@@ -14,8 +14,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Krok 5: Skopiuj resztę kodu aplikacji
 COPY . .
 
-# Krok 6: Poinformuj Docker, że aplikacja będzie działać na porcie 10000
+# Krok 6: Skopiuj i przygotuj skrypt startowy
+COPY run.sh .
+RUN chmod +x ./run.sh
+
+# Krok 7: Poinformuj Docker, że aplikacja będzie działać na porcie 10000
 EXPOSE 10000
 
-# Krok 7: Zdefiniuj komendę, która uruchomi naszą NOWĄ aplikację master_api
-CMD ["gunicorn", "--bind", "0.0.0.0:10000", "master_api:app"]
+# Krok 8: Zdefiniuj komendę, która uruchomi nasz skrypt startowy
+CMD ["./run.sh"]
