@@ -13,7 +13,12 @@ app = Flask(__name__)
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 SERPAPI_URL = "https://serpapi.com/search"
 LANGEXTRACT_API_URL = "https://langextract-api.onrender.com/extract"
-NGRAM_API_URL = "https://gpt-ngram-api-igyw.vercel.app/api/ngram_entity_analysis"
+
+# --- POPRAWIONY ADRES URL ---
+# Wskazuje na api/index.py (który jest mapowany na /api/)
+NGRAM_API_URL = "https://gpt-ngram-api-igyw.vercel.app/api/" 
+# ------------------------------
+
 HEADINGS_API_URL = "https://gpt-ngram-api-igyw.vercel.app/api/analyze_headings"
 SYNTHESIZE_API_URL = "https://gpt-ngram-api-igyw.vercel.app/api/synthesize_topics"
 
@@ -47,9 +52,13 @@ def call_langextract(url):
     return call_api_with_json(LANGEXTRACT_API_URL, {"url": url}, "LangExtract API")
 
 # --- Nowe funkcje pomocnicze dla analiz S1 ---
-def call_ngram_api(text):
+
+# --- POPRAWIONA FUNKCJA (wysyła 'topic' jako 'main_keyword') ---
+def call_ngram_api(text, topic):
     """Wywołuje API do analizy n-gramów i encji."""
-    return call_api_with_json(NGRAM_API_URL, {"text": text}, "N-gram API")
+    payload = {"text": text, "main_keyword": topic}
+    return call_api_with_json(NGRAM_API_URL, payload, "N-gram API")
+# -----------------------------------------------------------
 
 def call_headings_api(headings_list):
     """Wywołuje API do analizy nagłówków."""
@@ -96,7 +105,11 @@ def perform_s1_analysis():
             source_processing_log.append({"url": url, "status": "Failure", "reason": content_data.get("error", "Brak treści")})
 
     # 3. Uruchom analizy na połączonej treści
-    ngrams_result = call_ngram_api(combined_text)
+    
+    # --- POPRAWIONE WYWOŁANIE (przekazuje 'topic') ---
+    ngrams_result = call_ngram_api(combined_text, topic)
+    # -----------------------------------------------
+
     headings_result = call_headings_api(combined_h2s)
     synthesis_result = call_synthesize_api(combined_text)
 
