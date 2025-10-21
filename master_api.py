@@ -99,7 +99,8 @@ def perform_s1_analysis():
         "competitive_metrics": {
             "avg_h2_per_article": round(avg_h2, 1),
             "min_h2": min_h2,
-            "max_h2": max_h2
+            "max_h2": max_h2,
+            "h2_distribution": h2_count_list
         },
         "serp_features": {
             "ai_overview": serp_data.get("ai_overview"),
@@ -107,6 +108,33 @@ def perform_s1_analysis():
             "featured_snippets": serp_data.get("answer_box")
         }
     })
+
+# --- Endpoint: H2 DISTRIBUTION ---
+@app.route("/api/h2_distribution", methods=["POST"])
+def h2_distribution():
+    data = request.get_json()
+    h2_counts = data.get("h2_counts")
+
+    if not h2_counts or not isinstance(h2_counts, list):
+        return jsonify({"error": "Brak danych h2_counts (lista liczb)"}), 400
+
+    try:
+        min_h2 = min(h2_counts)
+        max_h2 = max(h2_counts)
+        avg_h2 = sum(h2_counts) / len(h2_counts)
+        histogram = {}
+        for count in h2_counts:
+            histogram[count] = histogram.get(count, 0) + 1
+
+        return jsonify({
+            "min_h2": min_h2,
+            "max_h2": max_h2,
+            "avg_h2": round(avg_h2, 2),
+            "distribution": histogram,
+            "recommendation": f"Optymalna liczba H2: {round(avg_h2)} ±1"
+        })
+    except Exception as e:
+        return jsonify({"error": f"Błąd przetwarzania: {e}"}), 500
 
 # --- Keyword parsing ---
 def parse_keyword_string(keyword_data):
@@ -168,7 +196,7 @@ def verify_s3_keywords():
 # --- Health check ---
 @app.route("/api/health", methods=["GET"])
 def health():
-    return jsonify({"status": "✅ OK", "version": "3.2", "message": "master_api działa poprawnie"}), 200
+    return jsonify({"status": "✅ OK", "version": "3.3", "message": "master_api działa poprawnie"}), 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=os.getenv("PORT", 3000), debug=True)
