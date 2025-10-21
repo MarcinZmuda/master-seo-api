@@ -18,6 +18,7 @@ COMPLIANCE_API_URL = "https://gpt-ngram-api.onrender.com/api/generate_compliance
 
 # --- Helper: API call ---
 def call_api_with_json(url, payload, name):
+    """Pomocnik do wywoływania innych API z obsługą błędów."""
     try:
         r = requests.post(url, json=payload, timeout=40)
         r.raise_for_status()
@@ -28,6 +29,7 @@ def call_api_with_json(url, payload, name):
 
 # --- SerpAPI ---
 def call_serpapi(topic):
+    """Wywołuje SerpApi dla zadanego tematu."""
     params = {"api_key": SERPAPI_KEY, "q": topic, "gl": "pl", "hl": "pl", "engine": "google"}
     try:
         r = requests.get(SERPAPI_URL, params=params, timeout=20)
@@ -39,11 +41,20 @@ def call_serpapi(topic):
 
 # --- LangExtract ---
 def call_langextract(url):
+    """Wywołuje LangExtract API, aby pobrać treść ze strony."""
     return call_api_with_json(LANGEXTRACT_API_URL, {"url": url}, "LangExtract API")
 
-# --- Endpoint: S1 ANALYSIS ---
+# --- Endpoint: S1 ANALYSIS (ZMODYFIKOWANY) ---
 @app.route("/api/s1_analysis", methods=["POST"])
 def perform_s1_analysis():
+    """
+    Endpoint "Czarnej Skrzynki" dla S1:
+    1. Pobiera dane SERP.
+    2. Pobiera treść (LangExtract).
+    3. Analizuje metryki H2.
+    4. Wywołuje Ngram API, aby uzyskać encje i n-gramy.
+    5. Zwraca połączony raport.
+    """
     data = request.get_json()
     topic = data.get("topic")
 
@@ -62,13 +73,22 @@ def perform_s1_analysis():
     successful_sources, source_processing_log = [], []
     total_text_length = 0
     headings_list, h2_count_list = [], []
+    
+    # === MODYFIKACJA 1: Zmienna na połączony tekst ===
+    combined_text_content = ""
 
     for url in top_5_urls:
         if len(successful_sources) >= 4:
             break
+        
         content = call_langextract(url)
+        
         if content and not content.get("error") and content.get("content"):
-            text_len = len(content.get("content", ""))
+            # === MODYFIKACJA 2: Zbieranie tekstu ===
+            current_text = content.get("content", "")
+            combined_text_content += current_text + "\n\n" # Łączymy teksty
+            
+            text_len = len(current_text)
             h2s = content.get("h2", [])
             total_text_length += text_len
             h2_count_list.append(len(h2s))
@@ -87,10 +107,20 @@ def perform_s1_analysis():
                 "reason": content.get("error", "Brak treści")
             })
 
+    # Obliczanie metryk H2
     avg_h2 = sum(h2_count_list) / len(h2_count_list) if h2_count_list else 0
     min_h2 = min(h2_count_list) if h2_count_list else 0
     max_h2 = max(h2_count_list) if h2_count_list else 0
 
+    # === MODYFIKACJA 3: Wywołanie Ngram API ===
+    # Używamy zebranego tekstu i przekazujemy go do gpt-ngram-api
+    ngram_payload = {
+        "text": combined_text_content,
+        "main_keyword": topic
+    }
+    ngram_data = call_api_with_json(NGRAM_API_URL, ngram_payload, "Ngram API")
+    
+    # === MODYFIKACJA 4: Zwracanie połączonego raportu ===
     return jsonify({
         "identified_urls": top_5_urls,
         "processing_report": source_processing_log,
@@ -106,10 +136,19 @@ def perform_s1_analysis():
             "ai_overview": serp_data.get("ai_overview"),
             "people_also_ask": serp_data.get("related_questions"),
             "featured_snippets": serp_data.get("answer_box")
+        },
+        
+        # --- DODANY BLOK ---
+        # Dołączamy wyniki z Ngram API do odpowiedzi
+        "s1_enrichment": {
+            "entities": ngram_data.get("entities"),
+            "ngrams": ngram_data.get("ngrams"),
+            "error": ngram_data.get("error") 
         }
+        # --- KONIEC DODANEGO BLOKU ---
     })
 
-# --- Endpoint: H2 DISTRIBUTION ---
+# --- Endpoint: H2 DISTRIBUTION (Bez zmian) ---
 @app.route("/api/h2_distribution", methods=["POST"])
 def h2_distribution():
     data = request.get_json()
@@ -136,7 +175,7 @@ def h2_distribution():
     except Exception as e:
         return jsonify({"error": f"Błąd przetwarzania: {e}"}), 500
 
-# --- Keyword parsing ---
+# --- Keyword parsing (Bez zmian) ---
 def parse_keyword_string(keyword_data):
     if isinstance(keyword_data, dict):
         return keyword_data
@@ -158,7 +197,7 @@ def parse_keyword_string(keyword_data):
             }
     return result
 
-# --- Endpoint: S3 VERIFY KEYWORDS ---
+# --- Endpoint: S3 VERIFY KEYWORDS (Bez zmian) ---
 @app.route("/api/s3_verify_keywords", methods=["POST"])
 def verify_s3_keywords():
     data = request.get_json()
@@ -193,7 +232,7 @@ def verify_s3_keywords():
 
     return jsonify({"keyword_report": report})
 
-# --- Health check ---
+# --- Health check (Bez zmian) ---
 @app.route("/api/health", methods=["GET"])
 def health():
     return jsonify({"status": "✅ OK", "version": "3.3", "message": "master_api działa poprawnie"}), 200
