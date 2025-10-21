@@ -4,10 +4,11 @@ import requests
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 
-# --- Konfiguracja i inicjalizacja ---
+# --- Inicjalizacja ---
 load_dotenv()
 app = Flask(__name__)
 
+# --- Konfiguracja ---
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 SERPAPI_URL = "https://serpapi.com/search"
 LANGEXTRACT_API_URL = "https://langextract-api.onrender.com/extract"
@@ -15,23 +16,19 @@ NGRAM_API_URL = "https://gpt-ngram-api.onrender.com/api/ngram_entity_analysis"
 SYNTHESIZE_API_URL = "https://gpt-ngram-api.onrender.com/api/synthesize_topics"
 COMPLIANCE_API_URL = "https://gpt-ngram-api.onrender.com/api/generate_compliance_report"
 
-# --- Funkcje pomocnicze ---
-
-def call_api_with_json(url, json_payload, service_name):
-    """Bezpieczne wywołanie API z JSON-em."""
+# --- Helper: API call ---
+def call_api_with_json(url, payload, name):
     try:
-        response = requests.post(url, json=json_payload, timeout=40)
-        response.raise_for_status()
-        return response.json()
+        r = requests.post(url, json=payload, timeout=40)
+        r.raise_for_status()
+        return r.json()
     except Exception as e:
-        print(f"❌ Błąd w {service_name}: {e}")
-        return {"error": f"Nie udało się połączyć z {service_name}", "details": str(e)}
+        print(f"❌ {name} error: {e}")
+        return {"error": f"Nie udało się połączyć z {name}", "details": str(e)}
 
+# --- SerpAPI ---
 def call_serpapi(topic):
-    """Pobiera dane SERP z SerpAPI."""
-    params = {
-        "api_key": SERPAPI_KEY, "q": topic, "gl": "pl", "hl": "pl", "engine": "google"
-    }
+    params = {"api_key": SERPAPI_KEY, "q": topic, "gl": "pl", "hl": "pl", "engine": "google"}
     try:
         r = requests.get(SERPAPI_URL, params=params, timeout=20)
         r.raise_for_status()
@@ -40,11 +37,11 @@ def call_serpapi(topic):
         print("❌ Błąd SerpAPI:", e)
         return None
 
+# --- LangExtract ---
 def call_langextract(url):
-    """Wywołuje API do ekstrakcji treści."""
     return call_api_with_json(LANGEXTRACT_API_URL, {"url": url}, "LangExtract API")
 
-# --- Etap S1: analiza SERP + ekstrakcja nagłówków ---
+# --- Endpoint: S1 ANALYSIS ---
 @app.route("/api/s1_analysis", methods=["POST"])
 def perform_s1_analysis():
     data = request.get_json()
@@ -64,49 +61,58 @@ def perform_s1_analysis():
 
     successful_sources, source_processing_log = [], []
     total_text_length = 0
-    headings_list = []
+    headings_list, h2_count_list = [], []
 
     for url in top_5_urls:
         if len(successful_sources) >= 4:
             break
-        content_data = call_langextract(url)
-        if content_data and not content_data.get("error") and content_data.get("content"):
-            text_len = len(content_data.get("content", ""))
+        content = call_langextract(url)
+        if content and not content.get("error") and content.get("content"):
+            text_len = len(content.get("content", ""))
+            h2s = content.get("h2", [])
             total_text_length += text_len
-            headings_list.extend(content_data.get("h2", []))
+            h2_count_list.append(len(h2s))
+            headings_list.extend(h2s)
             successful_sources.append(url)
-            source_processing_log.append({"url": url, "status": "Success", "length": text_len})
+            source_processing_log.append({
+                "url": url,
+                "status": "Success",
+                "length": text_len,
+                "h2_count": len(h2s)
+            })
         else:
             source_processing_log.append({
                 "url": url,
                 "status": "Failure",
-                "reason": content_data.get("error", "Brak treści")
+                "reason": content.get("error", "Brak treści")
             })
 
-    headings_result = call_api_with_json(
-        SYNTHESIZE_API_URL, {"headings": headings_list}, "Headings API"
-    )
+    avg_h2 = sum(h2_count_list) / len(h2_count_list) if h2_count_list else 0
+    min_h2 = min(h2_count_list) if h2_count_list else 0
+    max_h2 = max(h2_count_list) if h2_count_list else 0
 
     return jsonify({
         "identified_urls": top_5_urls,
         "processing_report": source_processing_log,
         "successful_sources_count": len(successful_sources),
         "total_text_length": total_text_length,
+        "competitive_metrics": {
+            "avg_h2_per_article": round(avg_h2, 1),
+            "min_h2": min_h2,
+            "max_h2": max_h2
+        },
         "serp_features": {
             "ai_overview": serp_data.get("ai_overview"),
             "people_also_ask": serp_data.get("related_questions"),
             "featured_snippets": serp_data.get("answer_box")
-        },
-        "analysis_results": {
-            "headings_analysis": headings_result
         }
     })
 
-# --- Etap S3: weryfikacja słów kluczowych ---
+# --- Keyword parsing ---
 def parse_keyword_string(keyword_data):
     if isinstance(keyword_data, dict):
         return keyword_data
-    keyword_dict = {}
+    result = {}
     pattern = re.compile(r"^\s*(.+?)\s*(?:\((\d+)\s*-\s*(\d+)\))?\s*$")
     for line in keyword_data.splitlines():
         if not line.strip():
@@ -117,13 +123,14 @@ def parse_keyword_string(keyword_data):
             phrase = phrase.strip().lower()
             min_allowed = int(min_val) if min_val else 1
             max_allowed = int(max_val) if max_val else 5
-            keyword_dict[phrase] = {
+            result[phrase] = {
                 "min_allowed": min_allowed,
                 "max_allowed": max_allowed,
                 "allowed_range": f"{min_allowed}-{max_allowed}"
             }
-    return keyword_dict
+    return result
 
+# --- Endpoint: S3 VERIFY KEYWORDS ---
 @app.route("/api/s3_verify_keywords", methods=["POST"])
 def verify_s3_keywords():
     data = request.get_json()
@@ -134,34 +141,34 @@ def verify_s3_keywords():
         return jsonify({"error": "Brak 'text' lub 'keywords_with_ranges'"}), 400
 
     try:
-        keywords_to_check = parse_keyword_string(keywords_with_ranges)
+        keywords = parse_keyword_string(keywords_with_ranges)
     except Exception as e:
-        return jsonify({"error": f"Błąd parsowania keywords_with_ranges: {e}"}), 400
+        return jsonify({"error": f"Błąd parsowania: {e}"}), 400
 
     text_lower = text.lower()
-    keyword_report = {}
+    report = {}
 
-    for phrase, ranges in keywords_to_check.items():
+    for phrase, rng in keywords.items():
         count = text_lower.count(phrase)
         status = "OK"
-        if count < ranges["min_allowed"]:
+        if count < rng["min_allowed"]:
             status = "UNDER"
-        elif count > ranges["max_allowed"]:
+        elif count > rng["max_allowed"]:
             status = "OVER"
-        keyword_report[phrase] = {
+        report[phrase] = {
             "used": count,
-            "min_allowed": ranges["min_allowed"],
-            "max_allowed": ranges["max_allowed"],
-            "allowed_range": ranges["allowed_range"],
+            "min_allowed": rng["min_allowed"],
+            "max_allowed": rng["max_allowed"],
+            "allowed_range": rng["allowed_range"],
             "status": status
         }
 
-    return jsonify({"keyword_report": keyword_report})
+    return jsonify({"keyword_report": report})
 
 # --- Health check ---
 @app.route("/api/health", methods=["GET"])
 def health():
-    return jsonify({"status": "✅ OK", "version": "3.1-Lite", "message": "master-seo-api działa poprawnie"}), 200
+    return jsonify({"status": "✅ OK", "version": "3.2", "message": "master_api działa poprawnie"}), 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=os.getenv("PORT", 3000), debug=True)
