@@ -44,7 +44,7 @@ def call_langextract(url):
     """Wywołuje LangExtract API, aby pobrać treść ze strony."""
     return call_api_with_json(LANGEXTRACT_API_URL, {"url": url}, "LangExtract API")
 
-# --- Endpoint: S1 ANALYSIS (ZMODYFIKOWANY) ---
+# --- Endpoint: S1 ANALYSIS ("Czarna Skrzynka") ---
 @app.route("/api/s1_analysis", methods=["POST"])
 def perform_s1_analysis():
     """
@@ -74,19 +74,17 @@ def perform_s1_analysis():
     total_text_length = 0
     headings_list, h2_count_list = [], []
     
-    # === MODYFIKACJA 1: Zmienna na połączony tekst ===
     combined_text_content = ""
 
     for url in top_5_urls:
-        if len(successful_sources) >= 4:
+        if len(successful_sources) >= 3: # Wystarczą 3 źródła do analizy n-gramów
             break
         
         content = call_langextract(url)
         
         if content and not content.get("error") and content.get("content"):
-            # === MODYFIKACJA 2: Zbieranie tekstu ===
             current_text = content.get("content", "")
-            combined_text_content += current_text + "\n\n" # Łączymy teksty
+            combined_text_content += current_text + "\n\n"
             
             text_len = len(current_text)
             h2s = content.get("h2", [])
@@ -112,15 +110,14 @@ def perform_s1_analysis():
     min_h2 = min(h2_count_list) if h2_count_list else 0
     max_h2 = max(h2_count_list) if h2_count_list else 0
 
-    # === MODYFIKACJA 3: Wywołanie Ngram API ===
-    # Używamy zebranego tekstu i przekazujemy go do gpt-ngram-api
+    # Wywołanie Ngram API
     ngram_payload = {
         "text": combined_text_content,
         "main_keyword": topic
     }
     ngram_data = call_api_with_json(NGRAM_API_URL, ngram_payload, "Ngram API")
     
-    # === MODYFIKACJA 4: Zwracanie połączonego raportu ===
+    # Zwracanie połączonego raportu
     return jsonify({
         "identified_urls": top_5_urls,
         "processing_report": source_processing_log,
@@ -137,15 +134,11 @@ def perform_s1_analysis():
             "people_also_ask": serp_data.get("related_questions"),
             "featured_snippets": serp_data.get("answer_box")
         },
-        
-        # --- DODANY BLOK ---
-        # Dołączamy wyniki z Ngram API do odpowiedzi
         "s1_enrichment": {
             "entities": ngram_data.get("entities"),
             "ngrams": ngram_data.get("ngrams"),
             "error": ngram_data.get("error") 
         }
-        # --- KONIEC DODANEGO BLOKU ---
     })
 
 # --- Endpoint: H2 DISTRIBUTION (Bez zmian) ---
@@ -153,18 +146,13 @@ def perform_s1_analysis():
 def h2_distribution():
     data = request.get_json()
     h2_counts = data.get("h2_counts")
-
     if not h2_counts or not isinstance(h2_counts, list):
         return jsonify({"error": "Brak danych h2_counts (lista liczb)"}), 400
-
     try:
         min_h2 = min(h2_counts)
         max_h2 = max(h2_counts)
         avg_h2 = sum(h2_counts) / len(h2_counts)
-        histogram = {}
-        for count in h2_counts:
-            histogram[count] = histogram.get(count, 0) + 1
-
+        histogram = {count: h2_counts.count(count) for count in set(h2_counts)}
         return jsonify({
             "min_h2": min_h2,
             "max_h2": max_h2,
@@ -203,18 +191,14 @@ def verify_s3_keywords():
     data = request.get_json()
     text = data.get("text")
     keywords_with_ranges = data.get("keywords_with_ranges")
-
     if not isinstance(text, str) or not keywords_with_ranges:
         return jsonify({"error": "Brak 'text' lub 'keywords_with_ranges'"}), 400
-
     try:
         keywords = parse_keyword_string(keywords_with_ranges)
     except Exception as e:
         return jsonify({"error": f"Błąd parsowania: {e}"}), 400
-
     text_lower = text.lower()
     report = {}
-
     for phrase, rng in keywords.items():
         count = text_lower.count(phrase)
         status = "OK"
@@ -229,13 +213,13 @@ def verify_s3_keywords():
             "allowed_range": rng["allowed_range"],
             "status": status
         }
-
     return jsonify({"keyword_report": report})
 
 # --- Health check (Bez zmian) ---
 @app.route("/api/health", methods=["GET"])
 def health():
-    return jsonify({"status": "✅ OK", "version": "3.3", "message": "master_api działa poprawnie"}), 200
+    return jsonify({"status": "✅ OK", "version": "3.4-integrated", "message": "master_api działa poprawnie"}), 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=os.getenv("PORT", 3000), debug=True)
+
