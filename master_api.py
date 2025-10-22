@@ -3,6 +3,7 @@ import re
 import requests
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
+from collections import Counter # Importujemy Counter
 
 # --- Inicjalizacja ---
 load_dotenv()
@@ -10,12 +11,12 @@ app = Flask(__name__)
 
 # --- Konfiguracja ---
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") # Potrzebne dla endpointu generate_article
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SERPAPI_URL = "https://serpapi.com/search"
 LANGEXTRACT_API_URL = "https://langextract-api.onrender.com/extract"
 NGRAM_API_URL = "https://gpt-ngram-api.onrender.com/api/ngram_entity_analysis"
 
-# --- Funkcje Pomocnicze ---
+# --- Funkcje Pomocnicze (bez zmian) ---
 def call_api_with_json(url, payload, name):
     try:
         r = requests.post(url, json=payload, timeout=60)
@@ -59,12 +60,21 @@ def perform_s1_analysis():
         if content and content.get("content"):
             successful_sources += 1
             h2s = content.get("h2", [])
-            all_headings.extend(h2s) # Zbieramy H2
+            # Normalizujemy H2 przed dodaniem (małe litery, bez białych znaków)
+            all_headings.extend([h.strip().lower() for h in h2s])
             h2_counts.append(len(h2s))
             combined_text += content.get("content", "") + "\n\n"
             source_log.append({"url": url, "status": "Success", "h2_count": len(h2s)})
         else:
             source_log.append({"url": url, "status": "Failure"})
+
+    # === NOWA LOGIKA: Zliczanie i wybieranie Top 10 H2 ===
+    if all_headings:
+        heading_counts = Counter(all_headings)
+        top_10_headings = [heading for heading, count in heading_counts.most_common(10)]
+    else:
+        top_10_headings = []
+    # =======================================================
 
     ngram_data = call_api_with_json(NGRAM_API_URL, {"text": combined_text, "main_keyword": topic}, "Ngram API")
 
@@ -76,7 +86,7 @@ def perform_s1_analysis():
             "min_h2": min(h2_counts) if h2_counts else 0,
             "max_h2": max(h2_counts) if h2_counts else 0,
         },
-        "all_competitor_headings": all_headings, # <-- NOWE POLE Z LISTĄ H2
+        "top_competitor_headings": top_10_headings, # <-- NOWE POLE Z LISTĄ TOP 10 H2
         "serp_features": {
             "ai_overview": serp_data.get("ai_overview"),
             "people_also_ask": serp_data.get("related_questions"),
@@ -86,6 +96,6 @@ def perform_s1_analysis():
     })
 
 # --- Pozostałe endpointy i kod (bez zmian) ---
-
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=os.getenv("PORT", 3000), debug=True)
+
