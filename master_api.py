@@ -15,7 +15,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SERPAPI_URL = "https://serpapi.com/search"
 LANGEXTRACT_API_URL = "https://langextract-api.onrender.com/extract"
 NGRAM_API_URL = "https://gpt-ngram-api.onrender.com/api/ngram_entity_analysis"
-KEYWORD_API_URL = os.getenv("KEYWORD_URL", ""https://seo-keyword-api.onrender.com/api/update_keywords"")
+KEYWORD_API_URL = os.getenv("KEYWORD_URL", "https://seo-keyword-api.onrender.com/api/update_keywords")
 
 # --- Funkcje Pomocnicze ---
 def call_api_with_json(url, payload, name):
