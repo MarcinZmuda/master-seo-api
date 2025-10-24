@@ -168,3 +168,15 @@ def update_keywords():
 # --- Uruchomienie ---
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=os.getenv("PORT", 3000), debug=True)
+    import os, requests
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
+
+@app.route("/api/s3_verify_keywords", methods=["POST"])
+def s3_verify_keywords():
+    keyword_api = os.getenv("KEYWORD_URL", "https://seo-keyword-api.onrender.com/api/verify_keywords")
+    payload = request.get_json(force=True)
+    r = requests.post(keyword_api, json=payload, headers={"Content-Type": "application/json"})
+    return jsonify(r.json())
+
