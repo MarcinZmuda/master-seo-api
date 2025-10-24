@@ -154,7 +154,7 @@ def update_keywords():
 def s3_verify_keywords():
     payload = request.get_json(force=True)
     try:
-        r = requests.post(KEYWORD_API_URL, json=payload, headers={"Content-Type": "application/json"}, timeout=30)
+        r = requests.post(KEYWORD_API_URL, json=payload, headers={"Content-Type": "application/json"}, timeout=240)
         r.raise_for_status()
         return jsonify(r.json()), 200
     except Exception as e:
