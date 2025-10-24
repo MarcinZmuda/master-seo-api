@@ -12,13 +12,20 @@ app = Flask(__name__)
 # --- Konfiguracja ---
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
 SERPAPI_URL = "https://serpapi.com/search"
 LANGEXTRACT_API_URL = "https://langextract-api.onrender.com/extract"
 NGRAM_API_URL = "https://gpt-ngram-api.onrender.com/api/ngram_entity_analysis"
-KEYWORD_API_URL = os.getenv("KEYWORD_URL", "https://seo-keyword-api.onrender.com/api/update_keywords")
 
-# --- Funkcje Pomocnicze ---
+# ✅ Zmieniono z seo-keyword-api → gpt-ngram-api
+KEYWORD_API_URL = os.getenv(
+    "KEYWORD_URL",
+    "https://gpt-ngram-api.onrender.com/api/advanced_keyword_verifier"
+)
+
+# --- Funkcje pomocnicze ---
 def call_api_with_json(url, payload, name):
+    """Uniwersalna funkcja POST JSON z obsługą błędów."""
     try:
         r = requests.post(url, json=payload, timeout=60)
         r.raise_for_status()
@@ -28,6 +35,7 @@ def call_api_with_json(url, payload, name):
         return {"error": f"Błąd połączenia z {name}", "details": str(e)}
 
 def call_serpapi(topic):
+    """Pobiera wyniki z SerpAPI."""
     params = {"api_key": SERPAPI_KEY, "q": topic, "gl": "pl", "hl": "pl", "engine": "google"}
     try:
         r = requests.get(SERPAPI_URL, params=params, timeout=30)
@@ -38,9 +46,11 @@ def call_serpapi(topic):
         return None
 
 def call_langextract(url):
+    """Pobiera tekst z URL przy użyciu LangExtract."""
     return call_api_with_json(LANGEXTRACT_API_URL, {"url": url}, "LangExtract")
 
-# --- Endpoint S1 ---
+
+# --- Endpoint S1: Analiza konkurencji ---
 @app.route("/api/s1_analysis", methods=["POST"])
 def perform_s1_analysis():
     data = request.get_json()
@@ -53,7 +63,7 @@ def perform_s1_analysis():
         return jsonify({"error": "Błąd pobierania danych z SerpApi"}), 502
 
     top_urls = [res.get("link") for res in serp_data.get("organic_results", [])[:5]]
-    
+
     source_log, h2_counts, all_headings, combined_text = [], [], [], ""
     successful_sources = 0
 
@@ -77,7 +87,11 @@ def perform_s1_analysis():
     else:
         top_10_headings = []
 
-    ngram_data = call_api_with_json(NGRAM_API_URL, {"text": combined_text, "main_keyword": topic}, "Ngram API")
+    ngram_data = call_api_with_json(
+        NGRAM_API_URL,
+        {"text": combined_text, "main_keyword": topic},
+        "Ngram API"
+    )
 
     return jsonify({
         "identified_urls": top_urls,
@@ -96,75 +110,35 @@ def perform_s1_analysis():
         "s1_enrichment": ngram_data
     })
 
-# --- Endpoint: /api/update_keywords ---
-@app.route("/api/update_keywords", methods=["POST"])
-def update_keywords():
-    data = request.get_json()
-    text = data.get("text", "")
-    keywords_state = data.get("keywords_state", {})
-
-    if not text or not keywords_state:
-        return jsonify({"error": "Missing text or keywords_state"}), 400
-
-    limits_raw = keywords_state.get("keywords_with_limits", "")
-    limits = {}
-    for line in limits_raw.strip().split("\n"):
-        match = re.match(r"^(.*?):\s*(\d+)-(\d+)x", line.strip())
-        if match:
-            kw, min_l, max_l = match.groups()
-            limits[kw.strip()] = {"min": int(min_l), "max": int(max_l), "used": 0}
-
-    text_lower = text.lower()
-    for kw in limits.keys():
-        count = len(re.findall(rf"\b{re.escape(kw.lower())}\b", text_lower))
-        limits[kw]["used"] = count
-
-    usage_summary = {}
-    validation_report = []
-    updated_lines = []
-
-    for kw, vals in limits.items():
-        used = vals["used"]
-        remaining = max(0, vals["max"] - used)
-        if used < vals["min"]:
-            status = "❕ Niedobór"
-        elif used > vals["max"]:
-            status = "❌ Przekroczono"
-        else:
-            status = "✅ OK"
-
-        usage_summary[kw] = f"{used}/{vals['max']}x ({status})"
-        validation_report.append({"keyword": kw, "used": used, "min": vals["min"], "max": vals["max"], "status": status})
-        updated_lines.append(f"{kw}: {vals['min']}-{vals['max']}x (pozostało: {remaining})")
-
-    updated_keywords_state = {
-        **keywords_state,
-        "keywords_with_limits": "\n".join(updated_lines),
-        "usage": usage_summary
-    }
-
-    return jsonify({
-        "updated_keywords_state": updated_keywords_state,
-        "summary": usage_summary,
-        "validation_report": validation_report
-    })
 
 # --- Endpoint: /api/s3_verify_keywords ---
 @app.route("/api/s3_verify_keywords", methods=["POST"])
 def s3_verify_keywords():
+    """Przekazuje dane do GPT-Ngram API (analiza użycia słów kluczowych)."""
     payload = request.get_json(force=True)
     try:
-        r = requests.post(KEYWORD_API_URL, json=payload, headers={"Content-Type": "application/json"}, timeout=240)
+        r = requests.post(
+            KEYWORD_API_URL,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=240
+        )
         r.raise_for_status()
         return jsonify(r.json()), 200
     except Exception as e:
         print(f"❌ Błąd S3 Verify Keywords: {e}")
         return jsonify({"error": "Nie udało się połączyć z KEYWORD_API", "details": str(e)}), 500
 
+
 # --- Health Check ---
 @app.route("/api/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "version": "v3.6", "message": "Master SEO API działa poprawnie"}), 200
+    return jsonify({
+        "status": "ok",
+        "version": "v3.7",
+        "message": "Master SEO API działa poprawnie (połączony z GPT-Ngram API)"
+    }), 200
+
 
 # --- Uruchomienie ---
 if __name__ == "__main__":
