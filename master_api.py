@@ -129,7 +129,12 @@ def s3_verify_keywords():
     """
     # 1. Odbierz payload z GPT (zgodny z promptem v4.1)
     # Spodziewany format: {"text": "...", "keyword_state": "..." lub {...}}
-    gpt_payload = request.get_json(force=True)
+    try:
+        gpt_payload = request.get_json(force=True)
+    except Exception as e:
+        print(f"❌ Błąd S3: Nie można sparsować JSON. Treść: {request.data}")
+        return jsonify({"error": "Błędny format JSON", "details": str(e)}), 400
+
     text = gpt_payload.get("text") # Tekst TYLKO z batcha
     keyword_state_from_gpt = gpt_payload.get("keyword_state") # Klucz ze stanem
 
@@ -175,4 +180,5 @@ def health():
 
 # --- Uruchomienie ---
 if __name__ == "__main__":
-app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
+    # ✅ POPRAWKA 4: Dodane prawidłowe wcięcie
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
