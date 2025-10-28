@@ -21,7 +21,7 @@ NGRAM_API_URL = "https://gpt-ngram-api.onrender.com/api/ngram_entity_analysis"
 # ✅ POPRAWKA 1: Poprawiony URL docelowego API
 # -------------------------------------------------------------------
 # Wskazujemy na JEDYNY poprawny endpoint, który teraz używa
-# Twojego idealnego, połączonego walidatora.
+# Twojego idealnego, stanowego walidatora (v4.1).
 KEYWORD_API_URL = os.getenv(
     "KEYWORD_URL",
     "https://gpt-ngram-api.onrender.com/api/generate_compliance_report"
@@ -119,40 +119,42 @@ def perform_s1_analysis():
 
 
 # -------------------------------------------------------------------
-# ✅ POPRAWKA 2: Poprawiona funkcja walidacji (tłumaczenie payloadu)
+# ✅ POPRAWKA 2: Poprawiona funkcja walidacji (WERSJA STANOWA v4.1)
 # -------------------------------------------------------------------
 @app.route("/api/s3_verify_keywords", methods=["POST"])
 def s3_verify_keywords():
     """
     Tłumaczy payload z GPT i przekazuje go do
-    docelowego endpointu /api/generate_compliance_report.
+    docelowego endpointu /api/generate_compliance_report (w trybie STANOWYM).
     """
-    # 1. Odbierz payload z GPT (zgodny z promptem v3.8)
-    # Spodziewany format: {"text": "...", "keywords_with_ranges": "..."}
+    # 1. Odbierz payload z GPT (zgodny z promptem v4.1)
+    # Spodziewany format: {"text": "...", "keyword_state": "..." lub {...}}
     gpt_payload = request.get_json(force=True)
-    text = gpt_payload.get("text")
-    keyword_string = gpt_payload.get("keywords_with_ranges")
+    text = gpt_payload.get("text") # Tekst TYLKO z batcha
+    keyword_state_from_gpt = gpt_payload.get("keyword_state") # Klucz ze stanem
 
-    if not text or not keyword_string:
-        return jsonify({"error": "Brak 'text' lub 'keywords_with_ranges' w payloadzie"}), 400
+    # text może być pustym stringiem (np. przy inicjalizacji), ale nie None
+    if text is None or keyword_state_from_gpt is None: 
+        return jsonify({"error": "Brak 'text' lub 'keyword_state' w payloadzie"}), 400
 
     # 2. Przygotuj NOWY payload dla gpt-ngram-api
-    # Wymagany format: {"text": "...", "keyword_list_string": "..."}
-    # (Zakładając, że zaktualizowałeś swój index.py, by tego oczekiwał)
+    # Wymagany format: {"text": "...", "keyword_state": "..." lub {...}}
     target_payload = {
         "text": text,
-        "keyword_list_string": keyword_string
+        "keyword_state": keyword_state_from_gpt 
     }
 
     try:
         # 3. Wywołaj docelowe API (zdefiniowane w KEYWORD_API_URL)
         r = requests.post(
-            KEYWORD_API_URL,
-            json=target_payload, # <-- Wysyła poprawnie sformatowany payload
+            KEYWORD_API_URL, # Wskazuje na /api/generate_compliance_report
+            json=target_payload, 
             headers={"Content-Type": "application/json"},
             timeout=240
         )
         r.raise_for_status()
+        
+        # 4. Zwróć odpowiedź 1:1 do GPT (będzie zawierać 'new_keyword_state')
         return jsonify(r.json()), 200
     except Exception as e:
         print(f"❌ Błąd S3 Verify Keywords: {e}")
@@ -166,11 +168,11 @@ def health():
     return jsonify({
         "status": "ok",
         # ✅ POPRAWKA 3: Zaktualizowana wersja i komunikat
-        "version": "v3.8-fixed",
+        "version": "v4.1-stateful",
         "message": "Master SEO API działa poprawnie (połączony z /api/generate_compliance_report)"
     }), 200
 
 
 # --- Uruchomienie ---
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 3000)), debug=True)
+    app.run(host="0.0.0.0", port=int(os.getenv("
