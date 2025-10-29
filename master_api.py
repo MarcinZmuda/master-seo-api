@@ -4,6 +4,7 @@ import requests
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 from collections import Counter
+import json
 
 # --- Inicjalizacja ---
 load_dotenv()
@@ -17,6 +18,9 @@ SERPAPI_URL = "https://serpapi.com/search"
 LANGEXTRACT_API_URL = "https://langextract-api.onrender.com/extract"
 NGRAM_API_URL = "https://gpt-ngram-api.onrender.com/api/ngram_entity_analysis"
 
+# -------------------------------------------------------------------
+# ✅ POPRAWKA 1: Poprawiony URL docelowego API (v4.1)
+# -------------------------------------------------------------------
 KEYWORD_API_URL = os.getenv(
     "KEYWORD_URL",
     "https://gpt-ngram-api.onrender.com/api/generate_compliance_report"
@@ -25,11 +29,10 @@ KEYWORD_API_URL = os.getenv(
 
 
 # --- Funkcje pomocnicze ---
-def call_api_with_json(url, payload, name):
+def call_api_with_json(url, payload, name, timeout=60):
     """Uniwersalna funkcja POST JSON z obsługą błędów."""
     try:
-        # Zwiększamy globalny timeout, bo nowa logika może wymagać 2 wywołań
-        r = requests.post(url, json=payload, timeout=300, headers={"Content-Type": "application/json"})
+        r = requests.post(url, json=payload, timeout=timeout, headers={"Content-Type": "application/json"})
         r.raise_for_status()
         return r.json()
     except Exception as e:
@@ -57,6 +60,8 @@ def call_langextract(url):
 @app.route("/api/s1_analysis", methods=["POST"])
 def perform_s1_analysis():
     data = request.get_json()
+    if not data:
+        return jsonify({"error": "Brak danych JSON"}), 400
     topic = data.get("topic")
     if not topic:
         return jsonify({"error": "Brak 'topic'"}), 400
@@ -115,105 +120,85 @@ def perform_s1_analysis():
 
 
 # -------------------------------------------------------------------
-# ✅ NOWA LOGIKA: Inteligentny pośrednik v4.2 (State-Fixer)
+# ✅ POPRAWKA 3: "Inteligentna" funkcja walidacji (WERSJA v4.2-stateful-fixer)
 # -------------------------------------------------------------------
 @app.route("/api/s3_verify_keywords", methods=["POST"])
 def s3_verify_keywords():
     """
-    Inteligentny pośrednik (v4.2):
-    1. Odbiera dane od klienta (GPT).
-    2. Sprawdza, czy 'keyword_state' to obiekt JSON (poprawnie)
-       czy string z briefem (błędnie).
-    3. Jeśli błędnie (string), automatycznie naprawia stan,
-       wykonując dodatkowe wywołanie inicjalizujące.
-    4. Przekazuje poprawny ładunek do docelowego API.
+    Tłumaczy payload z GPT i przekazuje go do
+    docelowego endpointu /api/generate_compliance_report (w trybie STANOWYM).
+    
+    Posiada logikę "naprawczą":
+    - Jeśli klient przyśle brief (string) i tekst (string),
+      najpierw zainicjuje stan, a potem go użyje do walidacji.
     """
     try:
         gpt_payload = request.get_json(force=True)
     except Exception as e:
-        print(f"❌ Błąd S3: Nie można sparsować JSON. Treść: {request.data}")
-        return jsonify({"error": "Błędny format JSON", "details": str(e)}), 400
+        return jsonify({"error": "Niepoprawny format JSON", "details": str(e)}), 400
 
-    text_to_validate = gpt_payload.get("text")
+    text = gpt_payload.get("text")
     keyword_state_from_gpt = gpt_payload.get("keyword_state")
 
-    if text_to_validate is None or keyword_state_from_gpt is None:
+    # 1. Walidacja podstawowa (to jest błąd, który powinien zwracać Twój serwer)
+    # Jeśli text jest None LUB keyword_state jest None
+    if text is None or keyword_state_from_gpt is None:
+        print("❌ Błąd S3: Brak 'text' lub 'keyword_state'.")
         return jsonify({"error": "Brak 'text' lub 'keyword_state' w payloadzie"}), 400
 
-    try:
-        # --- Inteligentna logika naprawcza ---
+    
+    # 2. "Inteligentna" logika naprawcza (to, o co prosiłeś)
+    
+    # Przypadek A: Klient wysłał brief (string) ORAZ tekst do analizy (string).
+    # To jest niepoprawne wywołanie, które musimy "naprawić".
+    if isinstance(keyword_state_from_gpt, str) and text != "":
+        print("🔧 S3 Fixer: Wykryto jednoczesną inicjalizację i walidację. Naprawiam...")
         
-        final_payload = None
-
-        # Przypadek A: Poprawny stan (klient wysłał obiekt JSON)
-        if isinstance(keyword_state_from_gpt, dict):
-            print("✅ S3 Info: Otrzymano poprawny obiekt stanu. Przekazuję dalej.")
-            final_payload = {
-                "text": text_to_validate,
-                "keyword_state": keyword_state_from_gpt
-            }
-
-        # Przypadek B: Błędny stan (klient wysłał string z briefem)
-        elif isinstance(keyword_state_from_gpt, str):
-            print("⚠️ S3 Info: Otrzymano string (brief) zamiast obiektu stanu. Rozpoczynam naprawę...")
+        # Krok 1: Inicjalizacja (wysyłamy pusty tekst i brief)
+        init_payload = {"text": "", "keyword_state": keyword_state_from_gpt}
+        print(f"🔧 S3 Fixer: Krok 1 - Inicjalizacja stanu...")
+        init_response = call_api_with_json(KEYWORD_API_URL, init_payload, "Keyword API (Init-Fix)", timeout=240)
+        
+        if "error" in init_response:
+            print("❌ S3 Fixer: Błąd podczas próby inicjalizacji.")
+            return jsonify(init_response), 500
             
-            # 1. Wykonaj wywołanie "rozgrzewkowe" (inicjalizujące), aby pobrać stan
-            print("...Krok 1: Wywołanie inicjalizujące (text: \"\")...")
-            pre_payload = {
-                "text": "", # Pusty tekst, aby zasygnalizować inicjalizację
-                "keyword_state": keyword_state_from_gpt # Brief w stringu
-            }
-            
-            initial_state_data = call_api_with_json(
-                KEYWORD_API_URL, 
-                pre_payload, 
-                "Keyword API (Init-Fix)"
+        new_state_object = init_response.get("new_keyword_state")
+        if not new_state_object:
+            print("❌ S3 Fixer: Inicjalizacja nie zwróciła 'new_keyword_state'.")
+            return jsonify({"error": "Logika naprawcza nie uzyskała stanu z API"}), 500
+
+        # Krok 2: Walidacja (wysyłamy tekst i nowy stan-obiekt)
+        print(f"🔧 S3 Fixer: Krok 2 - Walidacja tekstu z nowym stanem...")
+        validation_payload = {"text": text, "keyword_state": new_state_object}
+        final_response = call_api_with_json(KEYWORD_API_URL, validation_payload, "Keyword API (Validate-Fix)", timeout=240)
+        
+        return jsonify(final_response), 200
+
+    # Przypadek B: Klient wysłał poprawne dane (inicjalizacja LUB walidacja)
+    # Albo (text: "", state: "brief")
+    # Albo (text: "...", state: {...})
+    else:
+        print("✅ S3: Wywołanie poprawne (bezpośrednie przekazanie)...")
+        target_payload = {
+            "text": text,
+            "keyword_state": keyword_state_from_gpt
+        }
+        
+        try:
+            r = requests.post(
+                KEYWORD_API_URL, # Wskazuje na /api/generate_compliance_report
+                json=target_payload,
+                headers={"Content-Type": "application/json"},
+                timeout=240
             )
+            r.raise_for_status()
             
-            if "error" in initial_state_data:
-                print("❌ S3 Błąd: Nie udało się naprawić stanu. Błąd inicjalizacji.")
-                return jsonify(initial_state_data), 500
-
-            new_state_object = initial_state_data.get("new_keyword_state")
-
-            if not new_state_object or not isinstance(new_state_object, dict):
-                print("❌ S3 Błąd: Inicjalizacja nie zwróciła obiektu 'new_keyword_state'.")
-                return jsonify({"error": "Błąd logiki naprawczej: API inicjalizujące nie zwróciło obiektu stanu."}), 500
-            
-            print("...Krok 2: Stan naprawiony. Wykonuję właściwe wywołanie walidacyjne...")
-            
-            # 2. Przygotuj właściwy payload z tekstem usera i naprawionym stanem
-            final_payload = {
-                "text": text_to_validate,      # Oryginalny tekst do analizy
-                "keyword_state": new_state_object # Naprawiony obiekt stanu
-            }
-        
-        else:
-            return jsonify({"error": "Niepoprawny typ danych dla 'keyword_state'. Oczekiwano obiektu lub stringa."}), 400
-
-        # --- Wykonanie właściwego wywołania ---
-        
-        if not final_payload:
-             return jsonify({"error": "Wewnętrzny błąd serwera: Nie udało się utworzyć final_payload."}), 500
-
-        print(f"✅ S3 Info: Wysyłanie do {KEYWORD_API_URL}...")
-        
-        # Wywołujemy docelowe API (już na pewno z poprawnym payloadem)
-        response_data = call_api_with_json(
-            KEYWORD_API_URL, 
-            final_payload, 
-            "Keyword API (Main)"
-        )
-
-        if "error" in response_data:
-            return jsonify(response_data), 502 # 502 Bad Gateway (problem z API docelowym)
-
-        # 4. Zwróć odpowiedź 1:1 do GPT
-        return jsonify(response_data), 200
-
-    except Exception as e:
-        print(f"❌ Błąd S3 Verify Keywords (logika wewnętrzna): {e}")
-        return jsonify({"error": "Wewnętrzny błąd serwera w S3", "details": str(e)}), 500
+            # 4. Zwróć odpowiedź 1:1 do GPT
+            return jsonify(r.json()), 200
+        except Exception as e:
+            print(f"❌ Błąd S3 (Przekazanie): {e}")
+            return jsonify({"error": "Nie udało się połączyć z KEYWORD_API", "details": str(e)}), 500
 # -------------------------------------------------------------------
 
 
@@ -223,10 +208,12 @@ def health():
     return jsonify({
         "status": "ok",
         "version": "v4.2-stateful-fixer",
-        "message": "Master SEO API działa poprawnie (z inteligentną logiką naprawczą)"
+        "message": "Master SEO API działa poprawnie (połączony z /api/generate_compliance_report i logiką 'naprawczą')"
     }), 200
 
 
 # --- Uruchomienie ---
 if __name__ == "__main__":
+    # Poprawione wcięcie
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
+
