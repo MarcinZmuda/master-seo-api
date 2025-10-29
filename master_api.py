@@ -70,7 +70,7 @@ def call_langextract(url):
 # -------------------------------------------------------------------
 def parse_brief_to_keywords(brief_text):
     keywords_dict = {}
-    section_regex = r'((?:BASIC|EXTENDED)\s*.*?\s*TERMS):\s*={10,}\s*([\s\S]*?)(?=\n[A-Z\s]+ TERMS:|$)'
+    section_regex = r'((?:H2 HEADERS|BASIC|EXTENDED)\s*.*?\s*TERMS):\s*={10,}\s*([\s\S]*?)(?=\n[A-Z\s]+ TERMS:|$)'
     
     # Regex tolerujący błędy spacji
     keyword_regex = re.compile(
