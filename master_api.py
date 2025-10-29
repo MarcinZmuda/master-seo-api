@@ -6,26 +6,19 @@ from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 import firebase_admin
 from firebase_admin import credentials, firestore
-from collections import Counter # ✅ DODANO IMPORT
+from collections import Counter
 
 # --- Inicjalizacja ---
 load_dotenv()
 app = Flask(__name__)
 
 # -------------------------------------------------------------------
-# ✅ KROK 1: Konfiguracja Firebase (Firestore)
-# -------------------------------------------------------------------
-# WAŻNE: W Render.com musisz utworzyć zmienną środowiskową o nazwie
-# "FIREBASE_CREDS_JSON" i wkleić do niej CAŁĄ ZAWARTOŚĆ
-# pliku serviceAccountKey.json, który pobierzesz z Firebase.
-# 
-# UWAGA: Musisz włączyć "Firestore Database" w swoim projekcie Firebase.
+# KROK 1: Konfiguracja Firebase (Firestore)
 # -------------------------------------------------------------------
 try:
     FIREBASE_CREDS_JSON = os.getenv("FIREBASE_CREDS_JSON")
     if not FIREBASE_CREDS_JSON:
         print("❌ KRYTYCZNY BŁĄD: Brak zmiennej środowiskowej FIREBASE_CREDS_JSON.")
-        # W trybie lokalnym, spróbuj załadować plik
         if os.path.exists('serviceAccountKey.json'):
             print("🔧 Znaleziono lokalny plik 'serviceAccountKey.json'. Używam go...")
             cred = credentials.Certificate('serviceAccountKey.json')
@@ -47,12 +40,11 @@ except Exception as e:
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 SERPAPI_URL = "https://serpapi.com/search"
 LANGEXTRACT_API_URL = "https://langextract-api.onrender.com/extract"
-# ✅ DODANO NGRAM API POTRZEBNE DLA S1
 NGRAM_API_URL = "https://gpt-ngram-api.onrender.com/api/ngram_entity_analysis"
 
 
 # -------------------------------------------------------------------
-# ✅ DODANO FUNKCJE POMOCNICZE DLA S1
+# FUNKCJE POMOCNICZE DLA S1
 # -------------------------------------------------------------------
 def call_api_with_json(url, payload, name):
     """Uniwersalna funkcja POST JSON z obsługą błędów."""
@@ -80,21 +72,36 @@ def call_langextract(url):
     return call_api_with_json(LANGEXTRACT_API_URL, {"url": url}, "LangExtract")
 
 # -------------------------------------------------------------------
-# ✅ KROK 2: Logika Parsowania Briefu
+# ✅ KROK 2A: "Uodporniony" Parser Tekstu (Fallback)
 # -------------------------------------------------------------------
 def parse_brief_to_keywords(brief_text):
     """
-    Paruje brief (BASIC i EXTENDED) do struktury bazy danych.
+    Paruje brief (BASIC i EXTENDED) w formacie plain text.
+    Wersja "uodporniona" na błędy formatowania (np. dodatkowe spacje).
     """
     keywords_dict = {}
-    # Regex do znalezienia sekcji BASIC lub EXTENDED
-    section_regex = r'(BASIC TEXT TERMS|EXTENDED TEXT TERMS):\s*={10,}\s*([\s\S]*?)(?=\n[A-Z\s]+ TERMS:|$)'
-    # Regex do znalezienia linii ze słowem kluczowym
-    keyword_regex = re.compile(r'^\s*(.*?):\s*(\d+)-(\d+)x\s*$', re.UNICODE)
-    keyword_regex_single = re.compile(r'^\s*(.*?):\s*(\d+)x\s*$', re.UNICODE)
+    
+    # Elastyczny regex dla nazw sekcji
+    section_regex = r'((?:BASIC|EXTENDED)\s*.*?\s*TERMS):\s*={10,}\s*([\s\S]*?)(?=\n[A-Z\s]+ TERMS:|$)'
+    
+    # Uodpornione regexy dla słów kluczowych (tolerują spacje)
+    keyword_regex = re.compile(
+        r'^\s*(.*?)\s*:\s*(\d+)\s*-\s*(\d+)x\s*$', re.UNICODE
+    )
+    keyword_regex_single = re.compile(
+        r'^\s*(.*?)\s*:\s*(\d+)x\s*$', re.UNICODE
+    )
 
-    for match in re.finditer(section_regex, brief_text, re.IGNORECASE):
+    # Wstępne czyszczenie briefu (usuwa puste linie)
+    cleaned_brief_text = os.linesep.join([s for s in brief_text.splitlines() if s.strip()])
+
+    for match in re.finditer(section_regex, cleaned_brief_text, re.IGNORECASE):
+        section_name = match.group(1).upper()
         section_content = match.group(2)
+        
+        if not (section_name.startswith("BASIC") or section_name.startswith("EXTENDED")):
+            continue
+
         for line in section_content.splitlines():
             line = line.strip()
             if not line:
@@ -110,24 +117,68 @@ def parse_brief_to_keywords(brief_text):
                 if kw_match_single:
                     keyword = kw_match_single.group(1).strip()
                     min_val = int(kw_match_single.group(2))
-                    max_val = int(kw_match_single.group(2)) # min i max są takie same
+                    max_val = int(kw_match_single.group(2))
                 else:
-                    continue # Linia bez zakresu, ignorujemy (np. H2 HEADERS)
+                    continue 
 
-            # Zapisujemy stan początkowy i docelowy
             keywords_dict[keyword] = {
                 "target_min": min_val,
                 "target_max": max_val,
                 "remaining_min": min_val,
                 "remaining_max": max_val,
                 "actual": 0,
-                "locked": False # Do Twojej reguły max + 3
+                "locked": False
             }
             
     return keywords_dict
 
 # -------------------------------------------------------------------
-# ✅ KROK 3: Logika Hierarchicznego Liczenia (Kluczowy element)
+# ✅ KROK 2B: Parser JSON (Preferowana ścieżka)
+# -------------------------------------------------------------------
+def parse_brief_from_json(data_json):
+    """
+    Paruje brief z gotowego formatu JSON.
+    Oczekuje: {"basic_terms": {"fraza": "1-5x"}, "extended_terms": ...}
+    """
+    keywords_state = {}
+    
+    # Łączymy oba słowniki (basic i extended) w jeden
+    terms_sources = [
+        data_json.get('basic_terms', {}),
+        data_json.get('extended_terms', {})
+    ]
+
+    for terms_dict in terms_sources:
+        for keyword, limits in terms_dict.items():
+            try:
+                # Oczekujemy formatu "1-5x" lub "2x"
+                limits_clean = str(limits).strip().lower().replace(' ', '')
+                
+                if '-' in limits_clean:
+                    min_val_str, max_val_str = limits_clean.replace('x', '').split('-')
+                    min_val = int(min_val_str)
+                    max_val = int(max_val_str)
+                else:
+                    min_val = max_val = int(limits_clean.replace('x', ''))
+                
+                keywords_state[keyword.strip()] = {
+                    "target_min": min_val,
+                    "target_max": max_val,
+                    "remaining_min": min_val,
+                    "remaining_max": max_val,
+                    "actual": 0,
+                    "locked": False
+                }
+            except Exception as e:
+                # Jeśli format limitu jest zły (np. "jeden do pięciu"), pomijamy
+                print(f"Błąd parsowania limitu JSON '{limits}' dla frazy '{keyword}': {e}")
+                continue
+                
+    return keywords_state
+
+
+# -------------------------------------------------------------------
+# KROK 3: Logika Hierarchicznego Liczenia (Kluczowy element)
 # -------------------------------------------------------------------
 def calculate_hierarchical_counts(full_text, keywords_dict):
     """
@@ -136,7 +187,6 @@ def calculate_hierarchical_counts(full_text, keywords_dict):
     text_lower = full_text.lower()
     
     # Sortujemy słowa kluczowe od najdłuższego do najkrótszego
-    # To jest klucz do hierarchicznego liczenia
     sorted_keywords = sorted(keywords_dict.keys(), key=len, reverse=True)
     
     counts = {k: 0 for k in keywords_dict}
@@ -154,7 +204,6 @@ def calculate_hierarchical_counts(full_text, keywords_dict):
             counts[kw] = count
             
             # "Wycinamy" znalezione frazy z maski, aby nie policzyć ich podwójnie
-            # (np. "prawnik" wewnątrz "prawnik rozwodowy")
             if count > 0:
                 masked_text = re.sub(r'\b' + re.escape(kw_lower) + r'\b', "X" * len(kw), masked_text, count=count)
         except re.error as e:
@@ -164,31 +213,49 @@ def calculate_hierarchical_counts(full_text, keywords_dict):
     return counts
 
 # -------------------------------------------------------------------
-# ✅ KROK 4: Nowe Endpointy (Architektura v5)
+# ✅ KROK 4: "Kuloodporny" Endpoint `/api/project/create`
 # -------------------------------------------------------------------
-
 @app.route("/api/project/create", methods=["POST"])
-def create_project():
+def create_project_hybrid():
     """
-    Tworzy nowy projekt na podstawie briefu.
-    Oczekuje briefu jako surowy tekst (plain text) w body.
+    Tworzy nowy projekt - akceptuje dane JSON (preferowane)
+    lub surowy tekst (fallback).
     """
     if not db:
         return jsonify({"error": "Baza danych Firestore nie jest połączona."}), 503
 
+    keywords_state = {}
+    
+    # Ścieżka 1: Spróbuj sparsować jako JSON (Preferowane)
+    # silent=True zapobiega wywołaniu błędu, jeśli body nie jest JSON-em
+    data_json = request.get_json(silent=True)
+
+    if data_json:
+        print("INFO: Otrzymano poprawny format JSON.")
+        keywords_state = parse_brief_from_json(data_json)
+    else:
+        # Ścieżka 2: JSON się nie udał. Spróbuj jako surowy tekst (Fallback)
+        print("WARN: Nie wykryto formatu JSON. Próbuję parsować jako plain text.")
+        try:
+            brief_text = request.data.decode('utf-8')
+            if not brief_text:
+                return jsonify({"error": "Brak danych (JSON lub text) w body."}), 400
+            
+            # Używamy "uodpornionego" parsera tekstu
+            keywords_state = parse_brief_to_keywords(brief_text)
+        except Exception as e:
+            print(f"CRITICAL: Błąd parsowania plain text: {e}")
+            return jsonify({"error": "Brak danych lub nieobsługiwany format kodowania."}), 400
+
+    # Sprawdzenie, czy którakolwiek metoda zadziałała
+    if not keywords_state:
+        return jsonify({
+            "error": "Nie udało się sparsować słów kluczowych. Sprawdź format JSON lub briefu tekstowego."
+        }), 400
+
+    # Jeśli doszliśmy tutaj, keywords_state jest gotowe.
     try:
-        brief_text = request.data.decode('utf-8')
-        if not brief_text:
-            return jsonify({"error": "Brak briefu w body żądania."}), 400
-            
-        keywords_state = parse_brief_to_keywords(brief_text)
-        
-        if not keywords_state:
-            return jsonify({"error": "Nie udało się sparsować słów kluczowych z briefu. Sprawdź format."}), 400
-            
-        # Tworzy nowy projekt w kolekcji 'seo_projects'
         doc_ref = db.collection('seo_projects').document()
-        
         project_data = {
             "keywords_state": keywords_state,
             "full_text": "",
@@ -203,9 +270,13 @@ def create_project():
         }), 201
 
     except Exception as e:
-        print(f"❌ Błąd /api/project/create: {e}")
-        return jsonify({"error": f"Wystąpił błąd serwera: {e}"}), 500
+        print(f"❌ Błąd /api/project/create (zapis Firestore): {e}")
+        return jsonify({"error": f"Wystąpił błąd serwera przy zapisie: {e}"}), 500
 
+
+# -------------------------------------------------------------------
+# KROK 5: Pozostałe Endpointy
+# -------------------------------------------------------------------
 
 @app.route("/api/project/<project_id>/add_batch", methods=["POST"])
 def add_batch_to_project(project_id):
@@ -242,14 +313,12 @@ def add_batch_to_project(project_id):
         # Aktualizujemy stan i generujemy raport
         for keyword, state in current_keywords_state.items():
             
-            # Sprawdzamy, czy fraza nie jest zablokowana
             if state.get('locked', False):
                 report_for_gpt.append(f"{keyword}: LOCKED (Użyto max + 3)")
                 continue
 
             state['actual'] = new_counts.get(keyword, 0)
             
-            # Aktualizujemy pozostałe min/max
             state['remaining_min'] = max(0, state['target_min'] - state['actual'])
             state['remaining_max'] = max(0, state['target_max'] - state['actual'])
             
@@ -273,7 +342,6 @@ def add_batch_to_project(project_id):
             "batches": firestore.ArrayUnion([batch_text])
         })
         
-        # Zwracamy raport tekstowy dla GPT
         return jsonify(report_for_gpt), 200
 
     except Exception as e:
@@ -281,9 +349,6 @@ def add_batch_to_project(project_id):
         return jsonify({"error": f"Wystąpił błąd serwera: {e}"}), 500
 
 
-# -------------------------------------------------------------------
-# ✅ NOWY ENDPOINT: Czyszczenie bazy danych po zakończeniu pracy
-# -------------------------------------------------------------------
 @app.route("/api/project/<project_id>", methods=["DELETE"])
 def delete_project(project_id):
     """
@@ -299,7 +364,6 @@ def delete_project(project_id):
         if not doc.exists:
             return jsonify({"error": "Projekt o podanym ID nie istnieje."}), 404
         
-        # Usuń dokument
         doc_ref.delete()
         
         return jsonify({"status": f"Projekt {project_id} został pomyślnie usunięty."}), 200
@@ -307,20 +371,17 @@ def delete_project(project_id):
     except Exception as e:
         print(f"❌ Błąd /api/project/{project_id} [DELETE]: {e}")
         return jsonify({"error": f"Wystąpił błąd serwera: {e}"}), 500
-# -------------------------------------------------------------------
 
 
 @app.route("/api/health", methods=["GET"])
 def health():
     return jsonify({
         "status": "ok",
-        "version": "v5.1-firestore-cleanup", # Zaktualizowano wersję
+        "version": "v5.3-hybrid-parser", # Zaktualizowano wersję
         "message": "Master SEO API (Firestore Edition) działa poprawnie."
     }), 200
 
-# -------------------------------------------------------------------
-# ✅ PRZYWRÓCONO PEŁNY KOD ENDPOINTU S1
-# -------------------------------------------------------------------
+
 @app.route("/api/s1_analysis", methods=["POST"])
 def perform_s1_analysis():
     """
@@ -360,7 +421,6 @@ def perform_s1_analysis():
             source_log.append({"url": url, "status": "Failure", "error": content.get("error")})
 
     if not combined_text:
-        # Zabezpieczenie, gdy żaden URL nie zwrócił treści
         print("❌ Błąd S1: Nie udało się pobrać treści z żadnego URL-a.")
         return jsonify({
             "identified_urls": top_urls,
@@ -379,7 +439,6 @@ def perform_s1_analysis():
     else:
         top_10_headings = []
 
-    # Wywołanie API Ngram do wzbogacenia S1
     ngram_data = call_api_with_json(
         NGRAM_API_URL,
         {"text": combined_text, "main_keyword": topic},
@@ -407,4 +466,3 @@ def perform_s1_analysis():
 # --- Uruchomienie ---
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
-
