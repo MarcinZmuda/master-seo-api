@@ -36,16 +36,14 @@ except Exception as e:
     print(f"❌ KRYTYCZNY BŁĄD: Nie można zainicjować Firebase: {e}")
     db = None
 
-# --- Konfiguracja SerpAPI (dla S1, jeśli nadal potrzebne) ---
+# -------------------------------------------------------------------
+# Konfiguracja API i funkcje pomocnicze (dla S1)
+# -------------------------------------------------------------------
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 SERPAPI_URL = "https://serpapi.com/search"
 LANGEXTRACT_API_URL = "https://langextract-api.onrender.com/extract"
 NGRAM_API_URL = "https://gpt-ngram-api.onrender.com/api/ngram_entity_analysis"
 
-
-# -------------------------------------------------------------------
-# FUNKCJE POMOCNICZE DLA S1
-# -------------------------------------------------------------------
 def call_api_with_json(url, payload, name):
     """Uniwersalna funkcja POST JSON z obsługą błędów."""
     try:
@@ -72,68 +70,7 @@ def call_langextract(url):
     return call_api_with_json(LANGEXTRACT_API_URL, {"url": url}, "LangExtract")
 
 # -------------------------------------------------------------------
-# ✅ KROK 2A: "Uodporniony" Parser Tekstu (Fallback)
-# -------------------------------------------------------------------
-def parse_brief_to_keywords(brief_text):
-    """
-    Paruje brief (BASIC i EXTENDED) w formacie plain text.
-    Wersja "uodporniona" na błędy formatowania (np. dodatkowe spacje).
-    """
-    keywords_dict = {}
-    
-    # Elastyczny regex dla nazw sekcji
-    section_regex = r'((?:BASIC|EXTENDED)\s*.*?\s*TERMS):\s*={10,}\s*([\s\S]*?)(?=\n[A-Z\s]+ TERMS:|$)'
-    
-    # Uodpornione regexy dla słów kluczowych (tolerują spacje)
-    keyword_regex = re.compile(
-        r'^\s*(.*?)\s*:\s*(\d+)\s*-\s*(\d+)x\s*$', re.UNICODE
-    )
-    keyword_regex_single = re.compile(
-        r'^\s*(.*?)\s*:\s*(\d+)x\s*$', re.UNICODE
-    )
-
-    # Wstępne czyszczenie briefu (usuwa puste linie)
-    cleaned_brief_text = os.linesep.join([s for s in brief_text.splitlines() if s.strip()])
-
-    for match in re.finditer(section_regex, cleaned_brief_text, re.IGNORECASE):
-        section_name = match.group(1).upper()
-        section_content = match.group(2)
-        
-        if not (section_name.startswith("BASIC") or section_name.startswith("EXTENDED")):
-            continue
-
-        for line in section_content.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-
-            kw_match = keyword_regex.match(line)
-            if kw_match:
-                keyword = kw_match.group(1).strip()
-                min_val = int(kw_match.group(2))
-                max_val = int(kw_match.group(3))
-            else:
-                kw_match_single = keyword_regex_single.match(line)
-                if kw_match_single:
-                    keyword = kw_match_single.group(1).strip()
-                    min_val = int(kw_match_single.group(2))
-                    max_val = int(kw_match_single.group(2))
-                else:
-                    continue 
-
-            keywords_dict[keyword] = {
-                "target_min": min_val,
-                "target_max": max_val,
-                "remaining_min": min_val,
-                "remaining_max": max_val,
-                "actual": 0,
-                "locked": False
-            }
-            
-    return keywords_dict
-
-# -------------------------------------------------------------------
-# ✅ KROK 2B: Parser JSON (Preferowana ścieżka)
+# KROK 2: Parser JSON (Teraz jedyna metoda)
 # -------------------------------------------------------------------
 def parse_brief_from_json(data_json):
     """
@@ -142,16 +79,20 @@ def parse_brief_from_json(data_json):
     """
     keywords_state = {}
     
-    # Łączymy oba słowniki (basic i extended) w jeden
+    # Źródła terminów (np. basic_terms, extended_terms)
     terms_sources = [
         data_json.get('basic_terms', {}),
         data_json.get('extended_terms', {})
     ]
 
     for terms_dict in terms_sources:
+        if not isinstance(terms_dict, dict):
+            # Jeśli "basic_terms" nie jest słownikiem (np. jest listą), pomiń
+            continue
+            
         for keyword, limits in terms_dict.items():
             try:
-                # Oczekujemy formatu "1-5x" lub "2x"
+                # Czyszczenie formatu limitu (usuwa spacje, 'x', zamienia na małe litery)
                 limits_clean = str(limits).strip().lower().replace(' ', '')
                 
                 if '-' in limits_clean:
@@ -176,9 +117,8 @@ def parse_brief_from_json(data_json):
                 
     return keywords_state
 
-
 # -------------------------------------------------------------------
-# KROK 3: Logika Hierarchicznego Liczenia (Kluczowy element)
+# KROK 3: Logika Hierarchicznego Liczenia
 # -------------------------------------------------------------------
 def calculate_hierarchical_counts(full_text, keywords_dict):
     """
@@ -213,53 +153,41 @@ def calculate_hierarchical_counts(full_text, keywords_dict):
     return counts
 
 # -------------------------------------------------------------------
-# ✅ KROK 4: "Kuloodporny" Endpoint `/api/project/create`
+# ✅ KROK 4: Endpoint `/api/project/create` (Tylko JSON)
 # -------------------------------------------------------------------
 @app.route("/api/project/create", methods=["POST"])
-def create_project_hybrid():
+def create_project_json_only():
     """
-    Tworzy nowy projekt - akceptuje dane JSON (preferowane)
-    lub surowy tekst (fallback).
+    Tworzy nowy projekt. Akceptuje WYŁĄCZNIE application/json.
     """
     if not db:
         return jsonify({"error": "Baza danych Firestore nie jest połączona."}), 503
 
-    keywords_state = {}
-    
-    # Ścieżka 1: Spróbuj sparsować jako JSON (Preferowane)
-    # silent=True zapobiega wywołaniu błędu, jeśli body nie jest JSON-em
-    data_json = request.get_json(silent=True)
+    # Wymuś sprawdzenie nagłówka Content-Type
+    if not request.is_json:
+        return jsonify({"error": "Błąd: Oczekiwano nagłówka 'Content-Type: application/json'."}), 415 # Unsupported Media Type
 
-    if data_json:
-        print("INFO: Otrzymano poprawny format JSON.")
-        keywords_state = parse_brief_from_json(data_json)
-    else:
-        # Ścieżka 2: JSON się nie udał. Spróbuj jako surowy tekst (Fallback)
-        print("WARN: Nie wykryto formatu JSON. Próbuję parsować jako plain text.")
-        try:
-            brief_text = request.data.decode('utf-8')
-            if not brief_text:
-                return jsonify({"error": "Brak danych (JSON lub text) w body."}), 400
-            
-            # Używamy "uodpornionego" parsera tekstu
-            keywords_state = parse_brief_to_keywords(brief_text)
-        except Exception as e:
-            print(f"CRITICAL: Błąd parsowania plain text: {e}")
-            return jsonify({"error": "Brak danych lub nieobsługiwany format kodowania."}), 400
+    data_json = request.get_json()
+    if not data_json:
+        return jsonify({"error": "Brak danych JSON w body."}), 400
 
-    # Sprawdzenie, czy którakolwiek metoda zadziałała
+    # Przetwarzamy dane JSON na nasz format bazy danych
+    keywords_state = parse_brief_from_json(data_json)
+
     if not keywords_state:
         return jsonify({
-            "error": "Nie udało się sparsować słów kluczowych. Sprawdź format JSON lub briefu tekstowego."
+            "error": "Nie udało się sparsować słów kluczowych. Sprawdź format JSON: 'basic_terms' i 'extended_terms' muszą być słownikami (obiektami), np. {'fraza': '1-5x'}."
         }), 400
 
-    # Jeśli doszliśmy tutaj, keywords_state jest gotowe.
+    # Zapisujemy projekt w Firestore
     try:
         doc_ref = db.collection('seo_projects').document()
         project_data = {
             "keywords_state": keywords_state,
             "full_text": "",
-            "batches": []
+            "batches": [],
+            # Zapiszmy też H2, jeśli przyszły w JSON-ie
+            "h2_terms": data_json.get('h2_terms', [])
         }
         doc_ref.set(project_data)
         
@@ -273,7 +201,6 @@ def create_project_hybrid():
         print(f"❌ Błąd /api/project/create (zapis Firestore): {e}")
         return jsonify({"error": f"Wystąpił błąd serwera przy zapisie: {e}"}), 500
 
-
 # -------------------------------------------------------------------
 # KROK 5: Pozostałe Endpointy
 # -------------------------------------------------------------------
@@ -281,8 +208,7 @@ def create_project_hybrid():
 @app.route("/api/project/<project_id>/add_batch", methods=["POST"])
 def add_batch_to_project(project_id):
     """
-    Dodaje nowy batch tekstu do projektu, przelicza całość i zwraca raport.
-    Oczekuje tekstu batcha jako surowy tekst (plain text) w body.
+    Dodaje nowy batch tekstu (plain text) do projektu, przelicza całość.
     """
     if not db:
         return jsonify({"error": "Baza danych Firestore nie jest połączona."}), 503
@@ -302,7 +228,6 @@ def add_batch_to_project(project_id):
         if not batch_text:
             return jsonify({"error": "Brak tekstu w body żądania."}), 400
             
-        # Dodajemy nowy tekst do całości
         new_full_text = current_full_text + "\n\n" + batch_text
         
         # Przeliczamy USAGE na podstawie CAŁEGO tekstu
@@ -377,7 +302,7 @@ def delete_project(project_id):
 def health():
     return jsonify({
         "status": "ok",
-        "version": "v5.3-hybrid-parser", # Zaktualizowano wersję
+        "version": "v6.0-json-only", # Zaktualizowano wersję
         "message": "Master SEO API (Firestore Edition) działa poprawnie."
     }), 200
 
