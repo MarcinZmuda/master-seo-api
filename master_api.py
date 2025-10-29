@@ -281,11 +281,40 @@ def add_batch_to_project(project_id):
         return jsonify({"error": f"Wystąpił błąd serwera: {e}"}), 500
 
 
+# -------------------------------------------------------------------
+# ✅ NOWY ENDPOINT: Czyszczenie bazy danych po zakończeniu pracy
+# -------------------------------------------------------------------
+@app.route("/api/project/<project_id>", methods=["DELETE"])
+def delete_project(project_id):
+    """
+    Usuwa projekt (dokument) z bazy danych po zakończeniu pracy.
+    """
+    if not db:
+        return jsonify({"error": "Baza danych Firestore nie jest połączona."}), 503
+
+    try:
+        doc_ref = db.collection('seo_projects').document(project_id)
+        doc = doc_ref.get()
+
+        if not doc.exists:
+            return jsonify({"error": "Projekt o podanym ID nie istnieje."}), 404
+        
+        # Usuń dokument
+        doc_ref.delete()
+        
+        return jsonify({"status": f"Projekt {project_id} został pomyślnie usunięty."}), 200
+
+    except Exception as e:
+        print(f"❌ Błąd /api/project/{project_id} [DELETE]: {e}")
+        return jsonify({"error": f"Wystąpił błąd serwera: {e}"}), 500
+# -------------------------------------------------------------------
+
+
 @app.route("/api/health", methods=["GET"])
 def health():
     return jsonify({
         "status": "ok",
-        "version": "v5.0-firestore-stateful",
+        "version": "v5.1-firestore-cleanup", # Zaktualizowano wersję
         "message": "Master SEO API (Firestore Edition) działa poprawnie."
     }), 200
 
