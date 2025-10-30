@@ -177,8 +177,9 @@ def create_project_hybrid():
                 return jsonify({"error": "Brak danych w body (JSON lub text/plain)."}), 400
             keywords_state, headers_list = parse_brief_to_keywords(brief_text)
 
-        if not keywords_state:
-            return jsonify({"error": "Nie udało się sparsować słów kluczowych."}), 400
+if not keywords_state:
+    print("⚠️ Brak słów kluczowych – projekt zostanie oznaczony jako testowy, ale licznik będzie działał.")
+    keywords_state = {}
 
         doc_ref = db.collection("seo_projects").document()
         project_data = {
