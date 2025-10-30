@@ -1,4 +1,4 @@
-# master_api.py — Master SEO API (v5.9 hybrid, debug counting)
+# master_api.py — Master SEO API (v6.0 hybrid JSON mode, debug counting)
 # Obsługa: Firestore, S1 (SerpApi + LangExtract + Ngram API), Brief Base64, Batch Counting, PAA Integration
 
 import os
@@ -127,7 +127,7 @@ def parse_brief_to_keywords(brief_text):
 
 
 # -------------------------------------------------------------------
-# 🔢 Liczenie fraz (v5.9 – debug + Unicode)
+# 🔢 Liczenie fraz (v6.0 – JSON-safe + Unicode)
 # -------------------------------------------------------------------
 def calculate_hierarchical_counts(full_text, keywords_dict):
     text = full_text.lower()
@@ -195,7 +195,7 @@ def create_project_hybrid():
 
 
 # -------------------------------------------------------------------
-# ✍️ /api/project/<id>/add_batch — dodaje batch i liczy frazy (debug)
+# ✍️ /api/project/<id>/add_batch — JSON mode (spójny z briefem)
 # -------------------------------------------------------------------
 @app.route("/api/project/<project_id>/add_batch", methods=["POST"])
 def add_batch_to_project(project_id):
@@ -212,18 +212,20 @@ def add_batch_to_project(project_id):
         current_keywords = project_data.get("keywords_state", {})
         current_full_text = project_data.get("full_text", "")
 
+        batch_text = ""
         if request.is_json:
             data = request.get_json(silent=True) or {}
-            batch_text = data.get("text", "")
+            batch_text = data.get("text", "").strip()
         else:
-            batch_text = request.get_data(as_text=True)
+            batch_text = request.data.decode("utf-8").strip()
 
-        print("\n📦 [DEBUG] Odebrano batch:")
+        print("\n📦 [DEBUG] Odebrano batch")
         print(f"➡️ Długość: {len(batch_text)} znaków")
         print(f"➡️ Pierwsze 200 znaków:\n{batch_text[:200]}")
 
-        if not batch_text.strip():
-            return jsonify({"error": "Pusty batch"}), 400
+        if not batch_text or batch_text == "{}":
+            print("⚠️ [DEBUG] Pusty batch lub '{}', brak treści do zliczania.")
+            return jsonify({"error": "Pusty batch lub {}"}), 400
 
         new_full_text = current_full_text + "\n\n" + batch_text
         counts = calculate_hierarchical_counts(new_full_text, current_keywords)
@@ -256,7 +258,12 @@ def add_batch_to_project(project_id):
         })
 
         print("✅ [DEBUG] Batch zapisany do Firestore.\n")
-        return jsonify(report), 200
+        return jsonify({
+            "status": "OK",
+            "batch_length": len(batch_text),
+            "counts": counts,
+            "report": report
+        }), 200
 
     except Exception as e:
         print(f"❌ Błąd add_batch: {e}")
@@ -340,8 +347,8 @@ def delete_project(project_id):
 def health():
     return jsonify({
         "status": "ok",
-        "version": "v5.9-hybrid-debug",
-        "message": "Master SEO API działa poprawnie (pełne logi debugowania i poprawione liczenie)."
+        "version": "v6.0-hybrid-json",
+        "message": "Master SEO API działa poprawnie (pełny JSON mode i liczenie fraz)."
     }), 200
 
 
