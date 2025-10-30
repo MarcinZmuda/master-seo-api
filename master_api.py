@@ -23,8 +23,8 @@ try:
     FIREBASE_CREDS_JSON = os.getenv("FIREBASE_CREDS_JSON")
     if not FIREBASE_CREDS_JSON:
         print("❌ Brak zmiennej środowiskowej FIREBASE_CREDS_JSON.")
-        if os.path.exists('serviceAccountKey.json'):
-            cred = credentials.Certificate('serviceAccountKey.json')
+        if os.path.exists("serviceAccountKey.json"):
+            cred = credentials.Certificate("serviceAccountKey.json")
         else:
             raise ValueError("Brak FIREBASE_CREDS_JSON i pliku serviceAccountKey.json")
     else:
@@ -80,9 +80,9 @@ def parse_brief_to_keywords(brief_text):
 
     cleaned_text = os.linesep.join([s.strip() for s in brief_text.splitlines() if s.strip()])
 
-    section_regex = r'((?:BASIC|EXTENDED|H2)\s+TEXT\s+TERMS)\s*:\s*=*\s*([\s\S]*?)(?=\n[A-Z\s]+TEXT\s+TERMS|$)'
-    keyword_regex = re.compile(r'^\s*(.*?)\s*:\s*(\d+)\s*-\s*(\d+)x\s*$', re.UNICODE)
-    keyword_regex_single = re.compile(r'^\s*(.*?)\s*:\s*(\d+)x\s*$', re.UNICODE)
+    section_regex = r"((?:BASIC|EXTENDED|H2)\s+TEXT\s+TERMS)\s*:\s*=*\s*([\s\S]*?)(?=\n[A-Z\s]+TEXT\s+TERMS|$)"
+    keyword_regex = re.compile(r"^\s*(.*?)\s*:\s*(\d+)\s*-\s*(\d+)x\s*$", re.UNICODE)
+    keyword_regex_single = re.compile(r"^\s*(.*?)\s*:\s*(\d+)x\s*$", re.UNICODE)
 
     for match in re.finditer(section_regex, cleaned_text, re.IGNORECASE):
         section_name = match.group(1).upper()
@@ -118,7 +118,7 @@ def parse_brief_to_keywords(brief_text):
                 "remaining_min": min_val,
                 "remaining_max": max_val,
                 "actual": 0,
-                "locked": False
+                "locked": False,
             }
 
     return keywords_dict, headers_list
@@ -135,11 +135,11 @@ def calculate_hierarchical_counts(full_text, keywords_dict):
     for kw in sorted_keywords:
         kw_lower = kw.lower()
         try:
-            matches = re.findall(r'\b' + re.escape(kw_lower) + r'\b', masked_text)
+            matches = re.findall(r"\b" + re.escape(kw_lower) + r"\b", masked_text)
             count = len(matches)
             counts[kw] = count
             if count > 0:
-                masked_text = re.sub(r'\b' + re.escape(kw_lower) + r'\b', "X" * len(kw), masked_text, count=count)
+                masked_text = re.sub(r"\b" + re.escape(kw_lower) + r"\b", "X" * len(kw), masked_text, count=count)
         except re.error as e:
             print(f"Błąd regex dla '{kw}': {e}")
             continue
@@ -154,10 +154,11 @@ def create_project_hybrid():
     if not db:
         return jsonify({"error": "Baza danych Firestore nie jest połączona."}), 503
 
-    data_json = request.get_json(silent=True)
-    keywords_state, headers_list = {}, []
-
     try:
+        data_json = request.get_json(silent=True)
+        keywords_state, headers_list = {}, []
+
+        # 🧩 Odczyt briefu (Base64 lub tekst)
         if data_json:
             brief_text = ""
             if "brief_base64" in data_json:
@@ -169,25 +170,30 @@ def create_project_hybrid():
                 brief_text = data_json["brief_text"]
             else:
                 return jsonify({"error": "Brak brief_text lub brief_base64."}), 400
-
-            keywords_state, headers_list = parse_brief_to_keywords(brief_text)
         else:
             brief_text = request.data.decode("utf-8")
             if not brief_text:
                 return jsonify({"error": "Brak danych w body (JSON lub text/plain)."}), 400
-            keywords_state, headers_list = parse_brief_to_keywords(brief_text)
 
-if not keywords_state:
-    print("⚠️ Brak słów kluczowych – projekt zostanie oznaczony jako testowy, ale licznik będzie działał.")
-    keywords_state = {}
+        # 🧠 Parsowanie briefu
+        keywords_state, headers_list = parse_brief_to_keywords(brief_text)
+        if not isinstance(keywords_state, dict):
+            keywords_state = {}
+        if not isinstance(headers_list, list):
+            headers_list = []
 
+        if not keywords_state:
+            print("⚠️ Brak słów kluczowych – projekt zostanie oznaczony jako testowy, ale licznik będzie działał.")
+            keywords_state = {}
+
+        # 🗃️ Tworzenie dokumentu w Firestore
         doc_ref = db.collection("seo_projects").document()
         project_data = {
             "keywords_state": keywords_state,
             "headers_suggestions": headers_list,
             "s1_data": None,
             "full_text": "",
-            "batches": []
+            "batches": [],
         }
         doc_ref.set(project_data)
 
@@ -195,7 +201,7 @@ if not keywords_state:
             "status": "✅ Projekt utworzony pomyślnie.",
             "project_id": doc_ref.id,
             "keywords_parsed": len(keywords_state),
-            "headers_count": len(headers_list)
+            "headers_count": len(headers_list),
         }), 201
 
     except Exception as e:
@@ -253,7 +259,7 @@ def add_batch_to_project(project_id):
         doc_ref.update({
             "keywords_state": current_keywords,
             "full_text": new_full_text,
-            "batches": firestore.ArrayUnion([batch_text])
+            "batches": firestore.ArrayUnion([batch_text]),
         })
 
         return jsonify(report), 200
