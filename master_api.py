@@ -109,10 +109,6 @@ def parse_brief_to_keywords(brief_text):
             keywords_dict[keyword] = {
                 "target_min": min_val,
                 "target_max": max_val,
-                "remaining_min": min_val,
-                "remaining_max": max_val,
-                "actual": 0,
-                "locked": False
             }
 
     return keywords_dict
@@ -140,11 +136,7 @@ def parse_brief_from_json(data_json):
 
                 keywords_state[keyword.strip()] = {
                     "target_min": min_val,
-                    "target_max": max_val,
-                    "remaining_min": min_val,
-                    "remaining_max": max_val,
-                    "actual": 0,
-                    "locked": False
+                    "target_max": max_val
                 }
             except Exception as e:
                 print(f"Błąd parsowania limitu JSON '{limits}' dla frazy '{keyword}': {e}")
@@ -153,7 +145,7 @@ def parse_brief_from_json(data_json):
     return keywords_state
 
 # -------------------------------------------------------------------
-# KROK 3: Liczenie hierarchiczne (bez zmian)
+# KROK 3: Liczenie hierarchiczne
 # -------------------------------------------------------------------
 def calculate_hierarchical_counts(full_text, keywords_dict):
     text_lower = full_text.lower()
@@ -176,7 +168,7 @@ def calculate_hierarchical_counts(full_text, keywords_dict):
     return counts
 
 # -------------------------------------------------------------------
-# ✅ KROK 4: Endpoint /api/project/create (HYBRYDOWY)
+# ✅ /api/project/create
 # -------------------------------------------------------------------
 @app.route("/api/project/create", methods=["POST"])
 def create_project_hybrid():
@@ -223,10 +215,16 @@ def create_project_hybrid():
         return jsonify({"error": f"Błąd zapisu do Firestore: {e}"}), 500
 
 # -------------------------------------------------------------------
-# Endpoint: /api/project/<id>/add_batch
+# ✅ /api/project/<id>/add_batch — v6.0
 # -------------------------------------------------------------------
 @app.route("/api/project/<project_id>/add_batch", methods=["POST"])
 def add_batch_to_project(project_id):
+    """
+    Dodaje nowy batch i generuje raport:
+    - missing_keywords: frazy, które jeszcze nie wystąpiły
+    - locked_keywords: frazy przekroczone o 3+
+    - summary: pełne statystyki
+    """
     if not db:
         return jsonify({"error": "Baza danych Firestore nie jest połączona."}), 503
 
@@ -237,51 +235,57 @@ def add_batch_to_project(project_id):
             return jsonify({"error": "Projekt o podanym ID nie istnieje."}), 404
 
         project_data = doc.to_dict()
-        current_keywords_state = project_data.get('keywords_state', {})
+        keywords_state = project_data.get('keywords_state', {})
         current_full_text = project_data.get('full_text', "")
-        batch_text = request.data.decode('utf-8')
 
-        if not batch_text:
+        batch_text = request.data.decode('utf-8')
+        if not batch_text.strip():
             return jsonify({"error": "Brak tekstu w body żądania."}), 400
 
         new_full_text = current_full_text + "\n\n" + batch_text
-        new_counts = calculate_hierarchical_counts(new_full_text, current_keywords_state)
-        report_for_gpt = []
+        new_counts = calculate_hierarchical_counts(new_full_text, keywords_state)
 
-        for keyword, state in current_keywords_state.items():
-            if state.get('locked', False):
-                report_for_gpt.append(f"{keyword}: LOCKED (Użyto max + 3)")
-                continue
+        missing_keywords = []
+        locked_keywords = []
+        summary = []
 
-            state['actual'] = new_counts.get(keyword, 0)
-            state['remaining_min'] = max(0, state['target_min'] - state['actual'])
-            state['remaining_max'] = max(0, state['target_max'] - state['actual'])
+        for keyword, state in keywords_state.items():
+            actual = new_counts.get(keyword, 0)
+            target_min = state.get("target_min", 0)
+            target_max = state.get("target_max", 0)
 
-            status = "OK"
-            if state['actual'] >= state['target_max'] + 3:
-                state['locked'] = True
-                status = f"LOCKED (Użyto {state['actual']} / Cel: {state['target_max']}. Przekroczono o 3+)"
-            elif state['actual'] > state['target_max']:
-                status = f"OVER ({state['actual']} / Cel: {state['target_max']})"
-            elif state['actual'] < state['target_min']:
-                status = f"UNDER ({state['actual']} / Cel: {state['target_min']})"
+            if actual == 0:
+                missing_keywords.append(keyword)
+                status = "MISSING"
+            elif actual < target_min:
+                status = "UNDER"
+            elif actual <= target_max:
+                status = "OK"
+            elif actual <= target_max + 3:
+                status = "OVER"
+            else:
+                locked_keywords.append(keyword)
+                status = "LOCKED"
 
-            report_for_gpt.append(f"{keyword}: {state['actual']} użyto / Cel: {state['target_min']}-{state['target_max']} / Status: {status}")
+            summary.append(f"{keyword}: {actual}/{target_min}-{target_max} ({status})")
 
         doc_ref.update({
-            "keywords_state": current_keywords_state,
             "full_text": new_full_text,
             "batches": firestore.ArrayUnion([batch_text])
         })
 
-        return jsonify(report_for_gpt), 200
+        return jsonify({
+            "missing_keywords": missing_keywords,
+            "locked_keywords": locked_keywords,
+            "summary": summary
+        }), 200
 
     except Exception as e:
         print(f"❌ Błąd /api/project/{project_id}/add_batch: {e}")
         return jsonify({"error": f"Wystąpił błąd serwera: {e}"}), 500
 
 # -------------------------------------------------------------------
-# Endpoint: /api/project/<id> (DELETE)
+# DELETE /api/project/<id>
 # -------------------------------------------------------------------
 @app.route("/api/project/<project_id>", methods=["DELETE"])
 def delete_project(project_id):
@@ -295,24 +299,24 @@ def delete_project(project_id):
             return jsonify({"error": "Projekt o podanym ID nie istnieje."}), 404
 
         doc_ref.delete()
-        return jsonify({"status": f"Projekt {project_id} został pomyślnie usunięty."}), 200
+        return jsonify({"status": f"Projekt {project_id} został usunięty."}), 200
     except Exception as e:
-        print(f"❌ Błąd /api/project/{project_id} [DELETE]: {e}")
-        return jsonify({"error": f"Wystąpił błąd serwera: {e}"}), 500
+        print(f"❌ Błąd DELETE: {e}")
+        return jsonify({"error": f"Błąd serwera: {e}"}), 500
 
 # -------------------------------------------------------------------
-# Endpoint: /api/health
+# /api/health
 # -------------------------------------------------------------------
 @app.route("/api/health", methods=["GET"])
 def health():
     return jsonify({
         "status": "ok",
-        "version": "v5.3-hybrid-parser",
+        "version": "v6.0",
         "message": "Master SEO API (Firestore Edition) działa poprawnie."
     }), 200
 
 # -------------------------------------------------------------------
-# Endpoint: /api/s1_analysis
+# /api/s1_analysis
 # -------------------------------------------------------------------
 @app.route("/api/s1_analysis", methods=["POST"])
 def perform_s1_analysis():
