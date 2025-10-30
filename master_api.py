@@ -1,4 +1,4 @@
-# master_api.py — Master SEO API (v5.8 hybrid, fixed counting)
+# master_api.py — Master SEO API (v5.9 hybrid, debug counting)
 # Obsługa: Firestore, S1 (SerpApi + LangExtract + Ngram API), Brief Base64, Batch Counting, PAA Integration
 
 import os
@@ -38,6 +38,7 @@ except Exception as e:
     print(f"❌ Błąd inicjalizacji Firebase: {e}")
     db = None
 
+
 # -------------------------------------------------------------------
 # 🌐 API Zewnętrzne (S1)
 # -------------------------------------------------------------------
@@ -70,6 +71,7 @@ def call_serpapi(topic):
 
 def call_langextract(url):
     return call_api_with_json(LANGEXTRACT_API_URL, {"url": url}, "LangExtract")
+
 
 # -------------------------------------------------------------------
 # 🧩 Parser briefu (BASIC / EXTENDED / H2 HEADERS TERMS)
@@ -123,30 +125,24 @@ def parse_brief_to_keywords(brief_text):
 
     return keywords_dict, headers_list
 
+
 # -------------------------------------------------------------------
-# 🔢 Liczenie fraz (v5.8 – poprawione regexy dla n-gramów)
+# 🔢 Liczenie fraz (v5.9 – debug + Unicode)
 # -------------------------------------------------------------------
 def calculate_hierarchical_counts(full_text, keywords_dict):
     text = full_text.lower()
-    text = re.sub(r"[^\w\sąćęłńóśźż]", " ", text)  # usuń interpunkcję
+    text = re.sub(r"[^\w\sąćęłńóśźż]", " ", text)
     counts = {}
-
     for kw in sorted(keywords_dict.keys(), key=len, reverse=True):
         kw_clean = kw.lower().strip()
         if not kw_clean:
             counts[kw] = 0
             continue
-
-        # ✅ jeśli fraza ma spacje – nie dodajemy \b
-        if " " in kw_clean:
-            pattern = re.escape(kw_clean)
-        else:
-            pattern = r"\b" + re.escape(kw_clean) + r"\b"
-
-        matches = re.findall(pattern, text)
+        pattern = r"(?<!\w)" + re.escape(kw_clean) + r"(?!\w)"
+        matches = re.findall(pattern, text, flags=re.UNICODE)
         counts[kw] = len(matches)
-
     return counts
+
 
 # -------------------------------------------------------------------
 # ✅ /api/project/create — tworzy projekt
@@ -160,35 +156,21 @@ def create_project_hybrid():
         data_json = request.get_json(silent=True)
         keywords_state, headers_list = {}, []
 
-        # 🧩 Odczyt briefu (Base64 lub tekst)
         if data_json:
             brief_text = ""
             if "brief_base64" in data_json:
-                try:
-                    brief_text = base64.b64decode(data_json["brief_base64"]).decode("utf-8")
-                except Exception as e:
-                    return jsonify({"error": f"Błąd dekodowania Base64: {e}"}), 400
+                brief_text = base64.b64decode(data_json["brief_base64"]).decode("utf-8")
             elif "brief_text" in data_json:
                 brief_text = data_json["brief_text"]
-            else:
-                return jsonify({"error": "Brak brief_text lub brief_base64."}), 400
         else:
             brief_text = request.data.decode("utf-8")
-            if not brief_text:
-                return jsonify({"error": "Brak danych w body (JSON lub text/plain)."}), 400
 
-        # 🧠 Parsowanie briefu
+        if not brief_text.strip():
+            return jsonify({"error": "Brak treści briefu."}), 400
+
         keywords_state, headers_list = parse_brief_to_keywords(brief_text)
-        if not isinstance(keywords_state, dict):
-            keywords_state = {}
-        if not isinstance(headers_list, list):
-            headers_list = []
+        print(f"📘 [DEBUG] Sparsowano {len(keywords_state)} słów i {len(headers_list)} nagłówków H2.")
 
-        if not keywords_state:
-            print("⚠️ Brak słów kluczowych – projekt zostanie oznaczony jako testowy, ale licznik będzie działał.")
-            keywords_state = {}
-
-        # 🗃️ Tworzenie dokumentu w Firestore
         doc_ref = db.collection("seo_projects").document()
         project_data = {
             "keywords_state": keywords_state,
@@ -199,6 +181,7 @@ def create_project_hybrid():
         }
         doc_ref.set(project_data)
 
+        print(f"✅ [DEBUG] Utworzono projekt {doc_ref.id}")
         return jsonify({
             "status": "✅ Projekt utworzony pomyślnie.",
             "project_id": doc_ref.id,
@@ -208,44 +191,53 @@ def create_project_hybrid():
 
     except Exception as e:
         print(f"❌ Błąd /api/project/create: {e}")
-        return jsonify({"error": f"Błąd serwera: {e}"}), 500
+        return jsonify({"error": str(e)}), 500
+
 
 # -------------------------------------------------------------------
-# ✍️ /api/project/<id>/add_batch — dodaje batch i liczy frazy
+# ✍️ /api/project/<id>/add_batch — dodaje batch i liczy frazy (debug)
 # -------------------------------------------------------------------
 @app.route("/api/project/<project_id>/add_batch", methods=["POST"])
 def add_batch_to_project(project_id):
     if not db:
-        return jsonify({"error": "Baza danych Firestore nie jest połączona."}), 503
+        return jsonify({"error": "Firestore niedostępny."}), 503
 
     try:
         doc_ref = db.collection("seo_projects").document(project_id)
         doc = doc_ref.get()
         if not doc.exists:
-            return jsonify({"error": "Projekt o podanym ID nie istnieje."}), 404
+            return jsonify({"error": "Projekt nie istnieje."}), 404
 
         project_data = doc.to_dict()
         current_keywords = project_data.get("keywords_state", {})
         current_full_text = project_data.get("full_text", "")
-        batch_text = request.get_data(as_text=True).strip()
 
-        if not batch_text:
-            return jsonify({"error": "Brak tekstu batcha."}), 400
+        if request.is_json:
+            data = request.get_json(silent=True) or {}
+            batch_text = data.get("text", "")
+        else:
+            batch_text = request.get_data(as_text=True)
+
+        print("\n📦 [DEBUG] Odebrano batch:")
+        print(f"➡️ Długość: {len(batch_text)} znaków")
+        print(f"➡️ Pierwsze 200 znaków:\n{batch_text[:200]}")
+
+        if not batch_text.strip():
+            return jsonify({"error": "Pusty batch"}), 400
 
         new_full_text = current_full_text + "\n\n" + batch_text
-        new_counts = calculate_hierarchical_counts(new_full_text, current_keywords)
+        counts = calculate_hierarchical_counts(new_full_text, current_keywords)
+
+        print("\n📊 [DEBUG] Liczenie fraz:")
+        for k, v in counts.items():
+            print(f"   {k}: {v}")
+
         report = []
-
         for kw, state in current_keywords.items():
-            if state.get("locked"):
-                report.append(f"{kw}: LOCKED (użyto max +3)")
-                continue
-
-            actual = new_counts.get(kw, 0)
+            actual = counts.get(kw, 0)
             state["actual"] = actual
             state["remaining_min"] = max(0, state["target_min"] - actual)
             state["remaining_max"] = max(0, state["target_max"] - actual)
-
             if actual >= state["target_max"] + 3:
                 state["locked"] = True
                 status = f"LOCKED ({actual}/{state['target_max']} +3)"
@@ -255,7 +247,6 @@ def add_batch_to_project(project_id):
                 status = f"UNDER ({actual}/{state['target_min']})"
             else:
                 status = "OK"
-
             report.append(f"{kw}: {actual} użyć / cel {state['target_min']}-{state['target_max']} / {status}")
 
         doc_ref.update({
@@ -264,72 +255,57 @@ def add_batch_to_project(project_id):
             "batches": firestore.ArrayUnion([batch_text]),
         })
 
+        print("✅ [DEBUG] Batch zapisany do Firestore.\n")
         return jsonify(report), 200
 
     except Exception as e:
         print(f"❌ Błąd add_batch: {e}")
-        return jsonify({"error": f"Błąd serwera: {e}"}), 500
+        return jsonify({"error": str(e)}), 500
+
 
 # -------------------------------------------------------------------
-# 🧠 /api/s1_analysis — analiza konkurencji + PAA + n-gramy
+# 🧠 /api/s1_analysis — analiza konkurencji + n-gramy
 # -------------------------------------------------------------------
 @app.route("/api/s1_analysis", methods=["POST"])
 def perform_s1_analysis():
     try:
         data = request.get_json()
         if not data or "topic" not in data:
-            return jsonify({"error": "Brak 'topic' w body."}), 400
+            return jsonify({"error": "Brak 'topic'"}), 400
 
         topic = data["topic"]
         serp_data = call_serpapi(topic)
-
         if not serp_data:
-            return jsonify({"error": "Nie udało się pobrać danych z SerpAPI."}), 502
+            return jsonify({"error": "Brak danych z SerpAPI"}), 502
 
         ai_overview_status = serp_data.get("ai_overview", {}).get("status", "not_available")
-        ai_mode_results = len(serp_data.get("ai_results", [])) if "ai_results" in serp_data else 0
         people_also_ask = [q.get("question") for q in serp_data.get("related_questions", []) if q.get("question")]
         autocomplete_suggestions = [r.get("query") for r in serp_data.get("related_searches", []) if r.get("query")]
-
         top_urls = [r.get("link") for r in serp_data.get("organic_results", [])[:5]]
-        combined_text, h2_counts, all_headings, source_log = "", [], [], []
-        successful = 0
 
-        for url in top_urls:
-            if successful >= 3:
-                break
+        combined_text, h2_counts, all_headings = "", [], []
+        for url in top_urls[:3]:
             content = call_langextract(url)
             if content and content.get("content"):
-                successful += 1
                 h2s = content.get("h2", [])
                 all_headings.extend([h.strip().lower() for h in h2s])
                 h2_counts.append(len(h2s))
                 combined_text += content.get("content", "") + "\n\n"
-                source_log.append({"url": url, "status": "Success", "h2_count": len(h2s)})
-            else:
-                source_log.append({"url": url, "status": "Failure"})
 
         heading_counts = Counter(all_headings)
         top_headings = [h for h, _ in heading_counts.most_common(10)]
-
-        ngram_data = call_api_with_json(
-            NGRAM_API_URL,
-            {"text": combined_text, "main_keyword": topic},
-            "Ngram API"
-        )
+        ngram_data = call_api_with_json(NGRAM_API_URL, {"text": combined_text, "main_keyword": topic}, "Ngram API")
 
         competitive_metrics = {
             "avg_h2_per_article": round(sum(h2_counts) / len(h2_counts), 1) if h2_counts else 0,
             "min_h2": min(h2_counts) if h2_counts else 0,
-            "max_h2": max(h2_counts) if h2_counts else 0
+            "max_h2": max(h2_counts) if h2_counts else 0,
         }
 
         return jsonify({
             "identified_urls": top_urls,
-            "processing_report": source_log,
             "competitive_metrics": competitive_metrics,
             "ai_overview_status": ai_overview_status,
-            "ai_mode_results": ai_mode_results,
             "people_also_ask": people_also_ask,
             "autocomplete_suggestions": autocomplete_suggestions,
             "top_competitor_headings": top_headings,
@@ -338,7 +314,8 @@ def perform_s1_analysis():
 
     except Exception as e:
         print(f"❌ Błąd /api/s1_analysis: {e}")
-        return jsonify({"error": f"Błąd serwera: {e}"}), 500
+        return jsonify({"error": str(e)}), 500
+
 
 # -------------------------------------------------------------------
 # 🧹 DELETE /api/project/<id>
@@ -350,9 +327,11 @@ def delete_project(project_id):
         if not doc_ref.get().exists:
             return jsonify({"error": "Projekt nie istnieje."}), 404
         doc_ref.delete()
+        print(f"🧹 [DEBUG] Usunięto projekt {project_id}")
         return jsonify({"status": f"Projekt {project_id} usunięty."}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 
 # -------------------------------------------------------------------
 # ❤️ Health Check
@@ -361,9 +340,10 @@ def delete_project(project_id):
 def health():
     return jsonify({
         "status": "ok",
-        "version": "v5.8-hybrid-fixed",
-        "message": "Master SEO API działa poprawnie (naprawione liczenie fraz + S1 z PAA)."
+        "version": "v5.9-hybrid-debug",
+        "message": "Master SEO API działa poprawnie (pełne logi debugowania i poprawione liczenie)."
     }), 200
+
 
 # --- Uruchomienie ---
 if __name__ == "__main__":
