@@ -1,4 +1,4 @@
-# master_api.py — Master SEO API (v5.7-PAA hybrid)
+# master_api.py — Master SEO API (v5.8 hybrid, fixed counting)
 # Obsługa: Firestore, S1 (SerpApi + LangExtract + Ngram API), Brief Base64, Batch Counting, PAA Integration
 
 import os
@@ -124,25 +124,27 @@ def parse_brief_to_keywords(brief_text):
     return keywords_dict, headers_list
 
 # -------------------------------------------------------------------
-# 🔢 Liczenie fraz (hierarchiczne, nienakładające się)
+# 🔢 Liczenie fraz (v5.8 – poprawione regexy dla n-gramów)
 # -------------------------------------------------------------------
 def calculate_hierarchical_counts(full_text, keywords_dict):
-    text_lower = full_text.lower()
-    sorted_keywords = sorted(keywords_dict.keys(), key=len, reverse=True)
-    counts = {k: 0 for k in keywords_dict}
-    masked_text = text_lower
+    text = full_text.lower()
+    text = re.sub(r"[^\w\sąćęłńóśźż]", " ", text)  # usuń interpunkcję
+    counts = {}
 
-    for kw in sorted_keywords:
-        kw_lower = kw.lower()
-        try:
-            matches = re.findall(r"\b" + re.escape(kw_lower) + r"\b", masked_text)
-            count = len(matches)
-            counts[kw] = count
-            if count > 0:
-                masked_text = re.sub(r"\b" + re.escape(kw_lower) + r"\b", "X" * len(kw), masked_text, count=count)
-        except re.error as e:
-            print(f"Błąd regex dla '{kw}': {e}")
+    for kw in sorted(keywords_dict.keys(), key=len, reverse=True):
+        kw_clean = kw.lower().strip()
+        if not kw_clean:
+            counts[kw] = 0
             continue
+
+        # ✅ jeśli fraza ma spacje – nie dodajemy \b
+        if " " in kw_clean:
+            pattern = re.escape(kw_clean)
+        else:
+            pattern = r"\b" + re.escape(kw_clean) + r"\b"
+
+        matches = re.findall(pattern, text)
+        counts[kw] = len(matches)
 
     return counts
 
@@ -225,7 +227,7 @@ def add_batch_to_project(project_id):
         project_data = doc.to_dict()
         current_keywords = project_data.get("keywords_state", {})
         current_full_text = project_data.get("full_text", "")
-        batch_text = request.data.decode("utf-8")
+        batch_text = request.get_data(as_text=True).strip()
 
         if not batch_text:
             return jsonify({"error": "Brak tekstu batcha."}), 400
@@ -269,7 +271,7 @@ def add_batch_to_project(project_id):
         return jsonify({"error": f"Błąd serwera: {e}"}), 500
 
 # -------------------------------------------------------------------
-# 🧠 /api/s1_analysis — obowiązkowa analiza konkurencji + PAA
+# 🧠 /api/s1_analysis — analiza konkurencji + PAA + n-gramy
 # -------------------------------------------------------------------
 @app.route("/api/s1_analysis", methods=["POST"])
 def perform_s1_analysis():
@@ -359,8 +361,8 @@ def delete_project(project_id):
 def health():
     return jsonify({
         "status": "ok",
-        "version": "v5.7-paa-hybrid",
-        "message": "Master SEO API działa poprawnie (S1 z PAA, Firestore aktywny)."
+        "version": "v5.8-hybrid-fixed",
+        "message": "Master SEO API działa poprawnie (naprawione liczenie fraz + S1 z PAA)."
     }), 200
 
 # --- Uruchomienie ---
