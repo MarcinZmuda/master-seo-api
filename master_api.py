@@ -43,6 +43,7 @@ SERPAPI_URL = "https://serpapi.com/search"
 LANGEXTRACT_API_URL = "https://langextract-api.onrender.com/extract"
 NGRAM_API_URL = "https://gpt-ngram-api.onrender.com/api/ngram_entity_analysis"
 
+
 def call_api_with_json(url, payload, name):
     try:
         r = requests.post(url, json=payload, timeout=60)
@@ -51,6 +52,7 @@ def call_api_with_json(url, payload, name):
     except Exception as e:
         print(f"❌ Błąd API {name}: {e}")
         return {"error": f"Błąd połączenia z {name}", "details": str(e)}
+
 
 def call_serpapi(topic):
     params = {"api_key": SERPAPI_KEY, "q": topic, "gl": "pl", "hl": "pl", "engine": "google"}
@@ -62,6 +64,7 @@ def call_serpapi(topic):
         print(f"❌ Błąd SerpAPI: {e}")
         return None
 
+
 def call_langextract(url):
     return call_api_with_json(LANGEXTRACT_API_URL, {"url": url}, "LangExtract")
 
@@ -72,9 +75,11 @@ def parse_brief_to_keywords(brief_text):
     keywords_dict = {}
     headers_list = []
 
+    # Czyścimy linie
     cleaned_text = os.linesep.join([s.strip() for s in brief_text.splitlines() if s.strip()])
-    section_regex = r'((?:BASIC|EXTENDED|H2)\s+TEXT\s+TERMS)\s*:\s*=*\s*([\s\S]*?)(?=\n[A-Z\s]+TEXT\s+TERMS|$)'
 
+    # Akceptuje BASIC, EXTENDED i H2
+    section_regex = r'((?:BASIC|EXTENDED|H2)\s+TEXT\s+TERMS)\s*:\s*=*\s*([\s\S]*?)(?=\n[A-Z\s]+TEXT\s+TERMS|$)'
     keyword_regex = re.compile(r'^\s*(.*?)\s*:\s*(\d+)\s*-\s*(\d+)x\s*$', re.UNICODE)
     keyword_regex_single = re.compile(r'^\s*(.*?)\s*:\s*(\d+)x\s*$', re.UNICODE)
 
@@ -82,12 +87,14 @@ def parse_brief_to_keywords(brief_text):
         section_name = match.group(1).upper()
         section_content = match.group(2)
 
+        # Sekcja H2 HEADERS TERMS
         if section_name.startswith("H2"):
             for line in section_content.splitlines():
                 if line.strip():
                     headers_list.append(line.strip())
             continue
 
+        # Sekcje BASIC i EXTENDED
         for line in section_content.splitlines():
             line = line.strip()
             if not line:
@@ -118,7 +125,7 @@ def parse_brief_to_keywords(brief_text):
     return keywords_dict, headers_list
 
 # -------------------------------------------------------------------
-# 🔢 Liczenie wystąpień fraz (hierarchiczne)
+# 🔢 Liczenie wystąpień fraz (z poprawionym regexem)
 # -------------------------------------------------------------------
 def calculate_hierarchical_counts(full_text, keywords_dict):
     text_lower = full_text.lower()
@@ -129,11 +136,13 @@ def calculate_hierarchical_counts(full_text, keywords_dict):
     for kw in sorted_keywords:
         kw_lower = kw.lower()
         try:
-            matches = re.findall(r'\b' + re.escape(kw_lower) + r'\b', masked_text)
+            # ✅ Naprawiony regex: działa z polskimi znakami i frazami wielowyrazowymi
+            pattern = r'(?i)(?<!\w)' + re.escape(kw_lower) + r'(?!\w)'
+            matches = re.findall(pattern, masked_text)
             count = len(matches)
             counts[kw] = count
             if count > 0:
-                masked_text = re.sub(r'\b' + re.escape(kw_lower) + r'\b', "X" * len(kw), masked_text, count=count)
+                masked_text = re.sub(pattern, "X" * len(kw), masked_text, count=count)
         except re.error as e:
             print(f"Błąd regex dla '{kw}': {e}")
             continue
@@ -163,7 +172,6 @@ def create_project_hybrid():
                 brief_text = data_json["brief_text"]
             else:
                 return jsonify({"error": "Brak brief_text lub brief_base64."}), 400
-
             keywords_state, headers_list = parse_brief_to_keywords(brief_text)
         else:
             brief_text = request.data.decode("utf-8")
@@ -202,7 +210,6 @@ def create_project_hybrid():
 def add_batch_to_project(project_id):
     if not db:
         return jsonify({"error": "Baza danych Firestore nie jest połączona."}), 503
-
     try:
         doc_ref = db.collection("seo_projects").document(project_id)
         doc = doc_ref.get()
@@ -292,7 +299,9 @@ def perform_s1_analysis():
         top_headings = [h for h, _ in heading_counts.most_common(10)]
 
         ngram_data = call_api_with_json(
-            NGRAM_API_URL, {"text": combined_text, "main_keyword": topic}, "Ngram API"
+            NGRAM_API_URL,
+            {"text": combined_text, "main_keyword": topic},
+            "Ngram API"
         )
 
         return jsonify({
@@ -332,8 +341,8 @@ def delete_project(project_id):
 def health():
     return jsonify({
         "status": "ok",
-        "version": "v5.5-h2-s1",
-        "message": "Master SEO API działa poprawnie (S1 obowiązkowy, H2 obsługiwane)."
+        "version": "v5.6-h2-s1-regexfix",
+        "message": "Master SEO API działa poprawnie (S1 obowiązkowy, H2 obsługiwane, regex naprawiony)."
     }), 200
 
 # --- Uruchomienie ---
