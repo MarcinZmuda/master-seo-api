@@ -1,15 +1,49 @@
 # ================================================================
-# project_routes.py — Warstwa Project Management (v6.3.1)
+# project_routes.py — Warstwa Project Management (v6.3.2)
 # Obsługa: Firestore + integracja z Master SEO API (S1–S4)
 # ================================================================
 
 import json
 import base64
 import re
+import os
 from flask import Blueprint, request, jsonify
 from collections import Counter
 from datetime import datetime
 import requests
+
+# --- 🔐 Inicjalizacja Firebase z ENV JSON ---
+from firebase_admin import credentials, firestore, initialize_app
+import firebase_admin
+
+# Render przechowuje klucz jako zmienną FIREBASE_CREDS_JSON (nie plik)
+if os.getenv("FIREBASE_CREDS_JSON"):
+    try:
+        creds_json = os.getenv("FIREBASE_CREDS_JSON")
+        creds_path = "/tmp/firebase-key.json"
+
+        # Zapisz ENV do pliku tymczasowego
+        with open(creds_path, "w") as f:
+            f.write(creds_json)
+
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = creds_path
+        print("✅ FIREBASE_CREDS_JSON zapisany do /tmp/firebase-key.json")
+
+        # Zainicjalizuj Firebase tylko raz
+        if not firebase_admin._apps:
+            cred = credentials.Certificate(creds_path)
+            firebase_admin.initialize_app(cred)
+    except Exception as e:
+        print(f"⚠️ Błąd inicjalizacji Firebase z ENV: {e}")
+
+# Inicjalizacja klienta Firestore
+try:
+    db = firestore.client()
+    print("✅ Firestore client zainicjalizowany.")
+except Exception as e:
+    db = None
+    print(f"❌ Nie udało się zainicjalizować Firestore: {e}")
+
 
 # --- Blueprint dla modularności ---
 project_bp = Blueprint("project_routes", __name__)
@@ -81,10 +115,10 @@ def call_s1_analysis(topic):
 # ---------------------------------------------------------------
 @project_bp.route("/api/project/create", methods=["POST"])
 def create_project():
-    from firebase_admin import firestore
-    db = project_bp.db
-
     try:
+        if not db:
+            return jsonify({"error": "Firestore nie jest połączony"}), 503
+
         data = request.get_json(silent=True) or {}
         topic = data.get("topic", "").strip()
         brief_text = ""
@@ -136,9 +170,6 @@ def create_project():
 # ---------------------------------------------------------------
 @project_bp.route("/api/project/<project_id>/add_batch", methods=["POST"])
 def add_batch_to_project(project_id):
-    from firebase_admin import firestore
-    db = project_bp.db
-
     if not db:
         return jsonify({"error": "Brak połączenia z Firestore"}), 503
 
@@ -215,9 +246,6 @@ def add_batch_to_project(project_id):
 # ---------------------------------------------------------------
 @project_bp.route("/api/project/<project_id>", methods=["DELETE"])
 def delete_project_final(project_id):
-    from firebase_admin import firestore
-    db = project_bp.db
-
     if not db:
         return jsonify({"error": "Brak połączenia z Firestore"}), 503
 
@@ -254,7 +282,7 @@ def delete_project_final(project_id):
 # ---------------------------------------------------------------
 # 🔧 Funkcja rejestrująca blueprint
 # ---------------------------------------------------------------
-def register_project_routes(app, db):
-    project_bp.db = db
+def register_project_routes(app, _db=None):
+    project_bp.db = db if _db is None else _db
     app.register_blueprint(project_bp)
     print("✅ [DEBUG] Zarejestrowano project_routes (Firestore mode).")
