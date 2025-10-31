@@ -1,5 +1,8 @@
+# ================================================================
 # master_api.py — Master SEO API (v6.3.0 hybrid JSON mode)
-# Obsługa: Firestore, S1 (SerpApi + LangExtract + Ngram API), Brief Base64, Batch Counting, PAA Integration
+# Obsługa: Firestore, S1 (SerpApi + LangExtract + Ngram API),
+# Brief Base64, Batch Counting, PAA Integration + Project Management
+# ================================================================
 
 import os
 import re
@@ -37,7 +40,6 @@ try:
 except Exception as e:
     print(f"❌ Błąd inicjalizacji Firebase: {e}")
     db = None
-
 
 # -------------------------------------------------------------------
 # 🌐 API Zewnętrzne (S1)
@@ -181,7 +183,6 @@ def perform_s1_analysis():
             else:
                 print(f"⚠️ [WARN] Brak treści dla {url}")
 
-        # --- Wywołanie analizy n-gramów z wieloma źródłami ---
         ngram_data = call_api_with_json(
             NGRAM_API_URL,
             {"sources": sources_payload, "main_keyword": topic, "serp_context": {
@@ -229,6 +230,16 @@ def health():
         "message": "Master SEO API działa poprawnie (pełna integracja z n-gram sources)."
     }), 200
 
+
+# -------------------------------------------------------------------
+# 🔗 Integracja: Project Management Layer
+# -------------------------------------------------------------------
+try:
+    from project_routes import register_project_routes
+    register_project_routes(app, db)
+    print("✅ Zarejestrowano project_routes.")
+except Exception as e:
+    print(f"⚠️ Nie udało się załadować project_routes: {e}")
 
 # --- Uruchomienie ---
 if __name__ == "__main__":
