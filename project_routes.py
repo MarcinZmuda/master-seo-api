@@ -1,6 +1,6 @@
 # ================================================================
 # project_routes.py — Warstwa Project Management (v6.3.0)
-# Obsługa: Firestore + integracja z Master SEO API (S1 Analysis)
+# Obsługa: Firestore + integracja z Master SEO API (S1–S4)
 # ================================================================
 
 import json
@@ -77,7 +77,7 @@ def call_s1_analysis(topic):
 
 
 # ---------------------------------------------------------------
-# ✅ /api/project/create — tworzy nowy projekt SEO
+# ✅ /api/project/create — tworzy nowy projekt SEO (S2)
 # ---------------------------------------------------------------
 @project_bp.route("/api/project/create", methods=["POST"])
 def create_project():
@@ -128,45 +128,155 @@ def create_project():
 
 
 # ---------------------------------------------------------------
-# 📄 /api/project/<id> — pobiera dane projektu
+# 🧠 /api/project/<id>/add_batch — dodaje batch treści (S3)
 # ---------------------------------------------------------------
-@project_bp.route("/api/project/<project_id>", methods=["GET"])
-def get_project(project_id):
+@project_bp.route("/api/project/<project_id>/add_batch", methods=["POST"])
+def add_batch_to_project(project_id):
+    from firebase_admin import firestore
     db = project_bp.db
-    doc_ref = db.collection("seo_projects").document(project_id)
-    doc = doc_ref.get()
-    if not doc.exists:
-        return jsonify({"error": "Projekt nie istnieje"}), 404
-    return jsonify(doc.to_dict()), 200
+
+    if not db:
+        return jsonify({"error": "Brak połączenia z Firestore"}), 503
+
+    try:
+        # 🔹 Pobierz dokument projektu
+        doc_ref = db.collection("seo_projects").document(project_id)
+        doc = doc_ref.get()
+        if not doc.exists:
+            return jsonify({"error": "Projekt nie istnieje"}), 404
+
+        project_data = doc.to_dict()
+        keywords_state = project_data.get("keywords_state", {})
+        batches = project_data.get("batches", [])
+
+        # 🔹 Odczytaj dane z body (obsługa JSON i text/plain)
+        text_input = ""
+        if request.is_json:
+            text_input = (request.get_json() or {}).get("text", "")
+        else:
+            text_input = request.data.decode("utf-8", errors="ignore")
+
+        if not text_input.strip():
+            return jsonify({"error": "Brak treści w żądaniu"}), 400
+
+        text_clean = text_input.lower()
+        text_clean = re.sub(r"[^\w\sąćęłńóśźż]", " ", text_clean)
+
+        # 🔹 Liczenie wystąpień
+        counts = {}
+        for kw, meta in keywords_state.items():
+            pattern = r"(?<!\w)" + re.escape(kw.lower()) + r"(?!\w)"
+            matches = re.findall(pattern, text_clean, flags=re.UNICODE)
+            count = len(matches)
+            meta["actual"] += count
+            counts[kw] = count
+
+            # 🔸 Logika blokowania (LOCKED / OVER / UNDER)
+            if meta["actual"] > meta["target_max"] + 3:
+                meta["locked"] = True
+                meta["status"] = "LOCKED"
+            elif meta["actual"] > meta["target_max"]:
+                meta["status"] = "OVER"
+            elif meta["actual"] < meta["target_min"]:
+                meta["status"] = "UNDER"
+            else:
+                meta["status"] = "OK"
+
+        # 🔹 Aktualizacja Firestore
+        batch_entry = {
+            "created_at": datetime.utcnow().isoformat(),
+            "length": len(text_input),
+            "counts": counts,
+            "text": text_input[:5000]  # limit zapisu dla Firestore
+        }
+        batches.append(batch_entry)
+
+        doc_ref.update({
+            "batches": firestore.ArrayUnion([batch_entry]),
+            "keywords_state": keywords_state,
+            "updated_at": datetime.utcnow().isoformat()
+        })
+
+        # 🔹 Raport
+        report_lines = []
+        for kw, meta in keywords_state.items():
+            report_lines.append(
+                f"{kw}: {meta['actual']} użyć / cel {meta['target_min']}-{meta['target_max']} / {meta.get('status', 'OK')}"
+            )
+
+        locked_terms = [kw for kw, meta in keywords_state.items() if meta.get("locked")]
+
+        return jsonify({
+            "status": "OK",
+            "batch_length": len(text_input),
+            "counts": counts,
+            "report": report_lines,
+            "locked_terms": locked_terms,
+            "updated_keywords": len(keywords_state)
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": f"Błąd /api/project/add_batch: {str(e)}"}), 500
 
 
 # ---------------------------------------------------------------
-# ✏️ /api/project/<id>/update — aktualizuje projekt
+# 🧹 /api/project/<id> — finalne usunięcie projektu + raport podsumowujący (S4)
 # ---------------------------------------------------------------
-@project_bp.route("/api/project/<project_id>/update", methods=["POST"])
-def update_project(project_id):
+@project_bp.route("/api/project/<project_id>", methods=["DELETE"])
+def delete_project_final(project_id):
+    from firebase_admin import firestore
     db = project_bp.db
-    data = request.get_json(silent=True) or {}
-    doc_ref = db.collection("seo_projects").document(project_id)
 
-    if not doc_ref.get().exists:
-        return jsonify({"error": "Projekt nie istnieje"}), 404
+    if not db:
+        return jsonify({"error": "Brak połączenia z Firestore"}), 503
 
-    doc_ref.update(data)
-    return jsonify({"status": f"✅ Projekt {project_id} zaktualizowany"}), 200
+    try:
+        # 🔹 Pobierz projekt
+        doc_ref = db.collection("seo_projects").document(project_id)
+        doc = doc_ref.get()
+        if not doc.exists:
+            return jsonify({"error": "Projekt nie istnieje"}), 404
 
+        project_data = doc.to_dict()
 
-# ---------------------------------------------------------------
-# 🗑️ /api/project/<id>/delete — usuwa projekt
-# ---------------------------------------------------------------
-@project_bp.route("/api/project/<project_id>/delete", methods=["DELETE"])
-def delete_project(project_id):
-    db = project_bp.db
-    doc_ref = db.collection("seo_projects").document(project_id)
-    if not doc_ref.get().exists:
-        return jsonify({"error": "Projekt nie istnieje"}), 404
-    doc_ref.delete()
-    return jsonify({"status": f"🗑️ Projekt {project_id} usunięty"}), 200
+        # 🔹 Przygotuj raport końcowy
+        topic = project_data.get("topic", "nieznany temat")
+        keywords_state = project_data.get("keywords_state", {})
+        batches = project_data.get("batches", [])
+
+        total_batches = len(batches)
+        total_length = sum(b.get("length", 0) for b in batches)
+        locked_terms = [kw for kw, meta in keywords_state.items() if meta.get("locked")]
+        over_terms = [kw for kw, meta in keywords_state.items() if meta.get("status") == "OVER"]
+        under_terms = [kw for kw, meta in keywords_state.items() if meta.get("status") == "UNDER"]
+        ok_terms = [kw for kw, meta in keywords_state.items() if meta.get("status") == "OK"]
+
+        summary_report = {
+            "topic": topic,
+            "total_batches": total_batches,
+            "total_length": total_length,
+            "locked_terms_count": len(locked_terms),
+            "over_terms_count": len(over_terms),
+            "under_terms_count": len(under_terms),
+            "ok_terms_count": len(ok_terms),
+            "locked_terms": locked_terms,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+
+        # 🔹 Zapisz kopię raportu do kolekcji archiwalnej
+        db.collection("seo_projects_archive").document(project_id).set(summary_report)
+
+        # 🔹 Usuń oryginalny projekt
+        doc_ref.delete()
+
+        # 🔹 Zwróć raport końcowy
+        return jsonify({
+            "status": f"✅ Projekt {project_id} został usunięty z Firestore.",
+            "summary": summary_report
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": f"Błąd /api/project DELETE: {str(e)}"}), 500
 
 
 # ---------------------------------------------------------------
