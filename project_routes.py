@@ -93,11 +93,14 @@ def create_project():
             return jsonify({"error": "Brak 'topic' (frazy kluczowej)"}), 400
 
         # Obsługa briefu (tekst lub base64)
-        if "brief_base64" in data:
-            brief_text = base64.b64decode(data["brief_base64"]).decode("utf-8")
-        elif "brief_text" in data:
-            brief_text = data["brief_text"]
-
+       if "brief_base64" in data:
+    brief_text = base64.b64decode(data["brief_base64"]).decode("utf-8")
+elif "brief_text" in data:
+    brief_text = data["brief_text"]
+    # automatyczna konwersja, jeśli brief zbyt długi
+    if len(brief_text) > 2000:
+        data["brief_base64"] = base64.b64encode(brief_text.encode("utf-8")).decode("utf-8")
+        brief_text = base64.b64decode(data["brief_base64"]).decode("utf-8")
         keywords_state, headers_list = parse_brief_to_keywords(brief_text) if brief_text else ({}, [])
         s1_data = call_s1_analysis(topic)
 
