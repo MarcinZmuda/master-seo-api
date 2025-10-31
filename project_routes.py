@@ -1,5 +1,5 @@
 # ================================================================
-# project_routes.py — Warstwa Project Management (v6.3.0)
+# project_routes.py — Warstwa Project Management (v6.3.1)
 # Obsługa: Firestore + integracja z Master SEO API (S1–S4)
 # ================================================================
 
@@ -93,14 +93,15 @@ def create_project():
             return jsonify({"error": "Brak 'topic' (frazy kluczowej)"}), 400
 
         # Obsługa briefu (tekst lub base64)
-       if "brief_base64" in data:
-    brief_text = base64.b64decode(data["brief_base64"]).decode("utf-8")
-elif "brief_text" in data:
-    brief_text = data["brief_text"]
-    # automatyczna konwersja, jeśli brief zbyt długi
-    if len(brief_text) > 2000:
-        data["brief_base64"] = base64.b64encode(brief_text.encode("utf-8")).decode("utf-8")
-        brief_text = base64.b64decode(data["brief_base64"]).decode("utf-8")
+        if "brief_base64" in data:
+            brief_text = base64.b64decode(data["brief_base64"]).decode("utf-8")
+        elif "brief_text" in data:
+            brief_text = data["brief_text"]
+            # automatyczna konwersja, jeśli brief zbyt długi
+            if len(brief_text) > 2000:
+                data["brief_base64"] = base64.b64encode(brief_text.encode("utf-8")).decode("utf-8")
+                brief_text = base64.b64decode(data["brief_base64"]).decode("utf-8")
+
         keywords_state, headers_list = parse_brief_to_keywords(brief_text) if brief_text else ({}, [])
         s1_data = call_s1_analysis(topic)
 
@@ -142,7 +143,6 @@ def add_batch_to_project(project_id):
         return jsonify({"error": "Brak połączenia z Firestore"}), 503
 
     try:
-        # 🔹 Pobierz dokument projektu
         doc_ref = db.collection("seo_projects").document(project_id)
         doc = doc_ref.get()
         if not doc.exists:
@@ -152,7 +152,6 @@ def add_batch_to_project(project_id):
         keywords_state = project_data.get("keywords_state", {})
         batches = project_data.get("batches", [])
 
-        # 🔹 Odczytaj dane z body (obsługa JSON i text/plain)
         text_input = ""
         if request.is_json:
             text_input = (request.get_json() or {}).get("text", "")
@@ -165,7 +164,6 @@ def add_batch_to_project(project_id):
         text_clean = text_input.lower()
         text_clean = re.sub(r"[^\w\sąćęłńóśźż]", " ", text_clean)
 
-        # 🔹 Liczenie wystąpień
         counts = {}
         for kw, meta in keywords_state.items():
             pattern = r"(?<!\w)" + re.escape(kw.lower()) + r"(?!\w)"
@@ -174,7 +172,6 @@ def add_batch_to_project(project_id):
             meta["actual"] += count
             counts[kw] = count
 
-            # 🔸 Logika blokowania (LOCKED / OVER / UNDER)
             if meta["actual"] > meta["target_max"] + 3:
                 meta["locked"] = True
                 meta["status"] = "LOCKED"
@@ -185,12 +182,11 @@ def add_batch_to_project(project_id):
             else:
                 meta["status"] = "OK"
 
-        # 🔹 Aktualizacja Firestore
         batch_entry = {
             "created_at": datetime.utcnow().isoformat(),
             "length": len(text_input),
             "counts": counts,
-            "text": text_input[:5000]  # limit zapisu dla Firestore
+            "text": text_input[:5000]
         }
         batches.append(batch_entry)
 
@@ -200,20 +196,12 @@ def add_batch_to_project(project_id):
             "updated_at": datetime.utcnow().isoformat()
         })
 
-        # 🔹 Raport
-        report_lines = []
-        for kw, meta in keywords_state.items():
-            report_lines.append(
-                f"{kw}: {meta['actual']} użyć / cel {meta['target_min']}-{meta['target_max']} / {meta.get('status', 'OK')}"
-            )
-
         locked_terms = [kw for kw, meta in keywords_state.items() if meta.get("locked")]
 
         return jsonify({
             "status": "OK",
             "batch_length": len(text_input),
             "counts": counts,
-            "report": report_lines,
             "locked_terms": locked_terms,
             "updated_keywords": len(keywords_state)
         }), 200
@@ -223,7 +211,7 @@ def add_batch_to_project(project_id):
 
 
 # ---------------------------------------------------------------
-# 🧹 /api/project/<id> — finalne usunięcie projektu + raport podsumowujący (S4)
+# 🧹 /api/project/<id> — finalne usunięcie projektu (S4)
 # ---------------------------------------------------------------
 @project_bp.route("/api/project/<project_id>", methods=["DELETE"])
 def delete_project_final(project_id):
@@ -234,45 +222,26 @@ def delete_project_final(project_id):
         return jsonify({"error": "Brak połączenia z Firestore"}), 503
 
     try:
-        # 🔹 Pobierz projekt
         doc_ref = db.collection("seo_projects").document(project_id)
         doc = doc_ref.get()
         if not doc.exists:
             return jsonify({"error": "Projekt nie istnieje"}), 404
 
         project_data = doc.to_dict()
-
-        # 🔹 Przygotuj raport końcowy
-        topic = project_data.get("topic", "nieznany temat")
         keywords_state = project_data.get("keywords_state", {})
         batches = project_data.get("batches", [])
 
-        total_batches = len(batches)
-        total_length = sum(b.get("length", 0) for b in batches)
-        locked_terms = [kw for kw, meta in keywords_state.items() if meta.get("locked")]
-        over_terms = [kw for kw, meta in keywords_state.items() if meta.get("status") == "OVER"]
-        under_terms = [kw for kw, meta in keywords_state.items() if meta.get("status") == "UNDER"]
-        ok_terms = [kw for kw, meta in keywords_state.items() if meta.get("status") == "OK"]
-
         summary_report = {
-            "topic": topic,
-            "total_batches": total_batches,
-            "total_length": total_length,
-            "locked_terms_count": len(locked_terms),
-            "over_terms_count": len(over_terms),
-            "under_terms_count": len(under_terms),
-            "ok_terms_count": len(ok_terms),
-            "locked_terms": locked_terms,
+            "topic": project_data.get("topic", "nieznany temat"),
+            "total_batches": len(batches),
+            "total_length": sum(b.get("length", 0) for b in batches),
+            "locked_terms": [kw for kw, meta in keywords_state.items() if meta.get("locked")],
             "timestamp": datetime.utcnow().isoformat(),
         }
 
-        # 🔹 Zapisz kopię raportu do kolekcji archiwalnej
         db.collection("seo_projects_archive").document(project_id).set(summary_report)
-
-        # 🔹 Usuń oryginalny projekt
         doc_ref.delete()
 
-        # 🔹 Zwróć raport końcowy
         return jsonify({
             "status": f"✅ Projekt {project_id} został usunięty z Firestore.",
             "summary": summary_report
