@@ -1,4 +1,4 @@
-# master_api.py — Master SEO API (v6.2.1 hybrid JSON mode)
+# master_api.py — Master SEO API (v6.3.0 hybrid JSON mode)
 # Obsługa: Firestore, S1 (SerpApi + LangExtract + Ngram API), Brief Base64, Batch Counting, PAA Integration
 
 import os
@@ -50,7 +50,7 @@ NGRAM_API_URL = "https://gpt-ngram-api.onrender.com/api/ngram_entity_analysis"
 
 def call_api_with_json(url, payload, name):
     try:
-        r = requests.post(url, json=payload, timeout=60)
+        r = requests.post(url, json=payload, timeout=120)
         r.raise_for_status()
         return r.json()
     except Exception as e:
@@ -127,7 +127,7 @@ def parse_brief_to_keywords(brief_text):
 
 
 # -------------------------------------------------------------------
-# 🔢 Liczenie fraz (v6.2.1 – JSON-safe + Unicode)
+# 🔢 Liczenie fraz (v6.3.0 – JSON-safe + Unicode)
 # -------------------------------------------------------------------
 def calculate_hierarchical_counts(full_text, keywords_dict):
     text = full_text.lower()
@@ -145,7 +145,7 @@ def calculate_hierarchical_counts(full_text, keywords_dict):
 
 
 # -------------------------------------------------------------------
-# 🧠 /api/s1_analysis — analiza konkurencji + n-gramy
+# 🧠 /api/s1_analysis — analiza konkurencji + n-gramy (pełna integracja)
 # -------------------------------------------------------------------
 @app.route("/api/s1_analysis", methods=["POST"])
 def perform_s1_analysis():
@@ -164,21 +164,35 @@ def perform_s1_analysis():
         autocomplete_suggestions = [r.get("query") for r in serp_data.get("related_searches", []) if r.get("query")]
         top_urls = [r.get("link") for r in serp_data.get("organic_results", [])[:7]]
 
-        combined_text, h2_counts, text_lengths, all_headings = "", [], [], []
+        print(f"🔍 [DEBUG] Analiza {len(top_urls)} wyników SERP dla: {topic}")
+
+        sources_payload, h2_counts, text_lengths, all_headings = [], [], [], []
+
         for url in top_urls[:5]:
             content = call_langextract(url)
             if content and content.get("content"):
                 text = content.get("content", "")
                 h2s = content.get("h2", [])
-                all_headings.extend([h.strip().lower() for h in h2s])
                 h2_counts.append(len(h2s))
+                all_headings.extend([h.strip().lower() for h in h2s])
                 word_count = len(re.findall(r"\w+", text))
                 text_lengths.append(word_count)
-                combined_text += text + "\n\n"
+                sources_payload.append({"url": url, "content": text})
+            else:
+                print(f"⚠️ [WARN] Brak treści dla {url}")
+
+        # --- Wywołanie analizy n-gramów z wieloma źródłami ---
+        ngram_data = call_api_with_json(
+            NGRAM_API_URL,
+            {"sources": sources_payload, "main_keyword": topic, "serp_context": {
+                "people_also_ask": people_also_ask,
+                "related_searches": autocomplete_suggestions
+            }},
+            "Ngram API"
+        )
 
         heading_counts = Counter(all_headings)
         top_headings = [h for h, _ in heading_counts.most_common(10)]
-        ngram_data = call_api_with_json(NGRAM_API_URL, {"text": combined_text, "main_keyword": topic}, "Ngram API")
 
         competitive_metrics = {
             "avg_h2_per_article": round(sum(h2_counts) / len(h2_counts), 1) if h2_counts else 0,
@@ -211,8 +225,8 @@ def perform_s1_analysis():
 def health():
     return jsonify({
         "status": "ok",
-        "version": "v6.2.1-hybrid-json",
-        "message": "Master SEO API działa poprawnie (pełny JSON mode i liczenie fraz)."
+        "version": "v6.3.0-hybrid-json",
+        "message": "Master SEO API działa poprawnie (pełna integracja z n-gram sources)."
     }), 200
 
 
