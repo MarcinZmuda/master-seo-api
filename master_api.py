@@ -181,6 +181,10 @@ try:
 except Exception as e:
     print(f"⚠️ Nie udało się załadować project_routes: {e}")
 
-# --- Uruchomienie ---
+# -------------------------------------------------------------------
+# 🚀 Uruchomienie (Poprawiony blok)
+# -------------------------------------------------------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
+    # Ustaw domyślny port na 10000, aby był zgodny z Gunicorn i ustawieniami wewnętrznymi
+    port = int(os.getenv("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
