@@ -1,6 +1,5 @@
 # ================================================================
-# project_routes.py — Warstwa Project Management (v6.3.2)
-# Obsługa: Firestore + integracja z Master SEO API (S1–S4)
+# project_routes.py — Warstwa Project Management (v6.3.3 - z raportowaniem)
 # ================================================================
 
 import json
@@ -13,15 +12,11 @@ from datetime import datetime
 import requests
 
 # --- 🔐 Inicjalizacja Firebase (została usunięta) ---
-# Importujemy tylko potrzebne moduły
 from firebase_admin import firestore
 import firebase_admin
 
-# Definiujemy 'db' jako zmienną globalną.
-# Zostanie ona wypełniona przez 'master_api.py' podczas rejestracji blueprintu.
 db = None
 
-# --- Blueprint dla modularności ---
 project_bp = Blueprint("project_routes", __name__)
 
 # ---------------------------------------------------------------
@@ -67,8 +62,8 @@ def parse_brief_to_keywords(brief_text):
             keywords_dict[keyword] = {
                 "target_min": min_val,
                 "target_max": max_val,
-                "remaining_min": min_val,
-                "remaining_max": max_val,
+                "remaining_min": min_val, # Te 'remaining' nie są obecnie używane, ale OK
+                "remaining_max": max_val, # Te 'remaining' nie są obecnie używane, ale OK
                 "actual": 0,
                 "locked": False,
             }
@@ -79,8 +74,6 @@ def parse_brief_to_keywords(brief_text):
 def call_s1_analysis(topic):
     """Wywołuje wewnętrznie endpoint /api/s1_analysis (lokalnie lub zewnętrznie)."""
     try:
-        # ===== POPRAWKA (Port 10000) =====
-        # Port musi być zgodny z tym, co Gunicorn (run.sh) uruchamia (10000)
         r = requests.post("http://localhost:10000/api/s1_analysis", json={"topic": topic}, timeout=120)
         r.raise_for_status()
         return r.json()
@@ -104,23 +97,18 @@ def create_project():
         if not topic:
             return jsonify({"error": "Brak 'topic' (frazy kluczowej)"}), 400
 
-        # Obsługa briefu (tekst lub base64)
         if "brief_base64" in data:
             brief_text = base64.b64decode(data["brief_base64"]).decode("utf-8")
         elif "brief_text" in data:
             brief_text = data["brief_text"]
-            # automatyczna konwersja, jeśli brief zbyt długi
             if len(brief_text) > 2000:
                 data["brief_base64"] = base64.b64encode(brief_text.encode("utf-8")).decode("utf-8")
                 brief_text = base64.b64decode(data["brief_base64"]).decode("utf-8")
 
         keywords_state, headers_list = parse_brief_to_keywords(brief_text) if brief_text else ({}, [])
         
-        # ===> KRYTYCZNY MOMENT <===
-        # Ta funkcja (call_s1_analysis) musi działać, aby projekt został utworzony
         s1_data = call_s1_analysis(topic)
 
-        # Sprawdzenie, czy S1 nie zwróciło błędu
         if "error" in s1_data:
             return jsonify({"error": "Błąd podrzędny podczas analizy S1", "details": s1_data["error"]}), 500
 
@@ -180,14 +168,19 @@ def add_batch_to_project(project_id):
         text_clean = text_input.lower()
         text_clean = re.sub(r"[^\w\sąćęłńóśźż]", " ", text_clean)
 
-        counts = {}
+        counts = {} # Licznik dla bieżącego batcha
+        
+        # --- Zaktualizowana logika liczenia i raportowania ---
+        
         for kw, meta in keywords_state.items():
             pattern = r"(?<!\w)" + re.escape(kw.lower()) + r"(?!\w)"
             matches = re.findall(pattern, text_clean, flags=re.UNICODE)
-            count = len(matches)
-            meta["actual"] += count
-            counts[kw] = count
+            count_in_batch = len(matches)
+            
+            meta["actual"] += count_in_batch # Aktualizuj łączną liczbę
+            counts[kw] = count_in_batch     # Zapisz liczbę z tego batcha
 
+            # Ustal status na podstawie ŁĄCZNEJ liczby
             if meta["actual"] > meta["target_max"] + 3:
                 meta["locked"] = True
                 meta["status"] = "LOCKED"
@@ -201,24 +194,36 @@ def add_batch_to_project(project_id):
         batch_entry = {
             "created_at": datetime.utcnow().isoformat(),
             "length": len(text_input),
-            "counts": counts,
+            "counts": counts, # Zapisujemy w batchu tylko liczniki z tego batcha
             "text": text_input[:5000]
         }
         batches.append(batch_entry)
 
         doc_ref.update({
             "batches": firestore.ArrayUnion([batch_entry]),
-            "keywords_state": keywords_state,
+            "keywords_state": keywords_state, # Zapisujemy zaktualizowany stan (z nowymi 'actual' i 'status')
             "updated_at": datetime.utcnow().isoformat()
         })
 
+        # === 🔽 TUTAJ JEST NOWY KOD 🔽 ===
+        
+        # 1. Stwórz listę zablokowanych terminów
         locked_terms = [kw for kw, meta in keywords_state.items() if meta.get("locked")]
+
+        # 2. Wygeneruj pełny raport stanu (to, czego brakowało)
+        report_list = []
+        for kw, meta in keywords_state.items():
+            report_str = f"{kw}: {meta['actual']} użyć / cel {meta['target_min']}-{meta['target_max']} / {meta.get('status', 'OK')}"
+            report_list.append(report_str)
+
+        # === KONIEC NOWEGO KODU ===
 
         return jsonify({
             "status": "OK",
             "batch_length": len(text_input),
-            "counts": counts,
-            "locked_terms": locked_terms,
+            "counts": counts,           # Ile zliczono w TYM BATCHU
+            "report": report_list,      # Pełny raport stanu (ŁĄCZNIE)
+            "locked_terms": locked_terms, # Lista zablokowanych (ŁĄCZNIE)
             "updated_keywords": len(keywords_state)
         }), 200
 
@@ -243,15 +248,29 @@ def delete_project_final(project_id):
         project_data = doc.to_dict()
         keywords_state = project_data.get("keywords_state", {})
         batches = project_data.get("batches", [])
+        
+        # --- Zliczanie statusów do raportu końcowego ---
+        status_counts = {"LOCKED": 0, "OVER": 0, "UNDER": 0, "OK": 0}
+        locked_terms_final = []
+        for kw, meta in keywords_state.items():
+            status = meta.get("status", "OK")
+            status_counts[status] += 1
+            if meta.get("locked"):
+                locked_terms_final.append(kw)
 
         summary_report = {
             "topic": project_data.get("topic", "nieznany temat"),
             "total_batches": len(batches),
             "total_length": sum(b.get("length", 0) for b in batches),
-            "locked_terms": [kw for kw, meta in keywords_state.items() if meta.get("locked")],
+            "locked_terms_count": status_counts["LOCKED"],
+            "over_terms_count": status_counts["OVER"],
+            "under_terms_count": status_counts["UNDER"],
+            "ok_terms_count": status_counts["OK"],
+            "locked_terms": locked_terms_final,
             "timestamp": datetime.utcnow().isoformat(),
         }
 
+        # Archiwizuj raport przed usunięciem (opcjonalne, ale dobra praktyka)
         db.collection("seo_projects_archive").document(project_id).set(summary_report)
         doc_ref.delete()
 
@@ -268,10 +287,7 @@ def delete_project_final(project_id):
 # 🔧 Funkcja rejestrująca blueprint
 # ---------------------------------------------------------------
 def register_project_routes(app, _db=None):
-    # ===== POPRAWKA (Globalna instancja db) =====
-    # Używamy globalnej zmiennej 'db' zdefiniowanej na górze tego pliku
     global db
-    # Przypisujemy instancję 'db' przekazaną z 'master_api.py'
     db = _db
     
     app.register_blueprint(project_bp)
