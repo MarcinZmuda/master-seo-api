@@ -20,7 +20,7 @@ load_dotenv()
 app = Flask(__name__)
 
 # -------------------------------------------------------------------
-# 🔧 Konfiguracja Firebase (Firestore)
+# 🔧 Konfiguracja Firebase (Firestore) - TO JEST GŁÓWNA INICJALIZACJA
 # -------------------------------------------------------------------
 try:
     FIREBASE_CREDS_JSON = os.getenv("FIREBASE_CREDS_JSON")
@@ -35,7 +35,7 @@ try:
         cred = credentials.Certificate(creds_dict)
 
     firebase_admin.initialize_app(cred)
-    db = firestore.client()
+    db = firestore.client() # Ta instancja 'db' zostanie przekazana do project_routes
     print("✅ Połączono z Firestore.")
 except Exception as e:
     print(f"❌ Błąd inicjalizacji Firebase: {e}")
@@ -76,74 +76,12 @@ def call_langextract(url):
 
 
 # -------------------------------------------------------------------
-# 🧩 Parser briefu (BASIC / EXTENDED / H2 HEADERS TERMS)
+# 🧩 Parser briefu i Liczenie fraz (USUNIĘTE)
+# ---
+# Te funkcje ('parse_brief_to_keywords' i 'calculate_hierarchical_counts')
+# zostały usunięte, ponieważ nie są używane w tym pliku,
+# a ich poprawna wersja znajduje się w 'project_routes.py'.
 # -------------------------------------------------------------------
-def parse_brief_to_keywords(brief_text):
-    keywords_dict = {}
-    headers_list = []
-
-    cleaned_text = os.linesep.join([s.strip() for s in brief_text.splitlines() if s.strip()])
-
-    section_regex = r"((?:BASIC|EXTENDED|H2)\s+TEXT\s+TERMS)\s*:\s*=*\s*([\s\S]*?)(?=\n[A-Z\s]+TEXT\s+TERMS|$)"
-    keyword_regex = re.compile(r"^\s*(.*?)\s*:\s*(\d+)\s*-\s*(\d+)x\s*$", re.UNICODE)
-    keyword_regex_single = re.compile(r"^\s*(.*?)\s*:\s*(\d+)x\s*$", re.UNICODE)
-
-    for match in re.finditer(section_regex, cleaned_text, re.IGNORECASE):
-        section_name = match.group(1).upper()
-        section_content = match.group(2)
-
-        if section_name.startswith("H2"):
-            for line in section_content.splitlines():
-                if line.strip():
-                    headers_list.append(line.strip())
-            continue
-
-        for line in section_content.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-
-            kw_match = keyword_regex.match(line)
-            if kw_match:
-                keyword = kw_match.group(1).strip()
-                min_val = int(kw_match.group(2))
-                max_val = int(kw_match.group(3))
-            else:
-                kw_match_single = keyword_regex_single.match(line)
-                if kw_match_single:
-                    keyword = kw_match_single.group(1).strip()
-                    min_val = max_val = int(kw_match_single.group(2))
-                else:
-                    continue
-
-            keywords_dict[keyword] = {
-                "target_min": min_val,
-                "target_max": max_val,
-                "remaining_min": min_val,
-                "remaining_max": max_val,
-                "actual": 0,
-                "locked": False,
-            }
-
-    return keywords_dict, headers_list
-
-
-# -------------------------------------------------------------------
-# 🔢 Liczenie fraz (v6.3.0 – JSON-safe + Unicode)
-# -------------------------------------------------------------------
-def calculate_hierarchical_counts(full_text, keywords_dict):
-    text = full_text.lower()
-    text = re.sub(r"[^\w\sąćęłńóśźż]", " ", text)
-    counts = {}
-    for kw in sorted(keywords_dict.keys(), key=len, reverse=True):
-        kw_clean = kw.lower().strip()
-        if not kw_clean:
-            counts[kw] = 0
-            continue
-        pattern = r"(?<!\w)" + re.escape(kw_clean) + r"(?!\w)"
-        matches = re.findall(pattern, text, flags=re.UNICODE)
-        counts[kw] = len(matches)
-    return counts
 
 
 # -------------------------------------------------------------------
@@ -236,6 +174,8 @@ def health():
 # -------------------------------------------------------------------
 try:
     from project_routes import register_project_routes
+    # Przekazujemy instancję 'db' (zainicjalizowaną na górze tego pliku)
+    # do funkcji rejestrującej w 'project_routes.py'
     register_project_routes(app, db)
     print("✅ Zarejestrowano project_routes.")
 except Exception as e:
