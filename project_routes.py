@@ -12,38 +12,14 @@ from collections import Counter
 from datetime import datetime
 import requests
 
-# --- 🔐 Inicjalizacja Firebase z ENV JSON ---
-from firebase_admin import credentials, firestore, initialize_app
+# --- 🔐 Inicjalizacja Firebase (została usunięta) ---
+# Importujemy tylko potrzebne moduły
+from firebase_admin import firestore
 import firebase_admin
 
-# Render przechowuje klucz jako zmienną FIREBASE_CREDS_JSON (nie plik)
-if os.getenv("FIREBASE_CREDS_JSON"):
-    try:
-        creds_json = os.getenv("FIREBASE_CREDS_JSON")
-        creds_path = "/tmp/firebase-key.json"
-
-        # Zapisz ENV do pliku tymczasowego
-        with open(creds_path, "w") as f:
-            f.write(creds_json)
-
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = creds_path
-        print("✅ FIREBASE_CREDS_JSON zapisany do /tmp/firebase-key.json")
-
-        # Zainicjalizuj Firebase tylko raz
-        if not firebase_admin._apps:
-            cred = credentials.Certificate(creds_path)
-            firebase_admin.initialize_app(cred)
-    except Exception as e:
-        print(f"⚠️ Błąd inicjalizacji Firebase z ENV: {e}")
-
-# Inicjalizacja klienta Firestore
-try:
-    db = firestore.client()
-    print("✅ Firestore client zainicjalizowany.")
-except Exception as e:
-    db = None
-    print(f"❌ Nie udało się zainicjalizować Firestore: {e}")
-
+# Definiujemy 'db' jako zmienną globalną.
+# Zostanie ona wypełniona przez 'master_api.py' podczas rejestracji blueprintu.
+db = None
 
 # --- Blueprint dla modularności ---
 project_bp = Blueprint("project_routes", __name__)
@@ -103,7 +79,9 @@ def parse_brief_to_keywords(brief_text):
 def call_s1_analysis(topic):
     """Wywołuje wewnętrznie endpoint /api/s1_analysis (lokalnie lub zewnętrznie)."""
     try:
-        r = requests.post("http://localhost:8080/api/s1_analysis", json={"topic": topic}, timeout=120)
+        # ===== POPRAWKA (Port 10000) =====
+        # Port musi być zgodny z tym, co Gunicorn (run.sh) uruchamia (10000)
+        r = requests.post("http://localhost:10000/api/s1_analysis", json={"topic": topic}, timeout=120)
         r.raise_for_status()
         return r.json()
     except Exception as e:
@@ -117,7 +95,7 @@ def call_s1_analysis(topic):
 def create_project():
     try:
         if not db:
-            return jsonify({"error": "Firestore nie jest połączony"}), 503
+            return jsonify({"error": "Firestore nie jest połączony (instancja db jest None)"}), 503
 
         data = request.get_json(silent=True) or {}
         topic = data.get("topic", "").strip()
@@ -137,7 +115,14 @@ def create_project():
                 brief_text = base64.b64decode(data["brief_base64"]).decode("utf-8")
 
         keywords_state, headers_list = parse_brief_to_keywords(brief_text) if brief_text else ({}, [])
+        
+        # ===> KRYTYCZNY MOMENT <===
+        # Ta funkcja (call_s1_analysis) musi działać, aby projekt został utworzony
         s1_data = call_s1_analysis(topic)
+
+        # Sprawdzenie, czy S1 nie zwróciło błędu
+        if "error" in s1_data:
+            return jsonify({"error": "Błąd podrzędny podczas analizy S1", "details": s1_data["error"]}), 500
 
         doc_ref = db.collection("seo_projects").document()
         project_data = {
@@ -283,6 +268,15 @@ def delete_project_final(project_id):
 # 🔧 Funkcja rejestrująca blueprint
 # ---------------------------------------------------------------
 def register_project_routes(app, _db=None):
-    project_bp.db = db if _db is None else _db
+    # ===== POPRAWKA (Globalna instancja db) =====
+    # Używamy globalnej zmiennej 'db' zdefiniowanej na górze tego pliku
+    global db
+    # Przypisujemy instancję 'db' przekazaną z 'master_api.py'
+    db = _db
+    
     app.register_blueprint(project_bp)
-    print("✅ [DEBUG] Zarejestrowano project_routes (Firestore mode).")
+    
+    if db:
+        print("✅ [DEBUG] Zarejestrowano project_routes (przekazano instancję 'db').")
+    else:
+        print("⚠️ [DEBUG] Zarejestrowano project_routes (instancja 'db' jest None!).")
