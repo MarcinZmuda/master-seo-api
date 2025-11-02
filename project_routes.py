@@ -1,5 +1,5 @@
 # ================================================================
-# project_routes.py — Warstwa Project Management (v6.3.3 - z raportowaniem)
+# project_routes.py — Warstwa Project Management (v6.5.0 - Lematyzacja + Priorytety)
 # ================================================================
 
 import json
@@ -11,13 +11,34 @@ from collections import Counter
 from datetime import datetime
 import requests
 
-# --- 🔐 Inicjalizacja Firebase (została usunięta) ---
+# --- 🔐 Inicjalizacja Firebase ---
 from firebase_admin import firestore
 import firebase_admin
 
 db = None
 
 project_bp = Blueprint("project_routes", __name__)
+
+# === 🔽 Inicjalizacja spaCy (do liczenia odmian) 🔽 ===
+import spacy
+try:
+    # Ładujemy model polski
+    NLP = spacy.load("pl_core_news_sm")
+    print("✅ Model spaCy (pl_core_news_sm) załadowany poprawnie.")
+except OSError:
+    print("❌ BŁĄD: Nie można załadować modelu spaCy 'pl_core_news_sm'.")
+    print("Upewnij się, że jest dodany do requirements.txt (link .tar.gz).")
+    NLP = None
+
+def lemmatize_text(text):
+    """Zwraca listę lematów z tekstu (bez interpunkcji, małe litery)."""
+    if not NLP:
+        # Fallback, jeśli spaCy nie działa - zwróci zwykłe słowa
+        return re.findall(r'\b\w+\b', text.lower())
+    doc = NLP(text.lower())
+    return [token.lemma_ for token in doc if token.is_alpha]
+# === 🔼 KONIEC SEKCJI spaCy 🔼 ===
+
 
 # ---------------------------------------------------------------
 # 🔧 Funkcje pomocnicze
@@ -58,14 +79,17 @@ def parse_brief_to_keywords(brief_text):
                     min_val = max_val = int(kw_match_single.group(2))
                 else:
                     continue
-
+            
+            # Pre-lematyzacja fraz kluczowych
+            keyword_lemmas = lemmatize_text(keyword)
+            
             keywords_dict[keyword] = {
                 "target_min": min_val,
                 "target_max": max_val,
-                "remaining_min": min_val, # Te 'remaining' nie są obecnie używane, ale OK
-                "remaining_max": max_val, # Te 'remaining' nie są obecnie używane, ale OK
                 "actual": 0,
                 "locked": False,
+                "lemmas": keyword_lemmas, # Zapisujemy lematy frazy
+                "lemma_len": len(keyword_lemmas) # Zapisujemy długość
             }
 
     return keywords_dict, headers_list
@@ -89,6 +113,8 @@ def create_project():
     try:
         if not db:
             return jsonify({"error": "Firestore nie jest połączony (instancja db jest None)"}), 503
+        if not NLP:
+             return jsonify({"error": "Krytyczny błąd serwera: Model spaCy nie jest załadowany."}), 500
 
         data = request.get_json(silent=True) or {}
         topic = data.get("topic", "").strip()
@@ -105,6 +131,7 @@ def create_project():
                 data["brief_base64"] = base64.b64encode(brief_text.encode("utf-8")).decode("utf-8")
                 brief_text = base64.b64decode(data["brief_base64"]).decode("utf-8")
 
+        # Parser od razu przeprowadzi lematyzację fraz
         keywords_state, headers_list = parse_brief_to_keywords(brief_text) if brief_text else ({}, [])
         
         s1_data = call_s1_analysis(topic)
@@ -117,7 +144,7 @@ def create_project():
             "topic": topic,
             "created_at": datetime.utcnow().isoformat(),
             "brief_text": brief_text[:5000],
-            "keywords_state": keywords_state,
+            "keywords_state": keywords_state, # Zawiera już lematy
             "headers_suggestions": headers_list,
             "s1_data": s1_data,
             "batches": [],
@@ -145,6 +172,8 @@ def create_project():
 def add_batch_to_project(project_id):
     if not db:
         return jsonify({"error": "Brak połączenia z Firestore"}), 503
+    if not NLP:
+         return jsonify({"error": "Krytyczny błąd serwera: Model spaCy nie jest załadowany."}), 500
 
     try:
         doc_ref = db.collection("seo_projects").document(project_id)
@@ -165,22 +194,33 @@ def add_batch_to_project(project_id):
         if not text_input.strip():
             return jsonify({"error": "Brak treści w żądaniu"}), 400
 
-        text_clean = text_input.lower()
-        text_clean = re.sub(r"[^\w\sąćęłńóśźż]", " ", text_clean)
+        # === Logika Lematyzacji ===
+        text_lemmas = lemmatize_text(text_input)
+        text_lemmas_len = len(text_lemmas)
+        counts_in_batch = {}
+        
+        # Sortujemy frazy od najdłuższej do najkrótszej (wg liczby lematów)
+        sorted_keywords = sorted(keywords_state.items(), key=lambda item: item[1].get('lemma_len', 0), reverse=True)
 
-        counts = {} # Licznik dla bieżącego batcha
-        
-        # --- Zaktualizowana logika liczenia i raportowania ---
-        
-        for kw, meta in keywords_state.items():
-            pattern = r"(?<!\w)" + re.escape(kw.lower()) + r"(?!\w)"
-            matches = re.findall(pattern, text_clean, flags=re.UNICODE)
-            count_in_batch = len(matches)
+        for kw, meta in sorted_keywords:
+            keyword_lemmas = meta.get("lemmas", [])
+            kw_len = meta.get("lemma_len", 0)
             
-            meta["actual"] += count_in_batch # Aktualizuj łączną liczbę
-            counts[kw] = count_in_batch     # Zapisz liczbę z tego batcha
+            if kw_len == 0:
+                counts_in_batch[kw] = 0
+                continue
 
-            # Ustal status na podstawie ŁĄCZNEJ liczby
+            count_in_batch = 0
+            # Algorytm okna przesuwnego do szukania sekwencji lematów
+            for i in range(text_lemmas_len - kw_len + 1):
+                if text_lemmas[i:i + kw_len] == keyword_lemmas:
+                    count_in_batch += 1
+            
+            # Aktualizujemy stan (łączną liczbę)
+            meta["actual"] = meta.get("actual", 0) + count_in_batch
+            counts_in_batch[kw] = count_in_batch
+
+            # Ustalanie statusu na podstawie łącznej liczby
             if meta["actual"] > meta["target_max"] + 3:
                 meta["locked"] = True
                 meta["status"] = "LOCKED"
@@ -190,40 +230,56 @@ def add_batch_to_project(project_id):
                 meta["status"] = "UNDER"
             else:
                 meta["status"] = "OK"
+            
+            # Musimy zaktualizować słownik, aby zmiany były widoczne dla kolejnych iteracji
+            keywords_state[kw] = meta 
+        # === Koniec logiki Lematyzacji ===
 
         batch_entry = {
             "created_at": datetime.utcnow().isoformat(),
             "length": len(text_input),
-            "counts": counts, # Zapisujemy w batchu tylko liczniki z tego batcha
+            "counts": counts_in_batch, # Licznik tylko dla tego batcha
             "text": text_input[:5000]
         }
         batches.append(batch_entry)
 
+        # Zapisujemy zaktualizowany stan do bazy
         doc_ref.update({
             "batches": firestore.ArrayUnion([batch_entry]),
-            "keywords_state": keywords_state, # Zapisujemy zaktualizowany stan (z nowymi 'actual' i 'status')
+            "keywords_state": keywords_state,
             "updated_at": datetime.utcnow().isoformat()
         })
 
-        # === 🔽 TUTAJ JEST NOWY KOD 🔽 ===
+        # === 🔽 NOWY, STRUKTURALNY RAPORT 🔽 ===
+        locked_terms = []
+        keywords_report = []
         
-        # 1. Stwórz listę zablokowanych terminów
-        locked_terms = [kw for kw, meta in keywords_state.items() if meta.get("locked")]
-
-        # 2. Wygeneruj pełny raport stanu (to, czego brakowało)
-        report_list = []
+        # Generujemy raport na podstawie świeżo zaktualizowanego keywords_state
         for kw, meta in keywords_state.items():
-            report_str = f"{kw}: {meta['actual']} użyć / cel {meta['target_min']}-{meta['target_max']} / {meta.get('status', 'OK')}"
-            report_list.append(report_str)
-
-        # === KONIEC NOWEGO KODU ===
+            status = meta.get('status', 'OK')
+            priority_instruction = "USE_AS_NEEDED" # Domyślna dla OK i OVER
+            
+            if status == "LOCKED":
+                priority_instruction = "DO_NOT_USE" # Totalnie zablokowana
+                locked_terms.append(kw)
+            elif status == "UNDER":
+                priority_instruction = "PRIORITY_USE" # Priorytet
+            
+            keywords_report.append({
+                "keyword": kw,
+                "actual_uses": meta.get('actual', 0),
+                "target_range": f"{meta.get('target_min', 0)}-{meta.get('target_max', 0)}",
+                "status": status,
+                "priority_instruction": priority_instruction
+            })
+        # === 🔼 KONIEC NOWEGO RAPORTU 🔼 ===
 
         return jsonify({
             "status": "OK",
             "batch_length": len(text_input),
-            "counts": counts,           # Ile zliczono w TYM BATCHU
-            "report": report_list,      # Pełny raport stanu (ŁĄCZNIE)
-            "locked_terms": locked_terms, # Lista zablokowanych (ŁĄCZNIE)
+            "counts_in_batch": counts_in_batch,   # Ile zliczono w TYM BATCHU
+            "keywords_report": keywords_report,   # NOWY, strukturalny raport dla GPT
+            "locked_terms": locked_terms,         # Wciąż przydatne jako szybka lista
             "updated_keywords": len(keywords_state)
         }), 200
 
@@ -249,7 +305,6 @@ def delete_project_final(project_id):
         keywords_state = project_data.get("keywords_state", {})
         batches = project_data.get("batches", [])
         
-        # --- Zliczanie statusów do raportu końcowego ---
         status_counts = {"LOCKED": 0, "OVER": 0, "UNDER": 0, "OK": 0}
         locked_terms_final = []
         for kw, meta in keywords_state.items():
@@ -270,7 +325,6 @@ def delete_project_final(project_id):
             "timestamp": datetime.utcnow().isoformat(),
         }
 
-        # Archiwizuj raport przed usunięciem (opcjonalne, ale dobra praktyka)
         db.collection("seo_projects_archive").document(project_id).set(summary_report)
         doc_ref.delete()
 
@@ -287,6 +341,7 @@ def delete_project_final(project_id):
 # 🔧 Funkcja rejestrująca blueprint
 # ---------------------------------------------------------------
 def register_project_routes(app, _db=None):
+    """Rejestruje trasy i przekazuje instancję bazy danych z master_api.py."""
     global db
     db = _db
     
