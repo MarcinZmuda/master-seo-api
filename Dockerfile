@@ -1,5 +1,6 @@
 # Krok 1: Wybierz oficjalny obraz Python jako bazę
-FROM python:3.9-slim
+# POPRAWKA: Zmieniono wersję z 3.9 na 3.11, aby wspierać spaCy i jego zależności
+FROM python:3.11-slim
 
 # Krok 2: Zainstaluj narzędzia systemowe (jeśli będą potrzebne w przyszłości)
 RUN apt-get update && apt-get install -y build-essential
