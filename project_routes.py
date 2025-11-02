@@ -1,5 +1,5 @@
 # ================================================================
-# project_routes.py — Warstwa Project Management (v6.5.0 - Lematyzacja + Priorytety)
+# project_routes.py — Warstwa Project Management (v6.6.0 - Krytyczne Priorytety)
 # ================================================================
 
 import json
@@ -22,7 +22,6 @@ project_bp = Blueprint("project_routes", __name__)
 # === 🔽 Inicjalizacja spaCy (do liczenia odmian) 🔽 ===
 import spacy
 try:
-    # Ładujemy model polski
     NLP = spacy.load("pl_core_news_sm")
     print("✅ Model spaCy (pl_core_news_sm) załadowany poprawnie.")
 except OSError:
@@ -33,7 +32,6 @@ except OSError:
 def lemmatize_text(text):
     """Zwraca listę lematów z tekstu (bez interpunkcji, małe litery)."""
     if not NLP:
-        # Fallback, jeśli spaCy nie działa - zwróci zwykłe słowa
         return re.findall(r'\b\w+\b', text.lower())
     doc = NLP(text.lower())
     return [token.lemma_ for token in doc if token.is_alpha]
@@ -44,12 +42,11 @@ def lemmatize_text(text):
 # 🔧 Funkcje pomocnicze
 # ---------------------------------------------------------------
 def parse_brief_to_keywords(brief_text):
-    """Parsuje tekst briefu i wyciąga słowa kluczowe + nagłówki H2."""
     keywords_dict = {}
     headers_list = []
 
     cleaned_text = "\n".join([s.strip() for s in brief_text.splitlines() if s.strip()])
-    section_regex = r"((?:BASIC|EXTENDED|H2)\s+TEXT\s+TERMS)\s*:\s*=*\s*([\s\S]*?)(?=\n[A-Z\s]+TEXT\s+TERMS|$)"
+    section_regex = r"((?:BASIC|EXTENDED|H2)\s+TEXT\s+TERMS)\s*:\s*=*\s*([\sS]*?)(?=\n[A-Z\s]+TEXT\s+TERMS|$)"
     keyword_regex = re.compile(r"^\s*(.*?)\s*:\s*(\d+)\s*-\s*(\d+)x\s*$", re.UNICODE)
     keyword_regex_single = re.compile(r"^\s*(.*?)\s*:\s*(\d+)x\s*$", re.UNICODE)
 
@@ -80,7 +77,6 @@ def parse_brief_to_keywords(brief_text):
                 else:
                     continue
             
-            # Pre-lematyzacja fraz kluczowych
             keyword_lemmas = lemmatize_text(keyword)
             
             keywords_dict[keyword] = {
@@ -88,15 +84,15 @@ def parse_brief_to_keywords(brief_text):
                 "target_max": max_val,
                 "actual": 0,
                 "locked": False,
-                "lemmas": keyword_lemmas, # Zapisujemy lematy frazy
-                "lemma_len": len(keyword_lemmas) # Zapisujemy długość
+                "lemmas": keyword_lemmas,
+                "lemma_len": len(keyword_lemmas)
             }
 
     return keywords_dict, headers_list
 
 
 def call_s1_analysis(topic):
-    """Wywołuje wewnętrznie endpoint /api/s1_analysis (lokalnie lub zewnętrznie)."""
+    """Wywołuje wewnętrznie endpoint /api/s1_analysis."""
     try:
         r = requests.post("http://localhost:10000/api/s1_analysis", json={"topic": topic}, timeout=120)
         r.raise_for_status()
@@ -131,7 +127,6 @@ def create_project():
                 data["brief_base64"] = base64.b64encode(brief_text.encode("utf-8")).decode("utf-8")
                 brief_text = base64.b64decode(data["brief_base64"]).decode("utf-8")
 
-        # Parser od razu przeprowadzi lematyzację fraz
         keywords_state, headers_list = parse_brief_to_keywords(brief_text) if brief_text else ({}, [])
         
         s1_data = call_s1_analysis(topic)
@@ -144,7 +139,7 @@ def create_project():
             "topic": topic,
             "created_at": datetime.utcnow().isoformat(),
             "brief_text": brief_text[:5000],
-            "keywords_state": keywords_state, # Zawiera już lematy
+            "keywords_state": keywords_state,
             "headers_suggestions": headers_list,
             "s1_data": s1_data,
             "batches": [],
@@ -194,12 +189,10 @@ def add_batch_to_project(project_id):
         if not text_input.strip():
             return jsonify({"error": "Brak treści w żądaniu"}), 400
 
-        # === Logika Lematyzacji ===
         text_lemmas = lemmatize_text(text_input)
         text_lemmas_len = len(text_lemmas)
         counts_in_batch = {}
         
-        # Sortujemy frazy od najdłuższej do najkrótszej (wg liczby lematów)
         sorted_keywords = sorted(keywords_state.items(), key=lambda item: item[1].get('lemma_len', 0), reverse=True)
 
         for kw, meta in sorted_keywords:
@@ -211,16 +204,13 @@ def add_batch_to_project(project_id):
                 continue
 
             count_in_batch = 0
-            # Algorytm okna przesuwnego do szukania sekwencji lematów
             for i in range(text_lemmas_len - kw_len + 1):
                 if text_lemmas[i:i + kw_len] == keyword_lemmas:
                     count_in_batch += 1
             
-            # Aktualizujemy stan (łączną liczbę)
             meta["actual"] = meta.get("actual", 0) + count_in_batch
             counts_in_batch[kw] = count_in_batch
 
-            # Ustalanie statusu na podstawie łącznej liczby
             if meta["actual"] > meta["target_max"] + 3:
                 meta["locked"] = True
                 meta["status"] = "LOCKED"
@@ -231,55 +221,56 @@ def add_batch_to_project(project_id):
             else:
                 meta["status"] = "OK"
             
-            # Musimy zaktualizować słownik, aby zmiany były widoczne dla kolejnych iteracji
             keywords_state[kw] = meta 
-        # === Koniec logiki Lematyzacji ===
 
         batch_entry = {
             "created_at": datetime.utcnow().isoformat(),
             "length": len(text_input),
-            "counts": counts_in_batch, # Licznik tylko dla tego batcha
+            "counts": counts_in_batch,
             "text": text_input[:5000]
         }
         batches.append(batch_entry)
 
-        # Zapisujemy zaktualizowany stan do bazy
         doc_ref.update({
             "batches": firestore.ArrayUnion([batch_entry]),
             "keywords_state": keywords_state,
             "updated_at": datetime.utcnow().isoformat()
         })
 
-        # === 🔽 NOWY, STRUKTURALNY RAPORT 🔽 ===
+        # === 🔽 ZAKTUALIZOWANY RAPORT 🔽 ===
         locked_terms = []
         keywords_report = []
         
-        # Generujemy raport na podstawie świeżo zaktualizowanego keywords_state
         for kw, meta in keywords_state.items():
             status = meta.get('status', 'OK')
             priority_instruction = "USE_AS_NEEDED" # Domyślna dla OK i OVER
             
             if status == "LOCKED":
-                priority_instruction = "DO_NOT_USE" # Totalnie zablokowana
+                priority_instruction = "DO_NOT_USE"
                 locked_terms.append(kw)
             elif status == "UNDER":
-                priority_instruction = "PRIORITY_USE" # Priorytet
+                # === NOWA LOGIKA (Twoja sugestia) ===
+                if meta.get('actual', 0) == 0:
+                    status = "NOT_USED" # Nowy, bardziej precyzyjny status
+                    priority_instruction = "CRITICAL_PRIORITY_USE" # Nowa, silniejsza instrukcja
+                else:
+                    priority_instruction = "PRIORITY_USE" # Standardowy priorytet dla UNDER
             
             keywords_report.append({
                 "keyword": kw,
                 "actual_uses": meta.get('actual', 0),
                 "target_range": f"{meta.get('target_min', 0)}-{meta.get('target_max', 0)}",
-                "status": status,
-                "priority_instruction": priority_instruction
+                "status": status, # Zwróci "NOT_USED" dla fraz z zerowym użyciem
+                "priority_instruction": priority_instruction # Zwróci "CRITICAL_PRIORITY_USE"
             })
-        # === 🔼 KONIEC NOWEGO RAPORTU 🔼 ===
+        # === 🔼 KONIEC ZAKTUALIZOWANEGO RAPORTU 🔼 ===
 
         return jsonify({
             "status": "OK",
             "batch_length": len(text_input),
-            "counts_in_batch": counts_in_batch,   # Ile zliczono w TYM BATCHU
-            "keywords_report": keywords_report,   # NOWY, strukturalny raport dla GPT
-            "locked_terms": locked_terms,         # Wciąż przydatne jako szybka lista
+            "counts_in_batch": counts_in_batch,
+            "keywords_report": keywords_report,
+            "locked_terms": locked_terms,
             "updated_keywords": len(keywords_state)
         }), 200
 
@@ -297,7 +288,7 @@ def delete_project_final(project_id):
 
     try:
         doc_ref = db.collection("seo_projects").document(project_id)
-        doc = doc_ref.get()
+        doc = doc.get()
         if not doc.exists:
             return jsonify({"error": "Projekt nie istnieje"}), 404
 
@@ -305,11 +296,18 @@ def delete_project_final(project_id):
         keywords_state = project_data.get("keywords_state", {})
         batches = project_data.get("batches", [])
         
-        status_counts = {"LOCKED": 0, "OVER": 0, "UNDER": 0, "OK": 0}
+        # === Zaktualizowane zliczanie statusów ===
+        status_counts = {"LOCKED": 0, "OVER": 0, "UNDER": 0, "OK": 0, "NOT_USED": 0}
         locked_terms_final = []
         for kw, meta in keywords_state.items():
             status = meta.get("status", "OK")
-            status_counts[status] += 1
+            # Logika do zliczania NOT_USED (jeśli 'actual' to 0 i jest 'UNDER')
+            if status == "UNDER" and meta.get("actual", 0) == 0:
+                status = "NOT_USED"
+            
+            if status in status_counts:
+                status_counts[status] += 1
+            
             if meta.get("locked"):
                 locked_terms_final.append(kw)
 
@@ -319,11 +317,13 @@ def delete_project_final(project_id):
             "total_length": sum(b.get("length", 0) for b in batches),
             "locked_terms_count": status_counts["LOCKED"],
             "over_terms_count": status_counts["OVER"],
-            "under_terms_count": status_counts["UNDER"],
+            "under_terms_count": status_counts["UNDER"], # Frazy użyte, ale poniżej celu
+            "not_used_terms_count": status_counts["NOT_USED"], # Frazy nieużyte
             "ok_terms_count": status_counts["OK"],
             "locked_terms": locked_terms_final,
             "timestamp": datetime.utcnow().isoformat(),
         }
+        # === Koniec aktualizacji raportu ===
 
         db.collection("seo_projects_archive").document(project_id).set(summary_report)
         doc_ref.delete()
