@@ -1,5 +1,5 @@
 # ================================================================
-# project_routes.py — Warstwa Project Management (v6.6.0 - Krytyczne Priorytety)
+# project_routes.py — Warstwa Project Management (v6.6.1 - Poprawka Regex)
 # ================================================================
 
 import json
@@ -42,23 +42,31 @@ def lemmatize_text(text):
 # 🔧 Funkcje pomocnicze
 # ---------------------------------------------------------------
 def parse_brief_to_keywords(brief_text):
+    """Parsuje tekst briefu i wyciąga słowa kluczowe + nagłówki H2."""
     keywords_dict = {}
     headers_list = []
 
     cleaned_text = "\n".join([s.strip() for s in brief_text.splitlines() if s.strip()])
-    section_regex = r"((?:BASIC|EXTENDED|H2)\s+TEXT\s+TERMS)\s*:\s*=*\s*([\sS]*?)(?=\n[A-Z\s]+TEXT\s+TERMS|$)"
+    
+    # === 🔽 POPRAWKA REGEX (TERAZ AKCEPTUJE 'H2 HEADERS TERMS' ORAZ 'H2 TEXT TERMS') 🔽 ===
+    section_regex = r"((?:BASIC|EXTENDED|H2)\s+(?:TEXT|HEADERS)\s+TERMS)\s*:\s*=*\s*([\s\S]*?)(?=\n[A-Z\s]+(?:TEXT|HEADERS)\s+TERMS|$)"
+    # === 🔼 KONIEC POPRAWKI REGEX 🔼 ===
+
     keyword_regex = re.compile(r"^\s*(.*?)\s*:\s*(\d+)\s*-\s*(\d+)x\s*$", re.UNICODE)
     keyword_regex_single = re.compile(r"^\s*(.*?)\s*:\s*(\d+)x\s*$", re.UNICODE)
 
     for match in re.finditer(section_regex, cleaned_text, re.IGNORECASE):
-        section_name = match.group(1).upper()
+        section_name_raw = match.group(1).upper()
         section_content = match.group(2)
-        if section_name.startswith("H2"):
+        
+        # Uproszczenie sprawdzania nazwy sekcji
+        if "H2" in section_name_raw:
             for line in section_content.splitlines():
                 if line.strip():
                     headers_list.append(line.strip())
             continue
 
+        # Przetwarzanie BASIC lub EXTENDED
         for line in section_content.splitlines():
             line = line.strip()
             if not line:
@@ -237,33 +245,30 @@ def add_batch_to_project(project_id):
             "updated_at": datetime.utcnow().isoformat()
         })
 
-        # === 🔽 ZAKTUALIZOWANY RAPORT 🔽 ===
         locked_terms = []
         keywords_report = []
         
         for kw, meta in keywords_state.items():
             status = meta.get('status', 'OK')
-            priority_instruction = "USE_AS_NEEDED" # Domyślna dla OK i OVER
+            priority_instruction = "USE_AS_NEEDED"
             
             if status == "LOCKED":
                 priority_instruction = "DO_NOT_USE"
                 locked_terms.append(kw)
             elif status == "UNDER":
-                # === NOWA LOGIKA (Twoja sugestia) ===
                 if meta.get('actual', 0) == 0:
-                    status = "NOT_USED" # Nowy, bardziej precyzyjny status
-                    priority_instruction = "CRITICAL_PRIORITY_USE" # Nowa, silniejsza instrukcja
+                    status = "NOT_USED"
+                    priority_instruction = "CRITICAL_PRIORITY_USE"
                 else:
-                    priority_instruction = "PRIORITY_USE" # Standardowy priorytet dla UNDER
+                    priority_instruction = "PRIORITY_USE"
             
             keywords_report.append({
                 "keyword": kw,
                 "actual_uses": meta.get('actual', 0),
                 "target_range": f"{meta.get('target_min', 0)}-{meta.get('target_max', 0)}",
-                "status": status, # Zwróci "NOT_USED" dla fraz z zerowym użyciem
-                "priority_instruction": priority_instruction # Zwróci "CRITICAL_PRIORITY_USE"
+                "status": status,
+                "priority_instruction": priority_instruction
             })
-        # === 🔼 KONIEC ZAKTUALIZOWANEGO RAPORTU 🔼 ===
 
         return jsonify({
             "status": "OK",
@@ -288,7 +293,7 @@ def delete_project_final(project_id):
 
     try:
         doc_ref = db.collection("seo_projects").document(project_id)
-        doc = doc.get()
+        doc = doc_ref.get()
         if not doc.exists:
             return jsonify({"error": "Projekt nie istnieje"}), 404
 
@@ -296,12 +301,10 @@ def delete_project_final(project_id):
         keywords_state = project_data.get("keywords_state", {})
         batches = project_data.get("batches", [])
         
-        # === Zaktualizowane zliczanie statusów ===
         status_counts = {"LOCKED": 0, "OVER": 0, "UNDER": 0, "OK": 0, "NOT_USED": 0}
         locked_terms_final = []
         for kw, meta in keywords_state.items():
             status = meta.get("status", "OK")
-            # Logika do zliczania NOT_USED (jeśli 'actual' to 0 i jest 'UNDER')
             if status == "UNDER" and meta.get("actual", 0) == 0:
                 status = "NOT_USED"
             
@@ -317,13 +320,12 @@ def delete_project_final(project_id):
             "total_length": sum(b.get("length", 0) for b in batches),
             "locked_terms_count": status_counts["LOCKED"],
             "over_terms_count": status_counts["OVER"],
-            "under_terms_count": status_counts["UNDER"], # Frazy użyte, ale poniżej celu
-            "not_used_terms_count": status_counts["NOT_USED"], # Frazy nieużyte
+            "under_terms_count": status_counts["UNDER"],
+            "not_used_terms_count": status_counts["NOT_USED"],
             "ok_terms_count": status_counts["OK"],
             "locked_terms": locked_terms_final,
             "timestamp": datetime.utcnow().isoformat(),
         }
-        # === Koniec aktualizacji raportu ===
 
         db.collection("seo_projects_archive").document(project_id).set(summary_report)
         doc_ref.delete()
