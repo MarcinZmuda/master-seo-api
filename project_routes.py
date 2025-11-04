@@ -1,72 +1,102 @@
 # ================================================================
-# project_routes.py — Warstwa Project Management (v6.6.1 - Poprawka Regex)
+# project_routes.py — Warstwa Project Management (v6.9.0 - Semantic Root + Context Matching)
 # ================================================================
 
 import json
 import base64
 import re
-import os
 from flask import Blueprint, request, jsonify
-from collections import Counter
 from datetime import datetime
 import requests
-
-# --- 🔐 Inicjalizacja Firebase ---
 from firebase_admin import firestore
-import firebase_admin
+import spacy
 
+# ---------------------------------------------------------------
+# 🔐 Inicjalizacja Firebase i spaCy
+# ---------------------------------------------------------------
 db = None
-
 project_bp = Blueprint("project_routes", __name__)
 
-# === 🔽 Inicjalizacja spaCy (do liczenia odmian) 🔽 ===
-import spacy
 try:
     NLP = spacy.load("pl_core_news_sm")
     print("✅ Model spaCy (pl_core_news_sm) załadowany poprawnie.")
 except OSError:
-    print("❌ BŁĄD: Nie można załadować modelu spaCy 'pl_core_news_sm'.")
-    print("Upewnij się, że jest dodany do requirements.txt (link .tar.gz).")
     NLP = None
+    print("❌ BŁĄD: Nie można załadować modelu spaCy 'pl_core_news_sm'.")
 
+
+# ---------------------------------------------------------------
+# 🧠 Funkcje językowe
+# ---------------------------------------------------------------
 def lemmatize_text(text):
-    """Zwraca listę lematów z tekstu (bez interpunkcji, małe litery)."""
+    """Zwraca listę lematów z tekstu (bez interpunkcji)."""
     if not NLP:
         return re.findall(r'\b\w+\b', text.lower())
     doc = NLP(text.lower())
     return [token.lemma_ for token in doc if token.is_alpha]
-# === 🔼 KONIEC SEKCJI spaCy 🔼 ===
+
+
+def get_root_prefix(word):
+    """Wyznacza dynamiczny rdzeń semantyczny słowa."""
+    if len(word) <= 6:
+        return word
+    vowels = 'aeiouyąęó'
+    root_len = 6
+    for i, ch in enumerate(word):
+        if ch in vowels:
+            root_len = i + 3
+            break
+    return word[:max(6, root_len)]
+
+
+def extract_context_matches(text, root_prefix, related_terms=None):
+    """Wykrywa kontekstowe wystąpienia rdzenia w otoczeniu powiązanych terminów."""
+    if not NLP:
+        return 0
+    doc = NLP(text.lower())
+    related_terms = related_terms or []
+    contextual_matches = 0
+
+    for token in doc:
+        if token.lemma_.startswith(root_prefix):
+            context = " ".join([t.text for t in token.subtree])
+            if any(term in context for term in related_terms):
+                contextual_matches += 1
+    return contextual_matches
 
 
 # ---------------------------------------------------------------
-# 🔧 Funkcje pomocnicze
+# 🔧 Pomocnicze funkcje Firestore
 # ---------------------------------------------------------------
+def call_s1_analysis(topic):
+    try:
+        r = requests.post("http://localhost:10000/api/s1_analysis", json={"topic": topic}, timeout=120)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        return {"error": f"Błąd wywołania S1 Analysis: {str(e)}"}
+
+
 def parse_brief_to_keywords(brief_text):
     """Parsuje tekst briefu i wyciąga słowa kluczowe + nagłówki H2."""
     keywords_dict = {}
     headers_list = []
 
     cleaned_text = "\n".join([s.strip() for s in brief_text.splitlines() if s.strip()])
-    
-    # === 🔽 POPRAWKA REGEX (TERAZ AKCEPTUJE 'H2 HEADERS TERMS' ORAZ 'H2 TEXT TERMS') 🔽 ===
     section_regex = r"((?:BASIC|EXTENDED|H2)\s+(?:TEXT|HEADERS)\s+TERMS)\s*:\s*=*\s*([\s\S]*?)(?=\n[A-Z\s]+(?:TEXT|HEADERS)\s+TERMS|$)"
-    # === 🔼 KONIEC POPRAWKI REGEX 🔼 ===
-
     keyword_regex = re.compile(r"^\s*(.*?)\s*:\s*(\d+)\s*-\s*(\d+)x\s*$", re.UNICODE)
     keyword_regex_single = re.compile(r"^\s*(.*?)\s*:\s*(\d+)x\s*$", re.UNICODE)
 
     for match in re.finditer(section_regex, cleaned_text, re.IGNORECASE):
         section_name_raw = match.group(1).upper()
         section_content = match.group(2)
-        
-        # Uproszczenie sprawdzania nazwy sekcji
+
         if "H2" in section_name_raw:
             for line in section_content.splitlines():
                 if line.strip():
                     headers_list.append(line.strip())
             continue
 
-        # Przetwarzanie BASIC lub EXTENDED
         for line in section_content.splitlines():
             line = line.strip()
             if not line:
@@ -84,66 +114,50 @@ def parse_brief_to_keywords(brief_text):
                     min_val = max_val = int(kw_match_single.group(2))
                 else:
                     continue
-            
+
             keyword_lemmas = lemmatize_text(keyword)
-            
+            root_prefix = get_root_prefix(keyword_lemmas[0]) if keyword_lemmas else get_root_prefix(keyword)
+
             keywords_dict[keyword] = {
                 "target_min": min_val,
                 "target_max": max_val,
                 "actual": 0,
+                "actual_tokens": 0,
+                "contextual_hits": 0,
+                "semantic_coverage": 0.0,
                 "locked": False,
                 "lemmas": keyword_lemmas,
-                "lemma_len": len(keyword_lemmas)
+                "lemma_len": len(keyword_lemmas),
+                "root_prefix": root_prefix
             }
 
     return keywords_dict, headers_list
 
 
-def call_s1_analysis(topic):
-    """Wywołuje wewnętrznie endpoint /api/s1_analysis."""
-    try:
-        r = requests.post("http://localhost:10000/api/s1_analysis", json={"topic": topic}, timeout=120)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        return {"error": f"Błąd wywołania S1 Analysis: {str(e)}"}
-
-
 # ---------------------------------------------------------------
-# ✅ /api/project/create — tworzy nowy projekt SEO (S2)
+# ✅ /api/project/create
 # ---------------------------------------------------------------
 @project_bp.route("/api/project/create", methods=["POST"])
 def create_project():
     try:
+        global db
         if not db:
-            return jsonify({"error": "Firestore nie jest połączony (instancja db jest None)"}), 503
+            return jsonify({"error": "Firestore nie jest połączony"}), 503
         if not NLP:
-             return jsonify({"error": "Krytyczny błąd serwera: Model spaCy nie jest załadowany."}), 500
+            return jsonify({"error": "Model spaCy nie jest załadowany"}), 500
 
         data = request.get_json(silent=True) or {}
         topic = data.get("topic", "").strip()
-        brief_text = ""
+        brief_text = data.get("brief_text", "")
 
         if not topic:
-            return jsonify({"error": "Brak 'topic' (frazy kluczowej)"}), 400
+            return jsonify({"error": "Brak 'topic'"}), 400
 
-        if "brief_base64" in data:
-            brief_text = base64.b64decode(data["brief_base64"]).decode("utf-8")
-        elif "brief_text" in data:
-            brief_text = data["brief_text"]
-            if len(brief_text) > 2000:
-                data["brief_base64"] = base64.b64encode(brief_text.encode("utf-8")).decode("utf-8")
-                brief_text = base64.b64decode(data["brief_base64"]).decode("utf-8")
-
-        keywords_state, headers_list = parse_brief_to_keywords(brief_text) if brief_text else ({}, [])
-        
+        keywords_state, headers_list = parse_brief_to_keywords(brief_text)
         s1_data = call_s1_analysis(topic)
 
-        if "error" in s1_data:
-            return jsonify({"error": "Błąd podrzędny podczas analizy S1", "details": s1_data["error"]}), 500
-
         doc_ref = db.collection("seo_projects").document()
-        project_data = {
+        doc_ref.set({
             "topic": topic,
             "created_at": datetime.utcnow().isoformat(),
             "brief_text": brief_text[:5000],
@@ -151,17 +165,14 @@ def create_project():
             "headers_suggestions": headers_list,
             "s1_data": s1_data,
             "batches": [],
-            "status": "created",
-        }
-        doc_ref.set(project_data)
+            "status": "created"
+        })
 
         return jsonify({
             "status": "✅ Projekt utworzony",
             "project_id": doc_ref.id,
             "topic": topic,
-            "keywords": len(keywords_state),
-            "headers": len(headers_list),
-            "s1_summary": s1_data.get("competitive_metrics", {}),
+            "keywords": len(keywords_state)
         }), 201
 
     except Exception as e:
@@ -169,16 +180,15 @@ def create_project():
 
 
 # ---------------------------------------------------------------
-# 🧠 /api/project/<id>/add_batch — dodaje batch treści (S3)
+# 🧮 /api/project/<id>/add_batch — dodaje batch treści
 # ---------------------------------------------------------------
 @project_bp.route("/api/project/<project_id>/add_batch", methods=["POST"])
 def add_batch_to_project(project_id):
-    if not db:
-        return jsonify({"error": "Brak połączenia z Firestore"}), 503
-    if not NLP:
-         return jsonify({"error": "Krytyczny błąd serwera: Model spaCy nie jest załadowany."}), 500
-
     try:
+        global db
+        if not db:
+            return jsonify({"error": "Brak połączenia z Firestore"}), 503
+
         doc_ref = db.collection("seo_projects").document(project_id)
         doc = doc_ref.get()
         if not doc.exists:
@@ -188,36 +198,39 @@ def add_batch_to_project(project_id):
         keywords_state = project_data.get("keywords_state", {})
         batches = project_data.get("batches", [])
 
-        text_input = ""
-        if request.is_json:
-            text_input = (request.get_json() or {}).get("text", "")
-        else:
-            text_input = request.data.decode("utf-8", errors="ignore")
-
+        text_input = (request.get_json(silent=True) or {}).get("text", "")
         if not text_input.strip():
-            return jsonify({"error": "Brak treści w żądaniu"}), 400
+            return jsonify({"error": "Brak treści"}), 400
 
+        text_lower = text_input.lower()
         text_lemmas = lemmatize_text(text_input)
         text_lemmas_len = len(text_lemmas)
+
         counts_in_batch = {}
-        
-        sorted_keywords = sorted(keywords_state.items(), key=lambda item: item[1].get('lemma_len', 0), reverse=True)
 
-        for kw, meta in sorted_keywords:
+        # 🔁 Główna pętla liczenia
+        for kw, meta in keywords_state.items():
             keyword_lemmas = meta.get("lemmas", [])
+            root_prefix = meta.get("root_prefix", "")
             kw_len = meta.get("lemma_len", 0)
-            
-            if kw_len == 0:
-                counts_in_batch[kw] = 0
-                continue
 
-            count_in_batch = 0
+            lemma_count = 0
             for i in range(text_lemmas_len - kw_len + 1):
                 if text_lemmas[i:i + kw_len] == keyword_lemmas:
-                    count_in_batch += 1
-            
-            meta["actual"] = meta.get("actual", 0) + count_in_batch
-            counts_in_batch[kw] = count_in_batch
+                    lemma_count += 1
+
+            regex_pattern = rf"\b{re.escape(root_prefix)}\w*\b"
+            root_matches = re.findall(regex_pattern, text_lower)
+            root_count = len(root_matches)
+
+            contextual_hits = extract_context_matches(text_input, root_prefix, ["sąd", "wniosek", "osoba", "postępowanie"])
+            semantic_coverage = round(root_count / (lemma_count + 1), 2)
+
+            meta["actual"] = meta.get("actual", 0) + max(lemma_count, root_count)
+            meta["actual_tokens"] = meta.get("actual_tokens", 0) + root_count
+            meta["contextual_hits"] = meta.get("contextual_hits", 0) + contextual_hits
+            meta["semantic_coverage"] = semantic_coverage
+            counts_in_batch[kw] = max(lemma_count, root_count)
 
             if meta["actual"] > meta["target_max"] + 3:
                 meta["locked"] = True
@@ -228,8 +241,6 @@ def add_batch_to_project(project_id):
                 meta["status"] = "UNDER"
             else:
                 meta["status"] = "OK"
-            
-            keywords_state[kw] = meta 
 
         batch_entry = {
             "created_at": datetime.utcnow().isoformat(),
@@ -245,26 +256,26 @@ def add_batch_to_project(project_id):
             "updated_at": datetime.utcnow().isoformat()
         })
 
-        locked_terms = []
-        keywords_report = []
-        
+        locked_terms, keywords_report = [], []
         for kw, meta in keywords_state.items():
-            status = meta.get('status', 'OK')
+            status = meta.get("status", "OK")
             priority_instruction = "USE_AS_NEEDED"
-            
             if status == "LOCKED":
                 priority_instruction = "DO_NOT_USE"
                 locked_terms.append(kw)
             elif status == "UNDER":
-                if meta.get('actual', 0) == 0:
+                if meta.get("actual", 0) == 0:
                     status = "NOT_USED"
                     priority_instruction = "CRITICAL_PRIORITY_USE"
                 else:
                     priority_instruction = "PRIORITY_USE"
-            
+
             keywords_report.append({
                 "keyword": kw,
-                "actual_uses": meta.get('actual', 0),
+                "actual_uses": meta.get("actual", 0),
+                "actual_tokens": meta.get("actual_tokens", 0),
+                "contextual_hits": meta.get("contextual_hits", 0),
+                "semantic_coverage": meta.get("semantic_coverage", 0.0),
                 "target_range": f"{meta.get('target_min', 0)}-{meta.get('target_max', 0)}",
                 "status": status,
                 "priority_instruction": priority_instruction
@@ -284,14 +295,15 @@ def add_batch_to_project(project_id):
 
 
 # ---------------------------------------------------------------
-# 🧹 /api/project/<id> — finalne usunięcie projektu (S4)
+# 🧹 /api/project/<id> — usuwa projekt
 # ---------------------------------------------------------------
 @project_bp.route("/api/project/<project_id>", methods=["DELETE"])
 def delete_project_final(project_id):
-    if not db:
-        return jsonify({"error": "Brak połączenia z Firestore"}), 503
-
     try:
+        global db
+        if not db:
+            return jsonify({"error": "Brak połączenia z Firestore"}), 503
+
         doc_ref = db.collection("seo_projects").document(project_id)
         doc = doc_ref.get()
         if not doc.exists:
@@ -300,56 +312,32 @@ def delete_project_final(project_id):
         project_data = doc.to_dict()
         keywords_state = project_data.get("keywords_state", {})
         batches = project_data.get("batches", [])
-        
-        status_counts = {"LOCKED": 0, "OVER": 0, "UNDER": 0, "OK": 0, "NOT_USED": 0}
-        locked_terms_final = []
-        for kw, meta in keywords_state.items():
-            status = meta.get("status", "OK")
-            if status == "UNDER" and meta.get("actual", 0) == 0:
-                status = "NOT_USED"
-            
-            if status in status_counts:
-                status_counts[status] += 1
-            
-            if meta.get("locked"):
-                locked_terms_final.append(kw)
 
-        summary_report = {
+        summary = {
             "topic": project_data.get("topic", "nieznany temat"),
             "total_batches": len(batches),
             "total_length": sum(b.get("length", 0) for b in batches),
-            "locked_terms_count": status_counts["LOCKED"],
-            "over_terms_count": status_counts["OVER"],
-            "under_terms_count": status_counts["UNDER"],
-            "not_used_terms_count": status_counts["NOT_USED"],
-            "ok_terms_count": status_counts["OK"],
-            "locked_terms": locked_terms_final,
+            "locked_terms": [k for k, v in keywords_state.items() if v.get("locked")],
             "timestamp": datetime.utcnow().isoformat(),
         }
 
-        db.collection("seo_projects_archive").document(project_id).set(summary_report)
+        db.collection("seo_projects_archive").document(project_id).set(summary)
         doc_ref.delete()
 
-        return jsonify({
-            "status": f"✅ Projekt {project_id} został usunięty z Firestore.",
-            "summary": summary_report
-        }), 200
+        return jsonify({"status": f"✅ Projekt {project_id} został usunięty.", "summary": summary}), 200
 
     except Exception as e:
         return jsonify({"error": f"Błąd /api/project DELETE: {str(e)}"}), 500
 
 
 # ---------------------------------------------------------------
-# 🔧 Funkcja rejestrująca blueprint
+# 🔧 Rejestracja blueprinta
 # ---------------------------------------------------------------
 def register_project_routes(app, _db=None):
-    """Rejestruje trasy i przekazuje instancję bazy danych z master_api.py."""
     global db
     db = _db
-    
     app.register_blueprint(project_bp)
-    
     if db:
-        print("✅ [DEBUG] Zarejestrowano project_routes (przekazano instancję 'db').")
+        print("✅ [DEBUG] project_routes: Firestore aktywne.")
     else:
-        print("⚠️ [DEBUG] Zarejestrowano project_routes (instancja 'db' jest None!).")
+        print("⚠️ [DEBUG] project_routes: instancja db == None.")
