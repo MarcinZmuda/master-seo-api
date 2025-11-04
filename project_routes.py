@@ -1,9 +1,8 @@
 # ================================================================
-# project_routes.py — Warstwa Project Management (v7.0.0 - Semantic Root + Context Matching + Extended Term Awareness + Local Report)
+# project_routes.py — Warstwa Project Management (v7.0.1 - Stable + Safe Return + Extended Aware + Local Report)
 # ================================================================
 
 import json
-import base64
 import re
 from flask import Blueprint, request, jsonify
 from datetime import datetime
@@ -70,12 +69,14 @@ def extract_context_matches(text, root_prefix, related_terms=None):
 # 🔧 Pomocnicze funkcje Firestore
 # ---------------------------------------------------------------
 def call_s1_analysis(topic):
+    """Bezpieczne wywołanie analizy S1 z timeoutem."""
     try:
         r = requests.post("http://localhost:10000/api/s1_analysis", json={"topic": topic}, timeout=120)
         r.raise_for_status()
         return r.json()
     except Exception as e:
-        return {"error": f"Błąd wywołania S1 Analysis: {str(e)}"}
+        print(f"[WARN] Błąd S1 Analysis: {e}")
+        return {"error": str(e)}
 
 
 # ---------------------------------------------------------------
@@ -135,7 +136,6 @@ def parse_brief_to_keywords(brief_text):
                 "target_min": min_val,
                 "target_max": max_val,
                 "actual": 0,
-                "actual_tokens": 0,
                 "contextual_hits": 0,
                 "semantic_coverage": 0.0,
                 "locked": False,
@@ -166,14 +166,18 @@ def create_project():
         if not topic:
             return jsonify({"error": "Brak 'topic'"}), 400
 
+        print(f"[DEBUG] Tworzenie projektu Firestore: {topic}")
         keywords_state, headers_list = parse_brief_to_keywords(brief_text)
+
         s1_data = call_s1_analysis(topic)
+        if "error" in s1_data:
+            print(f"[WARN] S1 Analysis nieudana: {s1_data['error']}")
 
         doc_ref = db.collection("seo_projects").document()
         doc_ref.set({
             "topic": topic,
             "created_at": datetime.utcnow().isoformat(),
-            "brief_text": brief_text[:5000],
+            "brief_text": brief_text[:8000],
             "keywords_state": keywords_state,
             "headers_suggestions": headers_list,
             "s1_data": s1_data,
@@ -181,6 +185,7 @@ def create_project():
             "status": "created"
         })
 
+        print(f"[INFO] ✅ Projekt {doc_ref.id} utworzony ({len(keywords_state)} fraz).")
         return jsonify({
             "status": "✅ Projekt utworzony",
             "project_id": doc_ref.id,
@@ -189,7 +194,12 @@ def create_project():
         }), 201
 
     except Exception as e:
-        return jsonify({"error": f"Błąd /api/project/create: {str(e)}"}), 500
+        print(f"❌ Błąd /api/project/create: {e}")
+        return jsonify({
+            "status": "ERROR",
+            "message": "Nie udało się utworzyć projektu (timeout lub błąd Firestore).",
+            "error": str(e)
+        }), 500
 
 
 # ---------------------------------------------------------------
@@ -209,44 +219,32 @@ def add_batch_to_project(project_id):
 
         project_data = doc.to_dict()
         keywords_state = project_data.get("keywords_state", {})
-        batches = project_data.get("batches", [])
-
         text_input = (request.get_json(silent=True) or {}).get("text", "")
+
         if not text_input.strip():
             return jsonify({"error": "Brak treści"}), 400
 
         text_lower = text_input.lower()
         text_lemmas = lemmatize_text(text_input)
-        text_lemmas_len = len(text_lemmas)
-
         counts_in_batch = {}
 
         for kw, meta in keywords_state.items():
-            keyword_lemmas = meta.get("lemmas", [])
+            lemmas = meta.get("lemmas", [])
             root_prefix = meta.get("root_prefix", "")
             kw_len = meta.get("lemma_len", 0)
-
-            lemma_count = 0
-            for i in range(text_lemmas_len - kw_len + 1):
-                if text_lemmas[i:i + kw_len] == keyword_lemmas:
-                    lemma_count += 1
-
-            regex_pattern = rf"\b{re.escape(root_prefix)}\w*\b"
-            root_matches = re.findall(regex_pattern, text_lower)
-            root_count = len(root_matches)
-
+            lemma_count = sum(
+                1 for i in range(len(text_lemmas) - kw_len + 1)
+                if text_lemmas[i:i + kw_len] == lemmas
+            )
+            root_count = len(re.findall(rf"\b{re.escape(root_prefix)}\w*\b", text_lower))
             contextual_hits = extract_context_matches(text_input, root_prefix, ["sąd", "wniosek", "osoba", "postępowanie"])
-            semantic_coverage = round(root_count / (lemma_count + 1), 2)
-
-            meta["actual"] = meta.get("actual", 0) + max(lemma_count, root_count)
-            meta["actual_tokens"] = meta.get("actual_tokens", 0) + root_count
-            meta["contextual_hits"] = meta.get("contextual_hits", 0) + contextual_hits
-            meta["semantic_coverage"] = semantic_coverage
+            meta["actual"] += max(lemma_count, root_count)
+            meta["contextual_hits"] += contextual_hits
+            meta["semantic_coverage"] = round(root_count / (lemma_count + 1), 2)
             counts_in_batch[kw] = max(lemma_count, root_count)
 
             if meta["actual"] > meta["target_max"] + 3:
-                meta["locked"] = True
-                meta["status"] = "LOCKED"
+                meta["locked"], meta["status"] = True, "LOCKED"
             elif meta["actual"] > meta["target_max"]:
                 meta["status"] = "OVER"
             elif meta["actual"] < meta["target_min"]:
@@ -254,70 +252,54 @@ def add_batch_to_project(project_id):
             else:
                 meta["status"] = "OK"
 
-        batch_entry = {
-            "created_at": datetime.utcnow().isoformat(),
-            "length": len(text_input),
-            "counts": counts_in_batch,
-            "text": text_input[:5000]
-        }
-        batches.append(batch_entry)
+        keywords_report = [
+            {
+                "keyword": k,
+                "type": v.get("type", "BASIC"),
+                "actual_uses": v.get("actual", 0),
+                "contextual_hits": v.get("contextual_hits", 0),
+                "semantic_coverage": v.get("semantic_coverage", 0.0),
+                "target_range": f"{v.get('target_min', 0)}-{v.get('target_max', 0)}",
+                "status": v.get("status", "OK"),
+                "priority_instruction": (
+                    "DO_NOT_USE" if v.get("status") == "LOCKED"
+                    else "PRIORITY_USE" if v.get("status") == "UNDER"
+                    else "USE_AS_NEEDED"
+                )
+            }
+            for k, v in keywords_state.items()
+        ]
+
+        extended_count = sum(1 for k in keywords_state.values() if k.get("type") == "EXTENDED")
+        basic_count = sum(1 for k in keywords_state.values() if k.get("type") == "BASIC")
+        print(f"[BATCH {project_id}] ✅ BASIC: {basic_count}, EXTENDED: {extended_count}")
 
         doc_ref.update({
-            "batches": firestore.ArrayUnion([batch_entry]),
             "keywords_state": keywords_state,
+            "batches": firestore.ArrayUnion([{
+                "created_at": datetime.utcnow().isoformat(),
+                "text": text_input[:5000],
+                "counts": counts_in_batch
+            }]),
             "updated_at": datetime.utcnow().isoformat()
         })
 
-        locked_terms, keywords_report = [], []
-        for kw, meta in keywords_state.items():
-            status = meta.get("status", "OK")
-            priority_instruction = "USE_AS_NEEDED"
-            if status == "LOCKED":
-                priority_instruction = "DO_NOT_USE"
-                locked_terms.append(kw)
-            elif status == "UNDER":
-                if meta.get("actual", 0) == 0:
-                    status = "NOT_USED"
-                    priority_instruction = "CRITICAL_PRIORITY_USE"
-                else:
-                    priority_instruction = "PRIORITY_USE"
+        report = generate_semantic_report(len(project_data.get("batches", [])) + 1, keywords_report)
 
-            keywords_report.append({
-                "keyword": kw,
-                "type": meta.get("type", "BASIC"),
-                "actual_uses": meta.get("actual", 0),
-                "contextual_hits": meta.get("contextual_hits", 0),
-                "semantic_coverage": meta.get("semantic_coverage", 0.0),
-                "target_range": f"{meta.get('target_min', 0)}-{meta.get('target_max', 0)}",
-                "status": status,
-                "priority_instruction": priority_instruction
-            })
-
-        # 🧩 Lokalny raport
-        try:
-            report_preview = generate_semantic_report(
-                batch_number=len(batches),
-                keywords_report=keywords_report,
-                headers=project_data.get("headers_suggestions", []),
-                structure_info={"akapitów": 3, "średnio_zdań": 7}
-            )
-            print("\n" + "=" * 70)
-            print(report_preview)
-            print("=" * 70 + "\n")
-        except Exception as e:
-            print(f"[WARN] Nie udało się wygenerować raportu: {e}")
+        print("\n" + "=" * 70)
+        print(report)
+        print("=" * 70 + "\n")
 
         return jsonify({
             "status": "OK",
             "batch_length": len(text_input),
             "counts_in_batch": counts_in_batch,
             "keywords_report": keywords_report,
-            "locked_terms": locked_terms,
-            "updated_keywords": len(keywords_state),
             "batch_text_preview": text_input[:5000]
         }), 200
 
     except Exception as e:
+        print(f"❌ Błąd /api/project/add_batch: {e}")
         return jsonify({"error": f"Błąd /api/project/add_batch: {str(e)}"}), 500
 
 
@@ -337,15 +319,12 @@ def delete_project_final(project_id):
             return jsonify({"error": "Projekt nie istnieje"}), 404
 
         project_data = doc.to_dict()
-        keywords_state = project_data.get("keywords_state", {})
-        batches = project_data.get("batches", [])
-
         summary = {
             "topic": project_data.get("topic", "nieznany temat"),
-            "total_batches": len(batches),
-            "total_length": sum(b.get("length", 0) for b in batches),
-            "locked_terms": [k for k, v in keywords_state.items() if v.get("locked")],
-            "timestamp": datetime.utcnow().isoformat(),
+            "total_batches": len(project_data.get("batches", [])),
+            "total_length": sum(b.get("length", 0) for b in project_data.get("batches", [])),
+            "locked_terms": [k for k, v in project_data.get("keywords_state", {}).items() if v.get("locked")],
+            "timestamp": datetime.utcnow().isoformat()
         }
 
         db.collection("seo_projects_archive").document(project_id).set(summary)
@@ -354,72 +333,32 @@ def delete_project_final(project_id):
         return jsonify({"status": f"✅ Projekt {project_id} został usunięty.", "summary": summary}), 200
 
     except Exception as e:
+        print(f"❌ Błąd DELETE: {e}")
         return jsonify({"error": f"Błąd /api/project DELETE: {str(e)}"}), 500
 
 
 # ---------------------------------------------------------------
-# 🧩 Lokalny raport semantyczny z obsługą EXTENDED
+# 🧩 Lokalny raport semantyczny
 # ---------------------------------------------------------------
-def generate_semantic_report(batch_number: int, keywords_report: list, headers: list = None, structure_info: dict = None) -> str:
-    """Generuje czytelny raport semantyczny i meta-prompt po zakończeniu batcha."""
+def generate_semantic_report(batch_number, keywords_report):
     try:
         over_terms = [k["keyword"] for k in keywords_report if k["status"] in ["OVER", "LOCKED"]]
         under_terms = [k["keyword"] for k in keywords_report if k["status"] in ["UNDER", "NOT_USED"]]
         extended_under = [k["keyword"] for k in keywords_report if k["type"] == "EXTENDED" and k["status"] in ["UNDER", "NOT_USED"]]
-
-        semantic_vals = [k.get("semantic_coverage", 0) for k in keywords_report if isinstance(k.get("semantic_coverage", 0), (int, float))]
-        context_vals = [k.get("contextual_hits", 0) for k in keywords_report if isinstance(k.get("contextual_hits", 0), (int, float))]
-
-        avg_sem = round(mean(semantic_vals), 2) if semantic_vals else 0
-        avg_ctx = round(mean(context_vals), 2) if context_vals else 0
-
-        section_descriptions = ""
-        if headers:
-            for h in headers:
-                section_descriptions += f"H2: „{h}” — sekcja dotycząca zagadnienia {h.lower()}.\n"
-
-        structure_text = ""
-        if structure_info:
-            structure_text = f"Struktura: {structure_info.get('akapitów', '—')} akapitów, średnio {structure_info.get('średnio_zdań', '—')} zdań w akapicie.\n"
-
-        over_block = "Frazy zredukowane do niezbędnego minimum:\n→ " + (", ".join(over_terms) if over_terms else "Brak") + "\n"
-        under_block = "Frazy priorytetowe (niedostateczne użycie):\n→ " + (", ".join(under_terms) if under_terms else "Wszystkie w normie") + "\n"
-
-        extended_block = ""
-        if extended_under:
-            extended_block = "📌 EXTENDED frazy pominięte lub niedostateczne:\n→ " + ", ".join(extended_under) + "\n"
-
-        quality_note = "Balans językowy i kontekstowy utrzymany."
-        if avg_sem > 1.5:
-            quality_note = "Uwaga: możliwe przeoptymalizowanie fraz — zredukuj nadmiar odmian."
-        elif avg_sem < 0.8:
-            quality_note = "Zwiększ różnorodność językową — dodaj warianty fleksyjne i równoważniki znaczeniowe."
+        avg_sem = round(mean([k["semantic_coverage"] for k in keywords_report]), 2)
+        avg_ctx = round(mean([k["contextual_hits"] for k in keywords_report]), 2)
 
         report = (
-            "──────────────────────────────\n"
-            f"Batch nr {batch_number}\n\n"
-            f"{section_descriptions}"
-            f"{structure_text}\n"
-            f"{over_block}\n"
-            f"{under_block}\n"
-            f"{extended_block}\n"
-            "──────────────────────────────\n"
-            f"Wskaźniki jakości:\n"
-            f"→ Średni semantic_coverage: {avg_sem}\n"
-            f"→ Średni contextual_hits: {avg_ctx}%\n"
-            f"→ Ocena: {quality_note}\n"
-            "──────────────────────────────\n\n"
-            "**Meta-prompt dla kolejnego batcha:**\n"
-            "Na podstawie powyższego raportu:\n"
-            " - redukuj użycie fraz z listy 'zredukowane',\n"
-            " - wpleć naturalnie frazy 'priorytetowe',\n"
-            " - dodaj przynajmniej 1 frazę EXTENDED na sekcję H2,\n"
-            " - zachowaj rytm, różnorodność i narracyjność.\n"
-            "──────────────────────────────"
+            f"─────────────── SEMANTIC REPORT BATCH {batch_number} ───────────────\n"
+            f"Frazy zredukowane: {', '.join(over_terms) or 'brak'}\n"
+            f"Frazy priorytetowe: {', '.join(under_terms) or 'brak'}\n"
+            f"EXTENDED do uzupełnienia: {', '.join(extended_under) or 'brak'}\n"
+            f"→ semantic_coverage: {avg_sem} | contextual_hits: {avg_ctx}\n"
+            "──────────────────────────────────────────────────────────────\n"
         )
         return report
     except Exception as e:
-        return f"[BŁĄD RAPORTU] Nie udało się wygenerować raportu semantycznego: {e}"
+        return f"[BŁĄD RAPORTU] {e}"
 
 
 # ---------------------------------------------------------------
@@ -429,7 +368,4 @@ def register_project_routes(app, _db=None):
     global db
     db = _db
     app.register_blueprint(project_bp)
-    if db:
-        print("✅ [DEBUG] project_routes: Firestore aktywne.")
-    else:
-        print("⚠️ [DEBUG] project_routes: instancja db == None.")
+    print("✅ [INIT] project_routes zarejestrowany.")
