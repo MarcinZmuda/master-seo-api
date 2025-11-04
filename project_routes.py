@@ -1,5 +1,5 @@
 # ================================================================
-# project_routes.py — Warstwa Project Management (v6.9.1 - Semantic Root + Context Matching + Local Report)
+# project_routes.py — Warstwa Project Management (v6.9.2 - Semantic Root + Context Matching + Local Report + Auto Console Log)
 # ================================================================
 
 import json
@@ -282,6 +282,21 @@ def add_batch_to_project(project_id):
                 "priority_instruction": priority_instruction
             })
 
+        # 🧩 Lokalny raport semantyczny — log do konsoli Render
+        try:
+            report_preview = generate_semantic_report(
+                batch_number=len(batches),
+                keywords_report=keywords_report,
+                headers=project_data.get("headers_suggestions", []),
+                structure_info={"akapitów": 3, "średnio_zdań": 7}
+            )
+            print("\n" + "="*70)
+            print(report_preview)
+            print("="*70 + "\n")
+        except Exception as log_err:
+            print(f"[WARN] Nie udało się wygenerować lokalnego raportu: {log_err}")
+
+        # Standardowa odpowiedź API
         return jsonify({
             "status": "OK",
             "batch_length": len(text_input),
