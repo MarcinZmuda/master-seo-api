@@ -1,5 +1,5 @@
 # ================================================================
-# project_routes.py — Warstwa Project Management (v6.9.2 - Semantic Root + Context Matching + Local Report + Auto Console Log)
+# project_routes.py — Warstwa Project Management (v7.0.0 - Semantic Root + Context Matching + Extended Term Awareness + Local Report)
 # ================================================================
 
 import json
@@ -78,8 +78,11 @@ def call_s1_analysis(topic):
         return {"error": f"Błąd wywołania S1 Analysis: {str(e)}"}
 
 
+# ---------------------------------------------------------------
+# 🧩 Parser briefu z obsługą BASIC / EXTENDED
+# ---------------------------------------------------------------
 def parse_brief_to_keywords(brief_text):
-    """Parsuje tekst briefu i wyciąga słowa kluczowe + nagłówki H2."""
+    """Parsuje tekst briefu i wyciąga słowa kluczowe (BASIC / EXTENDED) + nagłówki H2."""
     keywords_dict = {}
     headers_list = []
 
@@ -91,6 +94,10 @@ def parse_brief_to_keywords(brief_text):
     for match in re.finditer(section_regex, cleaned_text, re.IGNORECASE):
         section_name_raw = match.group(1).upper()
         section_content = match.group(2)
+
+        section_type = "BASIC"
+        if "EXTENDED" in section_name_raw:
+            section_type = "EXTENDED"
 
         if "H2" in section_name_raw:
             for line in section_content.splitlines():
@@ -119,7 +126,12 @@ def parse_brief_to_keywords(brief_text):
             keyword_lemmas = lemmatize_text(keyword)
             root_prefix = get_root_prefix(keyword_lemmas[0]) if keyword_lemmas else get_root_prefix(keyword)
 
+            if section_type == "EXTENDED":
+                min_val = max(1, round(min_val * 0.5))
+                max_val = max(1, round(max_val * 0.5))
+
             keywords_dict[keyword] = {
+                "type": section_type,
                 "target_min": min_val,
                 "target_max": max_val,
                 "actual": 0,
@@ -181,7 +193,7 @@ def create_project():
 
 
 # ---------------------------------------------------------------
-# 🧮 /api/project/<id>/add_batch — dodaje batch treści
+# 🧮 /api/project/<id>/add_batch
 # ---------------------------------------------------------------
 @project_bp.route("/api/project/<project_id>/add_batch", methods=["POST"])
 def add_batch_to_project(project_id):
@@ -209,7 +221,6 @@ def add_batch_to_project(project_id):
 
         counts_in_batch = {}
 
-        # 🔁 Główna pętla liczenia
         for kw, meta in keywords_state.items():
             keyword_lemmas = meta.get("lemmas", [])
             root_prefix = meta.get("root_prefix", "")
@@ -273,8 +284,8 @@ def add_batch_to_project(project_id):
 
             keywords_report.append({
                 "keyword": kw,
+                "type": meta.get("type", "BASIC"),
                 "actual_uses": meta.get("actual", 0),
-                "actual_tokens": meta.get("actual_tokens", 0),
                 "contextual_hits": meta.get("contextual_hits", 0),
                 "semantic_coverage": meta.get("semantic_coverage", 0.0),
                 "target_range": f"{meta.get('target_min', 0)}-{meta.get('target_max', 0)}",
@@ -282,7 +293,7 @@ def add_batch_to_project(project_id):
                 "priority_instruction": priority_instruction
             })
 
-        # 🧩 Lokalny raport semantyczny — log do konsoli Render
+        # 🧩 Lokalny raport
         try:
             report_preview = generate_semantic_report(
                 batch_number=len(batches),
@@ -290,20 +301,20 @@ def add_batch_to_project(project_id):
                 headers=project_data.get("headers_suggestions", []),
                 structure_info={"akapitów": 3, "średnio_zdań": 7}
             )
-            print("\n" + "="*70)
+            print("\n" + "=" * 70)
             print(report_preview)
-            print("="*70 + "\n")
-        except Exception as log_err:
-            print(f"[WARN] Nie udało się wygenerować lokalnego raportu: {log_err}")
+            print("=" * 70 + "\n")
+        except Exception as e:
+            print(f"[WARN] Nie udało się wygenerować raportu: {e}")
 
-        # Standardowa odpowiedź API
         return jsonify({
             "status": "OK",
             "batch_length": len(text_input),
             "counts_in_batch": counts_in_batch,
             "keywords_report": keywords_report,
             "locked_terms": locked_terms,
-            "updated_keywords": len(keywords_state)
+            "updated_keywords": len(keywords_state),
+            "batch_text_preview": text_input[:5000]
         }), 200
 
     except Exception as e:
@@ -311,7 +322,7 @@ def add_batch_to_project(project_id):
 
 
 # ---------------------------------------------------------------
-# 🧹 /api/project/<id> — usuwa projekt
+# 🧹 DELETE /api/project/<id>
 # ---------------------------------------------------------------
 @project_bp.route("/api/project/<project_id>", methods=["DELETE"])
 def delete_project_final(project_id):
@@ -347,13 +358,15 @@ def delete_project_final(project_id):
 
 
 # ---------------------------------------------------------------
-# 🧩 Lokalny raport semantyczny (bez zapisu do Firestore)
+# 🧩 Lokalny raport semantyczny z obsługą EXTENDED
 # ---------------------------------------------------------------
 def generate_semantic_report(batch_number: int, keywords_report: list, headers: list = None, structure_info: dict = None) -> str:
     """Generuje czytelny raport semantyczny i meta-prompt po zakończeniu batcha."""
     try:
         over_terms = [k["keyword"] for k in keywords_report if k["status"] in ["OVER", "LOCKED"]]
         under_terms = [k["keyword"] for k in keywords_report if k["status"] in ["UNDER", "NOT_USED"]]
+        extended_under = [k["keyword"] for k in keywords_report if k["type"] == "EXTENDED" and k["status"] in ["UNDER", "NOT_USED"]]
+
         semantic_vals = [k.get("semantic_coverage", 0) for k in keywords_report if isinstance(k.get("semantic_coverage", 0), (int, float))]
         context_vals = [k.get("contextual_hits", 0) for k in keywords_report if isinstance(k.get("contextual_hits", 0), (int, float))]
 
@@ -363,28 +376,24 @@ def generate_semantic_report(batch_number: int, keywords_report: list, headers: 
         section_descriptions = ""
         if headers:
             for h in headers:
-                section_descriptions += f"H2: „{h}”\nOpis: sekcja tematyczna dotycząca zagadnienia {h.lower()}.\n"
+                section_descriptions += f"H2: „{h}” — sekcja dotycząca zagadnienia {h.lower()}.\n"
 
         structure_text = ""
         if structure_info:
-            structure_text = f"Struktura: {structure_info.get('akapitów', '—')} akapitów, " \
-                             f"średnio {structure_info.get('średnio_zdań', '—')} zdań w akapicie (>5)\n"
+            structure_text = f"Struktura: {structure_info.get('akapitów', '—')} akapitów, średnio {structure_info.get('średnio_zdań', '—')} zdań w akapicie.\n"
 
-        over_block = (
-            "Frazy zredukowane do niezbędnego minimum\n"
-            "(utrzymane wyłącznie w kontekstach merytorycznych, gdy bez nich zdanie traci sens):\n"
-        )
-        over_block += "→ " + ", ".join(over_terms) + "\n" if over_terms else "→ Brak fraz przekroczonych\n"
+        over_block = "Frazy zredukowane do niezbędnego minimum:\n→ " + (", ".join(over_terms) if over_terms else "Brak") + "\n"
+        under_block = "Frazy priorytetowe (niedostateczne użycie):\n→ " + (", ".join(under_terms) if under_terms else "Wszystkie w normie") + "\n"
 
-        under_block = "Frazy priorytetowe (niedostateczne użycie lub brak kontekstu):\n"
-        under_block += "→ " + ", ".join(under_terms) + "\n" if under_terms else "→ Wszystkie frazy w normie\n"
+        extended_block = ""
+        if extended_under:
+            extended_block = "📌 EXTENDED frazy pominięte lub niedostateczne:\n→ " + ", ".join(extended_under) + "\n"
 
+        quality_note = "Balans językowy i kontekstowy utrzymany."
         if avg_sem > 1.5:
-            quality_note = "Uwaga: możliwe przeoptymalizowanie fraz — w kolejnym batchu redukuj nadmiar odmian."
+            quality_note = "Uwaga: możliwe przeoptymalizowanie fraz — zredukuj nadmiar odmian."
         elif avg_sem < 0.8:
             quality_note = "Zwiększ różnorodność językową — dodaj warianty fleksyjne i równoważniki znaczeniowe."
-        else:
-            quality_note = "Balans językowy i kontekstowy utrzymany."
 
         report = (
             "──────────────────────────────\n"
@@ -393,24 +402,22 @@ def generate_semantic_report(batch_number: int, keywords_report: list, headers: 
             f"{structure_text}\n"
             f"{over_block}\n"
             f"{under_block}\n"
+            f"{extended_block}\n"
             "──────────────────────────────\n"
-            f"Wskaźniki jakości semantycznej:\n"
+            f"Wskaźniki jakości:\n"
             f"→ Średni semantic_coverage: {avg_sem}\n"
             f"→ Średni contextual_hits: {avg_ctx}%\n"
             f"→ Ocena: {quality_note}\n"
             "──────────────────────────────\n\n"
             "**Meta-prompt dla kolejnego batcha:**\n"
-            "Na podstawie powyższego raportu wygeneruj kolejny batch zgodnie z wytycznymi:\n"
-            " - zachowaj styl i rytm narracyjny,\n"
-            " - ogranicz użycie fraz z listy 'zredukowane' do kontekstów merytorycznych,\n"
-            " - wpleć naturalnie frazy z listy 'priorytetowe',\n"
-            " - popraw contextual_hits i semantic_coverage,\n"
-            " - utrzymaj długość akapitów i ton narracyjny z poprzednich sekcji.\n"
+            "Na podstawie powyższego raportu:\n"
+            " - redukuj użycie fraz z listy 'zredukowane',\n"
+            " - wpleć naturalnie frazy 'priorytetowe',\n"
+            " - dodaj przynajmniej 1 frazę EXTENDED na sekcję H2,\n"
+            " - zachowaj rytm, różnorodność i narracyjność.\n"
             "──────────────────────────────"
         )
-
         return report
-
     except Exception as e:
         return f"[BŁĄD RAPORTU] Nie udało się wygenerować raportu semantycznego: {e}"
 
