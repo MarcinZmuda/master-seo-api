@@ -1,5 +1,5 @@
 # ================================================================
-# project_routes.py — Warstwa Project Management (v6.9.0 - Semantic Root + Context Matching)
+# project_routes.py — Warstwa Project Management (v6.9.1 - Semantic Root + Context Matching + Local Report)
 # ================================================================
 
 import json
@@ -10,6 +10,7 @@ from datetime import datetime
 import requests
 from firebase_admin import firestore
 import spacy
+from statistics import mean
 
 # ---------------------------------------------------------------
 # 🔐 Inicjalizacja Firebase i spaCy
@@ -328,6 +329,75 @@ def delete_project_final(project_id):
 
     except Exception as e:
         return jsonify({"error": f"Błąd /api/project DELETE: {str(e)}"}), 500
+
+
+# ---------------------------------------------------------------
+# 🧩 Lokalny raport semantyczny (bez zapisu do Firestore)
+# ---------------------------------------------------------------
+def generate_semantic_report(batch_number: int, keywords_report: list, headers: list = None, structure_info: dict = None) -> str:
+    """Generuje czytelny raport semantyczny i meta-prompt po zakończeniu batcha."""
+    try:
+        over_terms = [k["keyword"] for k in keywords_report if k["status"] in ["OVER", "LOCKED"]]
+        under_terms = [k["keyword"] for k in keywords_report if k["status"] in ["UNDER", "NOT_USED"]]
+        semantic_vals = [k.get("semantic_coverage", 0) for k in keywords_report if isinstance(k.get("semantic_coverage", 0), (int, float))]
+        context_vals = [k.get("contextual_hits", 0) for k in keywords_report if isinstance(k.get("contextual_hits", 0), (int, float))]
+
+        avg_sem = round(mean(semantic_vals), 2) if semantic_vals else 0
+        avg_ctx = round(mean(context_vals), 2) if context_vals else 0
+
+        section_descriptions = ""
+        if headers:
+            for h in headers:
+                section_descriptions += f"H2: „{h}”\nOpis: sekcja tematyczna dotycząca zagadnienia {h.lower()}.\n"
+
+        structure_text = ""
+        if structure_info:
+            structure_text = f"Struktura: {structure_info.get('akapitów', '—')} akapitów, " \
+                             f"średnio {structure_info.get('średnio_zdań', '—')} zdań w akapicie (>5)\n"
+
+        over_block = (
+            "Frazy zredukowane do niezbędnego minimum\n"
+            "(utrzymane wyłącznie w kontekstach merytorycznych, gdy bez nich zdanie traci sens):\n"
+        )
+        over_block += "→ " + ", ".join(over_terms) + "\n" if over_terms else "→ Brak fraz przekroczonych\n"
+
+        under_block = "Frazy priorytetowe (niedostateczne użycie lub brak kontekstu):\n"
+        under_block += "→ " + ", ".join(under_terms) + "\n" if under_terms else "→ Wszystkie frazy w normie\n"
+
+        if avg_sem > 1.5:
+            quality_note = "Uwaga: możliwe przeoptymalizowanie fraz — w kolejnym batchu redukuj nadmiar odmian."
+        elif avg_sem < 0.8:
+            quality_note = "Zwiększ różnorodność językową — dodaj warianty fleksyjne i równoważniki znaczeniowe."
+        else:
+            quality_note = "Balans językowy i kontekstowy utrzymany."
+
+        report = (
+            "──────────────────────────────\n"
+            f"Batch nr {batch_number}\n\n"
+            f"{section_descriptions}"
+            f"{structure_text}\n"
+            f"{over_block}\n"
+            f"{under_block}\n"
+            "──────────────────────────────\n"
+            f"Wskaźniki jakości semantycznej:\n"
+            f"→ Średni semantic_coverage: {avg_sem}\n"
+            f"→ Średni contextual_hits: {avg_ctx}%\n"
+            f"→ Ocena: {quality_note}\n"
+            "──────────────────────────────\n\n"
+            "**Meta-prompt dla kolejnego batcha:**\n"
+            "Na podstawie powyższego raportu wygeneruj kolejny batch zgodnie z wytycznymi:\n"
+            " - zachowaj styl i rytm narracyjny,\n"
+            " - ogranicz użycie fraz z listy 'zredukowane' do kontekstów merytorycznych,\n"
+            " - wpleć naturalnie frazy z listy 'priorytetowe',\n"
+            " - popraw contextual_hits i semantic_coverage,\n"
+            " - utrzymaj długość akapitów i ton narracyjny z poprzednich sekcji.\n"
+            "──────────────────────────────"
+        )
+
+        return report
+
+    except Exception as e:
+        return f"[BŁĄD RAPORTU] Nie udało się wygenerować raportu semantycznego: {e}"
 
 
 # ---------------------------------------------------------------
