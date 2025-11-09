@@ -1,5 +1,5 @@
 # ================================================================
-# project_routes.py — Warstwa Project Management (v7.0.1 - Stable + Safe Return + Extended Aware + Local Report)
+# project_routes.py — Warstwa Project Management (v7.0.2 - Stable + Meta Prompt Summary)
 # ================================================================
 
 import json
@@ -284,10 +284,14 @@ def add_batch_to_project(project_id):
             "updated_at": datetime.utcnow().isoformat()
         })
 
-        report = generate_semantic_report(len(project_data.get("batches", [])) + 1, keywords_report)
+        batch_number = len(project_data.get("batches", [])) + 1
+        report = generate_semantic_report(batch_number, keywords_report)
+        meta_prompt_summary = build_meta_prompt_summary(batch_number, keywords_report)
 
         print("\n" + "=" * 70)
         print(report)
+        print("- META PROMPT SUMMARY -------------------------------")
+        print(meta_prompt_summary)
         print("=" * 70 + "\n")
 
         return jsonify({
@@ -295,7 +299,8 @@ def add_batch_to_project(project_id):
             "batch_length": len(text_input),
             "counts_in_batch": counts_in_batch,
             "keywords_report": keywords_report,
-            "batch_text_preview": text_input[:5000]
+            "batch_text_preview": text_input[:5000],
+            "meta_prompt_summary": meta_prompt_summary
         }), 200
 
     except Exception as e:
@@ -335,6 +340,35 @@ def delete_project_final(project_id):
     except Exception as e:
         print(f"❌ Błąd DELETE: {e}")
         return jsonify({"error": f"Błąd /api/project DELETE: {str(e)}"}), 500
+
+
+# ---------------------------------------------------------------
+# 🧠 Meta-prompt summary dla GPT
+# ---------------------------------------------------------------
+def build_meta_prompt_summary(batch_number, keywords_report):
+    """Buduje zwięzły meta-prompt na podstawie raportu słów kluczowych."""
+    try:
+        under_terms = [k["keyword"] for k in keywords_report if k.get("status") in ["UNDER", "NOT_USED"]]
+        over_terms = [k["keyword"] for k in keywords_report if k.get("status") == "OVER"]
+        locked_terms = [k["keyword"] for k in keywords_report if k.get("status") == "LOCKED"]
+        extended_under = [
+            k["keyword"]
+            for k in keywords_report
+            if k.get("type") == "EXTENDED" and k.get("status") in ["UNDER", "NOT_USED"]
+        ]
+
+        summary = (
+            f"BATCH {batch_number} – podsumowanie semantyczne.\n"
+            f"UNDER (do wzmocnienia): {', '.join(under_terms) or 'brak'}.\n"
+            f"OVER (ogranicz / nie wzmacniaj): {', '.join(over_terms) or 'brak'}.\n"
+            f"LOCKED (zakaz użycia): {', '.join(locked_terms) or 'brak'}.\n"
+            f"EXTENDED do uzupełnienia: {', '.join(extended_under) or 'brak'}.\n"
+            "DZIAŁANIE: w kolejnym batchu wzmacniaj UNDER, "
+            "nie używaj LOCKED, redukuj OVER do minimum, a EXTENDED dawkuj naturalnie."
+        )
+        return summary
+    except Exception as e:
+        return f"[BŁĄD META-PROMPT SUMMARY] {e}"
 
 
 # ---------------------------------------------------------------
