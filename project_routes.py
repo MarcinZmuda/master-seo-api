@@ -1,8 +1,8 @@
 # ================================================================
-# project_routes.py — Warstwa Project Management (v7.2.1 - Final Logic)
-# Zintegrowane: Hierarchiczne Liczenie + Zwrot Danych Krytycznych
+# project_routes.py — Warstwa Project Management (v7.2.1 - Fixed + Blueprint Register)
 # ================================================================
 
+import os
 import json
 import re
 from flask import Blueprint, request, jsonify
@@ -11,7 +11,7 @@ import requests
 from firebase_admin import firestore
 import spacy
 from statistics import mean
-from collections import Counter # Nowy import
+from collections import Counter
 
 # ---------------------------------------------------------------
 # 🔐 Inicjalizacja Firebase i spaCy
@@ -68,36 +68,14 @@ def extract_context_matches(text, root_prefix, related_terms=None):
 
 
 # ---------------------------------------------------------------
-# 🔗 Hierarchiczne Liczenie (Zaczerpnięte z hierarchical_keyword_counter.py)
-# ---------------------------------------------------------------
-def apply_hierarchical_counting(raw_counts):
-    """
-    Oblicza hierarchiczne zliczanie fraz kluczowych.
-    Jeśli krótsze słowo występuje w dłuższym, licznik krótszej frazy jest zwiększany.
-    """
-    if not isinstance(raw_counts, dict):
-        return raw_counts
-
-    keywords = sorted(raw_counts.keys(), key=len, reverse=True)
-    hierarchical_counts = raw_counts.copy()
-
-    for i, long_kw in enumerate(keywords):
-        for short_kw in keywords[i + 1:]:
-            # Sprawdzenie, czy krótsza fraza jest pełnym słowem w dłuższej
-            if short_kw in long_kw and re.search(r'\b' + re.escape(short_kw) + r'\b', long_kw):
-                hierarchical_counts[short_kw] += raw_counts.get(long_kw, 0)
-    
-    return hierarchical_counts
-
-
-# ---------------------------------------------------------------
-# 🔧 Pomocnicze funkcje Firestore
+# 🔧 Pomocnicze funkcje Firestore + API
 # ---------------------------------------------------------------
 def call_s1_analysis(topic):
-    """Bezpieczne wywołanie analizy S1 z timeoutem."""
+    """Bezpieczne wywołanie analizy S1 z dynamicznym adresem API."""
     try:
-        # W środowisku Render/Gunicorn to powinno działać
-        r = requests.post("http://localhost:10000/api/s1_analysis", json={"topic": topic}, timeout=120) 
+        base_url = os.getenv("API_BASE_URL", "http://localhost:8080")
+        url = f"{base_url}/api/s1_analysis"
+        r = requests.post(url, json={"topic": topic}, timeout=120)
         r.raise_for_status()
         return r.json()
     except Exception as e:
@@ -106,14 +84,31 @@ def call_s1_analysis(topic):
 
 
 # ---------------------------------------------------------------
+# 🔢 Hierarchiczne liczenie
+# ---------------------------------------------------------------
+def apply_hierarchical_counting(raw_counts):
+    if not isinstance(raw_counts, dict):
+        return raw_counts
+
+    keywords = sorted(raw_counts.keys(), key=len, reverse=True)
+    hierarchical_counts = raw_counts.copy()
+
+    for i, long_kw in enumerate(keywords):
+        for short_kw in keywords[i + 1:]:
+            if short_kw in long_kw and re.search(r'\b' + re.escape(short_kw) + r'\b', long_kw):
+                hierarchical_counts[short_kw] += raw_counts.get(long_kw, 0)
+    return hierarchical_counts
+
+
+# ---------------------------------------------------------------
 # 🧩 Parser briefu z obsługą BASIC / EXTENDED
 # ---------------------------------------------------------------
 def parse_brief_to_keywords(brief_text):
-    """Parsuje tekst briefu i wyciąga słowa kluczowe (BASIC / EXTENDED) + nagłówki H2."""
+    """Parsuje brief i wyciąga frazy kluczowe BASIC / EXTENDED."""
     keywords_dict = {}
     headers_list = []
-
     cleaned_text = "\n".join([s.strip() for s in brief_text.splitlines() if s.strip()])
+
     section_regex = r"((?:BASIC|EXTENDED|H2)\s+(?:TEXT|HEADERS)\s+TERMS)\s*:\s*=*\s*([\s\S]*?)(?=\n[A-Z\s]+(?:TEXT|HEADERS)\s+TERMS|$)"
     keyword_regex = re.compile(r"^\s*(.*?)\s*:\s*(\d+)\s*-\s*(\d+)x\s*$", re.UNICODE)
     keyword_regex_single = re.compile(r"^\s*(.*?)\s*:\s*(\d+)x\s*$", re.UNICODE)
@@ -194,10 +189,7 @@ def create_project():
 
         print(f"[DEBUG] Tworzenie projektu Firestore: {topic}")
         keywords_state, headers_list = parse_brief_to_keywords(brief_text)
-
         s1_data = call_s1_analysis(topic)
-        if "error" in s1_data:
-            print(f"[WARN] S1 Analysis nieudana: {s1_data['error']}")
 
         doc_ref = db.collection("seo_projects").document()
         doc_ref.set({
@@ -221,140 +213,15 @@ def create_project():
 
     except Exception as e:
         print(f"❌ Błąd /api/project/create: {e}")
-        return jsonify({
-            "status": "ERROR",
-            "message": "Nie udało się utworzyć projektu (timeout lub błąd Firestore).",
-            "error": str(e)
-        }), 500
+        return jsonify({"error": str(e)}), 500
 
 
 # ---------------------------------------------------------------
-# 🧮 /api/project/<id>/add_batch (ZMIENIONO)
+# 🔧 Rejestracja blueprinta (zgodna z master_api.py)
 # ---------------------------------------------------------------
-@project_bp.route("/api/project/<project_id>/add_batch", methods=["POST"])
-def add_batch_to_project(project_id):
-    try:
-        global db
-        if not db:
-            return jsonify({"error": "Brak połączenia z Firestore"}), 503
-
-        doc_ref = db.collection("seo_projects").document(project_id)
-        doc = doc_ref.get()
-        if not doc.exists:
-            return jsonify({"error": "Projekt nie istnieje"}), 404
-
-        project_data = doc.to_dict()
-        keywords_state = project_data.get("keywords_state", {})
-        text_input = (request.get_json(silent=True) or {}).get("text", "")
-
-        if not text_input.strip():
-            return jsonify({"error": "Brak treści"}), 400
-
-        text_lower = text_input.lower()
-        text_lemmas = lemmatize_text(text_input)
-        
-        # 1. Obliczanie surowych wystąpień (RAW COUNTS)
-        raw_counts_in_batch = {}
-        
-        for kw, meta in keywords_state.items():
-            lemmas = meta.get("lemmas", [])
-            root_prefix = meta.get("root_prefix", "")
-            kw_len = meta.get("lemma_len", 0)
-            
-            # Liczenie dokładnych lematów
-            lemma_count = sum(
-                1 for i in range(len(text_lemmas) - kw_len + 1)
-                if text_lemmas[i:i + kw_len] == lemmas
-            )
-            # Liczenie rdzenia semantycznego
-            root_count = len(re.findall(rf"\b{re.escape(root_prefix)}\w*\b", text_lower))
-            
-            # Zliczanie semantyczne (max z obu)
-            raw_counts_in_batch[kw] = max(lemma_count, root_count)
-
-        # 2. Zastosowanie liczenia hierarchicznego (HIERARCHICAL COUNTS)
-        hierarchical_counts = apply_hierarchical_counting(raw_counts_in_batch)
-        
-        locked_count_global = 0
-        critical_over_diff = 0
-        
-        # 3. Aktualizacja globalnego stanu
-        for kw, meta in keywords_state.items():
-            count_in_batch = hierarchical_counts.get(kw, 0)
-            
-            # Kontekstualne hity (bez zmian)
-            root_prefix = meta.get("root_prefix", "")
-            contextual_hits = extract_context_matches(text_input, root_prefix, ["sąd", "wniosek", "osoba", "postępowanie"])
-            
-            # Aktualizacja globalnego stanu
-            meta["actual"] += count_in_batch
-            meta["contextual_hits"] += contextual_hits
-            
-            # Weryfikacja statusu (względem target_max i krytycznych polityk)
-            over_diff = meta["actual"] - meta["target_max"]
-            
-            if over_diff > 3: # Target_max + 3 (krytyczna blokada)
-                meta["locked"], meta["status"] = True, "LOCKED"
-            elif over_diff > 0:
-                meta["status"] = "OVER"
-            elif meta["actual"] < meta["target_min"]:
-                meta["status"] = "UNDER"
-            else:
-                meta["status"] = "OK"
-
-            # Zliczanie globalnego LOCKED i CRITICAL OVER
-            if meta.get("locked"):
-                locked_count_global += 1
-            if over_diff >= 10:
-                critical_over_diff = max(critical_over_diff, over_diff)
-
-        # 4. Budowanie raportu
-        keywords_report = [
-            {
-                "keyword": k,
-                "type": v.get("type", "BASIC"),
-                "actual_uses": v.get("actual", 0),
-                "contextual_hits": v.get("contextual_hits", 0),
-                "target_range": f"{v.get('target_min', 0)}-{v.get('target_max', 0)}",
-                "status": v.get("status", "OK"),
-                "priority_instruction": (
-                    "DO_NOT_USE" if v.get("status") == "LOCKED"
-                    else "PRIORITY_USE" if v.get("status") == "UNDER"
-                    else "USE_AS_NEEDED"
-                )
-            }
-            for k, v in keywords_state.items()
-        ]
-
-        batch_number = len(project_data.get("batches", [])) + 1
-        meta_prompt_summary = build_meta_prompt_summary(batch_number, keywords_report)
-        
-        # 5. Aktualizacja Firestore
-        doc_ref.update({
-            "keywords_state": keywords_state,
-            "batches": firestore.ArrayUnion([{
-                "created_at": datetime.utcnow().isoformat(),
-                "text": text_input[:5000],
-                "counts": hierarchical_counts # Zapisujemy hierarchiczne zliczenie
-            }]),
-            "updated_at": datetime.utcnow().isoformat()
-        })
-
-        print(f"[BATCH {project_id}] ✅ Zapisano hierarchiczne liczenie.")
-        
-        # 6. Zwrot Danych Krytycznych dla GPT
-        return jsonify({
-            "status": "OK",
-            "batch_length": len(text_input),
-            "locked_count_global": locked_count_global,
-            "critical_over_difference": critical_over_diff,
-            "keywords_report": keywords_report,
-            "meta_prompt_summary": meta_prompt_summary
-        }), 200
-
-    except Exception as e:
-        print(f"❌ Błąd /api/project/add_batch: {e}")
-        return jsonify({"error": f"Błąd /api/project/add_batch: {str(e)}"}), 500
-
-# ... (Pozostałe funkcje / DELETE / Meta Prompt Summary bez zmian)
-# ... (Rejestracja blueprinta na końcu)
+def register_project_routes(app, _db=None):
+    """Rejestruje blueprinta project_routes w aplikacji Flask."""
+    global db
+    db = _db
+    app.register_blueprint(project_bp)
+    print("✅ [INIT] project_routes zarejestrowany (v7.2.1-fixed).")
