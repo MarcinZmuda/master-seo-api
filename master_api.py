@@ -1,5 +1,5 @@
 # ================================================================
-# master_api.py — Master SEO API (v7.2.1 - Final Logic)
+# master_api.py — Master SEO API (v7.2.1-fixed for Render)
 # ================================================================
 
 import os
@@ -18,24 +18,23 @@ load_dotenv()
 app = Flask(__name__)
 
 # -------------------------------------------------------------------
-# 🔧 Konfiguracja Firebase (Firestore) - TO JEST GŁÓWNA INICJALIZACJA
+# 🔧 Konfiguracja Firebase (Firestore)
 # -------------------------------------------------------------------
-# ... (Kod inicjalizacyjny Firebase bez zmian)
 try:
     FIREBASE_CREDS_JSON = os.getenv("FIREBASE_CREDS_JSON")
     if not FIREBASE_CREDS_JSON:
-        print("❌ Brak zmiennej środowiskowej FIREBASE_CREDS_JSON.")
+        print("⚠️ Brak zmiennej FIREBASE_CREDS_JSON — próba użycia pliku lokalnego.")
         if os.path.exists("serviceAccountKey.json"):
             cred = credentials.Certificate("serviceAccountKey.json")
         else:
-            raise ValueError("Brak FIREBASE_CREDS_JSON i pliku serviceAccountKey.json")
+            raise ValueError("❌ Brak FIREBASE_CREDS_JSON i pliku serviceAccountKey.json.")
     else:
         creds_dict = json.loads(FIREBASE_CREDS_JSON)
         cred = credentials.Certificate(creds_dict)
 
     firebase_admin.initialize_app(cred)
-    db = firestore.client() 
-    print("✅ Połączono z Firestore.")
+    db = firestore.client()
+    print("✅ Firestore połączony poprawnie.")
 except Exception as e:
     print(f"❌ Błąd inicjalizacji Firebase: {e}")
     db = None
@@ -43,7 +42,6 @@ except Exception as e:
 # -------------------------------------------------------------------
 # 🌐 API Zewnętrzne (S1)
 # -------------------------------------------------------------------
-# ... (Kod API Zewnętrznych bez zmian)
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 SERPAPI_URL = "https://serpapi.com/search"
 LANGEXTRACT_API_URL = "https://langextract-api.onrender.com/extract"
@@ -76,11 +74,10 @@ def call_langextract(url):
 
 
 # -------------------------------------------------------------------
-# 🧠 /api/s1_analysis — analiza konkurencji + n-gramy (pełna integracja)
+# 🧠 /api/s1_analysis — analiza konkurencji + n-gramy
 # -------------------------------------------------------------------
 @app.route("/api/s1_analysis", methods=["POST"])
 def perform_s1_analysis():
-    # ... (Kod S1 Analysis bez zmian)
     try:
         data = request.get_json()
         if not data or "topic" not in data:
@@ -107,11 +104,11 @@ def perform_s1_analysis():
                 h2s = content.get("h2", [])
                 h2_counts.append(len(h2s))
                 all_headings.extend([h.strip().lower() for h in h2s])
-                word_count = len(re.findall(r"\w+", text))
+                word_count = len(re.findall(r'\w+', text))
                 text_lengths.append(word_count)
                 sources_payload.append({"url": url, "content": text})
             else:
-                print(f"⚠️ [WARN] Brak treści dla {url}")
+                print(f"⚠️ Brak treści dla {url}")
 
         ngram_data = call_api_with_json(
             NGRAM_API_URL,
@@ -156,8 +153,8 @@ def perform_s1_analysis():
 def health():
     return jsonify({
         "status": "ok",
-        "version": "v7.2.1-final-logic",
-        "message": "Master SEO API działa poprawnie (pełna integracja z hierarchicznym liczeniem)."
+        "version": "v7.2.1-fixed",
+        "message": "Master SEO API działa poprawnie (Render + Firestore OK)."
     }), 200
 
 
@@ -166,17 +163,16 @@ def health():
 # -------------------------------------------------------------------
 try:
     from project_routes import register_project_routes
-    # Przekazujemy instancję 'db' (zainicjalizowaną na górze tego pliku)
-    # do funkcji rejestrującej w 'project_routes.py'
     register_project_routes(app, db)
-    print("✅ Zarejestrowano project_routes.")
+    print("✅ Zarejestrowano project_routes (Blueprint działa).")
 except Exception as e:
-    print(f"⚠️ Nie udało się załadować project_routes: {e}")
+    print(f"❌ Nie udało się załadować project_routes: {e}")
+
 
 # -------------------------------------------------------------------
-# 🚀 Uruchomienie (Poprawiony blok)
+# 🚀 Uruchomienie (Render-compatible)
 # -------------------------------------------------------------------
 if __name__ == "__main__":
-    # Ustaw domyślny port na 10000, aby był zgodny z Gunicorn i ustawieniami wewnętrznymi
-    port = int(os.getenv("PORT", 10000))
+    port = int(os.getenv("PORT", 8080))  # Render wymaga portu z ENV
+    print(f"🌐 Uruchamiam Master SEO API (port={port}, Firestore={'OK' if db else 'BRAK'})")
     app.run(host="0.0.0.0", port=port)
