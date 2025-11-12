@@ -1,7 +1,5 @@
 # ================================================================
-# master_api.py — Master SEO API (v6.3.0 hybrid JSON mode)
-# Obsługa: Firestore, S1 (SerpApi + LangExtract + Ngram API),
-# Brief Base64, Batch Counting, PAA Integration + Project Management
+# master_api.py — Master SEO API (v7.2.1 - Final Logic)
 # ================================================================
 
 import os
@@ -22,6 +20,7 @@ app = Flask(__name__)
 # -------------------------------------------------------------------
 # 🔧 Konfiguracja Firebase (Firestore) - TO JEST GŁÓWNA INICJALIZACJA
 # -------------------------------------------------------------------
+# ... (Kod inicjalizacyjny Firebase bez zmian)
 try:
     FIREBASE_CREDS_JSON = os.getenv("FIREBASE_CREDS_JSON")
     if not FIREBASE_CREDS_JSON:
@@ -35,7 +34,7 @@ try:
         cred = credentials.Certificate(creds_dict)
 
     firebase_admin.initialize_app(cred)
-    db = firestore.client() # Ta instancja 'db' zostanie przekazana do project_routes
+    db = firestore.client() 
     print("✅ Połączono z Firestore.")
 except Exception as e:
     print(f"❌ Błąd inicjalizacji Firebase: {e}")
@@ -44,6 +43,7 @@ except Exception as e:
 # -------------------------------------------------------------------
 # 🌐 API Zewnętrzne (S1)
 # -------------------------------------------------------------------
+# ... (Kod API Zewnętrznych bez zmian)
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 SERPAPI_URL = "https://serpapi.com/search"
 LANGEXTRACT_API_URL = "https://langextract-api.onrender.com/extract"
@@ -76,19 +76,11 @@ def call_langextract(url):
 
 
 # -------------------------------------------------------------------
-# 🧩 Parser briefu i Liczenie fraz (USUNIĘTE)
-# ---
-# Te funkcje ('parse_brief_to_keywords' i 'calculate_hierarchical_counts')
-# zostały usunięte, ponieważ nie są używane w tym pliku,
-# a ich poprawna wersja znajduje się w 'project_routes.py'.
-# -------------------------------------------------------------------
-
-
-# -------------------------------------------------------------------
 # 🧠 /api/s1_analysis — analiza konkurencji + n-gramy (pełna integracja)
 # -------------------------------------------------------------------
 @app.route("/api/s1_analysis", methods=["POST"])
 def perform_s1_analysis():
+    # ... (Kod S1 Analysis bez zmian)
     try:
         data = request.get_json()
         if not data or "topic" not in data:
@@ -164,8 +156,8 @@ def perform_s1_analysis():
 def health():
     return jsonify({
         "status": "ok",
-        "version": "v6.3.0-hybrid-json",
-        "message": "Master SEO API działa poprawnie (pełna integracja z n-gram sources)."
+        "version": "v7.2.1-final-logic",
+        "message": "Master SEO API działa poprawnie (pełna integracja z hierarchicznym liczeniem)."
     }), 200
 
 
