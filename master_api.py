@@ -1,5 +1,5 @@
 # ================================================================
-# master_api.py — Master SEO API (v7.2.1-fixed for Render)
+# master_api.py — Master SEO API (v7.2.1-fixed + Firestore Tracker)
 # ================================================================
 
 import os
@@ -153,13 +153,13 @@ def perform_s1_analysis():
 def health():
     return jsonify({
         "status": "ok",
-        "version": "v7.2.1-fixed",
+        "version": "v7.2.1-fixed + tracker",
         "message": "Master SEO API działa poprawnie (Render + Firestore OK)."
     }), 200
 
 
 # -------------------------------------------------------------------
-# 🔗 Integracja: Project Management Layer
+# 🔗 Integracja: Project Management Layer + Firestore Tracker
 # -------------------------------------------------------------------
 try:
     from project_routes import register_project_routes
@@ -168,6 +168,12 @@ try:
 except Exception as e:
     print(f"❌ Nie udało się załadować project_routes: {e}")
 
+try:
+    from firestore_tracker_routes import register_tracker_routes
+    register_tracker_routes(app, db)
+    print("✅ Zarejestrowano firestore_tracker_routes (Tracker Layer działa).")
+except Exception as e:
+    print(f"❌ Nie udało się załadować firestore_tracker_routes: {e}")
 
 # -------------------------------------------------------------------
 # 🚀 Uruchomienie (Render-compatible)
