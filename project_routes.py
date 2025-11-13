@@ -1,5 +1,5 @@
 # ================================================================
-# project_routes.py — Warstwa Project Management (v7.2.4-firestore-primary)
+# project_routes.py — Warstwa Project Management (v7.2.5-firestore-primary-remote)
 # ================================================================
 
 import os
@@ -95,7 +95,7 @@ def parse_brief_to_keywords(brief_text):
 def call_s1_analysis(topic):
     """Wywołuje endpoint /api/s1_analysis dla tematu."""
     try:
-        base_url = os.getenv("API_BASE_URL", "http://localhost:8080")
+        base_url = os.getenv("API_BASE_URL", "https://master-seo-api.onrender.com")
         url = f"{base_url}/api/s1_analysis"
         r = requests.post(url, json={"topic": topic}, timeout=120)
         r.raise_for_status()
@@ -112,6 +112,7 @@ def call_s1_analysis(topic):
 def add_batch_to_project(project_id):
     """
     Przekazuje batch do Firestore Tracker API (pełne liczenie lematyczne).
+    W przypadku braku połączenia z API — zapisuje batch lokalnie (mirror mode).
     """
     try:
         data = request.get_json(silent=True) or {}
@@ -119,12 +120,25 @@ def add_batch_to_project(project_id):
         if not text:
             return jsonify({"error": "Brak tekstu batcha"}), 400
 
-        base_url = os.getenv("API_BASE_URL", "http://localhost:8080")
+        base_url = os.getenv("API_BASE_URL", "https://master-seo-api.onrender.com")
         tracker_url = f"{base_url}/api/project/{project_id}/add_batch"
 
         print(f"[INFO] 🔄 Deleguję batch do Firestore Tracker → {tracker_url}")
 
-        r = requests.post(tracker_url, json={"text": text}, timeout=120)
+        try:
+            r = requests.post(tracker_url, json={"text": text}, timeout=120)
+        except requests.exceptions.ConnectionError:
+            print("⚠️ Firestore Tracker niedostępny — zapisuję batch lokalnie (mirror mode).")
+            os.makedirs("./offline_batches", exist_ok=True)
+            file_path = f"./offline_batches/{project_id}_mirror.txt"
+            with open(file_path, "a", encoding="utf-8") as f:
+                f.write(f"\n\n[BATCH {datetime.utcnow().isoformat()}]\n{text}\n")
+            return jsonify({
+                "status": "⚠️ Firestore Tracker offline – batch zapisany lokalnie",
+                "project_id": project_id,
+                "mirror_file": file_path
+            }), 503
+
         if r.status_code != 200:
             print(f"[WARN] Tracker zwrócił błąd: {r.status_code} – {r.text}")
             return jsonify({"error": f"Firestore Tracker error: {r.text}"}), r.status_code
@@ -199,4 +213,4 @@ def register_project_routes(app, _db=None):
     global db
     db = _db
     app.register_blueprint(project_bp)
-    print("✅ [INIT] project_routes zarejestrowany (v7.2.4-firestore-primary).")
+    print("✅ [INIT] project_routes zarejestrowany (v7.2.5-firestore-primary-remote).")
