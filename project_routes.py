@@ -81,7 +81,6 @@ def parse_brief_to_keywords(brief_text):
                 "actual": 0,
                 "status": "UNDER",
                 "locked": False,
-                "lemmas": lemmas
             }
             headers_list.append(keyword)
 
