@@ -1,47 +1,47 @@
 # ================================================================
-# firestore_tracker_routes.py — Warstwa Batch + Keyword Tracker (v7.2.2-full + ForcedRegeneration / EmergencyExit)
+# firestore_tracker_routes.py — Warstwa Batch + Keyword Tracker (v7.2.4-firestore-lemma)
 # ================================================================
 
 from flask import Blueprint, request, jsonify
 from datetime import datetime
 import re
+import spacy
 
 tracker_bp = Blueprint("firestore_tracker_routes", __name__)
 db = None
 
-
 # ---------------------------------------------------------------
-# 🔠 Funkcje pomocnicze
+# ✅ Inicjalizacja modelu spaCy
 # ---------------------------------------------------------------
-
-# ---------------------------------------------------------------
-# 🔠 Funkcje pomocnicze – wersja z lematyzacją (pełne zliczanie semantyczne)
-# ---------------------------------------------------------------
-import spacy
-
-# ✅ Inicjalizacja modelu języka polskiego
 try:
     nlp_pl = spacy.load("pl_core_news_sm")
-except:
+    print("✅ Model spaCy (pl_core_news_sm) załadowany poprawnie.")
+except OSError:
     import os
     os.system("python -m spacy download pl_core_news_sm")
-    import spacy
     nlp_pl = spacy.load("pl_core_news_sm")
+    print("📦 Model spaCy 'pl_core_news_sm' został pobrany i załadowany.")
 
-def lemmatize_text(text):
-    """Zwraca listę lematów (form podstawowych) z tekstu."""
+
+# ---------------------------------------------------------------
+# 🔠 Funkcje lematyzacji i zliczania
+# ---------------------------------------------------------------
+def lemmatize_text(text: str):
+    """Zwraca listę lematów z tekstu (tylko tokeny alfabetyczne, lowercase)."""
     doc = nlp_pl(text)
     return [token.lemma_.lower() for token in doc if token.is_alpha]
 
-def count_keyword_occurrences(text, keyword):
+
+def count_keyword_occurrences(text: str, keyword: str) -> int:
     """
     Liczy wystąpienia frazy w tekście na podstawie lematów.
-    Dzięki temu 'adwokata rozwodowego' i 'adwokaci rozwodowi'
-    zliczą się jako 'adwokat rozwodowy'.
+    'adwokata rozwodowego' == 'adwokaci rozwodowi' (bo oba mają lematy: adwokat, rozwodowy)
+    Wymaga jednak ciągłości sekwencji (strict lemma adjacency).
     """
     text_lemmas = lemmatize_text(text)
     keyword_lemmas = lemmatize_text(keyword)
     keyword_len = len(keyword_lemmas)
+
     count = 0
     for i in range(len(text_lemmas) - keyword_len + 1):
         if text_lemmas[i:i + keyword_len] == keyword_lemmas:
@@ -49,9 +49,11 @@ def count_keyword_occurrences(text, keyword):
     return count
 
 
-
+# ---------------------------------------------------------------
+# ⚙️ System progów i reakcji (Forced Regeneration / Emergency Exit)
+# ---------------------------------------------------------------
 def trigger_forced_regeneration(doc_ref, project_id, over_count):
-    """Aktywuje Forced Regeneration, jeśli liczba fraz OVER >= 10."""
+    """Aktywuje Forced Regeneration, jeśli liczba fraz OVER ≥ 10."""
     print(f"⚠️ [Forced Regeneration] Projekt {project_id} – OVER={over_count}")
     doc_ref.update({
         "status": "regenerating",
@@ -62,7 +64,7 @@ def trigger_forced_regeneration(doc_ref, project_id, over_count):
 
 
 def trigger_emergency_exit(doc_ref, project_id, locked_count):
-    """Zatrzymuje generację, jeśli liczba LOCKED >= 4."""
+    """Zatrzymuje generację, jeśli liczba LOCKED ≥ 4."""
     print(f"⛔ [Emergency Exit] Projekt {project_id} – LOCKED={locked_count}")
     doc_ref.update({
         "status": "halted",
@@ -77,8 +79,10 @@ def trigger_emergency_exit(doc_ref, project_id, locked_count):
 # ---------------------------------------------------------------
 @tracker_bp.route("/api/project/<project_id>/add_batch", methods=["POST"])
 def add_batch(project_id):
-    """Dodaje batch treści do projektu Firestore, aktualizuje statystyki słów kluczowych
-    i reaguje na progi semantyczne (Forced Regeneration / Emergency Exit)."""
+    """
+    Dodaje batch treści do projektu Firestore, zlicza frazy (lematycznie),
+    aktualizuje statusy i reaguje na progi semantyczne.
+    """
     global db
     if not db:
         return jsonify({"error": "Firestore nie jest połączony"}), 503
@@ -89,6 +93,7 @@ def add_batch(project_id):
     if not text:
         return jsonify({"error": "Brak tekstu do zapisu"}), 400
 
+    # 🔍 Pobranie projektu
     doc_ref = db.collection("seo_projects").document(project_id)
     doc = doc_ref.get()
     if not doc.exists:
@@ -97,9 +102,15 @@ def add_batch(project_id):
     project_data = doc.to_dict()
     keywords_state = project_data.get("keywords_state", {})
 
-    # 🔢 Liczenie wystąpień fraz w batchu
+    if not keywords_state:
+        return jsonify({"error": "Brak fraz w projekcie (keywords_state pusty)"}), 400
+
+    print(f"[INFO] 🔢 Lemmatyczne zliczanie batcha dla projektu {project_id} ({len(keywords_state)} fraz)")
+
+    # 🧮 Liczenie
     updated_keywords = 0
     keywords_report = []
+    over_terms_count = under_terms_count = ok_terms_count = locked_terms_count = 0
 
     for keyword, info in keywords_state.items():
         count = count_keyword_occurrences(text, keyword)
@@ -110,10 +121,13 @@ def add_batch(project_id):
         # Status logic
         if info["actual"] < info["target_min"]:
             status = "UNDER"
+            under_terms_count += 1
         elif info["actual"] > info["target_max"] + 10:
             status = "OVER"
+            over_terms_count += 1
         else:
             status = "OK"
+            ok_terms_count += 1
 
         info["status"] = status
         keywords_report.append({
@@ -124,26 +138,20 @@ def add_batch(project_id):
         })
         keywords_state[keyword] = info
 
-    # 🔐 Blokowanie LOCKED
+    # 🔒 LOCKED terms = frazy OVER
     locked_terms = [k for k, v in keywords_state.items() if v.get("status") == "OVER"]
-
-    # 📊 Obliczenia meta prompt
-    over_terms_count = len([k for k in keywords_state.values() if k["status"] == "OVER"])
-    under_terms_count = len([k for k in keywords_state.values() if k["status"] == "UNDER"])
-    ok_terms_count = len([k for k in keywords_state.values() if k["status"] == "OK"])
     locked_terms_count = len(locked_terms)
 
-    regeneration_triggered = False
-    emergency_exit_triggered = False
+    # 🚨 Progi
+    regeneration_triggered = over_terms_count >= 10
+    emergency_exit_triggered = locked_terms_count >= 4
 
-    # 🚨 Logika progów semantycznych
-    if over_terms_count >= 10:
-        regeneration_triggered = trigger_forced_regeneration(doc_ref, project_id, over_terms_count)
+    if regeneration_triggered:
+        trigger_forced_regeneration(doc_ref, project_id, over_terms_count)
+    if emergency_exit_triggered:
+        trigger_emergency_exit(doc_ref, project_id, locked_terms_count)
 
-    if locked_terms_count >= 4:
-        emergency_exit_triggered = trigger_emergency_exit(doc_ref, project_id, locked_terms_count)
-
-    # 🔄 Zapis batcha
+    # 💾 Zapis batcha
     existing_batches = project_data.get("batches", [])
     new_batch = {
         "created_at": datetime.utcnow().isoformat(),
@@ -152,13 +160,14 @@ def add_batch(project_id):
         "summary": f"BATCH – UNDER: {under_terms_count}, OVER: {over_terms_count}, LOCKED: {locked_terms_count}, OK: {ok_terms_count}"
     }
     existing_batches.append(new_batch)
+
     doc_ref.update({
         "batches": existing_batches,
         "keywords_state": keywords_state,
         "status": "updated"
     })
 
-    # 🧠 Meta Prompt Summary (HEAR 2.0 Ready)
+    # 🧠 Raport
     meta_prompt_summary = {
         "updated_keywords": updated_keywords,
         "locked_terms_count": locked_terms_count,
@@ -168,7 +177,7 @@ def add_batch(project_id):
         "summary_text": f"UNDER={under_terms_count}, OVER={over_terms_count}, LOCKED={locked_terms_count}, OK={ok_terms_count}"
     }
 
-    print(f"[INFO] ✅ Batch dodany do projektu {project_id} ({updated_keywords} fraz). "
+    print(f"[INFO] ✅ Batch dodany ({updated_keywords} fraz). "
           f"OVER={over_terms_count}, LOCKED={locked_terms_count}, ForcedReg={regeneration_triggered}, Exit={emergency_exit_triggered}")
 
     return jsonify({
@@ -192,4 +201,4 @@ def register_tracker_routes(app, _db=None):
     global db
     db = _db
     app.register_blueprint(tracker_bp)
-    print("✅ [INIT] firestore_tracker_routes zarejestrowany (v7.2.2-full + ForcedReg/EmergencyExit).")
+    print("✅ [INIT] firestore_tracker_routes zarejestrowany (v7.2.4-firestore-lemma).")
