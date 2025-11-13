@@ -1,5 +1,5 @@
 # ================================================================
-# project_routes.py — Warstwa Project Management (v7.2.1 - Fixed + Blueprint Register)
+# project_routes.py — Warstwa Project Management (v7.2.2-full + Forced Regeneration & Emergency Exit)
 # ================================================================
 
 import os
@@ -31,7 +31,6 @@ except OSError:
 # 🧠 Funkcje językowe
 # ---------------------------------------------------------------
 def lemmatize_text(text):
-    """Zwraca listę lematów z tekstu (bez interpunkcji)."""
     if not NLP:
         return re.findall(r'\b\w+\b', text.lower())
     doc = NLP(text.lower())
@@ -39,9 +38,6 @@ def lemmatize_text(text):
 
 
 def get_root_prefix(word):
-    """Wyznacza dynamiczny rdzeń semantyczny słowa."""
-    if len(word) <= 6:
-        return word
     vowels = 'aeiouyąęó'
     root_len = 6
     for i, ch in enumerate(word):
@@ -52,7 +48,6 @@ def get_root_prefix(word):
 
 
 def extract_context_matches(text, root_prefix, related_terms=None):
-    """Wykrywa kontekstowe wystąpienia rdzenia w otoczeniu powiązanych terminów."""
     if not NLP:
         return 0
     doc = NLP(text.lower())
@@ -71,7 +66,6 @@ def extract_context_matches(text, root_prefix, related_terms=None):
 # 🔧 Pomocnicze funkcje Firestore + API
 # ---------------------------------------------------------------
 def call_s1_analysis(topic):
-    """Bezpieczne wywołanie analizy S1 z dynamicznym adresem API."""
     try:
         base_url = os.getenv("API_BASE_URL", "http://localhost:8080")
         url = f"{base_url}/api/s1_analysis"
@@ -84,88 +78,146 @@ def call_s1_analysis(topic):
 
 
 # ---------------------------------------------------------------
-# 🔢 Hierarchiczne liczenie
+# 🧩 Analiza batcha + liczenie fraz
 # ---------------------------------------------------------------
-def apply_hierarchical_counting(raw_counts):
-    if not isinstance(raw_counts, dict):
-        return raw_counts
+def analyze_batch_text(project_id, text):
+    """Analizuje batch tekstu: zlicza frazy, ustala statusy UNDER/OVER/LOCKED."""
+    doc_ref = db.collection("seo_projects").document(project_id)
+    project_data = doc_ref.get().to_dict()
+    if not project_data:
+        raise ValueError("Projekt nie istnieje")
 
-    keywords = sorted(raw_counts.keys(), key=len, reverse=True)
-    hierarchical_counts = raw_counts.copy()
+    keywords_state = project_data.get("keywords_state", {})
+    text_lower = text.lower()
+    lemmatized_text = lemmatize_text(text_lower)
+    lemma_counts = Counter(lemmatized_text)
 
-    for i, long_kw in enumerate(keywords):
-        for short_kw in keywords[i + 1:]:
-            if short_kw in long_kw and re.search(r'\b' + re.escape(short_kw) + r'\b', long_kw):
-                hierarchical_counts[short_kw] += raw_counts.get(long_kw, 0)
-    return hierarchical_counts
+    over_terms_count = 0
+    locked_terms_count = 0
+    under_terms_count = 0
+    ok_terms_count = 0
+    updated_keywords = 0
+    keywords_report = []
+
+    for keyword, meta in keywords_state.items():
+        lemmas = meta.get("lemmas", [])
+        actual_count = sum(lemma_counts.get(l, 0) for l in lemmas)
+        keywords_state[keyword]["actual"] += actual_count
+        updated_keywords += 1
+
+        # status logic
+        if keywords_state[keyword]["actual"] > meta["target_max"] + 10:
+            status = "OVER"
+            over_terms_count += 1
+        elif keywords_state[keyword]["actual"] < meta["target_min"]:
+            status = "UNDER"
+            under_terms_count += 1
+        elif keywords_state[keyword]["locked"]:
+            status = "LOCKED"
+            locked_terms_count += 1
+        else:
+            status = "OK"
+            ok_terms_count += 1
+
+        keywords_report.append({
+            "keyword": keyword,
+            "actual_uses": keywords_state[keyword]["actual"],
+            "target_range": f"{meta['target_min']}–{meta['target_max']}x",
+            "status": status,
+            "priority_instruction": "Zablokuj nadmiarowe wystąpienia." if status == "OVER" else ""
+        })
+
+    meta_prompt_summary = (
+        f"BATCH – UNDER: {under_terms_count}, OVER: {over_terms_count}, LOCKED: {locked_terms_count}, OK: {ok_terms_count}"
+    )
+
+    batch_data = {
+        "text": text[:10000],
+        "created_at": datetime.utcnow().isoformat(),
+        "summary": meta_prompt_summary
+    }
+
+    # Zapisz batch do Firestore
+    doc_ref.update({
+        "batches": firestore.ArrayUnion([batch_data]),
+        "keywords_state": keywords_state
+    })
+
+    return {
+        "keywords_report": keywords_report,
+        "over_terms_count": over_terms_count,
+        "locked_terms_count": locked_terms_count,
+        "under_terms_count": under_terms_count,
+        "ok_terms_count": ok_terms_count,
+        "meta_prompt_summary": meta_prompt_summary
+    }
 
 
 # ---------------------------------------------------------------
-# 🧩 Parser briefu z obsługą BASIC / EXTENDED
+# ⚙️ Forced Regeneration / Emergency Exit
 # ---------------------------------------------------------------
-def parse_brief_to_keywords(brief_text):
-    """Parsuje brief i wyciąga frazy kluczowe BASIC / EXTENDED."""
-    keywords_dict = {}
-    headers_list = []
-    cleaned_text = "\n".join([s.strip() for s in brief_text.splitlines() if s.strip()])
+def trigger_forced_regeneration(project_id, result):
+    """Uruchamia automatyczną regenerację batcha, gdy OVER ≥10."""
+    print(f"⚠️ [Forced Regeneration] Projekt {project_id}: OVER={result['over_terms_count']}")
+    doc_ref = db.collection("seo_projects").document(project_id)
+    doc_ref.update({
+        "status": "regenerating",
+        "regeneration_triggered_at": datetime.utcnow().isoformat(),
+        "regeneration_reason": "OVER ≥ 10"
+    })
+    return True
 
-    section_regex = r"((?:BASIC|EXTENDED|H2)\s+(?:TEXT|HEADERS)\s+TERMS)\s*:\s*=*\s*([\s\S]*?)(?=\n[A-Z\s]+(?:TEXT|HEADERS)\s+TERMS|$)"
-    keyword_regex = re.compile(r"^\s*(.*?)\s*:\s*(\d+)\s*-\s*(\d+)x\s*$", re.UNICODE)
-    keyword_regex_single = re.compile(r"^\s*(.*?)\s*:\s*(\d+)x\s*$", re.UNICODE)
 
-    for match in re.finditer(section_regex, cleaned_text, re.IGNORECASE):
-        section_name_raw = match.group(1).upper()
-        section_content = match.group(2)
+def trigger_emergency_exit(project_id, result):
+    """Zatrzymuje generację, gdy LOCKED ≥4."""
+    print(f"⛔ [Emergency Exit] Projekt {project_id}: LOCKED={result['locked_terms_count']}")
+    doc_ref = db.collection("seo_projects").document(project_id)
+    doc_ref.update({
+        "status": "halted",
+        "emergency_exit_triggered_at": datetime.utcnow().isoformat(),
+        "emergency_exit_reason": "LOCKED ≥ 4"
+    })
+    return True
 
-        section_type = "BASIC"
-        if "EXTENDED" in section_name_raw:
-            section_type = "EXTENDED"
 
-        if "H2" in section_name_raw:
-            for line in section_content.splitlines():
-                if line.strip():
-                    headers_list.append(line.strip())
-            continue
+# ---------------------------------------------------------------
+# ✅ /api/project/{project_id}/add_batch
+# ---------------------------------------------------------------
+@project_bp.route("/api/project/<project_id>/add_batch", methods=["POST"])
+def add_batch_to_project(project_id):
+    try:
+        global db
+        if not db:
+            return jsonify({"error": "Firestore nie jest połączony"}), 503
 
-        for line in section_content.splitlines():
-            line = line.strip()
-            if not line:
-                continue
+        data = request.get_json(silent=True) or {}
+        text = data.get("text", "").strip()
+        if not text:
+            return jsonify({"error": "Brak tekstu batcha"}), 400
 
-            kw_match = keyword_regex.match(line)
-            if kw_match:
-                keyword = kw_match.group(1).strip()
-                min_val = int(kw_match.group(2))
-                max_val = int(kw_match.group(3))
-            else:
-                kw_match_single = keyword_regex_single.match(line)
-                if kw_match_single:
-                    keyword = kw_match_single.group(1).strip()
-                    min_val = max_val = int(kw_match_single.group(2))
-                else:
-                    continue
+        print(f"[INFO] 🧠 Analiza batcha dla projektu: {project_id}")
+        result = analyze_batch_text(project_id, text)
 
-            keyword_lemmas = lemmatize_text(keyword)
-            root_prefix = get_root_prefix(keyword_lemmas[0]) if keyword_lemmas else get_root_prefix(keyword)
+        regeneration_triggered = False
+        emergency_exit_triggered = False
 
-            if section_type == "EXTENDED":
-                min_val = max(1, round(min_val * 0.5))
-                max_val = max(1, round(max_val * 0.5))
+        if result["over_terms_count"] >= 10:
+            regeneration_triggered = trigger_forced_regeneration(project_id, result)
 
-            keywords_dict[keyword] = {
-                "type": section_type,
-                "target_min": min_val,
-                "target_max": max_val,
-                "actual": 0,
-                "contextual_hits": 0,
-                "semantic_coverage": 0.0,
-                "locked": False,
-                "lemmas": keyword_lemmas,
-                "lemma_len": len(keyword_lemmas),
-                "root_prefix": root_prefix
-            }
+        if result["locked_terms_count"] >= 4:
+            emergency_exit_triggered = trigger_emergency_exit(project_id, result)
 
-    return keywords_dict, headers_list
+        return jsonify({
+            "status": "OK",
+            "regeneration_triggered": regeneration_triggered,
+            "emergency_exit_triggered": emergency_exit_triggered,
+            "keywords_report": result["keywords_report"],
+            "meta_prompt_summary": result["meta_prompt_summary"]
+        }), 200
+
+    except Exception as e:
+        print(f"❌ Błąd /api/project/{project_id}/add_batch: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 # ---------------------------------------------------------------
@@ -217,11 +269,10 @@ def create_project():
 
 
 # ---------------------------------------------------------------
-# 🔧 Rejestracja blueprinta (zgodna z master_api.py)
+# 🔧 Rejestracja blueprinta
 # ---------------------------------------------------------------
 def register_project_routes(app, _db=None):
-    """Rejestruje blueprinta project_routes w aplikacji Flask."""
     global db
     db = _db
     app.register_blueprint(project_bp)
-    print("✅ [INIT] project_routes zarejestrowany (v7.2.1-fixed).")
+    print("✅ [INIT] project_routes zarejestrowany (v7.2.2-full + ForcedReg/EmergencyExit).")
