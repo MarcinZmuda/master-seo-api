@@ -13,10 +13,41 @@ db = None
 # ---------------------------------------------------------------
 # 🔠 Funkcje pomocnicze
 # ---------------------------------------------------------------
+
+# ---------------------------------------------------------------
+# 🔠 Funkcje pomocnicze – wersja z lematyzacją (pełne zliczanie semantyczne)
+# ---------------------------------------------------------------
+import spacy
+
+# ✅ Inicjalizacja modelu języka polskiego
+try:
+    nlp_pl = spacy.load("pl_core_news_sm")
+except:
+    import os
+    os.system("python -m spacy download pl_core_news_sm")
+    import spacy
+    nlp_pl = spacy.load("pl_core_news_sm")
+
+def lemmatize_text(text):
+    """Zwraca listę lematów (form podstawowych) z tekstu."""
+    doc = nlp_pl(text)
+    return [token.lemma_.lower() for token in doc if token.is_alpha]
+
 def count_keyword_occurrences(text, keyword):
-    """Liczy semantyczne wystąpienia frazy w tekście (bez rozróżniania wielkości liter)."""
-    pattern = re.compile(r'\b' + re.escape(keyword.lower()) + r'\b', re.UNICODE)
-    return len(pattern.findall(text.lower()))
+    """
+    Liczy wystąpienia frazy w tekście na podstawie lematów.
+    Dzięki temu 'adwokata rozwodowego' i 'adwokaci rozwodowi'
+    zliczą się jako 'adwokat rozwodowy'.
+    """
+    text_lemmas = lemmatize_text(text)
+    keyword_lemmas = lemmatize_text(keyword)
+    keyword_len = len(keyword_lemmas)
+    count = 0
+    for i in range(len(text_lemmas) - keyword_len + 1):
+        if text_lemmas[i:i + keyword_len] == keyword_lemmas:
+            count += 1
+    return count
+
 
 
 def trigger_forced_regeneration(doc_ref, project_id, over_count):
