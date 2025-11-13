@@ -1,10 +1,9 @@
 # ================================================================
-# firestore_tracker_routes.py — Warstwa Batch + Keyword Tracker (v7.2.4-firestore-lemma)
+# firestore_tracker_routes.py — Warstwa Batch + Keyword Tracker (v7.2.6-firestore-subcollection)
 # ================================================================
 
 from flask import Blueprint, request, jsonify
 from datetime import datetime
-import re
 import spacy
 
 tracker_bp = Blueprint("firestore_tracker_routes", __name__)
@@ -151,26 +150,26 @@ def add_batch(project_id):
     if emergency_exit_triggered:
         trigger_emergency_exit(doc_ref, project_id, locked_terms_count)
 
-    # 💾 Zapis batcha
-   # 🔹 Zapis tylko meta-informacji w głównym dokumencie
-batch_summary = {
-    "created_at": datetime.utcnow().isoformat(),
-    "length": len(text),
-    "summary": f"BATCH – UNDER: {under_terms_count}, OVER: {over_terms_count}, LOCKED: {locked_terms_count}, OK: {ok_terms_count}"
-}
+    # 💾 Zapis batcha (nowy — z subkolekcją)
+    batch_summary = {
+        "created_at": datetime.utcnow().isoformat(),
+        "length": len(text),
+        "summary": f"BATCH – UNDER: {under_terms_count}, OVER: {over_terms_count}, LOCKED: {locked_terms_count}, OK: {ok_terms_count}"
+    }
 
-doc_ref.update({
-    "keywords_state": keywords_state,
-    "status": "updated",
-    "last_batch_summary": batch_summary
-})
+    # 🔹 Zapis tylko meta w głównym dokumencie
+    doc_ref.update({
+        "keywords_state": keywords_state,
+        "status": "updated",
+        "last_batch_summary": batch_summary
+    })
 
-# 🔹 Pełny tekst batcha zapisujemy do subkolekcji, żeby nie blokować limitów
-batch_ref = db.collection("seo_projects").document(project_id).collection("batches").document()
-batch_ref.set({
-    "text": text,
-    "meta": batch_summary
-})
+    # 🔹 Pełny tekst batcha w subkolekcji
+    batch_ref = doc_ref.collection("batches").document()
+    batch_ref.set({
+        "text": text,
+        "meta": batch_summary
+    })
 
     # 🧠 Raport
     meta_prompt_summary = {
@@ -206,4 +205,4 @@ def register_tracker_routes(app, _db=None):
     global db
     db = _db
     app.register_blueprint(tracker_bp)
-    print("✅ [INIT] firestore_tracker_routes zarejestrowany (v7.2.4-firestore-lemma).")
+    print("✅ [INIT] firestore_tracker_routes zarejestrowany (v7.2.6-firestore-subcollection).")
