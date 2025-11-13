@@ -1,5 +1,5 @@
 # ================================================================
-# project_routes.py — Warstwa Project Management (v7.2.3-firestore-lemmaMode)
+# project_routes.py — Warstwa Project Management (v7.2.3-firestore-lemmaMode + Firestore Delegation)
 # ================================================================
 
 import os
@@ -10,7 +10,6 @@ from datetime import datetime
 import requests
 from firebase_admin import firestore
 import spacy
-from collections import Counter
 
 # ---------------------------------------------------------------
 # 🔐 Inicjalizacja Firebase i spaCy
@@ -84,6 +83,7 @@ def lemmatize_text(text):
 # 🔧 Firestore + API pomocnicze
 # ---------------------------------------------------------------
 def call_s1_analysis(topic):
+    """Wywołuje analizę S1 na Master API."""
     try:
         base_url = os.getenv("API_BASE_URL", "http://localhost:8080")
         url = f"{base_url}/api/s1_analysis"
@@ -96,150 +96,18 @@ def call_s1_analysis(topic):
 
 
 # ---------------------------------------------------------------
-# 🧩 Analiza batcha — lematyczne zliczanie fraz
+# ✅ /api/project/{project_id}/add_batch — DELEGACJA DO FIRESTORE TRACKER
 # ---------------------------------------------------------------
-def count_keyword_occurrences_lemma(text_lemmas, keyword_lemmas):
-    """Zlicza wystąpienia sekwencji lematów w tekście."""
-    keyword_len = len(keyword_lemmas)
-    count = 0
-    for i in range(len(text_lemmas) - keyword_len + 1):
-        if text_lemmas[i:i + keyword_len] == keyword_lemmas:
-            count += 1
-    return count
+from firestore_tracker_routes import add_batch as firestore_add_batch
 
-
-def analyze_batch_text(project_id, text):
-    """Analizuje batch w trybie lemmaMode (pełne zliczanie semantyczne)."""
-    doc_ref = db.collection("seo_projects").document(project_id)
-    project_data = doc_ref.get().to_dict()
-    if not project_data:
-        raise ValueError("Projekt nie istnieje")
-
-    keywords_state = project_data.get("keywords_state", {})
-    text_lemmas = lemmatize_text(text)
-
-    over_terms_count = under_terms_count = ok_terms_count = locked_terms_count = 0
-    updated_keywords = 0
-    keywords_report = []
-
-    for keyword, meta in keywords_state.items():
-        keyword_lemmas = meta.get("lemmas", lemmatize_phrase(keyword))
-        count = count_keyword_occurrences_lemma(text_lemmas, keyword_lemmas)
-        if count > 0:
-            meta["actual"] += count
-            updated_keywords += 1
-
-        if meta["actual"] < meta["target_min"]:
-            status = "UNDER"
-            under_terms_count += 1
-        elif meta["actual"] > meta["target_max"] + 10:
-            status = "OVER"
-            over_terms_count += 1
-        elif meta.get("locked"):
-            status = "LOCKED"
-            locked_terms_count += 1
-        else:
-            status = "OK"
-            ok_terms_count += 1
-
-        meta["status"] = status
-        keywords_report.append({
-            "keyword": keyword,
-            "actual_uses": meta["actual"],
-            "target_range": f"{meta['target_min']}–{meta['target_max']}x",
-            "status": status,
-            "priority_instruction": "Zredukuj użycia (OVER)" if status == "OVER" else ""
-        })
-        keywords_state[keyword] = meta
-
-    meta_prompt_summary = (
-        f"BATCH – UNDER: {under_terms_count}, OVER: {over_terms_count}, LOCKED: {locked_terms_count}, OK: {ok_terms_count}"
-    )
-
-    batch_data = {
-        "text": text[:10000],
-        "created_at": datetime.utcnow().isoformat(),
-        "summary": meta_prompt_summary
-    }
-
-    doc_ref.update({
-        "batches": firestore.ArrayUnion([batch_data]),
-        "keywords_state": keywords_state
-    })
-
-    return {
-        "keywords_report": keywords_report,
-        "over_terms_count": over_terms_count,
-        "locked_terms_count": locked_terms_count,
-        "under_terms_count": under_terms_count,
-        "ok_terms_count": ok_terms_count,
-        "meta_prompt_summary": meta_prompt_summary
-    }
-
-
-# ---------------------------------------------------------------
-# ⚙️ Forced Regeneration / Emergency Exit
-# ---------------------------------------------------------------
-def trigger_forced_regeneration(project_id, result):
-    print(f"⚠️ [Forced Regeneration] Projekt {project_id}: OVER={result['over_terms_count']}")
-    doc_ref = db.collection("seo_projects").document(project_id)
-    doc_ref.update({
-        "status": "regenerating",
-        "regeneration_triggered_at": datetime.utcnow().isoformat(),
-        "regeneration_reason": "OVER ≥10"
-    })
-    return True
-
-
-def trigger_emergency_exit(project_id, result):
-    print(f"⛔ [Emergency Exit] Projekt {project_id}: LOCKED={result['locked_terms_count']}")
-    doc_ref = db.collection("seo_projects").document(project_id)
-    doc_ref.update({
-        "status": "halted",
-        "emergency_exit_triggered_at": datetime.utcnow().isoformat(),
-        "emergency_exit_reason": "LOCKED ≥4"
-    })
-    return True
-
-
-# ---------------------------------------------------------------
-# ✅ /api/project/{project_id}/add_batch
-# ---------------------------------------------------------------
 @project_bp.route("/api/project/<project_id>/add_batch", methods=["POST"])
 def add_batch_to_project(project_id):
-    try:
-        global db
-        if not db:
-            return jsonify({"error": "Firestore nie jest połączony"}), 503
-
-        data = request.get_json(silent=True) or {}
-        text = data.get("text", "").strip()
-        if not text:
-            return jsonify({"error": "Brak tekstu batcha"}), 400
-
-        print(f"[INFO] 🧠 Analiza batcha (lemmaMode) dla projektu: {project_id}")
-        result = analyze_batch_text(project_id, text)
-
-        regeneration_triggered = result["over_terms_count"] >= 10
-        emergency_exit_triggered = result["locked_terms_count"] >= 4
-
-        if regeneration_triggered:
-            trigger_forced_regeneration(project_id, result)
-        if emergency_exit_triggered:
-            trigger_emergency_exit(project_id, result)
-
-        return jsonify({
-            "status": "OK",
-            "counting_mode": "lemma",
-            "regeneration_triggered": regeneration_triggered,
-            "emergency_exit_triggered": emergency_exit_triggered,
-            "keywords_report": result["keywords_report"],
-            "meta_prompt_summary": result["meta_prompt_summary"]
-        }), 200
-
-    except Exception as e:
-        print(f"❌ Błąd /api/project/{project_id}/add_batch: {e}")
-        return jsonify({"error": str(e)}), 500
+    """
+    Deleguje obsługę batcha do centralnego Firestore Tracker (lematyczne zliczanie fraz).
+    Dzięki temu system używa jednej, spójnej metody liczenia i unikamy duplikacji endpointów.
+    """
+    print(f"🔄 [Delegacja] Przekierowanie batcha do Firestore Tracker (lemmaMode) dla projektu: {project_id}")
+    return firestore_add_batch(project_id)
 
 
 # ---------------------------------------------------------------
@@ -247,6 +115,7 @@ def add_batch_to_project(project_id):
 # ---------------------------------------------------------------
 @project_bp.route("/api/project/create", methods=["POST"])
 def create_project():
+    """Tworzy projekt SEO w Firestore w trybie lemmaMode."""
     try:
         global db
         if not db:
@@ -274,7 +143,7 @@ def create_project():
             "headers_suggestions": headers_list,
             "s1_data": s1_data,
             "batches": [],
-            "counting_mode": "lemma",
+            "counting_mode": "firestore_remote_lemma",
             "status": "created"
         })
 
@@ -284,7 +153,7 @@ def create_project():
             "project_id": doc_ref.id,
             "topic": topic,
             "keywords": len(keywords_state),
-            "counting_mode": "lemma"
+            "counting_mode": "firestore_remote_lemma"
         }), 201
 
     except Exception as e:
@@ -296,7 +165,8 @@ def create_project():
 # 🔧 Rejestracja blueprinta
 # ---------------------------------------------------------------
 def register_project_routes(app, _db=None):
+    """Rejestruje blueprint project_routes (lemmaMode + Firestore delegacja)."""
     global db
     db = _db
     app.register_blueprint(project_bp)
-    print("✅ [INIT] project_routes zarejestrowany (v7.2.3-firestore-lemmaMode).")
+    print("✅ [INIT] project_routes zarejestrowany (v7.2.3-firestore-lemmaMode + Firestore Delegation).")
