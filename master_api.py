@@ -1,5 +1,5 @@
 # ================================================================
-# master_api.py — Master SEO API (v7.2.1-fixed + Firestore Tracker)
+# master_api.py — Master SEO API (v7.2.3-firestore-lemmaMode)
 # ================================================================
 
 import os
@@ -34,7 +34,7 @@ try:
 
     firebase_admin.initialize_app(cred)
     db = firestore.client()
-    print("✅ Firestore połączony poprawnie.")
+    print("✅ Firestore połączony poprawnie (tryb lemmaMode = ON).")
 except Exception as e:
     print(f"❌ Błąd inicjalizacji Firebase: {e}")
     db = None
@@ -78,6 +78,7 @@ def call_langextract(url):
 # -------------------------------------------------------------------
 @app.route("/api/s1_analysis", methods=["POST"])
 def perform_s1_analysis():
+    """Analiza SERP + ekstrakcja nagłówków H2, encji i n-gramów"""
     try:
         data = request.get_json()
         if not data or "topic" not in data:
@@ -112,10 +113,14 @@ def perform_s1_analysis():
 
         ngram_data = call_api_with_json(
             NGRAM_API_URL,
-            {"sources": sources_payload, "main_keyword": topic, "serp_context": {
-                "people_also_ask": people_also_ask,
-                "related_searches": autocomplete_suggestions
-            }},
+            {
+                "sources": sources_payload,
+                "main_keyword": topic,
+                "serp_context": {
+                    "people_also_ask": people_also_ask,
+                    "related_searches": autocomplete_suggestions
+                }
+            },
             "Ngram API"
         )
 
@@ -153,8 +158,8 @@ def perform_s1_analysis():
 def health():
     return jsonify({
         "status": "ok",
-        "version": "v7.2.1-fixed + tracker",
-        "message": "Master SEO API działa poprawnie (Render + Firestore OK)."
+        "version": "v7.2.3-firestore-lemmaMode",
+        "message": "Master SEO API działa poprawnie (Firestore + Lemmatyczny Tracker aktywny)."
     }), 200
 
 
@@ -171,7 +176,7 @@ except Exception as e:
 try:
     from firestore_tracker_routes import register_tracker_routes
     register_tracker_routes(app, db)
-    print("✅ Zarejestrowano firestore_tracker_routes (Tracker Layer działa).")
+    print("✅ Zarejestrowano firestore_tracker_routes (Lemmatyczny Tracker działa).")
 except Exception as e:
     print(f"❌ Nie udało się załadować firestore_tracker_routes: {e}")
 
@@ -180,5 +185,5 @@ except Exception as e:
 # -------------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8080))  # Render wymaga portu z ENV
-    print(f"🌐 Uruchamiam Master SEO API (port={port}, Firestore={'OK' if db else 'BRAK'})")
+    print(f"🌐 Uruchamiam Master SEO API (v7.2.3-firestore-lemmaMode, port={port}, Firestore={'OK' if db else 'BRAK'})")
     app.run(host="0.0.0.0", port=port)
