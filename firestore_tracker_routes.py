@@ -152,20 +152,25 @@ def add_batch(project_id):
         trigger_emergency_exit(doc_ref, project_id, locked_terms_count)
 
     # 💾 Zapis batcha
-    existing_batches = project_data.get("batches", [])
-    new_batch = {
-        "created_at": datetime.utcnow().isoformat(),
-        "length": len(text),
-        "text": text,
-        "summary": f"BATCH – UNDER: {under_terms_count}, OVER: {over_terms_count}, LOCKED: {locked_terms_count}, OK: {ok_terms_count}"
-    }
-    existing_batches.append(new_batch)
+   # 🔹 Zapis tylko meta-informacji w głównym dokumencie
+batch_summary = {
+    "created_at": datetime.utcnow().isoformat(),
+    "length": len(text),
+    "summary": f"BATCH – UNDER: {under_terms_count}, OVER: {over_terms_count}, LOCKED: {locked_terms_count}, OK: {ok_terms_count}"
+}
 
-    doc_ref.update({
-        "batches": existing_batches,
-        "keywords_state": keywords_state,
-        "status": "updated"
-    })
+doc_ref.update({
+    "keywords_state": keywords_state,
+    "status": "updated",
+    "last_batch_summary": batch_summary
+})
+
+# 🔹 Pełny tekst batcha zapisujemy do subkolekcji, żeby nie blokować limitów
+batch_ref = db.collection("seo_projects").document(project_id).collection("batches").document()
+batch_ref.set({
+    "text": text,
+    "meta": batch_summary
+})
 
     # 🧠 Raport
     meta_prompt_summary = {
