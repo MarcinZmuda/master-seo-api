@@ -197,7 +197,6 @@ def add_batch(project_id):
         "emergency_exit_triggered": emergency_exit_triggered
     }), 200
 
-
 # ---------------------------------------------------------------
 # 🔧 Rejestracja blueprinta
 # ---------------------------------------------------------------
@@ -205,5 +204,6 @@ def register_tracker_routes(app, _db=None):
     """Rejestruje blueprint firestore_tracker_routes."""
     global db
     db = _db
-    app.register_blueprint(tracker_bp)
-    print("✅ [INIT] firestore_tracker_routes zarejestrowany (v7.2.9-firestore-continuous-lemma).")
+    app.register_blueprint(tracker_bp, url_prefix="/api")  # ✅ DODANO PREFIX
+    print("✅ [INIT] firestore_tracker_routes zarejestrowany pod prefixem /api (v7.2.9-firestore-continuous-lemma).")
+
