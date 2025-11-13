@@ -28,6 +28,42 @@ except OSError:
 
 
 # ---------------------------------------------------------------
+# 🧩 parse_brief_to_keywords — parser briefu BASIC / EXTENDED
+# ---------------------------------------------------------------
+def parse_brief_to_keywords(brief_text):
+    """
+    Parsuje brief SEO (sekcje BASIC / EXTENDED) i zwraca:
+    - keywords_state: słownik fraz z zakresem i statusem
+    - headers_list: lista fraz bazowa dla dalszych nagłówków (opcjonalna)
+    """
+    import re
+    lines = [line.strip() for line in brief_text.splitlines() if line.strip()]
+    keywords_state = {}
+    headers_list = []
+
+    pattern = re.compile(r"^(.*?)\s*:\s*(\d+)[–-](\d+)x?$")
+
+    for line in lines:
+        match = pattern.match(line)
+        if match:
+            keyword = match.group(1).strip()
+            min_count = int(match.group(2))
+            max_count = int(match.group(3))
+            keywords_state[keyword] = {
+                "target_min": min_count,
+                "target_max": max_count,
+                "actual": 0,
+                "status": "UNDER",
+                "locked": False,
+                "lemmas": [keyword.lower()]  # uproszczony lemat
+            }
+            headers_list.append(keyword)
+
+    print(f"🧠 parse_brief_to_keywords → {len(keywords_state)} fraz zbriefowanych.")
+    return keywords_state, headers_list
+
+
+# ---------------------------------------------------------------
 # 🧠 Funkcje językowe
 # ---------------------------------------------------------------
 def lemmatize_text(text):
