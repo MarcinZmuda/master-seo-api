@@ -121,9 +121,10 @@ def summarize_batches(project_id):
 # ---------------------------------------------------------------
 # 🔧 Rejestracja blueprinta
 # ---------------------------------------------------------------
-def register_batch_summary_routes(app, _db=None):
-    """Rejestruje blueprint batch_summary_routes."""
+def register_project_routes(app, _db=None):
+    """Rejestruje blueprint project_routes."""
     global db
     db = _db
-    app.register_blueprint(batch_summary_bp)
-    print("✅ [INIT] firestore_batch_summary_routes zarejestrowany (v7.2.8-firestore-summarizer).")
+    app.register_blueprint(project_bp, url_prefix="/api")  # ✅ DODANO PREFIX
+    print("✅ [INIT] project_routes zarejestrowany pod prefixem /api (v7.2.5-firestore-primary-remote).")
+
