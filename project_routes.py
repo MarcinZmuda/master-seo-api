@@ -96,7 +96,7 @@ def call_s1_analysis(topic):
     try:
         base_url = os.getenv("API_BASE_URL", "https://master-seo-api.onrender.com")
         url = f"{base_url}/api/s1_analysis"
-        r = requests.post(url, json={"topic": topic}, timeout=120)
+        r = requests.post(url, json={"topic": topic}, timeout=300)
         r.raise_for_status()
         return r.json()
     except Exception as e:
