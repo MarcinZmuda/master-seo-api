@@ -3,7 +3,4 @@ python-dotenv
 firebase-admin
 requests
 gunicorn
-
-# Dodane zależności do obsługi lematyzacji
 spacy==3.7.2
-https://github.com/explosion/spacy-models/releases/download/pl_core_news_sm-3.7.0/pl_core_news_sm-3.7.0.tar.gz
