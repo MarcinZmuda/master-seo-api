@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: master-seo-api
+    env: python
+    plan: free
+    buildCommand: |
+      pip install -r requirements.txt
+      python -m spacy download pl_core_news_sm
+    startCommand: gunicorn master_api:app --bind 0.0.0.0:$PORT --timeout 300
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: API_BASE_URL
+        value: https://master-seo-api.onrender.com
