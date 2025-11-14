@@ -5,7 +5,6 @@
 import os
 import re
 import json
-import base64
 import requests
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
@@ -13,17 +12,20 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from collections import Counter
 
-# --- Inicjalizacja ---
+# ================================================================
+# 🧩 Inicjalizacja aplikacji Flask + środowiska
+# ================================================================
 load_dotenv()
 app = Flask(__name__)
 
-# -------------------------------------------------------------------
+# ================================================================
 # 🔧 Konfiguracja Firebase (Firestore)
-# -------------------------------------------------------------------
+# ================================================================
 try:
     FIREBASE_CREDS_JSON = os.getenv("FIREBASE_CREDS_JSON")
+
     if not FIREBASE_CREDS_JSON:
-        print("⚠️ Brak zmiennej FIREBASE_CREDS_JSON — próba użycia pliku lokalnego.")
+        print("⚠️ Brak FIREBASE_CREDS_JSON — próba użycia pliku lokalnego serviceAccountKey.json")
         if os.path.exists("serviceAccountKey.json"):
             cred = credentials.Certificate("serviceAccountKey.json")
         else:
@@ -35,13 +37,14 @@ try:
     firebase_admin.initialize_app(cred)
     db = firestore.client()
     print("✅ Firestore połączony poprawnie (tryb lemmaMode = ON).")
+
 except Exception as e:
     print(f"❌ Błąd inicjalizacji Firebase: {e}")
     db = None
 
-# -------------------------------------------------------------------
-# 🌐 API Zewnętrzne (S1)
-# -------------------------------------------------------------------
+# ================================================================
+# 🌐 Konfiguracja API zewnętrznych (S1)
+# ================================================================
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 SERPAPI_URL = "https://serpapi.com/search"
 LANGEXTRACT_API_URL = "https://langextract-api.onrender.com/extract"
@@ -49,6 +52,7 @@ NGRAM_API_URL = "https://gpt-ngram-api.onrender.com/api/ngram_entity_analysis"
 
 
 def call_api_with_json(url, payload, name):
+    """Pomocnicza funkcja do bezpiecznych wywołań POST JSON."""
     try:
         r = requests.post(url, json=payload, timeout=120)
         r.raise_for_status()
@@ -59,6 +63,7 @@ def call_api_with_json(url, payload, name):
 
 
 def call_serpapi(topic):
+    """Pobiera wyniki SERP z SerpAPI."""
     params = {"api_key": SERPAPI_KEY, "q": topic, "gl": "pl", "hl": "pl", "engine": "google"}
     try:
         r = requests.get(SERPAPI_URL, params=params, timeout=30)
@@ -70,15 +75,16 @@ def call_serpapi(topic):
 
 
 def call_langextract(url):
+    """Pobiera dane z LangExtract API."""
     return call_api_with_json(LANGEXTRACT_API_URL, {"url": url}, "LangExtract")
 
 
-# -------------------------------------------------------------------
-# 🧠 /api/s1_analysis — analiza konkurencji + n-gramy
-# -------------------------------------------------------------------
+# ================================================================
+# 🧠 /api/s1_analysis — analiza SERP + n-gramy
+# ================================================================
 @app.route("/api/s1_analysis", methods=["POST"])
 def perform_s1_analysis():
-    """Analiza SERP + ekstrakcja nagłówków H2, encji i n-gramów"""
+    """Analiza SERP + ekstrakcja nagłówków H2, encji i n-gramów."""
     try:
         data = request.get_json()
         if not data or "topic" not in data:
@@ -94,19 +100,18 @@ def perform_s1_analysis():
         autocomplete_suggestions = [r.get("query") for r in serp_data.get("related_searches", []) if r.get("query")]
         top_urls = [r.get("link") for r in serp_data.get("organic_results", [])[:7]]
 
-        print(f"🔍 [DEBUG] Analiza {len(top_urls)} wyników SERP dla: {topic}")
+        print(f"🔍 Analiza {len(top_urls)} wyników SERP dla: {topic}")
 
         sources_payload, h2_counts, text_lengths, all_headings = [], [], [], []
 
         for url in top_urls[:5]:
             content = call_langextract(url)
             if content and content.get("content"):
-                text = content.get("content", "")
+                text = content["content"]
                 h2s = content.get("h2", [])
                 h2_counts.append(len(h2s))
                 all_headings.extend([h.strip().lower() for h in h2s])
-                word_count = len(re.findall(r'\w+', text))
-                text_lengths.append(word_count)
+                text_lengths.append(len(re.findall(r'\w+', text)))
                 sources_payload.append({"url": url, "content": text})
             else:
                 print(f"⚠️ Brak treści dla {url}")
@@ -151,11 +156,12 @@ def perform_s1_analysis():
         return jsonify({"error": str(e)}), 500
 
 
-# -------------------------------------------------------------------
+# ================================================================
 # ❤️ Health Check
-# -------------------------------------------------------------------
+# ================================================================
 @app.route("/api/health", methods=["GET"])
 def health():
+    """Zwraca status API i wersję."""
     return jsonify({
         "status": "ok",
         "version": "v7.2.3-firestore-lemmaMode",
@@ -163,9 +169,9 @@ def health():
     }), 200
 
 
-# -------------------------------------------------------------------
-# 🔗 Integracja: Project Management Layer + Firestore Tracker
-# -------------------------------------------------------------------
+# ================================================================
+# 🔗 Rejestracja warstw: Project Routes, Firestore Tracker, Batch Summarizer
+# ================================================================
 try:
     from project_routes import register_project_routes
     register_project_routes(app, db)
@@ -180,10 +186,18 @@ try:
 except Exception as e:
     print(f"❌ Nie udało się załadować firestore_tracker_routes: {e}")
 
-# -------------------------------------------------------------------
+try:
+    from firestore_batch_summary_routes import register_batch_summary_routes
+    register_batch_summary_routes(app, db)
+    print("✅ Zarejestrowano firestore_batch_summary_routes (Batch Summarizer działa).")
+except Exception as e:
+    print(f"❌ Nie udało się załadować firestore_batch_summary_routes: {e}")
+
+
+# ================================================================
 # 🚀 Uruchomienie (Render-compatible)
-# -------------------------------------------------------------------
+# ================================================================
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8080))  # Render wymaga portu z ENV
+    port = int(os.getenv("PORT", 8080))
     print(f"🌐 Uruchamiam Master SEO API (v7.2.3-firestore-lemmaMode, port={port}, Firestore={'OK' if db else 'BRAK'})")
     app.run(host="0.0.0.0", port=port)
