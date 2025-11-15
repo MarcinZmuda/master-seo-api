@@ -73,7 +73,7 @@ def trigger_emergency_exit(doc_ref, project_id, locked_count):
 # ===============================================================
 # ✅ /api/project/<project_id>/add_batch — CIĄGŁE LICZENIE
 # ===============================================================
-@tracker_bp.route("/api/project/<project_id>/add_batch", methods=["POST"])
+@tracker_bp.route("/project/<project_id>/add_batch", methods=["POST"])
 def add_batch(project_id):
     """
     Dodaje batch treści do projektu Firestore.
