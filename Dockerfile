@@ -1,19 +1,22 @@
 FROM python:3.11-slim
 
-# system dependencies required for spaCy
+# Dependencies for spaCy
 RUN apt-get update && apt-get install -y build-essential gcc
 
 WORKDIR /app
 
+# Install Python deps first (layer caching)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Download spaCy model
+# Install spaCy model
 RUN python -m spacy download pl_core_news_sm
 
+# Copy application code
 COPY . .
 
+# Expose Render port
 EXPOSE 10000
 
-# Proper startup command: run master_api:app via gunicorn
+# Proper startup command
 CMD ["gunicorn", "master_api:app", "--bind", "0.0.0.0:10000"]
