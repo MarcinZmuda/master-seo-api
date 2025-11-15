@@ -161,7 +161,6 @@ def perform_s1_analysis():
 # ================================================================
 @app.route("/api/health", methods=["GET"])
 def health():
-    """Zwraca status API i wersję."""
     return jsonify({
         "status": "ok",
         "version": "v7.2.3-firestore-lemmaMode",
@@ -170,7 +169,7 @@ def health():
 
 
 # ================================================================
-# 🔗 Rejestracja warstw: Project Routes, Firestore Tracker, Batch Summarizer
+# 🔗 Rejestracja warstw: Project Routes + Firestore Tracker
 # ================================================================
 try:
     from project_routes import register_project_routes
@@ -186,12 +185,15 @@ try:
 except Exception as e:
     print(f"❌ Nie udało się załadować firestore_tracker_routes: {e}")
 
-try:
-    from firestore_batch_summary_routes import register_batch_summary_routes
-    register_batch_summary_routes(app, db)
-    print("✅ Zarejestrowano firestore_batch_summary_routes (Batch Summarizer działa).")
-except Exception as e:
-    print(f"❌ Nie udało się załadować firestore_batch_summary_routes: {e}")
+# 🔇 WYŁĄCZONE — nie masz tego pliku i nie jest potrzebny
+# ================================================================
+# try:
+#     from firestore_batch_summary_routes import register_batch_summary_routes
+#     register_batch_summary_routes(app, db)
+#     print("✅ Zarejestrowano firestore_batch_summary_routes (Batch Summarizer działa).")
+# except Exception as e:
+#     print(f"❌ Nie udało się załadować firestore_batch_summary_routes: {e}")
+# ================================================================
 
 
 # ================================================================
