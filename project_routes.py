@@ -102,9 +102,9 @@ def call_s1_analysis(topic):
 
 
 # ---------------------------------------------------------------
-# ✅ /api/project/create — tworzy nowy projekt Firestore
+# ✅ /project/create — tworzy nowy projekt Firestore
 # ---------------------------------------------------------------
-@project_bp.route("/api/project/create", methods=["POST"])
+@project_bp.route("/project/create", methods=["POST"])
 def create_project():
     """Tworzy nowy projekt Firestore z briefem SEO i strukturą lemmaMode."""
     try:
