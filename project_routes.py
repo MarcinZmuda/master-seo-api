@@ -1,5 +1,5 @@
 # ================================================================
-# project_routes.py — Project Management Layer (v7.2.9-firestore-primary-remote)
+# project_routes.py — Project Management Layer (v7.3.1-firestore-clean)
 # ================================================================
 
 import os
@@ -166,7 +166,8 @@ def add_batch_to_project(project_id):
             return jsonify({"error": "Brak tekstu batcha"}), 400
 
         base_url = os.getenv("API_BASE_URL", "https://master-seo-api.onrender.com")
-        tracker_url = f"{base_url}/api/project/{project_id}/add_batch"
+        # ✅ Poprawiony URL – bez dodatkowego /api/
+        tracker_url = f"{base_url}/project/{project_id}/add_batch"
 
         print(f"[INFO] 🔄 Deleguję batch do Firestore Tracker → {tracker_url}")
 
@@ -200,9 +201,9 @@ def add_batch_to_project(project_id):
 # ---------------------------------------------------------------
 # 🔧 Rejestracja blueprinta
 # ---------------------------------------------------------------
-def register_project_routes(app, _db=None):
-    """Rejestruje blueprint project_routes."""
+def register_project_routes(app, _db=None, prefix="/api"):
+    """Rejestruje blueprint project_routes z prefiksem /api."""
     global db
     db = _db
-    app.register_blueprint(project_bp, url_prefix="/api")
-    print("✅ [INIT] project_routes zarejestrowany pod prefixem /api (v7.2.9-firestore-primary-remote).")
+    app.register_blueprint(project_bp, url_prefix=prefix)
+    print(f"✅ [INIT] project_routes zarejestrowany pod prefixem {prefix} (v7.3.1-firestore-clean).")
