@@ -1,6 +1,6 @@
 # ================================================================
 # firestore_tracker_routes.py — Warstwa Batch + Keyword Tracker
-# v7.3.0-firestore-continuous-lemma (stabilna wersja produkcyjna)
+# v7.3.1-firestore-lemma-clean (stabilna wersja produkcyjna)
 # ================================================================
 
 from flask import Blueprint, request, jsonify
@@ -57,7 +57,6 @@ def trigger_forced_regeneration(doc_ref, project_id, over_count):
         "regeneration_triggered_at": datetime.utcnow().isoformat(),
         "regeneration_reason": "OVER ≥10"
     })
-    return True
 
 
 def trigger_emergency_exit(doc_ref, project_id, locked_count):
@@ -67,11 +66,10 @@ def trigger_emergency_exit(doc_ref, project_id, locked_count):
         "emergency_exit_triggered_at": datetime.utcnow().isoformat(),
         "emergency_exit_reason": "LOCKED ≥4"
     })
-    return True
 
 
 # ===============================================================
-# ✅ /api/project/<project_id>/add_batch — CIĄGŁE LICZENIE
+# ✅ /project/<project_id>/add_batch — CIĄGŁE LICZENIE
 # ===============================================================
 @tracker_bp.route("/project/<project_id>/add_batch", methods=["POST"])
 def add_batch(project_id):
@@ -200,9 +198,9 @@ def add_batch(project_id):
 # ===============================================================
 # 🔧 Rejestracja blueprinta
 # ===============================================================
-def register_tracker_routes(app, _db=None):
-    """Rejestruje blueprint firestore_tracker_routes."""
+def register_tracker_routes(app, _db=None, prefix="/api"):
+    """Rejestruje blueprint firestore_tracker_routes z JEDNYM prefixem /api."""
     global db
     db = _db
-    app.register_blueprint(tracker_bp, url_prefix="/api")
-    print("✅ [INIT] firestore_tracker_routes zarejestrowany pod prefixem /api (v7.3.0-firestore-continuous-lemma).")
+    app.register_blueprint(tracker_bp, url_prefix=prefix)
+    print(f"✅ [INIT] firestore_tracker_routes zarejestrowany pod prefixem {prefix} (v7.3.1-firestore-lemma-clean).")
