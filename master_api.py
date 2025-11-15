@@ -42,6 +42,7 @@ except Exception as e:
     print(f"❌ Błąd inicjalizacji Firebase: {e}")
     db = None
 
+
 # ================================================================
 # 🌐 Konfiguracja API zewnętrznych (S1)
 # ================================================================
@@ -52,7 +53,6 @@ NGRAM_API_URL = "https://gpt-ngram-api.onrender.com/api/ngram_entity_analysis"
 
 
 def call_api_with_json(url, payload, name):
-    """Pomocnicza funkcja do bezpiecznych wywołań POST JSON."""
     try:
         r = requests.post(url, json=payload, timeout=120)
         r.raise_for_status()
@@ -63,7 +63,6 @@ def call_api_with_json(url, payload, name):
 
 
 def call_serpapi(topic):
-    """Pobiera wyniki SERP z SerpAPI."""
     params = {"api_key": SERPAPI_KEY, "q": topic, "gl": "pl", "hl": "pl", "engine": "google"}
     try:
         r = requests.get(SERPAPI_URL, params=params, timeout=30)
@@ -75,7 +74,6 @@ def call_serpapi(topic):
 
 
 def call_langextract(url):
-    """Pobiera dane z LangExtract API."""
     return call_api_with_json(LANGEXTRACT_API_URL, {"url": url}, "LangExtract")
 
 
@@ -84,7 +82,6 @@ def call_langextract(url):
 # ================================================================
 @app.route("/api/s1_analysis", methods=["POST"])
 def perform_s1_analysis():
-    """Analiza SERP + ekstrakcja nagłówków H2, encji i n-gramów."""
     try:
         data = request.get_json()
         if not data or "topic" not in data:
@@ -185,21 +182,14 @@ try:
 except Exception as e:
     print(f"❌ Nie udało się załadować firestore_tracker_routes: {e}")
 
-# 🔇 WYŁĄCZONE — nie masz tego pliku i nie jest potrzebny
-# ================================================================
-# try:
-#     from firestore_batch_summary_routes import register_batch_summary_routes
-#     register_batch_summary_routes(app, db)
-#     print("✅ Zarejestrowano firestore_batch_summary_routes (Batch Summarizer działa).")
-# except Exception as e:
-#     print(f"❌ Nie udało się załadować firestore_batch_summary_routes: {e}")
-# ================================================================
-
 
 # ================================================================
 # 🚀 Uruchomienie (Render-compatible)
 # ================================================================
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8080))
+    port = int(os.environ.get("PORT", "10000"))
+
+    print(f"🔥 Render PORT env: {os.environ.get('PORT')}")
     print(f"🌐 Uruchamiam Master SEO API (v7.2.3-firestore-lemmaMode, port={port}, Firestore={'OK' if db else 'BRAK'})")
+
     app.run(host="0.0.0.0", port=port)
