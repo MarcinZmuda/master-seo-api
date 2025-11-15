@@ -102,9 +102,9 @@ def call_s1_analysis(topic):
 
 
 # ---------------------------------------------------------------
-# ✅ /api/project/create — tworzy nowy projekt Firestore
+# ✅ /project/create — tworzy nowy projekt Firestore
 # ---------------------------------------------------------------
-@project_bp.route("/api/project/create", methods=["POST"])
+@project_bp.route("/project/create", methods=["POST"])
 def create_project():
     """Tworzy nowy projekt Firestore z briefem SEO i strukturą lemmaMode."""
     try:
@@ -149,14 +149,14 @@ def create_project():
         }), 201
 
     except Exception as e:
-        print(f"❌ Błąd /api/project/create: {e}")
+        print(f"❌ Błąd /project/create: {e}")
         return jsonify({"error": str(e)}), 500
 
 
 # ---------------------------------------------------------------
-# ✅ /api/project/<project_id>/add_batch — wysyła batch do Firestore Tracker
+# ✅ /project/<project_id>/add_batch — wysyła batch do Firestore Tracker
 # ---------------------------------------------------------------
-@project_bp.route("/api/project/<project_id>/add_batch", methods=["POST"])
+@project_bp.route("/project/<project_id>/add_batch", methods=["POST"])
 def add_batch_to_project(project_id):
     """Przekazuje batch do Firestore Tracker API (pełne liczenie lematyczne)."""
     try:
