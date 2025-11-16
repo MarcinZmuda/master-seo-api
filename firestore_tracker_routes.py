@@ -73,7 +73,13 @@ def trigger_emergency_exit(doc_ref, project_id, locked_count):
 # ===============================================================
 # ✅ /api/project/<project_id>/add_batch — CIĄGŁE LICZENIE
 # ===============================================================
-@tracker_bp.route("/api/project/<project_id>/add_batch", methods=["POST"])
+# ❗❗❗ POPRAWIONA ŚCIEŻKA ❗❗❗
+# Było: "/api/project/<project_id>/add_batch"
+# Jest:  "/project/<project_id>/add_batch"
+# Połączenie z prefixem "/api" daje finalnie:
+#         /api/project/<project_id>/add_batch
+# ===============================================================
+@tracker_bp.route("/project/<project_id>/add_batch", methods=["POST"])
 def add_batch(project_id):
     """
     Dodaje batch treści do projektu Firestore.
@@ -118,9 +124,9 @@ def add_batch(project_id):
         count = count_keyword_occurrences_in_lemmas(text_lemmas, keyword)
         if count > 0:
             info["actual"] = info.get("actual", 0) + count
-            updated_keywords += 1
+            updated_keywords += 0
 
-        # Klasyfikacja statusu
+        # Status logic
         if info["actual"] < info["target_min"]:
             status = "UNDER"
             under_terms_count += 1
@@ -132,12 +138,14 @@ def add_batch(project_id):
             ok_terms_count += 1
 
         info["status"] = status
+
         keywords_report.append({
             "keyword": keyword,
             "actual_uses": info["actual"],
             "target_range": f"{info['target_min']}-{info['target_max']}",
             "status": status
         })
+
         keywords_state[keyword] = info
 
     # 🔒 LOCKED = OVER
