@@ -90,10 +90,17 @@ def parse_brief_to_keywords(brief_text):
 # 🔧 Firestore + API pomocnicze
 # ---------------------------------------------------------------
 def call_s1_analysis(topic):
-    """Wywołuje endpoint /api/s1_analysis dla tematu."""
+    """
+    Wywołuje endpoint /api/s1_analysis dla tematu.
+    ⛔ NIE KORZYSTAMY już z publicznego URL (Render), żeby uniknąć 499/timeout.
+    ✅ Zamiast tego domyślnie korzystamy z localhost:10000 (ten sam kontener).
+    """
     try:
-        base_url = os.getenv("API_BASE_URL", "https://master-seo-api.onrender.com")
+        # WAŻNE: domyślnie uderzamy w lokalny serwer w tym samym kontenerze
+        base_url = os.getenv("API_BASE_URL", "http://127.0.0.1:10000")
         url = f"{base_url}/api/s1_analysis"
+        print(f"[DEBUG] S1 Analysis call → {url} (topic='{topic}')")
+
         r = requests.post(url, json={"topic": topic}, timeout=300)
         r.raise_for_status()
         return r.json()
@@ -124,6 +131,8 @@ def create_project():
 
         print(f"[DEBUG] Tworzenie projektu Firestore: {topic}")
         keywords_state, headers_list = parse_brief_to_keywords(brief_text)
+
+        # 🔍 S1 Analysis — teraz lokalnie po localhost (bez self-call przez Render)
         s1_data = call_s1_analysis(topic)
 
         doc_ref = db.collection("seo_projects").document()
@@ -167,7 +176,8 @@ def add_batch_to_project(project_id):
         if not text:
             return jsonify({"error": "Brak tekstu batcha"}), 400
 
-        base_url = os.getenv("API_BASE_URL", "https://master-seo-api.onrender.com")
+        # Tu też możesz w przyszłości użyć localhost, ale na razie domyślne API_BASE_URL może zostać
+        base_url = os.getenv("API_BASE_URL", "http://127.0.0.1:10000")
         tracker_url = f"{base_url}/api/project/{project_id}/add_batch"
 
         print(f"[INFO] 🔄 Deleguję batch do Firestore Tracker → {tracker_url}")
