@@ -5,16 +5,10 @@
 
 import os
 import re
-import json
 import requests
 from flask import Blueprint, request, jsonify
 from datetime import datetime
 import spacy
-
-# ---------------------------------------------------------------
-# 🔧 Feature flag — czy wymuszać S1 w create_project?
-# ---------------------------------------------------------------
-ENABLE_CREATE_PROJECT_S1 = os.getenv("ENABLE_CREATE_PROJECT_S1", "false").lower() == "true"
 
 # ---------------------------------------------------------------
 # 🔧 Inicjalizacja
@@ -37,8 +31,9 @@ except OSError:
 # 🧩 Lematyzacja fraz
 # ---------------------------------------------------------------
 def lemmatize_phrase(phrase):
-    """Zwraca listę lematów dla frazy."""
+    """Zwraca listę lematów dla frazy (do trackera Firestore)."""
     if not NLP:
+        # awaryjnie: split po białych znakach + lower
         return phrase.lower().split()
     doc = NLP(phrase.lower())
     return [token.lemma_ for token in doc if token.is_alpha]
@@ -48,22 +43,39 @@ def lemmatize_phrase(phrase):
 # 🧾 Parser briefu SEO (BASIC / EXTENDED)
 # ---------------------------------------------------------------
 def parse_brief_to_keywords(brief_text):
-    """Parsuje brief SEO (BASIC TEXT TERMS / EXTENDED TEXT TERMS)."""
+    """
+    Parsuje brief SEO w formacie:
+
+    BASIC TEXT TERMS:
+    fraza 1: 8-12x
+    fraza 2: 3–7x
+
+    EXTENDED TEXT TERMS:
+    fraza 3: 2-4x
+    ...
+
+    Zwraca:
+      - keywords_state: dict do zapisania w Firestore
+      - headers_list: lista samych fraz (np. do sugestii nagłówków)
+    """
     lines = [line.strip() for line in brief_text.splitlines() if line.strip()]
     keywords_state = {}
     headers_list = []
     current_section = None
 
+    # Obsługa "–" i "-" oraz opcjonalnego "x" na końcu
     pattern = re.compile(r"^(.*?)\s*:\s*(\d+)[–-](\d+)x?$")
 
     for line in lines:
-        if "BASIC TEXT TERMS" in line.upper():
+        upper = line.upper()
+        if "BASIC TEXT TERMS" in upper:
             current_section = "basic"
             continue
-        elif "EXTENDED TEXT TERMS" in line.upper():
+        elif "EXTENDED TEXT TERMS" in upper:
             current_section = "extended"
             continue
         elif line.startswith("="):
+            # linie typu "====" pomijamy
             continue
 
         match = pattern.match(line)
@@ -72,7 +84,7 @@ def parse_brief_to_keywords(brief_text):
             min_count = int(match.group(2))
             max_count = int(match.group(3))
 
-            # EXTENDED → zakres x0.5
+            # EXTENDED → zakres x0.5 (łagodniejsze limity)
             if current_section == "extended":
                 min_count = max(1, round(min_count * 0.5))
                 max_count = max(1, round(max_count * 0.5))
@@ -92,32 +104,18 @@ def parse_brief_to_keywords(brief_text):
 
 
 # ---------------------------------------------------------------
-# 🔧 Firestore + API pomocnicze
-# ---------------------------------------------------------------
-def call_s1_analysis(topic):
-    """
-    Wywołuje endpoint /api/s1_analysis dla tematu.
-    ⛔ NIE KORZYSTAMY już z publicznego URL (Render), żeby uniknąć timeoutów.
-    """
-    try:
-        base_url = os.getenv("API_BASE_URL", "http://127.0.0.1:10000")
-        url = f"{base_url}/api/s1_analysis"
-        print(f"[DEBUG] S1 Analysis call → {url} (topic='{topic}')")
-
-        r = requests.post(url, json={"topic": topic}, timeout=300)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        print(f"[WARN] Błąd S1 Analysis: {e}")
-        return {"error": str(e)}
-
-
-# ---------------------------------------------------------------
-# ✅ /api/project/create — Tworzy projekt
+# ✅ /api/project/create — Tworzy projekt (bez S1 w backendzie)
 # ---------------------------------------------------------------
 @project_bp.route("/project/create", methods=["POST"])
 def create_project():
-    """Tworzy projekt Firestore z briefem SEO i strukturą lemmaMode."""
+    """
+    Tworzy projekt Firestore z briefem SEO i strukturą lemmaMode.
+
+    WAŻNE:
+    - Ten endpoint NIE wywołuje już /api/s1_analysis.
+    - Analiza S1 jest wykonywana osobno przez GPT (POST /api/s1_analysis),
+      a wynik może być opcjonalnie przekazany w polu "s1_data" w request body.
+    """
     try:
         global db
         if not db:
@@ -128,6 +126,7 @@ def create_project():
         data = request.get_json(silent=True) or {}
         topic = data.get("topic", "").strip()
         brief_text = data.get("brief_text", "")
+        s1_data_from_client = data.get("s1_data")  # opcjonalne
 
         if not topic:
             return jsonify({"error": "Brak 'topic'"}), 400
@@ -135,17 +134,11 @@ def create_project():
         print(f"[DEBUG] Tworzenie projektu Firestore: {topic}")
         keywords_state, headers_list = parse_brief_to_keywords(brief_text)
 
-        # -------------------------------------------------------------------
-        # 🔍 S1 SKIP / lub opcjonalnie S1 CALL na podstawie feature flag
-        # -------------------------------------------------------------------
-        if ENABLE_CREATE_PROJECT_S1:
-            print("[INFO] ENABLE_CREATE_PROJECT_S1=true → wykonuję S1 w /create_project")
-            s1_data = call_s1_analysis(topic)
+        # Jeśli GPT kiedyś zacznie przekazywać wynik S1 w body → zapisz
+        if s1_data_from_client is None:
+            s1_data = {"status": "not_provided", "note": "S1 wykonywane po stronie GPT / osobny krok."}
         else:
-            print("[INFO] S1 pomijane — GPT wykonał analizę SERP (safe mode).")
-            s1_data = {"status": "skipped", "reason": "handled_by_GPT"}
-
-        # -------------------------------------------------------------------
+            s1_data = s1_data_from_client
 
         doc_ref = db.collection("seo_projects").document()
         doc_ref.set({
@@ -177,55 +170,34 @@ def create_project():
 
 
 # ---------------------------------------------------------------
-# ✅ /api/project/<project_id>/add_batch — delegacja do Tracker API
+# ❌ USUNIĘTO: /api/project/<project_id>/add_batch (delegacja HTTP)
 # ---------------------------------------------------------------
-@project_bp.route("/project/<project_id>/add_batch", methods=["POST"])
-def add_batch_to_project(project_id):
-    """Przekazuje batch do Firestore Tracker API."""
-    try:
-        data = request.get_json(silent=True) or {}
-        text = data.get("text", "").strip()
-        if not text:
-            return jsonify({"error": "Brak tekstu batcha"}), 400
-
-        base_url = os.getenv("API_BASE_URL", "http://127.0.0.1:10000")
-        tracker_url = f"{base_url}/api/project/{project_id}/add_batch"
-
-        print(f"[INFO] 🔄 Deleguję batch do Firestore Tracker → {tracker_url}")
-
-        try:
-            r = requests.post(tracker_url, json={"text": text}, timeout=120)
-        except requests.exceptions.ConnectionError:
-            print("⚠️ Firestore Tracker offline — zapisuję batch lokalnie (mirror mode).")
-            os.makedirs("./offline_batches", exist_ok=True)
-            file_path = f"./offline_batches/{project_id}_mirror.txt"
-            with open(file_path, "a", encoding="utf-8") as f:
-                f.write(f"\n\n[BATCH {datetime.utcnow().isoformat()}]\n{text}\n")
-            return jsonify({
-                "status": "⚠️ Firestore Tracker offline – batch zapisany lokalnie",
-                "project_id": project_id,
-                "mirror_file": file_path
-            }), 503
-
-        if r.status_code != 200:
-            print(f"[WARN] Tracker zwrócił błąd: {r.status_code} – {r.text}")
-            return jsonify({"error": f"Firestore Tracker error: {r.text}"}), r.status_code
-
-        response_data = r.json()
-        print(f"[OK] 🔢 Raport Firestore Tracker: {response_data.get('meta_prompt_summary', {})}")
-        return jsonify(response_data), 200
-
-    except Exception as e:
-        print(f"❌ Błąd delegacji batcha do Firestore Tracker: {e}")
-        return jsonify({"error": str(e)}), 500
+# Ten endpoint wcześniej robił:
+#   /api/project/<id>/add_batch  →  HTTP POST na http://127.0.0.1:10000/api/project/<id>/add_batch
+# co powodowało nieskończoną pętlę i WORKER TIMEOUT.
+#
+# Teraz:
+#   - endpoint /api/project/<project_id>/add_batch obsługuje wyłącznie
+#     moduł firestore_tracker_routes.py (Tracker Lemmatyczny),
+#     bez żadnych wewnętrznych requestów HTTP.
+#
+# Dzięki temu:
+#   - brak pętli HTTP w tym samym serwerze,
+#   - brak WORKER TIMEOUT przy /add_batch,
+#   - pełna logika zliczania pozostaje w trackerze.
 
 
 # ---------------------------------------------------------------
-# ✅ /api/project/<project_id>/delete_final — Usuwa projekt
+# ✅ /api/project/<project_id>/delete_final — Usuwa projekt (lokalny)
 # ---------------------------------------------------------------
 @project_bp.route("/project/<project_id>/delete_final", methods=["DELETE"])
 def delete_project_final(project_id):
-    """Usuwa projekt Firestore i zwraca końcowe statystyki."""
+    """
+    Usuwa projekt Firestore i zwraca końcowe statystyki.
+    Uwaga: dla workflow GPT głównym endpointem "final summary" jest
+    DELETE /api/project/<project_id> z firestore_batch_summary_routes.py
+    (ten tylko fizycznie usuwa dokument).
+    """
     try:
         global db
         if not db:
@@ -240,10 +212,10 @@ def delete_project_final(project_id):
         data = snapshot.to_dict()
         keywords_state = data.get("keywords_state", {})
 
-        under = sum(1 for k in keywords_state.values() if k["status"] == "UNDER")
-        over = sum(1 for k in keywords_state.values() if k["status"] == "OVER")
-        locked = sum(1 for k in keywords_state.values() if k["locked"])
-        ok = sum(1 for k in keywords_state.values() if k["status"] == "OK")
+        under = sum(1 for k in keywords_state.values() if k.get("status") == "UNDER")
+        over = sum(1 for k in keywords_state.values() if k.get("status") == "OVER")
+        locked = sum(1 for k in keywords_state.values() if k.get("locked"))
+        ok = sum(1 for k in keywords_state.values() if k.get("status") == "OK")
 
         summary = {
             "topic": data.get("topic"),
