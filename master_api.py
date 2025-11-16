@@ -1,5 +1,6 @@
 # ================================================================
-# master_api.py — Master SEO API (v7.2.3-firestore-lemmaMode)
+# master_api.py — Master SEO API
+# v7.3.0-firestore-continuous-lemma (pełna zgodność z blueprintami)
 # ================================================================
 
 import os
@@ -13,7 +14,7 @@ from firebase_admin import credentials, firestore
 from collections import Counter
 
 # ================================================================
-# 🧩 Inicjalizacja aplikacji Flask + środowiska
+# 🧩 Inicjalizacja środowiska Flask
 # ================================================================
 load_dotenv()
 app = Flask(__name__)
@@ -25,25 +26,28 @@ try:
     FIREBASE_CREDS_JSON = os.getenv("FIREBASE_CREDS_JSON")
 
     if not FIREBASE_CREDS_JSON:
-        print("⚠️ Brak FIREBASE_CREDS_JSON — próba użycia pliku lokalnego serviceAccountKey.json")
+        print("⚠️ Brak FIREBASE_CREDS_JSON — próba użycia pliku serviceAccountKey.json")
+
         if os.path.exists("serviceAccountKey.json"):
             cred = credentials.Certificate("serviceAccountKey.json")
         else:
-            raise ValueError("❌ Brak FIREBASE_CREDS_JSON i pliku serviceAccountKey.json.")
+            raise ValueError("❌ Brak FIREBASE_CREDS_JSON i brak pliku serviceAccountKey.json.")
+
     else:
+        # Render: env jest stringiem JSON — konwersja do dict
         creds_dict = json.loads(FIREBASE_CREDS_JSON)
         cred = credentials.Certificate(creds_dict)
 
     firebase_admin.initialize_app(cred)
     db = firestore.client()
-    print("✅ Firestore połączony poprawnie (tryb lemmaMode = ON).")
+    print("✅ Firestore połączony (lemmaMode=ON, continuousCounting=ON)")
 
 except Exception as e:
     print(f"❌ Błąd inicjalizacji Firebase: {e}")
     db = None
 
 # ================================================================
-# 🌐 Konfiguracja API zewnętrznych (S1)
+# 🌐 Zewnętrzne API (S1 Analysis)
 # ================================================================
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 SERPAPI_URL = "https://serpapi.com/search"
@@ -52,21 +56,19 @@ NGRAM_API_URL = "https://gpt-ngram-api.onrender.com/api/ngram_entity_analysis"
 
 
 def call_api_with_json(url, payload, name):
-    """Pomocnicza funkcja do bezpiecznych wywołań POST JSON."""
     try:
-        r = requests.post(url, json=payload, timeout=120)
+        r = requests.post(url, json=payload, timeout=180)
         r.raise_for_status()
         return r.json()
     except Exception as e:
         print(f"❌ Błąd API {name}: {e}")
-        return {"error": f"Błąd połączenia z {name}", "details": str(e)}
+        return {"error": str(e), "location": name}
 
 
 def call_serpapi(topic):
-    """Pobiera wyniki SERP z SerpAPI."""
     params = {"api_key": SERPAPI_KEY, "q": topic, "gl": "pl", "hl": "pl", "engine": "google"}
     try:
-        r = requests.get(SERPAPI_URL, params=params, timeout=30)
+        r = requests.get(SERPAPI_URL, params=params, timeout=35)
         r.raise_for_status()
         return r.json()
     except Exception as e:
@@ -75,16 +77,14 @@ def call_serpapi(topic):
 
 
 def call_langextract(url):
-    """Pobiera dane z LangExtract API."""
     return call_api_with_json(LANGEXTRACT_API_URL, {"url": url}, "LangExtract")
 
 
 # ================================================================
-# 🧠 /api/s1_analysis — analiza SERP + n-gramy
+# 🧠 /api/s1_analysis — analiza SERP + H2 + n-gramy
 # ================================================================
 @app.route("/api/s1_analysis", methods=["POST"])
 def perform_s1_analysis():
-    """Analiza SERP + ekstrakcja nagłówków H2, encji i n-gramów."""
     try:
         data = request.get_json()
         if not data or "topic" not in data:
@@ -92,6 +92,7 @@ def perform_s1_analysis():
 
         topic = data["topic"]
         serp_data = call_serpapi(topic)
+
         if not serp_data:
             return jsonify({"error": "Brak danych z SerpAPI"}), 502
 
@@ -100,22 +101,27 @@ def perform_s1_analysis():
         autocomplete_suggestions = [r.get("query") for r in serp_data.get("related_searches", []) if r.get("query")]
         top_urls = [r.get("link") for r in serp_data.get("organic_results", [])[:7]]
 
-        print(f"🔍 Analiza {len(top_urls)} wyników SERP dla: {topic}")
+        print(f"🔍 S1 Analysis — temat: {topic}, URL-i: {len(top_urls)}")
 
         sources_payload, h2_counts, text_lengths, all_headings = [], [], [], []
 
+        # Pobierz treść top 5 URL-i
         for url in top_urls[:5]:
             content = call_langextract(url)
+
             if content and content.get("content"):
                 text = content["content"]
                 h2s = content.get("h2", [])
+
                 h2_counts.append(len(h2s))
                 all_headings.extend([h.strip().lower() for h in h2s])
                 text_lengths.append(len(re.findall(r'\w+', text)))
+
                 sources_payload.append({"url": url, "content": text})
             else:
-                print(f"⚠️ Brak treści dla {url}")
+                print(f"⚠️ Brak treści z LangExtract dla {url}")
 
+        # Wywołaj GPT-Ngram API
         ngram_data = call_api_with_json(
             NGRAM_API_URL,
             {
@@ -126,7 +132,7 @@ def perform_s1_analysis():
                     "related_searches": autocomplete_suggestions
                 }
             },
-            "Ngram API"
+            "GPT-Ngram"
         )
 
         heading_counts = Counter(all_headings)
@@ -161,43 +167,42 @@ def perform_s1_analysis():
 # ================================================================
 @app.route("/api/health", methods=["GET"])
 def health():
-    """Zwraca status API i wersję."""
     return jsonify({
         "status": "ok",
-        "version": "v7.2.3-firestore-lemmaMode",
-        "message": "Master SEO API działa poprawnie (Firestore + Lemmatyczny Tracker aktywny)."
+        "version": "v7.3.0-firestore-continuous-lemma",
+        "message": "Master SEO API działa poprawnie (Firestore lemmaMode + ContinuousCounting)."
     }), 200
 
 
 # ================================================================
-# 🔗 Rejestracja warstw: Project Routes, Firestore Tracker, Batch Summarizer
+# 🔗 Rejestracja blueprintów (pełna zgodność ścieżek)
 # ================================================================
 try:
     from project_routes import register_project_routes
     register_project_routes(app, db)
-    print("✅ Zarejestrowano project_routes (Blueprint działa).")
+    print("✅ Załadowano project_routes")
 except Exception as e:
-    print(f"❌ Nie udało się załadować project_routes: {e}")
+    print(f"❌ Błąd ładowania project_routes: {e}")
 
 try:
     from firestore_tracker_routes import register_tracker_routes
     register_tracker_routes(app, db)
-    print("✅ Zarejestrowano firestore_tracker_routes (Lemmatyczny Tracker działa).")
+    print("✅ Załadowano firestore_tracker_routes")
 except Exception as e:
-    print(f"❌ Nie udało się załadować firestore_tracker_routes: {e}")
+    print(f"❌ Błąd ładowania firestore_tracker_routes: {e}")
 
 try:
     from firestore_batch_summary_routes import register_batch_summary_routes
     register_batch_summary_routes(app, db)
-    print("✅ Zarejestrowano firestore_batch_summary_routes (Batch Summarizer działa).")
+    print("✅ Załadowano firestore_batch_summary_routes")
 except Exception as e:
-    print(f"❌ Nie udało się załadować firestore_batch_summary_routes: {e}")
+    print(f"❌ Błąd ładowania firestore_batch_summary_routes: {e}")
 
 
 # ================================================================
-# 🚀 Uruchomienie (Render-compatible)
+# 🚀 Uruchomienie zgodne z Render
 # ================================================================
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8080))
-    print(f"🌐 Uruchamiam Master SEO API (v7.2.3-firestore-lemmaMode, port={port}, Firestore={'OK' if db else 'BRAK'})")
+    print(f"🌐 Uruchamianie Master SEO API v7.3.0 na porcie {port} (Firestore={'OK' if db else 'BRAK'})")
     app.run(host="0.0.0.0", port=port)
