@@ -1,7 +1,0 @@
-flask
-python-dotenv
-firebase-admin
-requests
-gunicorn
-spacy==3.7.2
-pl_core_news_sm @ https://github.com/explosion/spacy-models/releases/download/pl_core_news_sm-3.7.0/pl_core_news_sm-3.7.0.tar.gz
