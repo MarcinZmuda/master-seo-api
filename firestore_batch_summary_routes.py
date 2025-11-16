@@ -13,7 +13,8 @@ db = None
 # ================================================================
 # 🧠 /api/project/<project_id> [DELETE] — FINAL SUMMARY
 # ================================================================
-@batch_summary_bp.route("/api/project/<project_id>", methods=["DELETE"])
+# ❗ POPRAWIONA ŚCIEŻKA — usunięto /api
+@batch_summary_bp.route("/project/<project_id>", methods=["DELETE"])
 def delete_project_final(project_id):
     """
     Usuwa projekt z Firestore i zwraca końcowe statystyki:
@@ -34,9 +35,10 @@ def delete_project_final(project_id):
     keywords_state = data.get("keywords_state", {})
     batches = list(doc_ref.collection("batches").stream())
 
+    # 🔥 Poprawione: locked_terms to frazy z flagą "locked"
     under_terms = [k for k, v in keywords_state.items() if v.get("status") == "UNDER"]
     over_terms = [k for k, v in keywords_state.items() if v.get("status") == "OVER"]
-    locked_terms = [k for k, v in keywords_state.items() if v.get("status") == "LOCKED"]
+    locked_terms = [k for k, v in keywords_state.items() if v.get("locked") is True]
     ok_terms = [k for k, v in keywords_state.items() if v.get("status") == "OK"]
 
     summary = {
@@ -52,8 +54,11 @@ def delete_project_final(project_id):
         "timestamp": datetime.utcnow().isoformat()
     }
 
-    # ❗Nie usuwaj całkowicie projektu — oznacz jako archived
-    doc_ref.update({"status": "archived", "archived_at": datetime.utcnow().isoformat()})
+    # ❗Nie usuwamy projektu — archiwizacja
+    doc_ref.update({
+        "status": "archived",
+        "archived_at": datetime.utcnow().isoformat()
+    })
 
     print(f"🧾 Projekt {project_id} zamknięty. UNDER={len(under_terms)}, OVER={len(over_terms)}, LOCKED={len(locked_terms)}")
 
