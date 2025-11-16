@@ -12,6 +12,11 @@ from datetime import datetime
 import spacy
 
 # ---------------------------------------------------------------
+# 🔧 Feature flag — czy wymuszać S1 w create_project?
+# ---------------------------------------------------------------
+ENABLE_CREATE_PROJECT_S1 = os.getenv("ENABLE_CREATE_PROJECT_S1", "false").lower() == "true"
+
+# ---------------------------------------------------------------
 # 🔧 Inicjalizacja
 # ---------------------------------------------------------------
 project_bp = Blueprint("project_routes", __name__)
@@ -92,11 +97,9 @@ def parse_brief_to_keywords(brief_text):
 def call_s1_analysis(topic):
     """
     Wywołuje endpoint /api/s1_analysis dla tematu.
-    ⛔ NIE KORZYSTAMY już z publicznego URL (Render), żeby uniknąć 499/timeout.
-    ✅ Zamiast tego domyślnie korzystamy z localhost:10000 (ten sam kontener).
+    ⛔ NIE KORZYSTAMY już z publicznego URL (Render), żeby uniknąć timeoutów.
     """
     try:
-        # WAŻNE: domyślnie uderzamy w lokalny serwer w tym samym kontenerze
         base_url = os.getenv("API_BASE_URL", "http://127.0.0.1:10000")
         url = f"{base_url}/api/s1_analysis"
         print(f"[DEBUG] S1 Analysis call → {url} (topic='{topic}')")
@@ -132,8 +135,17 @@ def create_project():
         print(f"[DEBUG] Tworzenie projektu Firestore: {topic}")
         keywords_state, headers_list = parse_brief_to_keywords(brief_text)
 
-        # 🔍 S1 Analysis — teraz lokalnie po localhost (bez self-call przez Render)
-        s1_data = call_s1_analysis(topic)
+        # -------------------------------------------------------------------
+        # 🔍 S1 SKIP / lub opcjonalnie S1 CALL na podstawie feature flag
+        # -------------------------------------------------------------------
+        if ENABLE_CREATE_PROJECT_S1:
+            print("[INFO] ENABLE_CREATE_PROJECT_S1=true → wykonuję S1 w /create_project")
+            s1_data = call_s1_analysis(topic)
+        else:
+            print("[INFO] S1 pomijane — GPT wykonał analizę SERP (safe mode).")
+            s1_data = {"status": "skipped", "reason": "handled_by_GPT"}
+
+        # -------------------------------------------------------------------
 
         doc_ref = db.collection("seo_projects").document()
         doc_ref.set({
@@ -176,7 +188,6 @@ def add_batch_to_project(project_id):
         if not text:
             return jsonify({"error": "Brak tekstu batcha"}), 400
 
-        # Tu też możesz w przyszłości użyć localhost, ale na razie domyślne API_BASE_URL może zostać
         base_url = os.getenv("API_BASE_URL", "http://127.0.0.1:10000")
         tracker_url = f"{base_url}/api/project/{project_id}/add_batch"
 
@@ -185,7 +196,7 @@ def add_batch_to_project(project_id):
         try:
             r = requests.post(tracker_url, json={"text": text}, timeout=120)
         except requests.exceptions.ConnectionError:
-            print("⚠️ Firestore Tracker niedostępny — zapisuję batch lokalnie (mirror mode).")
+            print("⚠️ Firestore Tracker offline — zapisuję batch lokalnie (mirror mode).")
             os.makedirs("./offline_batches", exist_ok=True)
             file_path = f"./offline_batches/{project_id}_mirror.txt"
             with open(file_path, "a", encoding="utf-8") as f:
