@@ -32,7 +32,7 @@ except OSError:
 # 🧩 Lematyzacja fraz
 # ---------------------------------------------------------------
 def lemmatize_phrase(phrase):
-    """Zwraca listę lematów dla frazy (np. 'adwokat rozwodowy' -> ['adwokat', 'rozwodowy'])."""
+    """Zwraca listę lematów dla frazy."""
     if not NLP:
         return phrase.lower().split()
     doc = NLP(phrase.lower())
@@ -43,7 +43,7 @@ def lemmatize_phrase(phrase):
 # 🧾 Parser briefu SEO (BASIC / EXTENDED)
 # ---------------------------------------------------------------
 def parse_brief_to_keywords(brief_text):
-    """Parsuje brief SEO (sekcje BASIC TEXT TERMS i EXTENDED TEXT TERMS)."""
+    """Parsuje brief SEO (BASIC TEXT TERMS / EXTENDED TEXT TERMS)."""
     lines = [line.strip() for line in brief_text.splitlines() if line.strip()]
     keywords_state = {}
     headers_list = []
@@ -67,7 +67,7 @@ def parse_brief_to_keywords(brief_text):
             min_count = int(match.group(2))
             max_count = int(match.group(3))
 
-            # EXTENDED → redukcja zakresu o 50%
+            # EXTENDED → zakres x0.5
             if current_section == "extended":
                 min_count = max(1, round(min_count * 0.5))
                 max_count = max(1, round(max_count * 0.5))
@@ -103,11 +103,11 @@ def call_s1_analysis(topic):
 
 
 # ---------------------------------------------------------------
-# ✅ /api/project/create — tworzy nowy projekt Firestore
+# ✅ /api/project/create — Tworzy projekt
 # ---------------------------------------------------------------
 @project_bp.route("/project/create", methods=["POST"])
 def create_project():
-    """Tworzy nowy projekt Firestore z briefem SEO i strukturą lemmaMode."""
+    """Tworzy projekt Firestore z briefem SEO i strukturą lemmaMode."""
     try:
         global db
         if not db:
@@ -156,11 +156,11 @@ def create_project():
 
 
 # ---------------------------------------------------------------
-# ✅ /api/project/<project_id>/add_batch — wysyła batch do Firestore Tracker
+# ✅ /api/project/<project_id>/add_batch — delegacja do Tracker API
 # ---------------------------------------------------------------
 @project_bp.route("/project/<project_id>/add_batch", methods=["POST"])
 def add_batch_to_project(project_id):
-    """Przekazuje batch do Firestore Tracker API (pełne liczenie lematyczne)."""
+    """Przekazuje batch do Firestore Tracker API."""
     try:
         data = request.get_json(silent=True) or {}
         text = data.get("text", "").strip()
@@ -200,7 +200,7 @@ def add_batch_to_project(project_id):
 
 
 # ---------------------------------------------------------------
-# ✅ /api/project/<project_id>/delete_final — usuwa projekt i zwraca statystyki
+# ✅ /api/project/<project_id>/delete_final — Usuwa projekt
 # ---------------------------------------------------------------
 @project_bp.route("/project/<project_id>/delete_final", methods=["DELETE"])
 def delete_project_final(project_id):
@@ -218,6 +218,7 @@ def delete_project_final(project_id):
 
         data = snapshot.to_dict()
         keywords_state = data.get("keywords_state", {})
+
         under = sum(1 for k in keywords_state.values() if k["status"] == "UNDER")
         over = sum(1 for k in keywords_state.values() if k["status"] == "OVER")
         locked = sum(1 for k in keywords_state.values() if k["locked"])
@@ -249,7 +250,11 @@ def delete_project_final(project_id):
 # ---------------------------------------------------------------
 @project_bp.route("/project/ping", methods=["GET"])
 def ping():
-    return jsonify({"status": "ok", "module": "project_routes", "version": "v7.3.0-firestore-continuous-lemma"}), 200
+    return jsonify({
+        "status": "ok",
+        "module": "project_routes",
+        "version": "v7.3.0-firestore-continuous-lemma"
+    }), 200
 
 
 # ---------------------------------------------------------------
