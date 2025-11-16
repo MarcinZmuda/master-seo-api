@@ -1,5 +1,6 @@
 # ================================================================
-# project_routes.py — Project Management Layer (v7.2.9-firestore-primary-remote)
+# project_routes.py — Project Management Layer
+# v7.3.0-firestore-continuous-lemma (Firestore + Lemmatyczny Tracker)
 # ================================================================
 
 import os
@@ -51,7 +52,6 @@ def parse_brief_to_keywords(brief_text):
     pattern = re.compile(r"^(.*?)\s*:\s*(\d+)[–-](\d+)x?$")
 
     for line in lines:
-        # wykrywanie sekcji
         if "BASIC TEXT TERMS" in line.upper():
             current_section = "basic"
             continue
@@ -77,7 +77,8 @@ def parse_brief_to_keywords(brief_text):
                 "target_max": max_count,
                 "actual": 0,
                 "status": "UNDER",
-                "locked": False
+                "locked": False,
+                "lemmas": lemmatize_phrase(keyword)
             }
             headers_list.append(keyword)
 
@@ -104,7 +105,7 @@ def call_s1_analysis(topic):
 # ---------------------------------------------------------------
 # ✅ /api/project/create — tworzy nowy projekt Firestore
 # ---------------------------------------------------------------
-@project_bp.route("/api/project/create", methods=["POST"])
+@project_bp.route("/project/create", methods=["POST"])
 def create_project():
     """Tworzy nowy projekt Firestore z briefem SEO i strukturą lemmaMode."""
     try:
@@ -135,6 +136,7 @@ def create_project():
             "s1_data": s1_data,
             "batches": [],
             "counting_mode": "firestore_remote_lemma",
+            "continuous_counting": True,
             "status": "created"
         })
 
@@ -149,14 +151,14 @@ def create_project():
         }), 201
 
     except Exception as e:
-        print(f"❌ Błąd /api/project/create: {e}")
+        print(f"❌ Błąd /project/create: {e}")
         return jsonify({"error": str(e)}), 500
 
 
 # ---------------------------------------------------------------
 # ✅ /api/project/<project_id>/add_batch — wysyła batch do Firestore Tracker
 # ---------------------------------------------------------------
-@project_bp.route("/api/project/<project_id>/add_batch", methods=["POST"])
+@project_bp.route("/project/<project_id>/add_batch", methods=["POST"])
 def add_batch_to_project(project_id):
     """Przekazuje batch do Firestore Tracker API (pełne liczenie lematyczne)."""
     try:
@@ -198,6 +200,59 @@ def add_batch_to_project(project_id):
 
 
 # ---------------------------------------------------------------
+# ✅ /api/project/<project_id>/delete_final — usuwa projekt i zwraca statystyki
+# ---------------------------------------------------------------
+@project_bp.route("/project/<project_id>/delete_final", methods=["DELETE"])
+def delete_project_final(project_id):
+    """Usuwa projekt Firestore i zwraca końcowe statystyki."""
+    try:
+        global db
+        if not db:
+            return jsonify({"error": "Firestore nie jest połączony"}), 503
+
+        doc_ref = db.collection("seo_projects").document(project_id)
+        snapshot = doc_ref.get()
+
+        if not snapshot.exists:
+            return jsonify({"error": "Projekt nie istnieje"}), 404
+
+        data = snapshot.to_dict()
+        keywords_state = data.get("keywords_state", {})
+        under = sum(1 for k in keywords_state.values() if k["status"] == "UNDER")
+        over = sum(1 for k in keywords_state.values() if k["status"] == "OVER")
+        locked = sum(1 for k in keywords_state.values() if k["locked"])
+        ok = sum(1 for k in keywords_state.values() if k["status"] == "OK")
+
+        summary = {
+            "topic": data.get("topic"),
+            "counting_mode": data.get("counting_mode"),
+            "continuous_counting": data.get("continuous_counting", True),
+            "total_batches": len(data.get("batches", [])),
+            "under_terms_count": under,
+            "over_terms_count": over,
+            "locked_terms_count": locked,
+            "ok_terms_count": ok,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+        doc_ref.delete()
+        print(f"🗑️ Projekt {project_id} usunięty z Firestore.")
+        return jsonify({"status": "deleted", "summary": summary}), 200
+
+    except Exception as e:
+        print(f"❌ Błąd delete_final: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+# ---------------------------------------------------------------
+# ❤️ Health-check blueprinta
+# ---------------------------------------------------------------
+@project_bp.route("/project/ping", methods=["GET"])
+def ping():
+    return jsonify({"status": "ok", "module": "project_routes", "version": "v7.3.0-firestore-continuous-lemma"}), 200
+
+
+# ---------------------------------------------------------------
 # 🔧 Rejestracja blueprinta
 # ---------------------------------------------------------------
 def register_project_routes(app, _db=None):
@@ -205,4 +260,4 @@ def register_project_routes(app, _db=None):
     global db
     db = _db
     app.register_blueprint(project_bp, url_prefix="/api")
-    print("✅ [INIT] project_routes zarejestrowany pod prefixem /api (v7.2.9-firestore-primary-remote).")
+    print("✅ [INIT] project_routes zarejestrowany pod prefixem /api (v7.3.0-firestore-continuous-lemma).")
