@@ -1,261 +1,254 @@
-# ================================================================
-# project_routes.py — Project Management Layer
-# v7.3.0-firestore-continuous-lemma (Firestore + Lemmatyczny Tracker)
-# ================================================================
-
-import os
+import logging
 import re
-import requests
+from typing import Dict, Any, List, Tuple
+
 from flask import Blueprint, request, jsonify
-from datetime import datetime
-import spacy
 
-# ---------------------------------------------------------------
-# 🔧 Inicjalizacja
-# ---------------------------------------------------------------
-project_bp = Blueprint("project_routes", __name__)
-db = None
+logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------
-# 🧠 Załaduj model spaCy (lemmatyzacja)
-# ---------------------------------------------------------------
-try:
-    NLP = spacy.load("pl_core_news_sm")
-    print("✅ Model spaCy (pl_core_news_sm) załadowany poprawnie (lemmaMode=ON).")
-except OSError:
-    NLP = None
-    print("❌ BŁĄD: Nie można załadować modelu spaCy 'pl_core_news_sm'.")
+project_bp = Blueprint("project_bp", __name__)
 
 
-# ---------------------------------------------------------------
-# 🧩 Lematyzacja fraz
-# ---------------------------------------------------------------
-def lemmatize_phrase(phrase):
-    """Zwraca listę lematów dla frazy (do trackera Firestore)."""
-    if not NLP:
-        # awaryjnie: split po białych znakach + lower
-        return phrase.lower().split()
-    doc = NLP(phrase.lower())
-    return [token.lemma_ for token in doc if token.is_alpha]
+# ==========================
+# 🔧 Pomocnicze funkcje
+# ==========================
 
 
-# ---------------------------------------------------------------
-# 🧾 Parser briefu SEO (BASIC / EXTENDED)
-# ---------------------------------------------------------------
-def parse_brief_to_keywords(brief_text):
+def parse_keyword_line(line: str) -> Tuple[str, int, int]:
     """
-    Parsuje brief SEO w formacie:
-
-    BASIC TEXT TERMS:
-    fraza 1: 8-12x
-    fraza 2: 3–7x
-
-    EXTENDED TEXT TERMS:
-    fraza 3: 2-4x
-    ...
+    Parsuje pojedynczą linię w formacie:
+    - "fraza: 3-5x"
+    - "fraza: 8–12x" (z dywizem / półpauzą)
 
     Zwraca:
-      - keywords_state: dict do zapisania w Firestore
-      - headers_list: lista samych fraz (np. do sugestii nagłówków)
+    (fraza, min_count, max_count)
+
+    Podnosi ValueError, jeśli format jest nieprawidłowy.
     """
-    lines = [line.strip() for line in brief_text.splitlines() if line.strip()]
-    keywords_state = {}
-    headers_list = []
-    current_section = None
+    original_line = line
+    line = line.strip()
+    if not line:
+        raise ValueError("Pusta linia")
 
-    # Obsługa "–" i "-" oraz opcjonalnego "x" na końcu
-    pattern = re.compile(r"^(.*?)\s*:\s*(\d+)[–-](\d+)x?$")
+    # Rozdzielenie na "fraza" i "zakres"
+    if ":" not in line:
+        raise ValueError(f"Brak dwukropka w linii: {original_line!r}")
 
-    for line in lines:
-        upper = line.upper()
-        if "BASIC TEXT TERMS" in upper:
-            current_section = "basic"
+    phrase_part, range_part = line.split(":", 1)
+    phrase = phrase_part.strip()
+
+    # Usuwamy końcówkę "x" oraz spacje
+    range_part = range_part.strip().lower().replace("x", "").strip()
+
+    # Obsługa zakresów "3-5" oraz "3–5" (dywiz/półpauza)
+    range_match = re.match(r"^(\d+)\s*[-–]\s*(\d+)$", range_part)
+    if not range_match:
+        raise ValueError(f"Nieprawidłowy zakres w linii: {original_line!r}")
+
+    min_count = int(range_match.group(1))
+    max_count = int(range_match.group(2))
+
+    if min_count > max_count:
+        raise ValueError(
+            f"Nieprawidłowy zakres (min > max) w linii: {original_line!r}"
+        )
+
+    return phrase, min_count, max_count
+
+
+def parse_brief_to_keywords(brief: str) -> List[Dict[str, Any]]:
+    """
+    Parsuje cały brief tekstowy (BASIC TEXT TERMS + EXTENDED TEXT TERMS)
+    i zwraca listę obiektów keywordów.
+
+    Zakładamy strukturę:
+
+    BASIC TEXT TERMS:
+    fraza: 3-5x
+    fraza2: 8–12x
+
+    EXTENDED TEXT TERMS:
+    fraza3: 4-10x
+    ...
+
+    EXTENDED mają domyślnie obniżone widełki o 50% (zaokrąglenie w górę).
+    """
+    lines = brief.splitlines()
+
+    keywords: List[Dict[str, Any]] = []
+    current_section = None  # "BASIC" albo "EXTENDED"
+
+    for raw_line in lines:
+        line = raw_line.strip()
+
+        if not line:
             continue
-        elif "EXTENDED TEXT TERMS" in upper:
-            current_section = "extended"
+
+        # Wykrywanie sekcji
+        if line.upper().startswith("BASIC TEXT TERMS"):
+            current_section = "BASIC"
             continue
-        elif line.startswith("="):
-            # linie typu "====" pomijamy
+        if line.upper().startswith("EXTENDED TEXT TERMS"):
+            current_section = "EXTENDED"
             continue
 
-        match = pattern.match(line)
-        if match:
-            keyword = match.group(1).strip()
-            min_count = int(match.group(2))
-            max_count = int(match.group(3))
+        # Pomijamy linie nagłówkowe lub śmieci
+        if current_section is None:
+            continue
 
-            # EXTENDED → zakres x0.5 (łagodniejsze limity)
-            if current_section == "extended":
-                min_count = max(1, round(min_count * 0.5))
-                max_count = max(1, round(max_count * 0.5))
+        # Próba sparsowania frazy
+        try:
+            phrase, min_count, max_count = parse_keyword_line(line)
+        except ValueError as e:
+            logger.warning(f"⏭ Pominięto linię w briefie: {line!r} ({e})")
+            continue
 
-            keywords_state[keyword] = {
+        # EXTENDED => obniżamy widełki o 50%
+        if current_section == "EXTENDED":
+            # Zaokrąglamy w górę (co najmniej 1)
+            min_count = max(1, (min_count + 1) // 2)
+            max_count = max(1, (max_count + 1) // 2)
+
+        keywords.append(
+            {
+                "phrase": phrase,
+                "section": current_section,
                 "target_min": min_count,
                 "target_max": max_count,
-                "actual": 0,
-                "status": "UNDER",
-                "locked": False,
-                "lemmas": lemmatize_phrase(keyword)
+                # Liczniki startowe (Firestore i tak będzie nadpisywał)
+                "actual_count": 0,
+                "status": "UNDER",  # domyślnie
             }
-            headers_list.append(keyword)
+        )
 
-    print(f"🧠 parse_brief_to_keywords → {len(keywords_state)} fraz sparsowanych.")
-    return keywords_state, headers_list
+    logger.info(f"🧠 parse_brief_to_keywords → {len(keywords)} fraz sparsowanych.")
+    return keywords
 
 
-# ---------------------------------------------------------------
-# ✅ /api/project/create — Tworzy projekt (bez S1 w backendzie)
-# ---------------------------------------------------------------
-@project_bp.route("/project/create", methods=["POST"])
-def create_project():
+# ==========================
+# 🌐 Endpointy projektowe
+# ==========================
+
+
+def register_project_routes(app, db):
     """
-    Tworzy projekt Firestore z briefem SEO i strukturą lemmaMode.
+    Rejestruje endpointy projektowe na aplikacji Flask.
 
-    WAŻNE:
-    - Ten endpoint NIE wywołuje już /api/s1_analysis.
-    - Analiza S1 jest wykonywana osobno przez GPT (POST /api/s1_analysis),
-      a wynik może być opcjonalnie przekazany w polu "s1_data" w request body.
+    Uwaga: tutaj obsługujemy tylko:
+    - tworzenie projektu (`/api/project/create`)
+    - pobieranie / usuwanie projektu (`/api/project/<id>`)
+    - prosty endpoint diagnostyczny
+
+    Endpoint `/api/project/<id>/add_batch` jest obsługiwany wyłącznie przez:
+    - `firestore_tracker_routes.py` (tracker_bp)
+
+    Dzięki temu:
+    - nie ma pętli HTTP do samego siebie,
+    - cała logika zliczania batchy (lemma) jest skupiona w jednym miejscu.
     """
-    try:
-        global db
-        if not db:
-            return jsonify({"error": "Firestore nie jest połączony"}), 503
-        if not NLP:
-            return jsonify({"error": "Model spaCy nie jest załadowany"}), 500
 
-        data = request.get_json(silent=True) or {}
-        topic = data.get("topic", "").strip()
-        brief_text = data.get("brief_text", "")
-        s1_data_from_client = data.get("s1_data")  # opcjonalne
+    @project_bp.route("/project/create", methods=["POST"])
+    def create_project():
+        """
+        Tworzy nowy projekt SEO w Firestore na podstawie briefu tekstowego.
 
-        if not topic:
-            return jsonify({"error": "Brak 'topic'"}), 400
+        Oczekiwany JSON:
+        {
+          "topic": "adwokat rozwód Warszawa",
+          "brief_text": "BASIC TEXT TERMS:\\nfraza: 3-5x\\n...",
+          "meta": {...}  // dowolne dane pomocnicze
+        }
+        """
+        data = request.get_json(force=True, silent=True) or {}
+        topic = data.get("topic") or data.get("main_keyword") or "unknown_topic"
+        brief_text = data.get("brief_text") or data.get("brief") or ""
+        meta = data.get("meta") or {}
 
-        print(f"[DEBUG] Tworzenie projektu Firestore: {topic}")
-        keywords_state, headers_list = parse_brief_to_keywords(brief_text)
+        if not brief_text.strip():
+            return (
+                jsonify(
+                    {
+                        "error": "Brak brief_text — nie mogę utworzyć projektu bez listy fraz.",
+                        "ok": False,
+                    }
+                ),
+                400,
+            )
 
-        # Jeśli GPT kiedyś zacznie przekazywać wynik S1 w body → zapisz
-        if s1_data_from_client is None:
-            s1_data = {"status": "not_provided", "note": "S1 wykonywane po stronie GPT / osobny krok."}
-        else:
-            s1_data = s1_data_from_client
+        logger.info(f"[DEBUG] Tworzenie projektu Firestore: {topic}")
 
-        doc_ref = db.collection("seo_projects").document()
-        doc_ref.set({
+        # Parsowanie briefu
+        keywords_list = parse_brief_to_keywords(brief_text)
+
+        # Dokument w Firestore
+        project_doc = {
             "topic": topic,
-            "created_at": datetime.utcnow().isoformat(),
-            "brief_text": brief_text[:8000],
-            "keywords_state": keywords_state,
-            "headers_suggestions": headers_list,
-            "s1_data": s1_data,
-            "batches": [],
-            "counting_mode": "firestore_remote_lemma",
+            "meta": meta,
+            "keywords_state": keywords_list,
+            "counting_mode": "lemma",
             "continuous_counting": True,
-            "status": "created"
-        })
-
-        print(f"✅ Projekt {doc_ref.id} utworzony ({len(keywords_state)} fraz).")
-
-        return jsonify({
-            "status": "✅ Projekt utworzony",
-            "project_id": doc_ref.id,
-            "topic": topic,
-            "keywords": len(keywords_state),
-            "counting_mode": "firestore_remote_lemma"
-        }), 201
-
-    except Exception as e:
-        print(f"❌ Błąd /project/create: {e}")
-        return jsonify({"error": str(e)}), 500
-
-
-# ---------------------------------------------------------------
-# ❌ USUNIĘTO: /api/project/<project_id>/add_batch (delegacja HTTP)
-# ---------------------------------------------------------------
-# Ten endpoint wcześniej robił:
-#   /api/project/<id>/add_batch  →  HTTP POST na http://127.0.0.1:10000/api/project/<id>/add_batch
-# co powodowało nieskończoną pętlę i WORKER TIMEOUT.
-#
-# Teraz:
-#   - endpoint /api/project/<project_id>/add_batch obsługuje wyłącznie
-#     moduł firestore_tracker_routes.py (Tracker Lemmatyczny),
-#     bez żadnych wewnętrznych requestów HTTP.
-#
-# Dzięki temu:
-#   - brak pętli HTTP w tym samym serwerze,
-#   - brak WORKER TIMEOUT przy /add_batch,
-#   - pełna logika zliczania pozostaje w trackerze.
-
-
-# ---------------------------------------------------------------
-# ✅ /api/project/<project_id>/delete_final — Usuwa projekt (lokalny)
-# ---------------------------------------------------------------
-@project_bp.route("/project/<project_id>/delete_final", methods=["DELETE"])
-def delete_project_final(project_id):
-    """
-    Usuwa projekt Firestore i zwraca końcowe statystyki.
-    Uwaga: dla workflow GPT głównym endpointem "final summary" jest
-    DELETE /api/project/<project_id> z firestore_batch_summary_routes.py
-    (ten tylko fizycznie usuwa dokument).
-    """
-    try:
-        global db
-        if not db:
-            return jsonify({"error": "Firestore nie jest połączony"}), 503
-
-        doc_ref = db.collection("seo_projects").document(project_id)
-        snapshot = doc_ref.get()
-
-        if not snapshot.exists:
-            return jsonify({"error": "Projekt nie istnieje"}), 404
-
-        data = snapshot.to_dict()
-        keywords_state = data.get("keywords_state", {})
-
-        under = sum(1 for k in keywords_state.values() if k.get("status") == "UNDER")
-        over = sum(1 for k in keywords_state.values() if k.get("status") == "OVER")
-        locked = sum(1 for k in keywords_state.values() if k.get("locked"))
-        ok = sum(1 for k in keywords_state.values() if k.get("status") == "OK")
-
-        summary = {
-            "topic": data.get("topic"),
-            "counting_mode": data.get("counting_mode"),
-            "continuous_counting": data.get("continuous_counting", True),
-            "total_batches": len(data.get("batches", [])),
-            "under_terms_count": under,
-            "over_terms_count": over,
-            "locked_terms_count": locked,
-            "ok_terms_count": ok,
-            "timestamp": datetime.utcnow().isoformat()
+            "created_at": db.SERVER_TIMESTAMP if hasattr(db, "SERVER_TIMESTAMP") else None,
+            "updated_at": db.SERVER_TIMESTAMP if hasattr(db, "SERVER_TIMESTAMP") else None,
+            "status": "ACTIVE",
         }
 
-        doc_ref.delete()
-        print(f"🗑️ Projekt {project_id} usunięty z Firestore.")
-        return jsonify({"status": "deleted", "summary": summary}), 200
+        # Zapis do Firestore
+        projects_collection = db.collection("seo_projects")
+        project_ref = projects_collection.document()
+        project_ref.set(project_doc)
 
-    except Exception as e:
-        print(f"❌ Błąd delete_final: {e}")
-        return jsonify({"error": str(e)}), 500
+        project_id = project_ref.id
+        logger.info(f"✅ Projekt {project_id} utworzony ({len(keywords_list)} fraz).")
 
+        return jsonify({"ok": True, "project_id": project_id, "keywords": keywords_list})
 
-# ---------------------------------------------------------------
-# ❤️ Health-check blueprinta
-# ---------------------------------------------------------------
-@project_bp.route("/project/ping", methods=["GET"])
-def ping():
-    return jsonify({
-        "status": "ok",
-        "module": "project_routes",
-        "version": "v7.3.0-firestore-continuous-lemma"
-    }), 200
+    @project_bp.route("/project/<project_id>", methods=["GET"])
+    def get_project(project_id):
+        """
+        Zwraca pełny dokument projektu z Firestore.
+        """
+        project_ref = db.collection("seo_projects").document(project_id)
+        doc = project_ref.get()
+        if not doc.exists:
+            return jsonify({"error": "Projekt nie istnieje.", "ok": False}), 404
 
+        data = doc.to_dict()
+        data["id"] = project_id
+        return jsonify({"ok": True, "project": data})
 
-# ---------------------------------------------------------------
-# 🔧 Rejestracja blueprinta
-# ---------------------------------------------------------------
-def register_project_routes(app, _db=None):
-    """Rejestruje blueprint project_routes."""
-    global db
-    db = _db
+    @project_bp.route("/project/<project_id>", methods=["DELETE"])
+    def delete_project(project_id):
+        """
+        Usuwa projekt z Firestore (lub oznacza jako zamknięty, jeśli chcesz).
+        """
+        project_ref = db.collection("seo_projects").document(project_id)
+        doc = project_ref.get()
+        if not doc.exists:
+            return jsonify({"error": "Projekt nie istnieje.", "ok": False}), 404
+
+        project_ref.delete()
+        logger.info(f"🧹 Projekt {project_id} usunięty z Firestore.")
+
+        return jsonify({"ok": True, "deleted_project_id": project_id})
+
+    @project_bp.route("/project/debug/routes", methods=["GET"])
+    def debug_routes():
+        """
+        Prosty endpoint diagnostyczny — pokazuje, że project_routes działają.
+        """
+        return jsonify(
+            {
+                "ok": True,
+                "message": "project_routes online",
+                "endpoints": [
+                    "POST /api/project/create",
+                    "GET /api/project/<project_id>",
+                    "DELETE /api/project/<project_id>",
+                    #   /api/project/<id>/add_batch  →  OBSŁUGUJE firestore_tracker_routes
+                ],
+            }
+        )
+
+    # Rejestrujemy blueprint na /api
     app.register_blueprint(project_bp, url_prefix="/api")
-    print("✅ [INIT] project_routes zarejestrowany pod prefixem /api (v7.3.0-firestore-continuous-lemma).")
+    logger.info("✅ [INIT] project_routes zarejestrowany pod prefixem /api")
