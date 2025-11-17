@@ -122,9 +122,11 @@ def process_batch_in_firestore(project_id: str, batch_text: str):
 
     # ------------------------------------------
     # 7) Finalny JSON — identyczny format jak /add_batch
+    # + zwraca batch_text dla GPT
     # ------------------------------------------
     return {
         "status": "BATCH_PROCESSED",
+        "batch_text": batch_text,   # <<< DODANE — TREŚĆ BATCHA WRACA DO GPT
         "counting_mode": "lemma",
         "continuous_counting": True,
         "prefer_local_tracker": False,
