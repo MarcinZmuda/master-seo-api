@@ -1,139 +1,130 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, jsonify
 from firebase_admin import firestore
 import spacy
 
-batch_routes = Blueprint("batch_routes", __name__)
+tracker_routes = Blueprint("tracker_routes", __name__)
 
-# spaCy ładowany raz na start kontenera
+# -------------------------------------------------------------------
+# SPAcy ładowany 1 raz — optymalne dla Render + Gunicorn
+# -------------------------------------------------------------------
 nlp = spacy.load("pl_core_news_sm")
 
-# ---------------------------------------------------------
-# 🔧 Lematyzacja
-# ---------------------------------------------------------
+
+# ===========================================================
+# 🔠 Lematization helper
+# ===========================================================
 def lemmatize_text(text: str):
     doc = nlp(text)
-    return [token.lemma_.lower() for token in doc if token.is_alpha]
+    return [t.lemma_.lower() for t in doc if t.is_alpha]
 
 
-# ---------------------------------------------------------
-# 🔧 Aktualizacja statusów: UNDER / OK / OVER / LOCKED
-# ---------------------------------------------------------
-def update_keyword_status(actual, target_min, target_max):
+# ===========================================================
+# 🔧 Status calculation (UNDER / OK / OVER / LOCKED)
+# ===========================================================
+def compute_status(actual, target_min, target_max):
     if actual < target_min:
         return "UNDER"
-    if target_min <= actual <= target_max:
-        return "OK"
     if actual > target_max:
         return "OVER"
     return "OK"
 
 
-# ---------------------------------------------------------
-# 🔧 Liczenie OVER/LOCKED po aktualizacji
-# ---------------------------------------------------------
-def compute_global_stats(keywords_state):
-    under = sum(1 for k in keywords_state.values() if k["status"] == "UNDER")
-    over = sum(1 for k in keywords_state.values() if k["status"] == "OVER")
+# ===========================================================
+# 🔄 Global Stats Summary (UNDER / OVER / LOCKED / OK)
+# LOCKED = jeśli ≥4 frazy są w stanie OVER
+# ===========================================================
+def global_keyword_stats(keywords_state):
+    under = sum(1 for v in keywords_state.values() if v["status"] == "UNDER")
+    over = sum(1 for v in keywords_state.values() if v["status"] == "OVER")
     locked = 1 if over >= 4 else 0
-    ok = sum(1 for k in keywords_state.values() if k["status"] == "OK")
-
+    ok = sum(1 for v in keywords_state.values() if v["status"] == "OK")
     return under, over, locked, ok
 
 
-# ---------------------------------------------------------
-# 🆕 S3 – Dodanie batcha + globalne liczenie lemma
-# ---------------------------------------------------------
-@batch_routes.post("/api/project/<project_id>/add_batch")
-def add_batch(project_id):
-
-    data = request.get_json()
-    if not data or "text" not in data:
-        return jsonify({"error": "Field 'text' required"}), 400
-
-    batch_text = data["text"]
+# ===========================================================
+# 🧠 MAIN FUNCTION (the one project_routes will call)
+# ===========================================================
+def process_batch_in_firestore(project_id: str, batch_text: str):
+    """
+    Najważniejsza funkcja — wywoływana BEZPOŚREDNIO z project_routes.py
+    Nie ma żadnych requestów HTTP — wszystko odbywa się lokalnie i szybko.
+    """
 
     db = firestore.client()
     doc_ref = db.collection("seo_projects").document(project_id)
     doc = doc_ref.get()
 
     if not doc.exists:
-        return jsonify({"error": "Project not found"}), 404
+        return {"error": "Project not found", "status": 404}
 
-    project_data = doc.to_dict()
-    keywords_state = project_data["keywords_state"]
+    data = doc.to_dict()
+    keywords_state = data["keywords_state"]
 
-    # ---------------------------------------------------------
-    # 1. 🔠 Lematyzacja batcha
-    # ---------------------------------------------------------
+    # ------------------------------------------
+    # 1) Lematyzacja batcha
+    # ------------------------------------------
     lemmas = lemmatize_text(batch_text)
 
-    # ---------------------------------------------------------
-    # 2. 🔢 Aktualizacja liczników w Firestore (global)
-    # ---------------------------------------------------------
+    # ------------------------------------------
+    # 2) Aktualizacja liczników globalnych
+    # ------------------------------------------
     for kw, meta in keywords_state.items():
-        lemma = meta["lemma"]
+        lemma = meta["lemma"].lower()
 
-        # Liczymy wystąpienia lematów
-        occurrences = sum(1 for word in lemmas if word == lemma.lower())
+        occ = sum(1 for w in lemmas if w == lemma)
+        meta["actual_uses"] += occ
 
-        # Zwiększamy globalny stan
-        meta["actual_uses"] += occurrences
-
-        # Aktualizacja statusu
-        meta["status"] = update_keyword_status(
-            meta["actual_uses"], meta["target_min"], meta["target_max"]
+        meta["status"] = compute_status(
+            meta["actual_uses"],
+            meta["target_min"],
+            meta["target_max"]
         )
 
-    # ---------------------------------------------------------
-    # 3. 🚨 Forced Regeneration / Emergency Exit
-    # ---------------------------------------------------------
-    under_count, over_count, locked_count, ok_count = compute_global_stats(keywords_state)
+    # ------------------------------------------
+    # 3) Obliczenie globalnych statusów
+    # ------------------------------------------
+    under, over, locked, ok = global_keyword_stats(keywords_state)
 
-    forced_regen = False
-    emergency_exit = False
+    forced_regen = over >= 10
+    emergency_exit = locked >= 1
 
-    # Emergency exit → LOCKED (≥4 OVER)
-    if locked_count >= 1:
-        emergency_exit = True
-
-    # Forced regeneration → OVER ≥ 10
-    if over_count >= 10:
-        forced_regen = True
-
-    # ---------------------------------------------------------
-    # 4. 🔥 Zapis batcha + aktualizacja projektu
-    # ---------------------------------------------------------
+    # ------------------------------------------
+    # 4) Dodanie batcha do historii projektu
+    # ------------------------------------------
     batch_entry = {
         "text": batch_text,
         "lemmas": lemmas,
         "forced_regeneration_triggered": forced_regen,
         "emergency_exit_triggered": emergency_exit,
         "summary": {
-            "under": under_count,
-            "over": over_count,
-            "locked": locked_count,
-            "ok": ok_count,
+            "under": under,
+            "over": over,
+            "locked": locked,
+            "ok": ok
         }
     }
 
-    project_data["batches"].append(batch_entry)
-    project_data["total_batches"] = len(project_data["batches"])
-    project_data["keywords_state"] = keywords_state
+    data["batches"].append(batch_entry)
+    data["total_batches"] = len(data["batches"])
+    data["keywords_state"] = keywords_state
 
-    doc_ref.set(project_data)
+    # ------------------------------------------
+    # 5) Zapis zmian
+    # ------------------------------------------
+    doc_ref.set(data)
 
-    # ---------------------------------------------------------
-    # 5. 📦 Meta Prompt Summary — wraca do GPT
-    # ---------------------------------------------------------
+    # ------------------------------------------
+    # 6) Meta summary (wraca do GPT)
+    # ------------------------------------------
     meta_prompt_summary = (
-        f"UNDER={under_count}, "
-        f"OVER={over_count}, "
-        f"LOCKED={locked_count}, "
-        f"OK={ok_count} – global lemma"
+        f"UNDER={under}, OVER={over}, LOCKED={locked}, OK={ok} – global lemma"
     )
 
-    return jsonify({
-        "status": "BATCH_RECORDED",
+    # ------------------------------------------
+    # 7) Finalny JSON — identyczny format jak /add_batch
+    # ------------------------------------------
+    return {
+        "status": "BATCH_PROCESSED",
         "counting_mode": "lemma",
         "continuous_counting": True,
         "prefer_local_tracker": False,
@@ -142,6 +133,7 @@ def add_batch(project_id):
         "keywords_report": [
             {
                 "keyword": kw,
+                "lemma": meta["lemma"],
                 "actual_uses": meta["actual_uses"],
                 "target_range": f"{meta['target_min']}–{meta['target_max']}",
                 "status": meta["status"],
@@ -154,4 +146,35 @@ def add_batch(project_id):
             for kw, meta in keywords_state.items()
         ],
         "meta_prompt_summary": meta_prompt_summary
-    }), 200
+    }
+
+
+# ===========================================================
+# 📌 ENDPOINT 1: Podgląd projektu
+# ===========================================================
+@tracker_routes.get("/api/project/<project_id>")
+def get_project(project_id):
+    db = firestore.client()
+    doc_ref = db.collection("seo_projects").document(project_id)
+    doc = doc_ref.get()
+
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+
+    return jsonify(doc.to_dict()), 200
+
+
+# ===========================================================
+# 📌 ENDPOINT 2: Podgląd keywordów
+# ===========================================================
+@tracker_routes.get("/api/project/<project_id>/keywords")
+def get_keywords_state(project_id):
+    db = firestore.client()
+    doc_ref = db.collection("seo_projects").document(project_id)
+    doc = doc_ref.get()
+
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+
+    data = doc.to_dict()
+    return jsonify(data.get("keywords_state", {})), 200
