@@ -1,208 +1,56 @@
-# ================================================================
-# master_api.py — Master SEO API
-# v7.3.0-firestore-continuous-lemma (pełna zgodność z blueprintami)
-# ================================================================
-
 import os
-import re
-import json
-import requests
-from flask import Flask, request, jsonify
-from dotenv import load_dotenv
-import firebase_admin
-from firebase_admin import credentials, firestore
-from collections import Counter
+from flask import Flask, jsonify
+from flask_cors import CORS
+from firebase_admin import credentials, initialize_app, firestore
 
-# ================================================================
-# 🧩 Inicjalizacja środowiska Flask
-# ================================================================
-load_dotenv()
+# -----------------------------------------
+# 🔥 Inicjalizacja Firestore
+# -----------------------------------------
+GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+
+if not GOOGLE_APPLICATION_CREDENTIALS:
+    raise RuntimeError("Brak zmiennej środowiskowej GOOGLE_APPLICATION_CREDENTIALS!")
+
+cred = credentials.Certificate(GOOGLE_APPLICATION_CREDENTIALS)
+firebase_app = initialize_app(cred)
+db = firestore.client()
+
+# -----------------------------------------
+# 🔥 Inicjalizacja aplikacji Flask
+# -----------------------------------------
 app = Flask(__name__)
-
-# ================================================================
-# 🔧 Konfiguracja Firebase (Firestore)
-# ================================================================
-try:
-    FIREBASE_CREDS_JSON = os.getenv("FIREBASE_CREDS_JSON")
-
-    if not FIREBASE_CREDS_JSON:
-        print("⚠️ Brak FIREBASE_CREDS_JSON — próba użycia pliku serviceAccountKey.json")
-
-        if os.path.exists("serviceAccountKey.json"):
-            cred = credentials.Certificate("serviceAccountKey.json")
-        else:
-            raise ValueError("❌ Brak FIREBASE_CREDS_JSON i brak pliku serviceAccountKey.json.")
-
-    else:
-        # Render: env jest stringiem JSON — konwersja do dict
-        creds_dict = json.loads(FIREBASE_CREDS_JSON)
-        cred = credentials.Certificate(creds_dict)
-
-    firebase_admin.initialize_app(cred)
-    db = firestore.client()
-    print("✅ Firestore połączony (lemmaMode=ON, continuousCounting=ON)")
-
-except Exception as e:
-    print(f"❌ Błąd inicjalizacji Firebase: {e}")
-    db = None
-
-# ================================================================
-# 🌐 Zewnętrzne API (S1 Analysis)
-# ================================================================
-SERPAPI_KEY = os.getenv("SERPAPI_KEY")
-SERPAPI_URL = "https://serpapi.com/search"
-LANGEXTRACT_API_URL = "https://langextract-api.onrender.com/extract"
-NGRAM_API_URL = "https://gpt-ngram-api.onrender.com/api/ngram_entity_analysis"
+CORS(app)
 
 
-def call_api_with_json(url, payload, name):
-    try:
-        r = requests.post(url, json=payload, timeout=180)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        print(f"❌ Błąd API {name}: {e}")
-        return {"error": str(e), "location": name}
+# -----------------------------------------
+# 🔥 Import blueprintów
+# -----------------------------------------
+from project_routes import project_routes
+from firestore_tracker_routes import tracker_routes
 
 
-def call_serpapi(topic):
-    params = {"api_key": SERPAPI_KEY, "q": topic, "gl": "pl", "hl": "pl", "engine": "google"}
-    try:
-        r = requests.get(SERPAPI_URL, params=params, timeout=35)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        print(f"❌ Błąd SerpAPI: {e}")
-        return None
+# -----------------------------------------
+# 🔥 Rejestracja blueprintów
+# -----------------------------------------
+app.register_blueprint(project_routes)
+app.register_blueprint(tracker_routes)
 
 
-def call_langextract(url):
-    return call_api_with_json(LANGEXTRACT_API_URL, {"url": url}, "LangExtract")
-
-
-# ================================================================
-# 🧠 /api/s1_analysis — analiza SERP + H2 + n-gramy
-# ================================================================
-@app.route("/api/s1_analysis", methods=["POST"])
-def perform_s1_analysis():
-    try:
-        data = request.get_json()
-        if not data or "topic" not in data:
-            return jsonify({"error": "Brak 'topic'"}), 400
-
-        topic = data["topic"]
-        serp_data = call_serpapi(topic)
-
-        if not serp_data:
-            return jsonify({"error": "Brak danych z SerpAPI"}), 502
-
-        ai_overview_status = serp_data.get("ai_overview", {}).get("status", "not_available")
-        people_also_ask = [q.get("question") for q in serp_data.get("related_questions", []) if q.get("question")]
-        autocomplete_suggestions = [r.get("query") for r in serp_data.get("related_searches", []) if r.get("query")]
-        top_urls = [r.get("link") for r in serp_data.get("organic_results", [])[:7]]
-
-        print(f"🔍 S1 Analysis — temat: {topic}, URL-i: {len(top_urls)}")
-
-        sources_payload, h2_counts, text_lengths, all_headings = [], [], [], []
-
-        # Pobierz treść top 5 URL-i
-        for url in top_urls[:5]:
-            content = call_langextract(url)
-
-            if content and content.get("content"):
-                text = content["content"]
-                h2s = content.get("h2", [])
-
-                h2_counts.append(len(h2s))
-                all_headings.extend([h.strip().lower() for h in h2s])
-                text_lengths.append(len(re.findall(r'\w+', text)))
-
-                sources_payload.append({"url": url, "content": text})
-            else:
-                print(f"⚠️ Brak treści z LangExtract dla {url}")
-
-        # Wywołaj GPT-Ngram API
-        ngram_data = call_api_with_json(
-            NGRAM_API_URL,
-            {
-                "sources": sources_payload,
-                "main_keyword": topic,
-                "serp_context": {
-                    "people_also_ask": people_also_ask,
-                    "related_searches": autocomplete_suggestions
-                }
-            },
-            "GPT-Ngram"
-        )
-
-        heading_counts = Counter(all_headings)
-        top_headings = [h for h, _ in heading_counts.most_common(10)]
-
-        competitive_metrics = {
-            "avg_h2_per_article": round(sum(h2_counts) / len(h2_counts), 1) if h2_counts else 0,
-            "min_h2": min(h2_counts) if h2_counts else 0,
-            "max_h2": max(h2_counts) if h2_counts else 0,
-            "avg_text_length_words": round(sum(text_lengths) / len(text_lengths)) if text_lengths else 0,
-            "min_text_length_words": min(text_lengths) if text_lengths else 0,
-            "max_text_length_words": max(text_lengths) if text_lengths else 0,
-        }
-
-        return jsonify({
-            "identified_urls": top_urls,
-            "competitive_metrics": competitive_metrics,
-            "ai_overview_status": ai_overview_status,
-            "people_also_ask": people_also_ask,
-            "autocomplete_suggestions": autocomplete_suggestions,
-            "top_competitor_headings": top_headings,
-            "s1_enrichment": ngram_data
-        }), 200
-
-    except Exception as e:
-        print(f"❌ Błąd /api/s1_analysis: {e}")
-        return jsonify({"error": str(e)}), 500
-
-
-# ================================================================
-# ❤️ Health Check
-# ================================================================
-@app.route("/api/health", methods=["GET"])
+# -----------------------------------------
+# 🔥 Healthcheck
+# -----------------------------------------
+@app.get("/health")
 def health():
     return jsonify({
         "status": "ok",
-        "version": "v7.3.0-firestore-continuous-lemma",
-        "message": "Master SEO API działa poprawnie (Firestore lemmaMode + ContinuousCounting)."
+        "message": "Master SEO API 7.3.0 — Firestore Continuous Lemma Running"
     }), 200
 
 
-# ================================================================
-# 🔗 Rejestracja blueprintów (pełna zgodność ścieżek)
-# ================================================================
-try:
-    from project_routes import register_project_routes
-    register_project_routes(app, db)
-    print("✅ Załadowano project_routes")
-except Exception as e:
-    print(f"❌ Błąd ładowania project_routes: {e}")
-
-try:
-    from firestore_tracker_routes import register_tracker_routes
-    register_tracker_routes(app, db)
-    print("✅ Załadowano firestore_tracker_routes")
-except Exception as e:
-    print(f"❌ Błąd ładowania firestore_tracker_routes: {e}")
-
-try:
-    from firestore_batch_summary_routes import register_batch_summary_routes
-    register_batch_summary_routes(app, db)
-    print("✅ Załadowano firestore_batch_summary_routes")
-except Exception as e:
-    print(f"❌ Błąd ładowania firestore_batch_summary_routes: {e}")
-
-
-# ================================================================
-# 🚀 Uruchomienie zgodne z Render
-# ================================================================
+# -----------------------------------------
+# 🔥 Uruchamianie lokalne
+# Render używa Gunicorn, więc tego nie dotyka
+# -----------------------------------------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8080))
-    print(f"🌐 Uruchamianie Master SEO API v7.3.0 na porcie {port} (Firestore={'OK' if db else 'BRAK'})")
     app.run(host="0.0.0.0", port=port)
