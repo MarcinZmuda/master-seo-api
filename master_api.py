@@ -30,14 +30,14 @@ CORS(app)
 # ---------------------------------------------------------
 from project_routes import project_routes
 from firestore_tracker_routes import tracker_routes
-from s1_analysis_routes import s1_analysis_routes
+from s1_analysis_routes import s1_routes   # 🔥 POPRAWIONY IMPORT
 
 # ---------------------------------------------------------
 # 🔥 Rejestracja blueprintów
 # ---------------------------------------------------------
 app.register_blueprint(project_routes)
 app.register_blueprint(tracker_routes)
-app.register_blueprint(s1_analysis_routes)
+app.register_blueprint(s1_routes)          # 🔥 POPRAWIONA REJESTRACJA
 
 # ---------------------------------------------------------
 # 🔥 Healthcheck
