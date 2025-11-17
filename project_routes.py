@@ -3,7 +3,7 @@ from firebase_admin import firestore
 import re
 import spacy
 
-# Ładowanie modelu spaCy raz w skali procesu
+# Ładowanie modelu spaCy raz w skali procesu (wydajne)
 nlp = spacy.load("pl_core_news_sm")
 
 project_routes = Blueprint("project_routes", __name__)
@@ -12,7 +12,6 @@ project_routes = Blueprint("project_routes", __name__)
 # -------------------------------------------------------------
 # 🔧 Narzędzia pomocnicze
 # -------------------------------------------------------------
-
 def parse_brief_text(brief_text: str):
     """
     Parsuje brief BASIC/EXTENDED w formacie:
@@ -167,3 +166,26 @@ def delete_project_final(project_id):
         "status": "DELETED",
         "summary": summary
     }), 200
+
+
+# -------------------------------------------------------------
+# 🆕 S3 — Dodawanie batcha (BEZ HTTP SELF-CALL)
+# -------------------------------------------------------------
+from firestore_tracker_routes import process_batch_in_firestore
+
+@project_routes.post("/api/project/<project_id>/add_batch")
+def add_batch_to_project(project_id):
+    data = request.get_json()
+
+    if not data or "text" not in data:
+        return jsonify({"error": "Field 'text' is required"}), 400
+
+    batch_text = data["text"]
+
+    # 🔥 ZAMIENNIK dawnych self-call HTTP → teraz lokalne wywołanie
+    result = process_batch_in_firestore(project_id, batch_text)
+
+    if "error" in result:
+        return jsonify(result), result.get("status", 400)
+
+    return jsonify(result), 200
