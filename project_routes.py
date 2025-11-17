@@ -143,8 +143,10 @@ def delete_project_final(project_id):
 
     under = sum(1 for k in keywords_state.values() if k["status"] == "UNDER")
     over = sum(1 for k in keywords_state.values() if k["status"] == "OVER")
-    locked = sum(1 for k in keywords_state.values() if k["status"] == "LOCKED")
     ok = sum(1 for k in keywords_state.values() if k["status"] == "OK")
+
+    # LOCKED nie zapisuje się w Firestore – liczymy jak tracker:
+    locked = 1 if over >= 4 else 0
 
     summary = {
         "topic": data.get("topic"),
@@ -182,10 +184,13 @@ def add_batch_to_project(project_id):
 
     batch_text = data["text"]
 
-    # 🔥 ZAMIENNIK dawnych self-call HTTP → teraz lokalne wywołanie
+    # 🔥 Lokalna funkcja zamiast self-HTTP
     result = process_batch_in_firestore(project_id, batch_text)
 
     if "error" in result:
         return jsonify(result), result.get("status", 400)
+
+    # <<< KLUCZOWA POPRAWKA → batch_text wraca do GPT >>>
+    result["batch_text"] = batch_text
 
     return jsonify(result), 200
