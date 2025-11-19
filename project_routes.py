@@ -3,24 +3,21 @@ from firebase_admin import firestore
 import re
 import spacy
 
-# Ładowanie modelu spaCy raz w skali procesu (wydajne)
+# Ładowanie modelu
 nlp = spacy.load("pl_core_news_sm")
 
 project_routes = Blueprint("project_routes", __name__)
 
-
 # -------------------------------------------------------------
 # 🔧 Narzędzia pomocnicze
 # -------------------------------------------------------------
-def parse_brief_text(brief_text: str):
+def parse_brief_text_row_level(brief_text: str):
     """
-    Parsuje brief BASIC/EXTENDED w formacie:
-        fraza: 4–8x
-    Zwraca listę słowników { keyword, min_val, max_val, lemma }
+    Parsuje brief w trybie ROW-LEVEL LEMMA.
+    Każda linia to osobny byt, ale obliczamy dla niej 'search_lemma'.
     """
-
     lines = brief_text.split("\n")
-    parsed = []
+    parsed_dict = {}
 
     range_pattern = re.compile(r"(.+?):\s*(\d+)[–-](\d+)x")
 
@@ -31,50 +28,25 @@ def parse_brief_text(brief_text: str):
 
         match = range_pattern.match(line)
         if match:
-            keyword = match.group(1).strip()
+            original_keyword = match.group(1).strip()
             min_val = int(match.group(2))
             max_val = int(match.group(3))
 
-            # Lematyzacja frazy
-            doc = nlp(keyword)
-            lemma = " ".join([token.lemma_ for token in doc])
+            # Obliczamy lemat frazy docelowej (np. "aparaty słuchowe" -> "aparat słuchowy")
+            doc = nlp(original_keyword)
+            # Tworzymy ciąg lematów do szukania: "aparat słuchowy"
+            search_lemma = " ".join([token.lemma_.lower() for token in doc if token.is_alpha])
 
-            parsed.append({
-                "keyword": keyword,
-                "lemma": lemma,
+            # Kluczem jest oryginalna fraza (żeby zachować strukturę briefu)
+            parsed_dict[original_keyword] = {
+                "search_lemma": search_lemma,  # TO JEST WZORZEC SZUKANIA
                 "target_min": min_val,
                 "target_max": max_val,
                 "actual_uses": 0,
                 "status": "UNDER"
-            })
+            }
 
-    return parsed
-
-
-def convert_to_firestore_keywords(parsed_keywords):
-    """
-    Konwertuje listę fraz do struktury Firestore:
-    {
-        "fraza": {
-            "lemma": "...",
-            "target_min": ...,
-            "target_max": ...,
-            "actual_uses": 0,
-            "status": "UNDER"
-        }
-    }
-    """
-    fs_dict = {}
-    for item in parsed_keywords:
-        fs_dict[item["keyword"]] = {
-            "lemma": item["lemma"],
-            "target_min": item["target_min"],
-            "target_max": item["target_max"],
-            "actual_uses": 0,
-            "status": "UNDER"
-        }
-    return fs_dict
-
+    return parsed_dict
 
 # -------------------------------------------------------------
 # 🆕 S2 — Tworzenie projektu
@@ -89,11 +61,9 @@ def create_project():
     topic = data["topic"]
     brief_text = data["brief_text"]
 
-    # 🔍 Parsowanie fraz
-    parsed_keywords = parse_brief_text(brief_text)
-    firestore_keywords = convert_to_firestore_keywords(parsed_keywords)
+    # 🔍 Parsowanie w trybie Row-Level Lemma
+    firestore_keywords = parse_brief_text_row_level(brief_text)
 
-    # 🔥 Tworzenie projektu w Firestore
     db = firestore.client()
     doc_ref = db.collection("seo_projects").document()
     project_id = doc_ref.id
@@ -102,9 +72,8 @@ def create_project():
         "topic": topic,
         "brief_raw": brief_text,
         "keywords_state": firestore_keywords,
-        "counting_mode": "lemma",
+        "counting_mode": "row_lemma", # Nowy identyfikator trybu
         "continuous_counting": True,
-        "prefer_local_tracker": False,
         "created_at": firestore.SERVER_TIMESTAMP,
         "batches": [],
         "total_batches": 0
@@ -116,16 +85,13 @@ def create_project():
         "status": "CREATED",
         "project_id": project_id,
         "topic": topic,
-        "counting_mode": "lemma",
-        "continuous_counting": True,
-        "prefer_local_tracker": False,
+        "counting_mode": "row_lemma",
         "keywords": len(firestore_keywords),
-        "headers": 0
+        "info": "Tryb Row-Level Lemma: Każda fraza z briefu liczona osobno, ale z uwzględnieniem odmiany."
     }), 201
 
-
 # -------------------------------------------------------------
-# 🧨 S4 — Usunięcie projektu i raport końcowy
+# Reszta endpointów (Delete, Add Batch wrapper) bez zmian logicznych
 # -------------------------------------------------------------
 @project_routes.delete("/api/project/<project_id>")
 def delete_project_final(project_id):
@@ -137,22 +103,16 @@ def delete_project_final(project_id):
         return jsonify({"error": "Project not found"}), 404
 
     data = doc.to_dict()
-
-    # Zbudowanie raportu przed usunięciem
     keywords_state = data.get("keywords_state", {})
 
     under = sum(1 for k in keywords_state.values() if k["status"] == "UNDER")
     over = sum(1 for k in keywords_state.values() if k["status"] == "OVER")
     ok = sum(1 for k in keywords_state.values() if k["status"] == "OK")
-
-    # LOCKED nie zapisuje się w Firestore – liczymy jak tracker:
     locked = 1 if over >= 4 else 0
 
     summary = {
         "topic": data.get("topic"),
-        "counting_mode": "lemma",
-        "continuous_counting": True,
-        "prefer_local_tracker": False,
+        "counting_mode": data.get("counting_mode", "row_lemma"),
         "total_batches": data.get("total_batches", 0),
         "under_terms_count": under,
         "over_terms_count": over,
@@ -161,36 +121,22 @@ def delete_project_final(project_id):
         "timestamp": firestore.SERVER_TIMESTAMP
     }
 
-    # 🔥 Usunięcie projektu
     doc_ref.delete()
+    return jsonify({"status": "DELETED", "summary": summary}), 200
 
-    return jsonify({
-        "status": "DELETED",
-        "summary": summary
-    }), 200
-
-
-# -------------------------------------------------------------
-# 🆕 S3 — Dodawanie batcha (BEZ HTTP SELF-CALL)
-# -------------------------------------------------------------
 from firestore_tracker_routes import process_batch_in_firestore
 
 @project_routes.post("/api/project/<project_id>/add_batch")
 def add_batch_to_project(project_id):
     data = request.get_json()
-
     if not data or "text" not in data:
         return jsonify({"error": "Field 'text' is required"}), 400
 
     batch_text = data["text"]
-
-    # 🔥 Lokalna funkcja zamiast self-HTTP
     result = process_batch_in_firestore(project_id, batch_text)
 
     if "error" in result:
         return jsonify(result), result.get("status", 400)
 
-    # <<< KLUCZOWA POPRAWKA → batch_text wraca do GPT >>>
     result["batch_text"] = batch_text
-
     return jsonify(result), 200
