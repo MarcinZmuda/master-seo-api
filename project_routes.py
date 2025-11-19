@@ -2,8 +2,10 @@ from flask import Blueprint, request, jsonify
 from firebase_admin import firestore
 import re
 import spacy
+# Importujemy logikę trackera z drugiego pliku (musi być w tym samym folderze)
+from firestore_tracker_routes import process_batch_in_firestore
 
-# Ładowanie modelu spaCy raz w skali procesu
+# Ładowanie modelu spaCy (raz na proces)
 nlp = spacy.load("pl_core_news_sm")
 
 project_routes = Blueprint("project_routes", __name__)
@@ -42,7 +44,7 @@ def parse_brief_text_row_level(brief_text: str):
             search_lemma = " ".join([token.lemma_.lower() for token in doc if token.is_alpha])
 
             # Kluczem w Firestore jest oryginalna fraza (żeby zachować czytelność briefu)
-            # Jeśli klucz już istnieje (duplikat w briefie), nadpisujemy go (lub można dodać suffix)
+            # Używamy original_keyword jako klucza, co gwarantuje rozróżnienie wierszy 1:1
             parsed_dict[original_keyword] = {
                 "search_lemma": search_lemma,  # TO JEST WZORZEC SZUKANIA
                 "target_min": min_val,
@@ -81,7 +83,7 @@ def create_project():
         "topic": topic,
         "brief_raw": brief_text,
         "keywords_state": firestore_keywords,
-        "counting_mode": "row_lemma", # Nowy identyfikator trybu dla jasności
+        "counting_mode": "row_lemma", # Tryb: Wiersz po wierszu z lematyzacją
         "continuous_counting": True,
         "created_at": firestore.SERVER_TIMESTAMP,
         "batches": [],
@@ -145,9 +147,6 @@ def delete_project_final(project_id):
 # -------------------------------------------------------------
 # 🆕 S3 — Dodawanie batcha (Wrapper do trackera)
 # -------------------------------------------------------------
-# Importujemy funkcję procesującą z pliku trackera (musi być w tym samym katalogu)
-from firestore_tracker_routes import process_batch_in_firestore
-
 @project_routes.post("/api/project/<project_id>/add_batch")
 def add_batch_to_project(project_id):
     data = request.get_json()
@@ -157,12 +156,11 @@ def add_batch_to_project(project_id):
 
     batch_text = data["text"]
 
-    # 🔥 Wywołujemy logikę biznesową z trackera
+    # 🔥 Wywołujemy logikę biznesową z trackera (funkcja importowana na górze)
     result = process_batch_in_firestore(project_id, batch_text)
 
     if "error" in result:
         status_code = result.get("status", 400)
-        # Jeśli status to string (np. z firestore), zmieniamy na int
         if not isinstance(status_code, int):
             status_code = 400
         return jsonify(result), status_code
