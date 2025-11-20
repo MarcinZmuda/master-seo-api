@@ -1,3 +1,4 @@
+import uuid  # <--- DODANE
 from flask import Blueprint, request, jsonify
 from firebase_admin import firestore
 import re
@@ -9,18 +10,19 @@ nlp = spacy.load("pl_core_news_sm")
 project_routes = Blueprint("project_routes", __name__)
 
 # -------------------------------------------------------------
-# 🔧 Parser HYBRYDOWY (Klucz = Oryginalny tekst)
+# 🔧 Parser UUID Hybrid (Każdy wiersz to osobny ID)
 # -------------------------------------------------------------
-def parse_brief_text_hybrid(brief_text: str):
+def parse_brief_text_uuid(brief_text: str):
     """
     Parsuje brief linia po linii.
-    Kluczem słownika jest PEŁNA TREŚĆ FRAZY (original_keyword).
-    Dzięki temu 'aparat' i 'aparaty' to dwa osobne wpisy.
+    Każda linia dostaje UNIKALNE ID (UUID).
+    Dzięki temu nawet identyczne frazy są traktowane jako osobne liczniki.
     """
     lines = brief_text.split("\n")
+    # Zmieniamy strukturę: to będzie lista obiektów, nie słownik po kluczu frazy
+    # Ale Firestore wymaga mapy lub kolekcji. Zrobimy mapę po UUID.
     parsed_dict = {}
     
-    # Regex łapie: "fraza: 1-5x"
     range_pattern = re.compile(r"(.+?):\s*(\d+)[–-](\d+)x")
 
     for line in lines:
@@ -29,17 +31,18 @@ def parse_brief_text_hybrid(brief_text: str):
 
         match = range_pattern.match(line)
         if match:
-            # Bierzemy frazę co do znaku (np. "aparaty słuchowe")
             original_keyword = match.group(1).strip()
             min_val = int(match.group(2))
             max_val = int(match.group(3))
 
-            # Generujemy lemat tylko pomocniczo
             doc = nlp(original_keyword)
             search_lemma = " ".join([token.lemma_.lower() for token in doc if token.is_alpha])
 
-            # ZAPISUJEMY POD ORYGINALNĄ NAZWĄ -> To gwarantuje liczbę kluczy = liczbie linii
-            parsed_dict[original_keyword] = {
+            # GENERUJEMY UNIKALNE ID DLA TEGO WIERSZA
+            row_id = str(uuid.uuid4())
+
+            parsed_dict[row_id] = {
+                "keyword": original_keyword,    # Wyświetlana nazwa
                 "search_term_exact": original_keyword.lower(),
                 "search_lemma": search_lemma,
                 "target_min": min_val,
@@ -49,6 +52,7 @@ def parse_brief_text_hybrid(brief_text: str):
             }
 
     return parsed_dict
+
 
 # -------------------------------------------------------------
 # S2 — Tworzenie projektu
@@ -63,11 +67,11 @@ def create_project():
     topic = data["topic"]
     brief_text = data["brief_text"]
 
-    # 🔥 Używamy parsera hybrydowego
-    firestore_keywords = parse_brief_text_hybrid(brief_text)
+    # 🔥 Używamy parsera UUID
+    firestore_keywords = parse_brief_text_uuid(brief_text)
 
-    # Debug: Sprawdzamy ile kluczy powstało
-    keyword_count = len(firestore_keywords)
+    if not firestore_keywords:
+        return jsonify({"error": "Could not parse any keywords"}), 400
 
     db = firestore.client()
     doc_ref = db.collection("seo_projects").document()
@@ -76,7 +80,7 @@ def create_project():
         "topic": topic,
         "brief_raw": brief_text,
         "keywords_state": firestore_keywords,
-        "counting_mode": "hybrid_row",
+        "counting_mode": "uuid_hybrid", # Nowy tryb
         "continuous_counting": True,
         "created_at": firestore.SERVER_TIMESTAMP,
         "batches": [],
@@ -89,14 +93,12 @@ def create_project():
         "status": "CREATED",
         "project_id": doc_ref.id,
         "topic": topic,
-        "counting_mode": "hybrid_row",
-        "keywords": keyword_count, # Tu musi być 80, jeśli GPT wysłał 80 linii
-        "info": f"Utworzono {keyword_count} unikalnych liczników (Hybrid Mode)."
+        "counting_mode": "uuid_hybrid",
+        "keywords": len(firestore_keywords), # Pokaże dokładną liczbę linii
+        "info": "Tryb UUID Hybrid: Każdy wiersz to unikalny rekord."
     }), 201
 
-# -------------------------------------------------------------
-# S4 — Usunięcie projektu
-# -------------------------------------------------------------
+# (Reszta endpointów DELETE i ADD BATCH bez zmian logicznych - tylko copy-paste standardowe)
 @project_routes.delete("/api/project/<project_id>")
 def delete_project_final(project_id):
     db = firestore.client()
@@ -124,9 +126,6 @@ def delete_project_final(project_id):
     doc_ref.delete()
     return jsonify({"status": "DELETED", "summary": summary}), 200
 
-# -------------------------------------------------------------
-# S3 — Dodawanie batcha
-# -------------------------------------------------------------
 @project_routes.post("/api/project/<project_id>/add_batch")
 def add_batch_to_project(project_id):
     data = request.get_json()
@@ -135,7 +134,6 @@ def add_batch_to_project(project_id):
 
     batch_text = data["text"]
     meta_trace = data.get("meta_trace", {})
-    
     result = process_batch_in_firestore(project_id, batch_text, meta_trace)
 
     status_code = result.get("status", 400)
