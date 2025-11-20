@@ -2,7 +2,6 @@ from flask import Blueprint, request, jsonify
 from firebase_admin import firestore
 import re
 import spacy
-# Importujemy logikę trackera
 from firestore_tracker_routes import process_batch_in_firestore
 
 nlp = spacy.load("pl_core_news_sm")
@@ -10,16 +9,18 @@ nlp = spacy.load("pl_core_news_sm")
 project_routes = Blueprint("project_routes", __name__)
 
 # -------------------------------------------------------------
-# 🔧 Narzędzia pomocnicze: Parsowanie HYBRYDOWE 1:1
+# 🔧 Parser HYBRYDOWY (Klucz = Oryginalny tekst)
 # -------------------------------------------------------------
 def parse_brief_text_hybrid(brief_text: str):
     """
     Parsuje brief linia po linii.
-    Nie grupuje. Tworzy strukturę pod Hybrid Matching (Exact + Lemma).
+    Kluczem słownika jest PEŁNA TREŚĆ FRAZY (original_keyword).
+    Dzięki temu 'aparat' i 'aparaty' to dwa osobne wpisy.
     """
     lines = brief_text.split("\n")
     parsed_dict = {}
     
+    # Regex łapie: "fraza: 1-5x"
     range_pattern = re.compile(r"(.+?):\s*(\d+)[–-](\d+)x")
 
     for line in lines:
@@ -28,20 +29,19 @@ def parse_brief_text_hybrid(brief_text: str):
 
         match = range_pattern.match(line)
         if match:
-            # Pobieramy frazę DOKŁADNIE taką, jak wpisał użytkownik
+            # Bierzemy frazę co do znaku (np. "aparaty słuchowe")
             original_keyword = match.group(1).strip()
             min_val = int(match.group(2))
             max_val = int(match.group(3))
 
-            # 1. Generujemy LEMAT do szukania (Smart Match)
+            # Generujemy lemat tylko pomocniczo
             doc = nlp(original_keyword)
             search_lemma = " ".join([token.lemma_.lower() for token in doc if token.is_alpha])
 
-            # 2. Zapisujemy w bazie pod kluczem = oryginalna fraza
-            # Zapisujemy parametry 'search_term_exact' oraz 'search_lemma'
+            # ZAPISUJEMY POD ORYGINALNĄ NAZWĄ -> To gwarantuje liczbę kluczy = liczbie linii
             parsed_dict[original_keyword] = {
-                "search_term_exact": original_keyword.lower(), # Do szukania 1:1
-                "search_lemma": search_lemma,                  # Do szukania sprytnego
+                "search_term_exact": original_keyword.lower(),
+                "search_lemma": search_lemma,
                 "target_min": min_val,
                 "target_max": max_val,
                 "actual_uses": 0,
@@ -50,9 +50,8 @@ def parse_brief_text_hybrid(brief_text: str):
 
     return parsed_dict
 
-
 # -------------------------------------------------------------
-# S2 — Tworzenie projektu (Hybrid Mode)
+# S2 — Tworzenie projektu
 # -------------------------------------------------------------
 @project_routes.post("/api/project/create")
 def create_project():
@@ -64,11 +63,11 @@ def create_project():
     topic = data["topic"]
     brief_text = data["brief_text"]
 
-    # Parsujemy brief w trybie hybrydowym
+    # 🔥 Używamy parsera hybrydowego
     firestore_keywords = parse_brief_text_hybrid(brief_text)
 
-    if not firestore_keywords:
-        return jsonify({"error": "Could not parse any keywords"}), 400
+    # Debug: Sprawdzamy ile kluczy powstało
+    keyword_count = len(firestore_keywords)
 
     db = firestore.client()
     doc_ref = db.collection("seo_projects").document()
@@ -77,7 +76,7 @@ def create_project():
         "topic": topic,
         "brief_raw": brief_text,
         "keywords_state": firestore_keywords,
-        "counting_mode": "hybrid_row", # Tryb Hybrydowy
+        "counting_mode": "hybrid_row",
         "continuous_counting": True,
         "created_at": firestore.SERVER_TIMESTAMP,
         "batches": [],
@@ -91,10 +90,9 @@ def create_project():
         "project_id": doc_ref.id,
         "topic": topic,
         "counting_mode": "hybrid_row",
-        "keywords": len(firestore_keywords),
-        "info": "Projekt utworzony w trybie Hybrid Row-Level (Exact + Lemma)."
+        "keywords": keyword_count, # Tu musi być 80, jeśli GPT wysłał 80 linii
+        "info": f"Utworzono {keyword_count} unikalnych liczników (Hybrid Mode)."
     }), 201
-
 
 # -------------------------------------------------------------
 # S4 — Usunięcie projektu
@@ -104,7 +102,6 @@ def delete_project_final(project_id):
     db = firestore.client()
     doc_ref = db.collection("seo_projects").document(project_id)
     doc = doc_ref.get()
-
     if not doc.exists: return jsonify({"error": "Not found"}), 404
 
     data = doc.to_dict()
@@ -124,30 +121,21 @@ def delete_project_final(project_id):
         "ok_terms_count": ok,
         "timestamp": firestore.SERVER_TIMESTAMP
     }
-
     doc_ref.delete()
-
-    return jsonify({
-        "status": "DELETED",
-        "summary": summary
-    }), 200
-
+    return jsonify({"status": "DELETED", "summary": summary}), 200
 
 # -------------------------------------------------------------
-# S3 — Dodawanie batcha (Wrapper)
+# S3 — Dodawanie batcha
 # -------------------------------------------------------------
 @project_routes.post("/api/project/<project_id>/add_batch")
 def add_batch_to_project(project_id):
     data = request.get_json()
-
     if not data or "text" not in data:
         return jsonify({"error": "Field 'text' is required"}), 400
 
     batch_text = data["text"]
-    # 🔥 Pobieramy meta_trace od GPT
     meta_trace = data.get("meta_trace", {})
-
-    # 🔥 Przekazujemy do trackera (który ma w sobie Gemini Judge)
+    
     result = process_batch_in_firestore(project_id, batch_text, meta_trace)
 
     status_code = result.get("status", 400)
