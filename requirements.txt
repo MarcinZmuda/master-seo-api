@@ -6,3 +6,4 @@ spacy==3.7.2
 pl-core-news-sm @ https://github.com/explosion/spacy-models/releases/download/pl_core_news_sm-3.7.0/pl_core_news_sm-3.7.0.tar.gz
 gunicorn==23.0.0
 python-dotenv==1.0.0
+google-generativeai==0.3.2
