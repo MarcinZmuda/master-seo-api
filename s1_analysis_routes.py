@@ -1,5 +1,6 @@
 # ================================================================
-# s1_analysis_routes.py — Turbo S1 (Fixed for Polish noun_chunks)
+# s1_analysis_routes.py — Turbo S1 (Fixed noun_chunks for PL)
+# v7.3.3-stable
 # ================================================================
 
 import os
@@ -34,7 +35,7 @@ NGRAM_API_URL = os.getenv(
 try:
     nlp = spacy.load("pl_core_news_sm")
 except OSError:
-    # Fallback na wypadek braku modelu, pobieramy w locie (opcjonalne)
+    # Fallback: pobieramy w locie jeśli brakuje
     from spacy.cli import download
     download("pl_core_news_sm")
     nlp = spacy.load("pl_core_news_sm")
@@ -107,7 +108,7 @@ def call_ngram_api(sources_payload, topic, serp_context):
 
 
 # ------------------------------------------------
-# 🔧 spaCy entity extractor (NER + noun chunks fix)
+# 🔧 spaCy entity extractor (NER + noun chunks FIX)
 # ------------------------------------------------
 def extract_spacy_entities(text: str):
     """
@@ -120,22 +121,20 @@ def extract_spacy_entities(text: str):
     entities = []
     noun_chunks = []
 
-    # 1. Wyciąganie Encji (To działa w PL)
+    # 1. Wyciąganie Encji (Działa OK)
     for ent in doc.ents:
         entities.append({
             "text": ent.text,
             "label": ent.label_
         })
 
-    # 2. Wyciąganie Noun Chunks (To wywala błąd [E894] w PL)
-    # Dodajemy zabezpieczenie:
+    # 2. Wyciąganie Noun Chunks (ZABEZPIECZONE)
+    # Model PL rzuca tutaj NotImplementedError, więc musimy to obsłużyć
     try:
-        # Próbujemy pobrać noun_chunks
         for chunk in doc.noun_chunks:
             noun_chunks.append(chunk.text)
     except (NotImplementedError, AttributeError):
-        # Jeśli model PL tego nie obsługuje, po prostu zostawiamy pustą listę
-        # i nie przerywamy działania aplikacji.
+        # Ignorujemy błąd dla języka polskiego
         pass
 
     return {
@@ -180,12 +179,12 @@ def extract_top_headings(all_headings, limit=10):
 def perform_s1_analysis():
     """
     FULL FLOW:
-      1. SerpAPI → organic_results, PAA, related_searches, AI Overview status
-      2. LangExtract (top 5 URL) → content + H2
-      3. spaCy → NER + noun chunks (SAFE MODE)
-      4. Metryki konkurencji
+      1. SerpAPI
+      2. LangExtract (top 5 URL)
+      3. spaCy (SAFE MODE)
+      4. Metryki
       5. GPT-Ngram API
-      6. Finalny raport S1
+      6. Final Report
     """
     try:
         data = request.get_json() or {}
@@ -247,7 +246,7 @@ def perform_s1_analysis():
             word_count = len(re.findall(r"\w+", text))
             text_lengths.append(word_count)
 
-            # spaCy NER + chunks (zabezpieczone przed błędem)
+            # spaCy NER + chunks (TERAZ ZABEZPIECZONE)
             spacy_data = extract_spacy_entities(text)
 
             # Payload do NGRAM API
@@ -281,8 +280,7 @@ def perform_s1_analysis():
 
             if ngrams_list:
                 def ngram_sort_key(item):
-                    if not isinstance(item, dict):
-                        return 0
+                    if not isinstance(item, dict): return 0
                     return (
                         item.get("weight")
                         or item.get("score")
@@ -296,8 +294,7 @@ def perform_s1_analysis():
                     reverse=True
                 )
                 for item in sorted_ngrams[:30]:
-                    if not isinstance(item, dict):
-                        continue
+                    if not isinstance(item, dict): continue
                     top_ngrams_summary.append({
                         "ngram": item.get("ngram") or item.get("text"),
                         "weight": item.get("weight"),
