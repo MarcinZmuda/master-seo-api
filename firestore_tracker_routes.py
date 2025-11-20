@@ -33,18 +33,15 @@ def evaluate_with_gemini(text, meta_trace):
     intent = meta_trace.get("execution_intent", "Brak")
     rhythm = meta_trace.get("rhythm_pattern_used", "Brak")
     
-    # 🔥 Lista zakazanych fraz (Hardcoded z Twojego pliku + DŁUGI MYŚLNIK)
+   # 🔥 ZAKTUALIZOWANA, ROZSZERZONA LISTA DLA GEMINI JUDGE
     banned_phrases_list = """
-    - "W podsumowaniu", "Podsumowując", "Reasumując"
-    - "Warto zauważyć", "Warto dodać", "Należy wspomnieć"
-    - "Kluczowym aspektem", "Istotnym elementem"
-    - "W niniejszym artykule", "W dzisiejszym świecie"
-    - "Nie ma wątpliwości", "Bez wątpienia", "Z całą pewnością"
-    - "Jak dowodzą eksperci", "Zgodnie z badaniami" (jeśli bez źródła)
-    - "Co więcej", "Ponadto", "Z drugiej strony" (jako tanie łączniki)
-    - "To prowadzi nas do wniosku"
-    - "Gra warta świeczki", "Strzał w dziesiątkę"
-    - "—" (Długi myślnik / Pauza) - AI często go nadużywa w wtrąceniach. Wymuszaj naturalne polskie znaki lub przecinki.
+    1. WYPEŁNIACZE STARTOWE: "W dzisiejszych czasach", "W dobie...", "Od zarania dziejów", "W niniejszym artykule", "Coraz więcej osób".
+    2. LENIWE ŁĄCZNIKI: "Warto zauważyć", "Należy wspomnieć", "Warto dodać", "Co więcej", "Ponadto", "Kolejnym aspektem".
+    3. ZAKOŃCZENIA: "Podsumowując", "Reasumując", "W ostatecznym rozrachunku", "Biorąc wszystko pod uwagę".
+    4. IDIOMY AI: "Gra warta świeczki", "Strzał w dziesiątkę", "Szyte na miarę", "Klucz do sukcesu".
+    5. ASEKURANCTWO: "Wszystko zależy od indywidualnych preferencji", "Każde rozwiązanie ma wady i zalety".
+    6. WZMOCNIENIA: "Nie ma wątpliwości", "Bez wątpienia", "Z całą pewnością", "Niezwykle ważne".
+    7. ZNAKI: "—" (Długi myślnik/Pauza - AI nadużywa go do wtrąceń).
     """
 
     prompt = f"""
