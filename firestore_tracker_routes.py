@@ -18,7 +18,7 @@ if GEMINI_API_KEY:
 
 def evaluate_with_gemini(text, meta_trace):
     if not GEMINI_API_KEY: return {"pass": True, "quality_score": 100, "feedback": "No key"}
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-pro')
     # ... (reszta logiki sędziego) ...
     return {"pass": True, "quality_score": 100} # Placeholder
 
