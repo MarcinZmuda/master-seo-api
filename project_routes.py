@@ -1,8 +1,9 @@
-import uuid  # <--- DODANE
+import uuid
 from flask import Blueprint, request, jsonify
 from firebase_admin import firestore
 import re
 import spacy
+# Importujemy logikę trackera
 from firestore_tracker_routes import process_batch_in_firestore
 
 nlp = spacy.load("pl_core_news_sm")
@@ -10,39 +11,54 @@ nlp = spacy.load("pl_core_news_sm")
 project_routes = Blueprint("project_routes", __name__)
 
 # -------------------------------------------------------------
-# 🔧 Parser UUID Hybrid (Każdy wiersz to osobny ID)
+# 🔧 Parser UUID Hybrid (NAPRAWIONY REGEX DLA "1x")
 # -------------------------------------------------------------
 def parse_brief_text_uuid(brief_text: str):
     """
     Parsuje brief linia po linii.
+    Obsługuje formaty: "fraza: 1-5x" ORAZ "fraza: 1x".
     Każda linia dostaje UNIKALNE ID (UUID).
-    Dzięki temu nawet identyczne frazy są traktowane jako osobne liczniki.
     """
     lines = brief_text.split("\n")
-    # Zmieniamy strukturę: to będzie lista obiektów, nie słownik po kluczu frazy
-    # Ale Firestore wymaga mapy lub kolekcji. Zrobimy mapę po UUID.
     parsed_dict = {}
     
-    range_pattern = re.compile(r"(.+?):\s*(\d+)[–-](\d+)x")
-
     for line in lines:
         line = line.strip()
         if not line: continue
 
-        match = range_pattern.match(line)
-        if match:
-            original_keyword = match.group(1).strip()
-            min_val = int(match.group(2))
-            max_val = int(match.group(3))
+        # Musi być dwukropek oddzielający frazę od liczb
+        if ":" not in line:
+            continue
 
+        try:
+            # Rozdzielamy po ostatnim dwukropku (na wypadek dwukropka w frazie)
+            parts = line.rsplit(":", 1)
+            original_keyword = parts[0].strip()
+            counts_part = parts[1].strip().lower()
+
+            # Wyciągamy WSZYSTKIE liczby z prawej strony
+            numbers = re.findall(r'\d+', counts_part)
+
+            if not numbers:
+                continue # Pomijamy linie bez liczb
+
+            if len(numbers) >= 2:
+                min_val = int(numbers[0])
+                max_val = int(numbers[1])
+            else:
+                # Jeśli jest tylko jedna liczba (np. "1x"), to min=max
+                min_val = int(numbers[0])
+                max_val = int(numbers[0])
+
+            # Generujemy Lemat
             doc = nlp(original_keyword)
             search_lemma = " ".join([token.lemma_.lower() for token in doc if token.is_alpha])
 
-            # GENERUJEMY UNIKALNE ID DLA TEGO WIERSZA
+            # Generujemy unikalne ID dla wiersza
             row_id = str(uuid.uuid4())
 
             parsed_dict[row_id] = {
-                "keyword": original_keyword,    # Wyświetlana nazwa
+                "keyword": original_keyword, # To wyświetlimy w raporcie
                 "search_term_exact": original_keyword.lower(),
                 "search_lemma": search_lemma,
                 "target_min": min_val,
@@ -50,6 +66,9 @@ def parse_brief_text_uuid(brief_text: str):
                 "actual_uses": 0,
                 "status": "UNDER"
             }
+        except Exception as e:
+            print(f"⚠️ Błąd parsowania linii: '{line}' -> {e}")
+            continue
 
     return parsed_dict
 
@@ -67,11 +86,15 @@ def create_project():
     topic = data["topic"]
     brief_text = data["brief_text"]
 
-    # 🔥 Używamy parsera UUID
+    # 🔥 Używamy naprawionego parsera
     firestore_keywords = parse_brief_text_uuid(brief_text)
 
-    if not firestore_keywords:
-        return jsonify({"error": "Could not parse any keywords"}), 400
+    keyword_count = len(firestore_keywords)
+
+    if keyword_count == 0:
+        return jsonify({
+            "error": "No keywords parsed. Check format (e.g., 'phrase: 1-5x' or 'phrase: 1x')"
+        }), 400
 
     db = firestore.client()
     doc_ref = db.collection("seo_projects").document()
@@ -80,7 +103,7 @@ def create_project():
         "topic": topic,
         "brief_raw": brief_text,
         "keywords_state": firestore_keywords,
-        "counting_mode": "uuid_hybrid", # Nowy tryb
+        "counting_mode": "uuid_hybrid",
         "continuous_counting": True,
         "created_at": firestore.SERVER_TIMESTAMP,
         "batches": [],
@@ -94,11 +117,14 @@ def create_project():
         "project_id": doc_ref.id,
         "topic": topic,
         "counting_mode": "uuid_hybrid",
-        "keywords": len(firestore_keywords), # Pokaże dokładną liczbę linii
-        "info": "Tryb UUID Hybrid: Każdy wiersz to unikalny rekord."
+        "keywords": keyword_count, # Powinno być tyle, ile linii w briefie
+        "info": "Projekt utworzony. Parser obsługuje '1x' i '1-5x'."
     }), 201
 
-# (Reszta endpointów DELETE i ADD BATCH bez zmian logicznych - tylko copy-paste standardowe)
+
+# -------------------------------------------------------------
+# S4 — Usunięcie projektu
+# -------------------------------------------------------------
 @project_routes.delete("/api/project/<project_id>")
 def delete_project_final(project_id):
     db = firestore.client()
@@ -126,6 +152,10 @@ def delete_project_final(project_id):
     doc_ref.delete()
     return jsonify({"status": "DELETED", "summary": summary}), 200
 
+
+# -------------------------------------------------------------
+# S3 — Dodawanie batcha
+# -------------------------------------------------------------
 @project_routes.post("/api/project/<project_id>/add_batch")
 def add_batch_to_project(project_id):
     data = request.get_json()
@@ -134,6 +164,7 @@ def add_batch_to_project(project_id):
 
     batch_text = data["text"]
     meta_trace = data.get("meta_trace", {})
+    
     result = process_batch_in_firestore(project_id, batch_text, meta_trace)
 
     status_code = result.get("status", 400)
