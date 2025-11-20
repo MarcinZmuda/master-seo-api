@@ -1,24 +1,97 @@
+import os
+import json
 from flask import Blueprint, jsonify
 from firebase_admin import firestore
 import spacy
+import google.generativeai as genai
 
 tracker_routes = Blueprint("tracker_routes", __name__)
 
-# Ładowanie spaCy
+# Ładowanie spaCy (raz przy starcie aplikacji)
 nlp = spacy.load("pl_core_news_sm")
+
+# Konfiguracja Gemini (Pobierana ze zmiennych środowiskowych Render)
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+
+# ===========================================================
+# ⚖️ GEMINI JUDGE (Sędzia z Twoją listą Banned + Myślnik)
+# ===========================================================
+def evaluate_with_gemini(text, meta_trace):
+    """
+    Wysyła tekst do Gemini w celu oceny jakości (Glass Box).
+    Zwraca werdykt JSON: pass/fail, score, feedback.
+    """
+    if not GEMINI_API_KEY:
+        # Fallback: Jeśli brak klucza, przepuszczamy tekst (Fail Open)
+        return {"pass": True, "quality_score": 100, "feedback_for_writer": "Brak klucza Gemini - skip check"}
+
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    
+    # Pobieramy metadane od GPT (intencja i rytm)
+    intent = meta_trace.get("execution_intent", "Brak")
+    rhythm = meta_trace.get("rhythm_pattern_used", "Brak")
+    
+    # 🔥 Lista zakazanych fraz (Hardcoded z Twojego pliku + DŁUGI MYŚLNIK)
+    banned_phrases_list = """
+    - "W podsumowaniu", "Podsumowując", "Reasumując"
+    - "Warto zauważyć", "Warto dodać", "Należy wspomnieć"
+    - "Kluczowym aspektem", "Istotnym elementem"
+    - "W niniejszym artykule", "W dzisiejszym świecie"
+    - "Nie ma wątpliwości", "Bez wątpienia", "Z całą pewnością"
+    - "Jak dowodzą eksperci", "Zgodnie z badaniami" (jeśli bez źródła)
+    - "Co więcej", "Ponadto", "Z drugiej strony" (jako tanie łączniki)
+    - "To prowadzi nas do wniosku"
+    - "Gra warta świeczki", "Strzał w dziesiątkę"
+    - "—" (Długi myślnik / Pauza) - AI często go nadużywa w wtrąceniach. Wymuszaj naturalne polskie znaki lub przecinki.
+    """
+
+    prompt = f"""
+    Jesteś bezwzględnym Sędzią Jakości SEO (Quality Gatekeeper).
+    Oceniasz fragment tekstu pod kątem naturalności, stylu HEAR i braku "AI-izmów".
+    
+    PARAMETRY AUTORA:
+    - Intencja: {intent}
+    - Deklarowany Rytm: {rhythm}
+    
+    LISTA ZAKAZANYCH FRAZ:
+    {banned_phrases_list}
+    
+    KRYTERIA PUNKTACJI (0-100):
+    - < 50 (ODRZUT): Występują zakazane frazy (w tym długie myślniki "—"), styl bota, listy punktowane.
+    - 50-69 (SŁABY): Nudny, powtarzalny schemat zdań.
+    - 70-89 (DOBRY): Naturalny język, brak zakazanych fraz, dobra asymetria.
+    - 90+ (WYBITNY): Ludzki styl, flow, nieszablonowe słownictwo.
+
+    Zwróć JSON:
+    {{
+        "pass": true/false, (false jeśli są zakazane słowa LUB score < 70)
+        "quality_score": (0-100),
+        "feedback_for_writer": "Instrukcja co poprawić (np. 'Usuń długie myślniki', 'Zmień rytm')"
+    }}
+    
+    TEKST DO OCENY:
+    "{text}"
+    """
+    try:
+        response = model.generate_content(prompt)
+        # Czyszczenie odpowiedzi z markdowna (```json ... ```)
+        clean = response.text.replace("```json", "").replace("```", "").strip()
+        return json.loads(clean)
+    except Exception as e:
+        print(f"Gemini Error: {e}")
+        # W razie awarii Gemini dajemy bezpieczny wynik, ale z ostrzeżeniem
+        return {"pass": True, "quality_score": 50, "feedback_for_writer": "Gemini Error"}
 
 
 # ===========================================================
-# 🧠 Algorytm liczenia: Sliding Window na Lematach
+# 🔧 Helpery do liczenia (Row-Level Lemma Logic)
 # ===========================================================
 def count_phrase_in_text_lemmas(text_lemma_list, phrase_lemma_str):
     """
-    Sprawdza, ile razy sekwencja lematów (phrase_lemma_str) występuje
-    w liście lematów tekstu (text_lemma_list).
-    
-    Np. Tekst: ['kupić', 'aparat', 'słuchowy']
-    Szukane: "aparat słuchowy" -> ['aparat', 'słuchowy']
-    Wynik: 1
+    Sprawdza wystąpienie sekwencji lematów (phrase_lemma_str) w liście (text_lemma_list).
+    Działa jak "okno przesuwne".
     """
     target_tokens = phrase_lemma_str.split()
     if not target_tokens:
@@ -28,21 +101,12 @@ def count_phrase_in_text_lemmas(text_lemma_list, phrase_lemma_str):
     text_len = len(text_lemma_list)
     count = 0
 
-    # Przesuwamy okno po tekście
     for i in range(text_len - target_len + 1):
-        # Wycinamy okno o długości szukanej frazy
-        window = text_lemma_list[i : i + target_len]
-        
-        # Porównujemy listy (match musi być dokładny co do kolejności lematów)
-        if window == target_tokens:
+        if text_lemma_list[i : i + target_len] == target_tokens:
             count += 1
-
     return count
 
 
-# ===========================================================
-# 🔧 Obliczanie statusu (UNDER / OK / OVER)
-# ===========================================================
 def compute_status(actual, target_min, target_max):
     if actual < target_min:
         return "UNDER"
@@ -51,30 +115,18 @@ def compute_status(actual, target_min, target_max):
     return "OK"
 
 
-# ===========================================================
-# 🔄 Statystyki Globalne (LOCKED logic)
-# ===========================================================
 def global_keyword_stats(keywords_state):
     under = sum(1 for v in keywords_state.values() if v["status"] == "UNDER")
     over = sum(1 for v in keywords_state.values() if v["status"] == "OVER")
-    # Jeśli mamy 4 lub więcej fraz przeoptymalizowanych (OVER), włączamy LOCKED
     locked = 1 if over >= 4 else 0
     ok = sum(1 for v in keywords_state.values() if v["status"] == "OK")
     return under, over, locked, ok
 
 
 # ===========================================================
-# 🧠 GŁÓWNA FUNKCJA PROCESUJĄCA BATCH (Logika Biznesowa)
+# 🧠 GŁÓWNA FUNKCJA (QUALITY GATE + ZLICZANIE)
 # ===========================================================
-def process_batch_in_firestore(project_id: str, batch_text: str):
-    """
-    Funkcja wykonuje:
-    1. Pobranie stanu projektu z Firestore.
-    2. Lematyzację nowego batcha.
-    3. Zliczenie wystąpień fraz z briefu w nowym batchu (Row-Level Lemma).
-    4. Aktualizację liczników (Continuous Counting).
-    5. Zapis historii i nowego stanu.
-    """
+def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dict = None):
     db = firestore.client()
     doc_ref = db.collection("seo_projects").document(project_id)
     doc = doc_ref.get()
@@ -82,107 +134,95 @@ def process_batch_in_firestore(project_id: str, batch_text: str):
     if not doc.exists:
         return {"error": "Project not found", "status": 404}
 
-    data = doc.to_dict()
+    # -------------------------------------------------------
+    # 1. QUALITY GATE (GEMINI)
+    # -------------------------------------------------------
+    gemini_verdict = {"pass": True, "quality_score": 100}
     
-    # Zabezpieczenie na wypadek braku pola keywords_state
+    if meta_trace:
+        gemini_verdict = evaluate_with_gemini(batch_text, meta_trace)
+    
+    # 🔥 PRÓG JAKOŚCI = 70 punktów
+    QUALITY_THRESHOLD = 70
+
+    # Jeśli werdykt to FAIL albo punkty < 70 -> ODRZUCAMY
+    if not gemini_verdict.get("pass", True) or gemini_verdict.get("quality_score", 100) < QUALITY_THRESHOLD:
+        return {
+            "status": "REJECTED_QUALITY",
+            "error": "Quality Gate Failed",
+            "gemini_feedback": gemini_verdict, # To wraca do GPT
+            "quality_alert": True,
+            "info": f"Odrzucono: Wynik {gemini_verdict.get('quality_score')} < {QUALITY_THRESHOLD} lub wykryto zakazane frazy."
+        }
+
+    # -------------------------------------------------------
+    # 2. ZLICZANIE FRAZ (Tylko jeśli Quality Gate = Pass)
+    # -------------------------------------------------------
+    data = doc.to_dict()
     keywords_state = data.get("keywords_state", {})
 
-    # ------------------------------------------
-    # 1) Lematyzacja CAŁEGO tekstu batcha do listy
-    # ------------------------------------------
+    # Lematyzacja tekstu batcha
     doc_nlp = nlp(batch_text)
-    # Tworzymy listę lematów (tylko słowa, małe litery)
     text_lemma_list = [t.lemma_.lower() for t in doc_nlp if t.is_alpha]
 
-    # ------------------------------------------
-    # 2) Iteracja po wszystkich frazach z briefu
-    # ------------------------------------------
+    # Iteracja po frazach z briefu (Row-Level)
     for original_keyword, meta in keywords_state.items():
-        # Pobieramy wzorzec lematyczny (np. "aparat słuchowy")
         search_lemma = meta.get("search_lemma", "")
         
-        # Fallback dla starych projektów (gdyby nie było search_lemma)
+        # Fallback dla starszych projektów
         if not search_lemma:
             doc_tmp = nlp(original_keyword)
             search_lemma = " ".join([t.lemma_.lower() for t in doc_tmp if t.is_alpha])
 
-        # Liczymy wystąpienia WZORCA w LEMATACH TEKSTU (Sliding Window)
+        # Liczenie wystąpień
         occurrences = count_phrase_in_text_lemmas(text_lemma_list, search_lemma)
-
-        # Aktualizujemy stan (Continuous counting - dodajemy do poprzednich)
-        meta["actual_uses"] += occurrences
         
-        # Przeliczamy status (UNDER/OK/OVER)
-        meta["status"] = compute_status(
-            meta["actual_uses"], 
-            meta["target_min"], 
-            meta["target_max"]
-        )
+        # Aktualizacja stanu
+        meta["actual_uses"] += occurrences
+        meta["status"] = compute_status(meta["actual_uses"], meta["target_min"], meta["target_max"])
 
-    # ------------------------------------------
-    # 3) Obliczenie globalnych statusów
-    # ------------------------------------------
+    # Statystyki globalne
     under, over, locked, ok = global_keyword_stats(keywords_state)
-
     forced_regen = over >= 10
     emergency_exit = locked >= 1
 
-    # ------------------------------------------
-    # 4) Dodanie batcha do historii
-    # ------------------------------------------
+    # -------------------------------------------------------
+    # 3. ZAPIS DO BAZY
+    # -------------------------------------------------------
     batch_entry = {
         "text": batch_text,
-        "summary": {
-            "under": under,
-            "over": over,
-            "locked": locked,
-            "ok": ok
-        },
-        # Możemy zapisać liczbę lematów dla celów analitycznych
-        "lemmas_count": len(text_lemma_list)
+        "gemini_audit": gemini_verdict,
+        "summary": {"under": under, "over": over, "locked": locked, "ok": ok}
     }
 
-    # Dodajemy do tablicy batches (jeśli nie istnieje, tworzymy)
     if "batches" not in data:
         data["batches"] = []
     
     data["batches"].append(batch_entry)
     data["total_batches"] = len(data["batches"])
-    data["keywords_state"] = keywords_state  # Zapisujemy zaktualizowane liczniki
+    data["keywords_state"] = keywords_state
 
-    # ------------------------------------------
-    # 5) Zapis zmian w Firestore
-    # ------------------------------------------
     doc_ref.set(data)
 
-    # ------------------------------------------
-    # 6) Meta summary dla GPT
-    # ------------------------------------------
-    meta_prompt_summary = (
-        f"UNDER={under}, OVER={over}, LOCKED={locked}, OK={ok} – Row-Level Lemma Mode"
-    )
+    # -------------------------------------------------------
+    # 4. ODPOWIEDŹ DLA GPT
+    # -------------------------------------------------------
+    meta_prompt_summary = f"UNDER={under}, OVER={over}, LOCKED={locked} | Quality={gemini_verdict.get('quality_score')}%"
 
-    # ------------------------------------------
-    # 7) Zwrot wyniku (JSON)
-    # ------------------------------------------
     return {
-        "status": "BATCH_PROCESSED",
+        "status": "BATCH_ACCEPTED",
         "counting_mode": "row_lemma",
-        "continuous_counting": True,
-        "prefer_local_tracker": False,
+        "gemini_feedback": gemini_verdict,
+        "quality_alert": False,
         "regeneration_triggered": forced_regen,
         "emergency_exit_triggered": emergency_exit,
         "keywords_report": [
             {
-                "keyword": kw,  # Oryginalna fraza z briefu
+                "keyword": kw,
                 "actual_uses": meta["actual_uses"],
                 "target_range": f"{meta['target_min']}–{meta['target_max']}",
                 "status": meta["status"],
-                "priority_instruction": (
-                    "INCREASE" if meta["status"] == "UNDER" else
-                    "DECREASE" if meta["status"] == "OVER" else
-                    "IGNORE"
-                )
+                "priority_instruction": ("INCREASE" if meta["status"] == "UNDER" else "DECREASE" if meta["status"] == "OVER" else "IGNORE")
             }
             for kw, meta in keywords_state.items()
         ],
@@ -191,29 +231,24 @@ def process_batch_in_firestore(project_id: str, batch_text: str):
 
 
 # ===========================================================
-# 📌 ENDPOINT 1: Podgląd projektu (GET)
+# 📌 ENDPOINTY GET (Do podglądu w dashboardzie)
 # ===========================================================
 @tracker_routes.get("/api/project/<project_id>")
 def get_project(project_id):
     db = firestore.client()
-    doc_ref = db.collection("seo_projects").document(project_id)
-    doc = doc_ref.get()
-
+    doc = db.collection("seo_projects").document(project_id).get()
+    
     if not doc.exists:
         return jsonify({"error": "Project not found"}), 404
 
     return jsonify(doc.to_dict()), 200
 
 
-# ===========================================================
-# 📌 ENDPOINT 2: Podgląd keywordów (GET)
-# ===========================================================
 @tracker_routes.get("/api/project/<project_id>/keywords")
 def get_keywords_state(project_id):
     db = firestore.client()
-    doc_ref = db.collection("seo_projects").document(project_id)
-    doc = doc_ref.get()
-
+    doc = db.collection("seo_projects").document(project_id).get()
+    
     if not doc.exists:
         return jsonify({"error": "Project not found"}), 404
 
