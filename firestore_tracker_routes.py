@@ -16,13 +16,14 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
 # ===========================================================
-# ⚖️ GEMINI JUDGE (Bez zmian)
+# ⚖️ GEMINI JUDGE (Model Stable: gemini-pro)
 # ===========================================================
 def evaluate_with_gemini(text, meta_trace):
     if not GEMINI_API_KEY:
         return {"pass": True, "quality_score": 100, "feedback_for_writer": "Brak klucza Gemini - skip check"}
 
     try:
+        # Używamy gemini-pro (najbardziej stabilny w API)
         model = genai.GenerativeModel('gemini-pro')
     except:
         return {"pass": True, "quality_score": 80, "feedback_for_writer": "Model Init Error"}
@@ -61,7 +62,8 @@ def evaluate_with_gemini(text, meta_trace):
         return json.loads(clean)
     except Exception as e:
         print(f"Gemini Error: {e}")
-        return {"pass": True, "quality_score": 80, "feedback_for_writer": f"Gemini Error: {str(e)}"}
+        # Fail Open: W razie błędu API Google przepuszczamy tekst (żeby nie blokować pracy)
+        return {"pass": True, "quality_score": 80, "feedback_for_writer": f"Gemini API Error: {str(e)}"}
 
 # ===========================================================
 # 🧠 HYBRID COUNTING
@@ -69,7 +71,11 @@ def evaluate_with_gemini(text, meta_trace):
 def count_hybrid_occurrences(text_raw, text_lemma_list, target_exact, target_lemma):
     text_lower = text_raw.lower()
     target_exact_lower = target_exact.lower()
+    
+    # 1. Exact
     exact_hits = text_lower.count(target_exact_lower)
+    
+    # 2. Lemma
     lemma_hits = 0
     target_tokens = target_lemma.split()
     if target_tokens:
@@ -78,11 +84,14 @@ def count_hybrid_occurrences(text_raw, text_lemma_list, target_exact, target_lem
         for i in range(text_len - target_len + 1):
             if text_lemma_list[i : i + target_len] == target_tokens:
                 lemma_hits += 1
+                
     return max(exact_hits, lemma_hits)
 
 def compute_status(actual, target_min, target_max):
     if actual < target_min: return "UNDER"
-    if actual > target_max: return "OVER"
+    # Bufor tolerancji: Pozwalamy na lekkie przekroczenie (np. o 20% lub +2)
+    tolerance = max(2, int(target_max * 0.2))
+    if actual > (target_max + tolerance): return "OVER"
     return "OK"
 
 def global_keyword_stats(keywords_state):
@@ -121,10 +130,10 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
         }
 
     # -------------------------------------------------------
-    # 2. PRZELICZENIE SEO "NA BRUDNO" (Przed zapisem)
+    # 2. PRZELICZENIE SEO "NA BRUDNO" (Symulacja przed zapisem)
     # -------------------------------------------------------
     data = doc.to_dict()
-    # Robimy głęboką kopię stanu, żeby policzyć symulację
+    # Robimy głęboką kopię stanu, żeby policzyć symulację bez psucia bazy
     import copy
     keywords_state = copy.deepcopy(data.get("keywords_state", {}))
 
@@ -136,6 +145,7 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
         original_keyword = meta.get("keyword", "")
         target_exact = meta.get("search_term_exact", original_keyword.lower())
         target_lemma = meta.get("search_lemma", "")
+        
         if not target_lemma:
              doc_tmp = nlp(original_keyword)
              target_lemma = " ".join([t.lemma_.lower() for t in doc_tmp if t.is_alpha])
@@ -144,30 +154,28 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
         meta["actual_uses"] += occurrences
         meta["status"] = compute_status(meta["actual_uses"], meta["target_min"], meta["target_max"])
 
-    # Sprawdzamy kryteria SEO
+    # Sprawdzamy kryteria SEO po dodaniu batcha
     under, over, locked, ok = global_keyword_stats(keywords_state)
     
     # -------------------------------------------------------
-    # 3. HARD SEO VETO (Nowość)
+    # 3. HARD SEO VETO (Ochrona przed spamem)
     # -------------------------------------------------------
-    # Jeśli batch powoduje krytyczne przeoptymalizowanie, ODRZUCAMY go.
-    # Kryterium: LOCKED >= 4 (Emergency) LUB nagły wzrost OVER (>10)
-    
+    # Jeśli ten batch spowodowałby krytyczne przeoptymalizowanie -> ODRZUCAMY
     if locked >= 4 or over >= 15:
         return {
             "status": "REJECTED_SEO",
             "error": "SEO Limits Exceeded",
             "gemini_feedback": {
                 "pass": False,
-                "quality_score": gemini_verdict.get("quality_score"),
+                "quality_score": gemini_verdict.get("quality_score", 0),
                 "feedback_for_writer": f"SEO CRITICAL: Tekst przeoptymalizowany! LOCKED={locked}, OVER={over}. Zredukuj użycie słów kluczowych."
             },
             "quality_alert": True,
-            "info": "Tekst odrzucony przez Hard SEO Veto (za dużo fraz)."
+            "info": "Tekst odrzucony przez Hard SEO Veto."
         }
 
     # -------------------------------------------------------
-    # 4. ZAPIS (Jeśli przeszedł i Gemini, i SEO Veto)
+    # 4. ZAPIS (Skoro przeszedł Gemini i SEO Veto)
     # -------------------------------------------------------
     batch_entry = {
         "text": batch_text,
@@ -178,7 +186,7 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
     if "batches" not in data: data["batches"] = []
     data["batches"].append(batch_entry)
     data["total_batches"] = len(data["batches"])
-    # Nadpisujemy stan licznika (bo jest zaakceptowany)
+    # Nadpisujemy stan licznika w bazie (zatwierdzamy symulację)
     data["keywords_state"] = keywords_state 
 
     doc_ref.set(data)
@@ -198,6 +206,7 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
                 "status": meta["status"],
                 "priority_instruction": ("INCREASE" if meta["status"] == "UNDER" else "DECREASE" if meta["status"] == "OVER" else "IGNORE")
             }
+            # Sortujemy wynik alfabetycznie dla czytelności
             for row_id, meta in sorted(keywords_state.items(), key=lambda item: item[1].get("keyword", ""))
         ],
         "meta_prompt_summary": meta_prompt_summary
