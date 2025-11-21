@@ -7,3 +7,4 @@ pl-core-news-sm @ https://github.com/explosion/spacy-models/releases/download/pl
 gunicorn==23.0.0
 python-dotenv==1.0.0
 google-generativeai==0.3.2
+rapidfuzz==3.9.7
