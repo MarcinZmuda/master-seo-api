@@ -30,14 +30,14 @@ CORS(app)
 # ---------------------------------------------------------
 from project_routes import project_routes
 from firestore_tracker_routes import tracker_routes
-from s1_analysis_routes import s1_routes   # 🔥 POPRAWIONY IMPORT
+from s1_analysis_routes import s1_routes   # 🔥 Turbo S1
 
 # ---------------------------------------------------------
 # 🔥 Rejestracja blueprintów
 # ---------------------------------------------------------
 app.register_blueprint(project_routes)
 app.register_blueprint(tracker_routes)
-app.register_blueprint(s1_routes)          # 🔥 POPRAWIONA REJESTRACJA
+app.register_blueprint(s1_routes)
 
 # ---------------------------------------------------------
 # 🔥 Healthcheck
@@ -46,7 +46,7 @@ app.register_blueprint(s1_routes)          # 🔥 POPRAWIONA REJESTRACJA
 def health():
     return jsonify({
         "status": "ok",
-        "message": "Master SEO API 7.3.0 działa — Firestore OK, Continuous Lemma ON"
+        "message": "Master SEO API 7.5.0-hybrid-fuzzy-polars-lt działa — Firestore OK, Hybrid Row-Level + Language QA ON"
     }), 200
 
 # ---------------------------------------------------------
