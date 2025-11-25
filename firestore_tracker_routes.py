@@ -4,9 +4,11 @@ from flask import Blueprint, jsonify, request
 from firebase_admin import firestore
 import spacy
 import google.generativeai as genai
-from rapidfuzz import fuzz  # fuzzy-matching
-import language_tool_python  # QA językowe
-import textstat              # czytelność
+from rapidfuzz import fuzz          # fuzzy-matching (stringowy)
+import language_tool_python         # QA językowe
+import textstat                     # czytelność
+import textdistance                 # drugi fuzzy layer (tokenowy)
+import pysbd                        # segmentacja zdań
 
 tracker_routes = Blueprint("tracker_routes", __name__)
 
@@ -18,8 +20,9 @@ nlp = spacy.load("pl_core_news_sm")
 # -----------------------------------------------------------
 # 🎯 Parametry fuzzy-matchingu dla trackera
 # -----------------------------------------------------------
-FUZZY_SIMILARITY_THRESHOLD = 90  # próg podobieństwa 0–100
-MAX_FUZZY_WINDOW_EXPANSION = 2   # ile dodatkowych lematów dopuszczamy w środku frazy
+FUZZY_SIMILARITY_THRESHOLD = 90   # próg podobieństwa 0–100 (rapidfuzz)
+MAX_FUZZY_WINDOW_EXPANSION = 2    # ile dodatkowych lematów dopuszczamy w środku frazy
+JACCARD_SIMILARITY_THRESHOLD = 0.8  # próg podobieństwa Jaccarda (0–1)
 
 # -----------------------------------------------------------
 # 🧪 Inicjalizacja LanguageTool dla polskiego
@@ -29,6 +32,11 @@ try:
 except Exception as e:
     print(f"[LanguageTool] Init error: {e}")
     LT_TOOL_PL = None
+
+# -----------------------------------------------------------
+# ✂️ Pysbd – segmentacja zdań (PL)
+# -----------------------------------------------------------
+SENTENCE_SEGMENTER = pysbd.Segmenter(language="pl", clean=True)
 
 # -----------------------------------------------------------
 # 🌐 Konfiguracja Gemini
@@ -50,7 +58,6 @@ def evaluate_with_gemini(text, meta_trace):
         }
 
     try:
-        # Używamy gemini-pro (najbardziej stabilny w API)
         model = genai.GenerativeModel("gemini-pro")
     except Exception:
         return {
@@ -59,8 +66,8 @@ def evaluate_with_gemini(text, meta_trace):
             "feedback_for_writer": "Model Init Error"
         }
 
-    intent = meta_trace.get("execution_intent", "Brak")
-    rhythm = meta_trace.get("rhythm_pattern_used", "Brak")
+    intent = (meta_trace or {}).get("execution_intent", "Brak")
+    rhythm = (meta_trace or {}).get("rhythm_pattern_used", "Brak")
 
     banned_phrases_list = """
     1. WYPEŁNIACZE: "W dzisiejszych czasach", "W dobie...", "Od zarania dziejów".
@@ -81,7 +88,7 @@ def evaluate_with_gemini(text, meta_trace):
     
     Zwróć JSON:
     {{
-        "pass": true/false, (false jeśli zakazane frazy LUB score < 70)
+        "pass": true/false,
         "quality_score": (0-100),
         "feedback_for_writer": "Instrukcja co poprawić"
     }}
@@ -98,7 +105,6 @@ def evaluate_with_gemini(text, meta_trace):
         return json.loads(clean)
     except Exception as e:
         print(f"Gemini Error: {e}")
-        # Fail Open: w razie błędu API Google przepuszczamy tekst
         return {
             "pass": True,
             "quality_score": 80,
@@ -107,13 +113,15 @@ def evaluate_with_gemini(text, meta_trace):
 
 
 # ===========================================================
-# 🔎 LanguageTool + textstat – Polish QA Gate (raport)
+# 🔎 LanguageTool + pysbd + textstat – Polish QA Gate (raport)
 # ===========================================================
 def analyze_language_quality(text: str) -> dict:
     """
     Analiza jakości językowej batcha:
     - błędy / sugestie z LanguageTool (polski),
-    - metryki czytelności z textstat.
+    - metryki czytelności z textstat,
+    - liczba zdań i średnia długość zdań z pysbd.
+
     Nie blokuje tekstu – służy jako raport dla UI / meta_prompt.
     """
     result = {
@@ -127,7 +135,7 @@ def analyze_language_quality(text: str) -> dict:
     if not text or not text.strip():
         return result
 
-    # LanguageTool – błędy / sugestie
+    # ---------- LanguageTool – błędy / sugestie ----------
     if LT_TOOL_PL is not None:
         try:
             matches = LT_TOOL_PL.check(text)
@@ -148,25 +156,31 @@ def analyze_language_quality(text: str) -> dict:
             print(f"[LanguageTool] Check error: {e}")
             result["error"] = f"LanguageTool error: {str(e)}"
 
-    # textstat – czytelność
+    # ---------- pysbd + textstat – czytelność ----------
     try:
-        sentences = textstat.sentence_count(text)
-        words = textstat.lexicon_count(text, removepunct=True)
-        avg_sentence_length = words / sentences if sentences > 0 else 0.0
+        raw_sentences = SENTENCE_SEGMENTER.segment(text)
+        sentences = [s.strip() for s in raw_sentences if s.strip()]
+        sentence_count = len(sentences)
+        word_count = sum(len(s.split()) for s in sentences) if sentences else 0
+        avg_sentence_length = word_count / sentence_count if sentence_count > 0 else 0.0
+
+        flesch_reading_ease = textstat.flesch_reading_ease(text)
+        flesch_kincaid_grade = textstat.flesch_kincaid_grade(text)
+        smog_index = textstat.smog_index(text)
 
         readability = {
-            "flesch_reading_ease": textstat.flesch_reading_ease(text),
-            "flesch_kincaid_grade": textstat.flesch_kincaid_grade(text),
-            "smog_index": textstat.smog_index(text),
+            "flesch_reading_ease": flesch_reading_ease,
+            "flesch_kincaid_grade": flesch_kincaid_grade,
+            "smog_index": smog_index,
             "avg_sentence_length": avg_sentence_length,
-            "sentence_count": sentences,
-            "word_count": words,
+            "sentence_count": sentence_count,
+            "word_count": word_count,
         }
         result["readability"] = readability
     except Exception as e:
-        print(f"[textstat] Error: {e}")
+        print(f"[pysbd/textstat] Error: {e}")
         if result["error"] is None:
-            result["error"] = f"textstat error: {str(e)}"
+            result["error"] = f"readability error: {str(e)}"
 
     return result
 
@@ -179,7 +193,6 @@ def apply_languagetool_fixes(text: str) -> str:
     Automatyczne poprawianie tekstu na bazie LanguageTool:
     - bierze pierwszą proponowaną poprawkę dla każdego błędu,
     - stosuje ją od końca tekstu, żeby nie popsuć offsetów.
-    Uwaga: to mechaniczne poprawki – dobre na literówki, interpunkcję, proste rzeczy.
     """
     if LT_TOOL_PL is None or not text or not text.strip():
         return text
@@ -210,6 +223,10 @@ def _count_fuzzy_on_lemmas(target_tokens, text_lemma_list, exact_spans):
     target_tokens: lista lematów frazy, np. ["adwokat", "rozwodowy", "warszawa"]
     text_lemma_list: lista lematów całego batcha
     exact_spans: lista (start, end) dla exact lemma matchy (żeby ich nie dublować)
+
+    Używamy:
+    - rapidfuzz.token_set_ratio (stringowo),
+    - textdistance.jaccard (tokenowo).
     """
     if not target_tokens or not text_lemma_list:
         return 0
@@ -220,8 +237,8 @@ def _count_fuzzy_on_lemmas(target_tokens, text_lemma_list, exact_spans):
         return 0
 
     kw_str = " ".join(target_tokens)
+    kw_tokens_set = set(target_tokens)
 
-    # Pozycje zajęte przez exact lemma match
     used_positions = set()
     for s, e in exact_spans:
         used_positions.update(range(s, e))
@@ -238,13 +255,24 @@ def _count_fuzzy_on_lemmas(target_tokens, text_lemma_list, exact_spans):
             if any(pos in used_positions for pos in window_positions):
                 continue
 
-            window_str = " ".join(text_lemma_list[start:end])
-            score = fuzz.token_set_ratio(kw_str, window_str)
+            window_tokens = text_lemma_list[start:end]
+            if not window_tokens:
+                continue
 
-            if score >= FUZZY_SIMILARITY_THRESHOLD:
+            window_str = " ".join(window_tokens)
+
+            rf_score = fuzz.token_set_ratio(kw_str, window_str)
+            jaccard_score = textdistance.jaccard(
+                kw_tokens_set,
+                set(window_tokens)
+            )
+
+            if (
+                rf_score >= FUZZY_SIMILARITY_THRESHOLD
+                or jaccard_score >= JACCARD_SIMILARITY_THRESHOLD
+            ):
                 fuzzy_hits += 1
                 used_positions.update(window_positions)
-                # nie szukamy dłuższego okna od tego samego startu
                 break
 
     return fuzzy_hits
@@ -258,18 +286,15 @@ def count_hybrid_occurrences(text_raw, text_lemma_list, target_exact, target_lem
     Hybrydowe zliczanie:
     - Exact na surowym tekście (case-insensitive)
     - Exact na lematyzowanym tekście
-    - Fuzzy na lematyzowanym tekście (rapidfuzz), toleruje wtrącenia typu "w", "na"
-    Zwraca max(exact_hits, lemma_hits_total).
+    - Fuzzy na lematyzowanym tekście (rapidfuzz + textdistance)
     """
     text_lower = text_raw.lower()
     target_exact_lower = target_exact.lower()
 
-    # 1. Exact na surowym tekście
     exact_hits = 0
     if target_exact_lower.strip():
         exact_hits = text_lower.count(target_exact_lower)
 
-    # 2. Lemma (exact + fuzzy)
     lemma_hits = 0
     exact_spans = []
     target_tokens = target_lemma.split()
@@ -278,13 +303,11 @@ def count_hybrid_occurrences(text_raw, text_lemma_list, target_exact, target_lem
         target_len = len(target_tokens)
         text_len = len(text_lemma_list)
 
-        # 2a. Exact lemma match
         for i in range(text_len - target_len + 1):
-            if text_lemma_list[i : i + target_len] == target_tokens:
+            if text_lemma_list[i: i + target_len] == target_tokens:
                 lemma_hits += 1
                 exact_spans.append((i, i + target_len))
 
-        # 2b. Fuzzy lemma match (tylko poza exact_spans)
         fuzzy_hits = _count_fuzzy_on_lemmas(
             target_tokens=target_tokens,
             text_lemma_list=text_lemma_list,
@@ -298,7 +321,6 @@ def count_hybrid_occurrences(text_raw, text_lemma_list, target_exact, target_lem
 def compute_status(actual, target_min, target_max):
     if actual < target_min:
         return "UNDER"
-    # Bufor tolerancji: pozwalamy na lekkie przekroczenie (np. o 20% lub +2)
     tolerance = max(2, int(target_max * 0.2))
     if actual > (target_max + tolerance):
         return "OVER"
@@ -314,29 +336,10 @@ def global_keyword_stats(keywords_state):
 
 
 # ===========================================================
-# 🆕 ENDPOINT: /api/language_refine – auto-fix + audyt (BEZ FIRESTORE)
+# 🆕 ENDPOINT: /api/language_refine – auto-fix + audyt
 # ===========================================================
 @tracker_routes.post("/api/language_refine")
 def language_refine():
-    """
-    Wejście:
-    {
-      "text": "...",
-      "meta_trace": { ... }  // opcjonalne, ignorowane na razie
-    }
-
-    Zwraca:
-    {
-      "original_text": "...",
-      "auto_fixed_text": "...",
-      "language_audit": { ... } // LT + textstat
-    }
-
-    Ten endpoint NIE liczy słów kluczowych i NIE zapisuje do Firestore.
-    Służy do:
-    - mechanicznej autokorekty (LanguageTool),
-    - wygenerowania raportu dla GPT i użytkownika.
-    """
     data = request.get_json(force=True) or {}
     text = data.get("text", "") or ""
 
@@ -363,16 +366,12 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
     if not doc.exists:
         return {"error": "Project not found", "status": 404}
 
-    # 1. QA językowy (raportowo – zakładamy, że auto-fix był wcześniej przez /language_refine)
     language_audit = analyze_language_quality(batch_text)
-
-    # 2. QUALITY GATE (GEMINI)
     gemini_verdict = {"pass": True, "quality_score": 100}
-    if meta_trace:
+    if meta_trace is not None:
         gemini_verdict = evaluate_with_gemini(batch_text, meta_trace)
 
     QUALITY_THRESHOLD = 70
-
     if not gemini_verdict.get("pass", True) or gemini_verdict.get(
         "quality_score", 100
     ) < QUALITY_THRESHOLD:
@@ -385,7 +384,6 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
             "info": "Tekst odrzucony przez Gemini (Styl/Jakość).",
         }
 
-    # 3. PRZELICZENIE SEO "NA BRUDNO" (Symulacja przed zapisem)
     data = doc.to_dict()
     import copy
 
@@ -394,7 +392,6 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
     doc_nlp = nlp(batch_text)
     text_lemma_list = [t.lemma_.lower() for t in doc_nlp if t.is_alpha]
 
-    # Symulacja liczenia dla tego batcha
     for row_id, meta in keywords_state.items():
         original_keyword = meta.get("keyword", "")
         target_exact = meta.get("search_term_exact", original_keyword.lower())
@@ -417,10 +414,8 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
             meta["actual_uses"], meta["target_min"], meta["target_max"]
         )
 
-    # Sprawdzamy kryteria SEO po dodaniu batcha
     under, over, locked, ok = global_keyword_stats(keywords_state)
 
-    # 4. HARD SEO VETO (Ochrona przed spamem)
     if locked >= 4 or over >= 15:
         return {
             "status": "REJECTED_SEO",
@@ -439,7 +434,6 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
             "info": "Tekst odrzucony przez Hard SEO Veto.",
         }
 
-    # 5. ZAPIS (Skoro przeszedł Gemini i SEO Veto)
     batch_entry = {
         "text": batch_text,
         "gemini_audit": gemini_verdict,
@@ -451,8 +445,6 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
         data["batches"] = []
     data["batches"].append(batch_entry)
     data["total_batches"] = len(data["batches"])
-
-    # Nadpisujemy stan licznika w bazie (zatwierdzamy symulację)
     data["keywords_state"] = keywords_state
 
     doc_ref.set(data)
@@ -483,7 +475,6 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
                     else "IGNORE"
                 ),
             }
-            # Sortujemy wynik alfabetycznie dla czytelności
             for row_id, meta in sorted(
                 keywords_state.items(),
                 key=lambda item: item[1].get("keyword", ""),
