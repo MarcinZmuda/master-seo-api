@@ -20,9 +20,9 @@ nlp = spacy.load("pl_core_news_sm")
 # -----------------------------------------------------------
 # 🎯 Parametry fuzzy-matchingu dla trackera
 # -----------------------------------------------------------
-FUZZY_SIMILARITY_THRESHOLD = 90   # próg podobieństwa 0–100 (rapidfuzz)
-MAX_FUZZY_WINDOW_EXPANSION = 2    # ile dodatkowych lematów dopuszczamy w środku frazy
-JACCARD_SIMILARITY_THRESHOLD = 0.8  # próg podobieństwa Jaccarda (0–1)
+FUZZY_SIMILARITY_THRESHOLD = 90      # próg podobieństwa 0–100 (rapidfuzz)
+MAX_FUZZY_WINDOW_EXPANSION = 2       # ile dodatkowych lematów dopuszczamy w środku frazy
+JACCARD_SIMILARITY_THRESHOLD = 0.8   # próg podobieństwa Jaccarda (0–1)
 
 # -----------------------------------------------------------
 # 🧪 Inicjalizacja LanguageTool dla polskiego
@@ -66,8 +66,9 @@ def evaluate_with_gemini(text, meta_trace):
             "feedback_for_writer": "Model Init Error"
         }
 
-    intent = (meta_trace or {}).get("execution_intent", "Brak")
-    rhythm = (meta_trace or {}).get("rhythm_pattern_used", "Brak")
+    meta = meta_trace or {}
+    intent = meta.get("execution_intent", "Brak")
+    rhythm = meta.get("rhythm_pattern_used", "Brak")
 
     banned_phrases_list = """
     1. WYPEŁNIACZE: "W dzisiejszych czasach", "W dobie...", "Od zarania dziejów".
@@ -449,10 +450,15 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
 
     doc_ref.set(data)
 
+    readability = language_audit.get("readability", {})
+    sentence_count = readability.get("sentence_count", 0)
+    avg_sentence_length = readability.get("avg_sentence_length", 0.0)
+
     meta_prompt_summary = (
         f"UNDER={under}, OVER={over}, LOCKED={locked} | "
         f"Quality={gemini_verdict.get('quality_score')}% | "
-        f"LT_issues={language_audit.get('lt_issues_count', 0)}"
+        f"LT_issues={language_audit.get('lt_issues_count', 0)} | "
+        f"Sentences={sentence_count}, Avg_len={avg_sentence_length:.1f}"
     )
 
     return {
