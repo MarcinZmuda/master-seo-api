@@ -2,11 +2,22 @@ Flask==3.0.0
 flask-cors==4.0.0
 firebase_admin==6.2.0
 requests==2.31.0
+
 spacy==3.7.2
 pl-core-news-sm @ https://github.com/explosion/spacy-models/releases/download/pl_core_news_sm-3.7.0/pl_core_news_sm-3.7.0.tar.gz
+
 gunicorn==23.0.0
 python-dotenv==1.0.0
+
 google-generativeai==0.3.2
+
 rapidfuzz==3.9.7
 language-tool-python==2.7.0
 textstat==0.7.4
+
+# 🔥 NOWE – jakościowe warstwy językowe i semantyczne
+pysbd
+textdistance
+keybert
+transformers
+sentence-transformers
