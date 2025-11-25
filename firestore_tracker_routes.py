@@ -1,33 +1,42 @@
 import os
 import json
-from flask import Blueprint, jsonify, request  # ⬅️ dodany request
+from flask import Blueprint, jsonify, request
 from firebase_admin import firestore
 import spacy
 import google.generativeai as genai
 from rapidfuzz import fuzz  # fuzzy-matching
-import language_tool_python  # ⬅️ NOWE: QA językowe
-import textstat              # ⬅️ NOWE: czytelność
+import language_tool_python  # QA językowe
+import textstat              # czytelność
 
 tracker_routes = Blueprint("tracker_routes", __name__)
 
-# Ładowanie spaCy
+# -----------------------------------------------------------
+# 🧠 spaCy – ładowane raz
+# -----------------------------------------------------------
 nlp = spacy.load("pl_core_news_sm")
 
-# Parametry fuzzy-matchingu dla trackera
+# -----------------------------------------------------------
+# 🎯 Parametry fuzzy-matchingu dla trackera
+# -----------------------------------------------------------
 FUZZY_SIMILARITY_THRESHOLD = 90  # próg podobieństwa 0–100
 MAX_FUZZY_WINDOW_EXPANSION = 2   # ile dodatkowych lematów dopuszczamy w środku frazy
 
-# Inicjalizacja LanguageTool dla polskiego  ⬅️ NOWE
+# -----------------------------------------------------------
+# 🧪 Inicjalizacja LanguageTool dla polskiego
+# -----------------------------------------------------------
 try:
     LT_TOOL_PL = language_tool_python.LanguageTool("pl-PL")
 except Exception as e:
     print(f"[LanguageTool] Init error: {e}")
     LT_TOOL_PL = None
 
-# Konfiguracja Gemini
+# -----------------------------------------------------------
+# 🌐 Konfiguracja Gemini
+# -----------------------------------------------------------
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
+
 
 # ===========================================================
 # ⚖️ GEMINI JUDGE (Model Stable: gemini-pro)
@@ -42,17 +51,17 @@ def evaluate_with_gemini(text, meta_trace):
 
     try:
         # Używamy gemini-pro (najbardziej stabilny w API)
-        model = genai.GenerativeModel('gemini-pro')
+        model = genai.GenerativeModel("gemini-pro")
     except Exception:
         return {
             "pass": True,
             "quality_score": 80,
             "feedback_for_writer": "Model Init Error"
         }
-    
+
     intent = meta_trace.get("execution_intent", "Brak")
     rhythm = meta_trace.get("rhythm_pattern_used", "Brak")
-    
+
     banned_phrases_list = """
     1. WYPEŁNIACZE: "W dzisiejszych czasach", "W dobie...", "Od zarania dziejów".
     2. ŁĄCZNIKI: "Warto zauważyć", "Należy wspomnieć", "Warto dodać".
@@ -78,21 +87,27 @@ def evaluate_with_gemini(text, meta_trace):
     }}
     TEKST: "{text}"
     """
+
     try:
         response = model.generate_content(prompt)
-        clean = response.text.replace("```json", "").replace("```", "").strip()
+        clean = (
+            response.text.replace("```json", "")
+            .replace("```", "")
+            .strip()
+        )
         return json.loads(clean)
     except Exception as e:
         print(f"Gemini Error: {e}")
-        # Fail Open: W razie błędu API Google przepuszczamy tekst (żeby nie blokować pracy)
+        # Fail Open: w razie błędu API Google przepuszczamy tekst
         return {
             "pass": True,
             "quality_score": 80,
             "feedback_for_writer": f"Gemini API Error: {str(e)}"
         }
 
+
 # ===========================================================
-# 🔎 LanguageTool + textstat – Polish QA Gate (raport) ⬅️ NOWE
+# 🔎 LanguageTool + textstat – Polish QA Gate (raport)
 # ===========================================================
 def analyze_language_quality(text: str) -> dict:
     """
@@ -106,7 +121,7 @@ def analyze_language_quality(text: str) -> dict:
         "lt_issues_count": 0,
         "lt_issues_sample": [],
         "readability": {},
-        "error": None
+        "error": None,
     }
 
     if not text or not text.strip():
@@ -119,13 +134,15 @@ def analyze_language_quality(text: str) -> dict:
             result["lt_issues_count"] = len(matches)
             sample = []
             for m in matches[:10]:
-                sample.append({
-                    "offset": m.offset,
-                    "length": m.errorLength,
-                    "rule_id": m.ruleId,
-                    "message": m.message,
-                    "replacements": m.replacements[:5]
-                })
+                sample.append(
+                    {
+                        "offset": m.offset,
+                        "length": m.errorLength,
+                        "rule_id": m.ruleId,
+                        "message": m.message,
+                        "replacements": m.replacements[:5],
+                    }
+                )
             result["lt_issues_sample"] = sample
         except Exception as e:
             print(f"[LanguageTool] Check error: {e}")
@@ -143,7 +160,7 @@ def analyze_language_quality(text: str) -> dict:
             "smog_index": textstat.smog_index(text),
             "avg_sentence_length": avg_sentence_length,
             "sentence_count": sentences,
-            "word_count": words
+            "word_count": words,
         }
         result["readability"] = readability
     except Exception as e:
@@ -153,15 +170,16 @@ def analyze_language_quality(text: str) -> dict:
 
     return result
 
+
 # ===========================================================
-# 🛠 LanguageTool – AUTO-FIX (mechaniczne poprawki) ⬅️ NOWE
+# 🛠 LanguageTool – AUTO-FIX (mechaniczne poprawki)
 # ===========================================================
 def apply_languagetool_fixes(text: str) -> str:
     """
     Automatyczne poprawianie tekstu na bazie LanguageTool:
     - bierze pierwszą proponowaną poprawkę dla każdego błędu,
     - stosuje ją od końca tekstu, żeby nie popsuć offsetów.
-    Uwaga: to mechaniczne poprawki – dobre na literówki, interpunkcję, proste kwiatki.
+    Uwaga: to mechaniczne poprawki – dobre na literówki, interpunkcję, proste rzeczy.
     """
     if LT_TOOL_PL is None or not text or not text.strip():
         return text
@@ -182,6 +200,7 @@ def apply_languagetool_fixes(text: str) -> str:
         text_list[start:end] = list(replacement)
 
     return "".join(text_list)
+
 
 # ===========================================================
 # 🔍 Fuzzy na lematyzowanym tekście (dla trackera)
@@ -230,6 +249,7 @@ def _count_fuzzy_on_lemmas(target_tokens, text_lemma_list, exact_spans):
 
     return fuzzy_hits
 
+
 # ===========================================================
 # 🧠 HYBRID COUNTING
 # ===========================================================
@@ -243,12 +263,12 @@ def count_hybrid_occurrences(text_raw, text_lemma_list, target_exact, target_lem
     """
     text_lower = text_raw.lower()
     target_exact_lower = target_exact.lower()
-    
+
     # 1. Exact na surowym tekście
     exact_hits = 0
     if target_exact_lower.strip():
         exact_hits = text_lower.count(target_exact_lower)
-    
+
     # 2. Lemma (exact + fuzzy)
     lemma_hits = 0
     exact_spans = []
@@ -271,17 +291,19 @@ def count_hybrid_occurrences(text_raw, text_lemma_list, target_exact, target_lem
             exact_spans=exact_spans,
         )
         lemma_hits += fuzzy_hits
-                
+
     return max(exact_hits, lemma_hits)
+
 
 def compute_status(actual, target_min, target_max):
     if actual < target_min:
         return "UNDER"
-    # Bufor tolerancji: Pozwalamy na lekkie przekroczenie (np. o 20% lub +2)
+    # Bufor tolerancji: pozwalamy na lekkie przekroczenie (np. o 20% lub +2)
     tolerance = max(2, int(target_max * 0.2))
     if actual > (target_max + tolerance):
         return "OVER"
     return "OK"
+
 
 def global_keyword_stats(keywords_state):
     under = sum(1 for v in keywords_state.values() if v["status"] == "UNDER")
@@ -289,6 +311,7 @@ def global_keyword_stats(keywords_state):
     locked = 1 if over >= 4 else 0
     ok = sum(1 for v in keywords_state.values() if v["status"] == "OK")
     return under, over, locked, ok
+
 
 # ===========================================================
 # 🆕 ENDPOINT: /api/language_refine – auto-fix + audyt (BEZ FIRESTORE)
@@ -320,11 +343,14 @@ def language_refine():
     auto_fixed = apply_languagetool_fixes(text)
     audit = analyze_language_quality(auto_fixed)
 
-    return jsonify({
-        "original_text": text,
-        "auto_fixed_text": auto_fixed,
-        "language_audit": audit
-    })
+    return jsonify(
+        {
+            "original_text": text,
+            "auto_fixed_text": auto_fixed,
+            "language_audit": audit,
+        }
+    )
+
 
 # ===========================================================
 # 🧠 MAIN PROCESS (HARD SEO VETO)
@@ -344,22 +370,25 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
     gemini_verdict = {"pass": True, "quality_score": 100}
     if meta_trace:
         gemini_verdict = evaluate_with_gemini(batch_text, meta_trace)
-    
+
     QUALITY_THRESHOLD = 70
 
-    if not gemini_verdict.get("pass", True) or gemini_verdict.get("quality_score", 100) < QUALITY_THRESHOLD:
+    if not gemini_verdict.get("pass", True) or gemini_verdict.get(
+        "quality_score", 100
+    ) < QUALITY_THRESHOLD:
         return {
             "status": "REJECTED_QUALITY",
             "error": "Quality Gate Failed",
             "gemini_feedback": gemini_verdict,
             "language_audit": language_audit,
             "quality_alert": True,
-            "info": "Tekst odrzucony przez Gemini (Styl/Jakość)."
+            "info": "Tekst odrzucony przez Gemini (Styl/Jakość).",
         }
 
     # 3. PRZELICZENIE SEO "NA BRUDNO" (Symulacja przed zapisem)
     data = doc.to_dict()
     import copy
+
     keywords_state = copy.deepcopy(data.get("keywords_state", {}))
 
     doc_nlp = nlp(batch_text)
@@ -370,27 +399,27 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
         original_keyword = meta.get("keyword", "")
         target_exact = meta.get("search_term_exact", original_keyword.lower())
         target_lemma = meta.get("search_lemma", "")
-        
+
         if not target_lemma:
-             doc_tmp = nlp(original_keyword)
-             target_lemma = " ".join([t.lemma_.lower() for t in doc_tmp if t.is_alpha])
+            doc_tmp = nlp(original_keyword)
+            target_lemma = " ".join(
+                [t.lemma_.lower() for t in doc_tmp if t.is_alpha]
+            )
 
         occurrences = count_hybrid_occurrences(
             batch_text,
             text_lemma_list,
             target_exact,
-            target_lemma
+            target_lemma,
         )
         meta["actual_uses"] += occurrences
         meta["status"] = compute_status(
-            meta["actual_uses"],
-            meta["target_min"],
-            meta["target_max"]
+            meta["actual_uses"], meta["target_min"], meta["target_max"]
         )
 
     # Sprawdzamy kryteria SEO po dodaniu batcha
     under, over, locked, ok = global_keyword_stats(keywords_state)
-    
+
     # 4. HARD SEO VETO (Ochrona przed spamem)
     if locked >= 4 or over >= 15:
         return {
@@ -403,11 +432,11 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
                     f"SEO CRITICAL: Tekst przeoptymalizowany! "
                     f"LOCKED={locked}, OVER={over}. "
                     f"Zredukuj użycie słów kluczowych."
-                )
+                ),
             },
             "language_audit": language_audit,
             "quality_alert": True,
-            "info": "Tekst odrzucony przez Hard SEO Veto."
+            "info": "Tekst odrzucony przez Hard SEO Veto.",
         }
 
     # 5. ZAPIS (Skoro przeszedł Gemini i SEO Veto)
@@ -415,15 +444,16 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
         "text": batch_text,
         "gemini_audit": gemini_verdict,
         "language_audit": language_audit,
-        "summary": {"under": under, "over": over, "locked": locked, "ok": ok}
+        "summary": {"under": under, "over": over, "locked": locked, "ok": ok},
     }
 
     if "batches" not in data:
         data["batches"] = []
     data["batches"].append(batch_entry)
     data["total_batches"] = len(data["batches"])
+
     # Nadpisujemy stan licznika w bazie (zatwierdzamy symulację)
-    data["keywords_state"] = keywords_state 
+    data["keywords_state"] = keywords_state
 
     doc_ref.set(data)
 
@@ -446,29 +476,39 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
                 "target_range": f"{meta['target_min']}–{meta['target_max']}",
                 "status": meta["status"],
                 "priority_instruction": (
-                    "INCREASE" if meta["status"] == "UNDER"
-                    else "DECREASE" if meta["status"] == "OVER"
+                    "INCREASE"
+                    if meta["status"] == "UNDER"
+                    else "DECREASE"
+                    if meta["status"] == "OVER"
                     else "IGNORE"
-                )
+                ),
             }
             # Sortujemy wynik alfabetycznie dla czytelności
             for row_id, meta in sorted(
                 keywords_state.items(),
-                key=lambda item: item[1].get("keyword", "")
+                key=lambda item: item[1].get("keyword", ""),
             )
         ],
-        "meta_prompt_summary": meta_prompt_summary
+        "meta_prompt_summary": meta_prompt_summary,
     }
 
-# Endpointy GET
+
+# ===========================================================
+# 🔍 Endpointy GET – podgląd projektu i liczników
+# ===========================================================
 @tracker_routes.get("/api/project/<project_id>")
 def get_project(project_id):
     db = firestore.client()
     doc = db.collection("seo_projects").document(project_id).get()
-    return jsonify(doc.to_dict() if doc.exists else {"error": "Not found"}), 200 if doc.exists else 404
+    if not doc.exists:
+        return jsonify({"error": "Not found"}), 404
+    return jsonify(doc.to_dict()), 200
+
 
 @tracker_routes.get("/api/project/<project_id>/keywords")
 def get_keywords_state(project_id):
     db = firestore.client()
     doc = db.collection("seo_projects").document(project_id).get()
-    return jsonify(doc.to_dict().get("keywords_state", {}) if doc.exists else {"error": "Not found"}), 200 if doc.exists else 404
+    if not doc.exists:
+        return jsonify({"error": "Not found"}), 404
+    return jsonify(doc.to_dict().get("keywords_state", {})), 200
