@@ -58,7 +58,7 @@ def evaluate_with_gemini(text, meta_trace):
         }
 
     try:
-        model = genai.GenerativeModel("gemini-pro")
+       model = genai.GenerativeModel("gemini-1.5-pro")
     except Exception:
         return {
             "pass": True,
