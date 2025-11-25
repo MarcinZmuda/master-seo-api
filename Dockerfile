@@ -1,26 +1,28 @@
-# Krok 1: Wybierz oficjalny obraz Python jako bazę
-# POPRAWKA: Zmieniono wersję z 3.9 na 3.11, aby wspierać spaCy i jego zależności
+# Bazowy obraz z Pythonem
 FROM python:3.11-slim
 
-# Krok 2: Zainstaluj narzędzia systemowe (jeśli będą potrzebne w przyszłości)
-RUN apt-get update && apt-get install -y build-essential
+# Instalacja Java (wymagana przez language_tool_python) + narzędzi build
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        default-jre \
+        build-essential && \
+    rm -rf /var/lib/apt/lists/*
 
-# Krok 3: Ustaw katalog roboczy wewnątrz kontenera
+# Katalog roboczy
 WORKDIR /app
 
-# Krok 4: Skopiuj plik z zależnościami i zainstaluj je
+# Zależności Pythona
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Krok 5: Skopiuj resztę kodu aplikacji
+# Kod aplikacji
 COPY . .
 
-# Krok 6: Skopiuj i przygotuj skrypt startowy
-COPY run.sh .
+# Uprawnienia do skryptu startowego
 RUN chmod +x ./run.sh
 
-# Krok 7: Poinformuj Docker, że aplikacja będzie działać na porcie 10000
+# Informacyjnie – aplikacja będzie nasłuchiwać na porcie z ENV (np. 10000)
 EXPOSE 10000
 
-# Krok 8: Zdefiniuj komendę, która uruchomi nasz skrypt startowy
+# Start aplikacji
 CMD ["./run.sh"]
