@@ -1,5 +1,6 @@
 import os
 import json
+import math
 from flask import Blueprint, jsonify, request
 from firebase_admin import firestore
 import spacy
@@ -44,6 +45,65 @@ SENTENCE_SEGMENTER = pysbd.Segmenter(language="pl", clean=True)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
+
+
+# ===========================================================
+# 📏 Stylometria: burstiness + fluff ratio
+# ===========================================================
+def calculate_burstiness(text: str) -> float:
+    """
+    Odchylenie standardowe długości zdań (w słowach).
+    - < 5  → rytm robotyczny (zbyt równy),
+    - > 8  → rytm bardziej ludzki.
+    Korzysta z globalnego SENTENCE_SEGMENTER (pysbd).
+    """
+    if not text or not text.strip():
+        return 0.0
+
+    try:
+        raw_sentences = SENTENCE_SEGMENTER.segment(text)
+        sentences = [s.strip() for s in raw_sentences if s.strip()]
+    except Exception:
+        # awaryjnie prosty split po .,!,?
+        import re
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        sentences = [s.strip() for s in sentences if s.strip()]
+
+    if not sentences:
+        return 0.0
+
+    lengths = []
+    for s in sentences:
+        words = s.split()
+        lengths.append(len(words))
+
+    n = len(lengths)
+    if n == 0:
+        return 0.0
+
+    mean_len = sum(lengths) / n
+    variance = sum((l - mean_len) ** 2 for l in lengths) / n
+    return math.sqrt(variance)
+
+
+def calculate_fluff_ratio(text: str) -> float:
+    """
+    Fluff ratio: (ADJ + ADV) / wszystkie słowa alfabetyczne.
+    Wartość > 0.15 sugeruje "watowaty" tekst (za dużo ozdobników).
+    Korzysta z globalnego modelu spaCy `nlp`.
+    """
+    if not text or not text.strip():
+        return 0.0
+
+    doc = nlp(text)
+
+    adv_adj_count = sum(1 for token in doc if token.pos_ in ("ADJ", "ADV"))
+    total_alpha_words = sum(1 for token in doc if token.is_alpha)
+
+    if total_alpha_words == 0:
+        return 0.0
+
+    return float(adv_adj_count / total_alpha_words)
 
 
 # ===========================================================
@@ -121,7 +181,8 @@ def analyze_language_quality(text: str) -> dict:
     Analiza jakości językowej batcha:
     - błędy / sugestie z LanguageTool (polski),
     - metryki czytelności z textstat,
-    - liczba zdań i średnia długość zdań z pysbd.
+    - liczba zdań i średnia długość zdań z pysbd,
+    - stylometria: burstiness + fluff_ratio.
 
     Nie blokuje tekstu – służy jako raport dla UI / meta_prompt.
     """
@@ -130,6 +191,8 @@ def analyze_language_quality(text: str) -> dict:
         "lt_issues_count": 0,
         "lt_issues_sample": [],
         "readability": {},
+        "burstiness": 0.0,
+        "fluff_ratio": 0.0,
         "error": None,
     }
 
@@ -157,7 +220,7 @@ def analyze_language_quality(text: str) -> dict:
             print(f"[LanguageTool] Check error: {e}")
             result["error"] = f"LanguageTool error: {str(e)}"
 
-    # ---------- pysbd + textstat – czytelność ----------
+    # ---------- pysbd + textstat – czytelność + stylometria ----------
     try:
         raw_sentences = SENTENCE_SEGMENTER.segment(text)
         sentences = [s.strip() for s in raw_sentences if s.strip()]
@@ -169,6 +232,10 @@ def analyze_language_quality(text: str) -> dict:
         flesch_kincaid_grade = textstat.flesch_kincaid_grade(text)
         smog_index = textstat.smog_index(text)
 
+        # stylometria
+        burstiness_value = calculate_burstiness(text)
+        fluff_value = calculate_fluff_ratio(text)
+
         readability = {
             "flesch_reading_ease": flesch_reading_ease,
             "flesch_kincaid_grade": flesch_kincaid_grade,
@@ -176,8 +243,12 @@ def analyze_language_quality(text: str) -> dict:
             "avg_sentence_length": avg_sentence_length,
             "sentence_count": sentence_count,
             "word_count": word_count,
+            "burstiness": burstiness_value,
+            "fluff_ratio": fluff_value,
         }
         result["readability"] = readability
+        result["burstiness"] = burstiness_value
+        result["fluff_ratio"] = fluff_value
     except Exception as e:
         print(f"[pysbd/textstat] Error: {e}")
         if result["error"] is None:
@@ -453,12 +524,15 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
     readability = language_audit.get("readability", {})
     sentence_count = readability.get("sentence_count", 0)
     avg_sentence_length = readability.get("avg_sentence_length", 0.0)
+    burstiness = language_audit.get("burstiness", 0.0)
+    fluff_ratio = language_audit.get("fluff_ratio", 0.0)
 
     meta_prompt_summary = (
         f"UNDER={under}, OVER={over}, LOCKED={locked} | "
         f"Quality={gemini_verdict.get('quality_score')}% | "
         f"LT_issues={language_audit.get('lt_issues_count', 0)} | "
-        f"Sentences={sentence_count}, Avg_len={avg_sentence_length:.1f}"
+        f"Sentences={sentence_count}, Avg_len={avg_sentence_length:.1f}, "
+        f"Burstiness={burstiness:.1f}, Fluff={fluff_ratio:.3f}"
     )
 
     return {
