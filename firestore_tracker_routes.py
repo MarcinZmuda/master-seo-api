@@ -62,7 +62,7 @@ def calculate_burstiness(text: str) -> float:
     Odchylenie standardowe długości zdań.
     Cel: > 6.0 (Ludzie piszą zmiennym rytmem).
     """
-    if not text.strip(): return 0.0
+    if not text or not text.strip(): return 0.0
     try:
         raw_sentences = SENTENCE_SEGMENTER.segment(text)
         sentences = [s.strip() for s in raw_sentences if s.strip()]
@@ -84,7 +84,7 @@ def calculate_fluff_ratio(text: str) -> float:
     Stosunek przymiotników/przysłówków do wszystkich słów.
     Cel: < 0.15.
     """
-    if not text.strip(): return 0.0
+    if not text or not text.strip(): return 0.0
     doc = nlp(text)
     adv_adj_count = sum(1 for token in doc if token.pos_ in ("ADJ", "ADV"))
     total_alpha_words = sum(1 for token in doc if token.is_alpha)
@@ -96,16 +96,14 @@ def calculate_passive_ratio(text: str) -> float:
     Heurystyka dla PL: Lemma 'zostać' + Imiesłów (ppas / VerbForm=Part).
     Cel: < 0.15.
     """
-    if not text.strip(): return 0.0
+    if not text or not text.strip(): return 0.0
     doc = nlp(text)
     passive_count = 0
     total_sents = 0
     
     for sent in doc.sents:
         total_sents += 1
-        # Szukamy konstrukcji "zostać" ... "zrobiony/napisany"
         has_zostac = any(t.lemma_ == "zostać" for t in sent)
-        # W modelu SM tagi bywają różne, szukamy śladów imiesłowu biernego
         has_imieslow = any(
             (t.tag_ and "ppas" in t.tag_) or 
             ("VerbForm=Part" in str(t.morph) and "Voice=Pass" in str(t.morph))
@@ -118,9 +116,9 @@ def calculate_passive_ratio(text: str) -> float:
 
 def detect_repeated_sentence_starts(text: str, prefix_words: int = 3) -> list:
     """
-    Wykrywa powtórzenia początków zdań (Zero Repetition Policy).
+    Wykrywa powtórzenia początków zdań.
     """
-    if not text.strip(): return []
+    if not text or not text.strip(): return []
     try:
         sentences = [s.strip() for s in SENTENCE_SEGMENTER.segment(text) if s.strip()]
     except:
@@ -131,10 +129,27 @@ def detect_repeated_sentence_starts(text: str, prefix_words: int = 3) -> list:
         words = s.split()
         if len(words) < prefix_words: continue
         prefix = " ".join(words[:prefix_words]).lower()
-        if len(prefix) < 5: continue # ignoruj krótkie spójniki
+        if len(prefix) < 5: continue 
         prefix_counts[prefix] = prefix_counts.get(prefix, 0) + 1
         
     return [{"prefix": p, "count": c} for p, c in prefix_counts.items() if c >= 2]
+
+def filter_repeated_starts_against_keywords(repeated_starts, keywords_state):
+    """
+    Usuwa z listy powtórzeń te przypadki, gdzie początek zdania to fraza kluczowa.
+    Nie karzemy za SEO :)
+    """
+    if not repeated_starts or not keywords_state: return repeated_starts
+    
+    keyword_strings = [meta.get("keyword", "").lower() for meta in keywords_state.values() if meta.get("keyword")]
+    filtered = []
+    for item in repeated_starts:
+        prefix = item["prefix"]
+        # Jeśli prefix zawiera któryś z keywordów -> ignorujemy to powtórzenie
+        if any(kw in prefix for kw in keyword_strings):
+            continue
+        filtered.append(item)
+    return filtered
 
 
 # ===========================================================
@@ -205,7 +220,7 @@ def analyze_language_quality(text: str) -> dict:
         "repeated_starts": [],
         "error": None
     }
-    if not text.strip(): return result
+    if not text or not text.strip(): return result
 
     if LT_TOOL_PL:
         try:
@@ -266,13 +281,10 @@ def _count_fuzzy_on_lemmas(target_tokens, text_lemma_list, exact_spans):
             end = start + target_len + extra
             if end > text_len: break
             if any(pos in used_positions for pos in range(start, end)): continue
-            
             win_tok = text_lemma_list[start:end]
             if not win_tok: continue
-            
             rf = fuzz.token_set_ratio(kw_str, " ".join(win_tok))
             jac = textdistance.jaccard(kw_tokens_set, set(win_tok))
-            
             if rf >= FUZZY_SIMILARITY_THRESHOLD or jac >= JACCARD_SIMILARITY_THRESHOLD:
                 fuzzy += 1
                 used_positions.update(range(start, end))
@@ -297,7 +309,7 @@ def count_hybrid_occurrences(text_raw, text_lemma_list, target_exact, target_lem
 
 def compute_status(actual, target_min, target_max):
     if actual < target_min: return "UNDER"
-    if actual > target_max: return "OVER" # Strict Limit (No tolerance)
+    if actual > target_max: return "OVER" # Strict Limit
     return "OK"
 
 def global_keyword_stats(keywords_state):
@@ -321,7 +333,7 @@ def language_refine():
 
 
 # ===========================================================
-# 🧠 MAIN PROCESS (FULL V8.0 LOGIC)
+# 🧠 MAIN PROCESS (FULL V8.1 LOGIC)
 # ===========================================================
 def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dict = None):
     db = firestore.client()
@@ -338,6 +350,11 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
     fluff = language_audit.get("fluff_ratio", 0.0)
     passive = language_audit.get("passive_ratio", 0.0)
     rep = language_audit.get("repeated_starts", [])
+
+    # 1.5 ODSZUMIANIE POWTÓRZEŃ (vs KEYWORDS)
+    rep = filter_repeated_starts_against_keywords(rep, project_data.get("keywords_state", {}))
+    # Nadpisujemy w raporcie
+    language_audit["repeated_starts"] = rep
 
     # Awaryjne odrzucenie tylko przy tragicznym stylu
     if burst < 3.5 and fluff > 0.22:
@@ -362,7 +379,7 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
             "info": "Odrzucone przez Sędziego (Styl/Merytoryka)."
         }
 
-    # 3. SEO TRACKING (Dynamic Limits)
+    # 3. SEO TRACKING (Dynamic Limits + Fallback)
     import copy
     keywords_state = copy.deepcopy(project_data.get("keywords_state", {}))
     
@@ -381,9 +398,16 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
         elif kw_type == "EXTENDED": local_limit = 6
         else: local_limit = 999 
 
+        # FALLBACK dla lemmatyzacji (jeśli brak w S2)
+        target_exact = meta.get("search_term_exact", original_keyword.lower())
+        target_lemma = meta.get("search_lemma", "")
+        if not target_lemma:
+            doc_tmp = nlp(original_keyword)
+            target_lemma = " ".join([t.lemma_.lower() for t in doc_tmp if t.is_alpha])
+
         occurrences = count_hybrid_occurrences(batch_text, text_lemma_list, 
-                                               meta.get("search_term_exact", ""), 
-                                               meta.get("search_lemma", ""))
+                                               target_exact, 
+                                               target_lemma)
         
         if occurrences > local_limit:
             batch_local_over.append(f"{original_keyword} ({occurrences}x, limit={local_limit})")
@@ -447,6 +471,12 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
         f"Burst={burst:.1f}, Fluff={fluff:.2f}, Passive={passive:.2f} | "
         f"TOP_UNDER={', '.join(top_under_list) if top_under_list else 'NONE'}"
     )
+    
+    # 4.5 Lekki raport Keywords (tylko UNDER/OVER dla debugu w UI/GPT)
+    light_report = [
+        {"keyword": m.get("keyword"), "status": m["status"]} 
+        for _, m in keywords_state.items() if m["status"] in ("UNDER", "OVER")
+    ]
 
     return {
         "status": "BATCH_ACCEPTED",
@@ -454,7 +484,7 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
         "language_audit": language_audit,
         "quality_alert": False,
         "meta_prompt_summary": meta_prompt_summary,
-        "keywords_report": [] 
+        "keywords_report": light_report 
     }
 
 
