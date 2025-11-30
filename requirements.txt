@@ -1,23 +1,23 @@
-Flask==3.0.0
-flask-cors==4.0.0
-firebase_admin==6.2.0
-requests==2.31.0
+Flask==3.0.3
+Flask-Cors==4.0.1
+requests==2.32.3
+python-dotenv==1.0.1
+gunicorn==21.2.0
 
+# --- Baza Danych ---
+firebase-admin==6.5.0
+
+# --- AI & Semantyka (Cloud - Lepsza jakość) ---
+google-generativeai==0.5.2
+numpy==1.26.4
+
+# --- NLP i Stylometria ---
 spacy==3.7.2
-pl-core-news-sm @ https://github.com/explosion/spacy-models/releases/download/pl_core_news_sm-3.7.0/pl_core_news_sm-3.7.0.tar.gz
+https://github.com/explosion/spacy-models/releases/download/pl_core_news_sm-3.7.0/pl_core_news_sm-3.7.0.tar.gz#egg=pl_core_news_sm
+pysbd==0.3.4
+textstat==0.7.3
+language-tool-python==2.7.1
 
-gunicorn==23.0.0
-python-dotenv==1.0.0
-
-google-generativeai==0.3.2
-
+# --- Fuzzy Logic ---
 rapidfuzz==3.9.7
-language-tool-python==2.7.0
-textstat==0.7.4
-
-# 🔥 NOWE – jakościowe warstwy językowe i semantyczne
-pysbd
-textdistance
-keybert
-transformers
-sentence-transformers
+textdistance==4.6.1
