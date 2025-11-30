@@ -7,7 +7,7 @@ from flask import Blueprint, jsonify, request
 from firebase_admin import firestore
 import spacy
 import google.generativeai as genai
-from rapidfuzz import fuzz
+from rapidfuzz import fuzz  # Fuzzy matching
 import language_tool_python
 import textstat
 import textdistance
@@ -15,9 +15,7 @@ import pysbd
 
 tracker_routes = Blueprint("tracker_routes", __name__)
 
-# -----------------------------------------------------------
-# 🧠 INICJALIZACJA
-# -----------------------------------------------------------
+# --- INICJALIZACJA ---
 try:
     nlp = spacy.load("pl_core_news_sm")
 except OSError:
@@ -25,39 +23,78 @@ except OSError:
     download("pl_core_news_sm")
     nlp = spacy.load("pl_core_news_sm")
 
-FUZZY_SIMILARITY_THRESHOLD = 90
-MAX_FUZZY_WINDOW_EXPANSION = 2
-JACCARD_SIMILARITY_THRESHOLD = 0.8
+FUZZY_SIMILARITY_THRESHOLD = 90      
+MAX_FUZZY_WINDOW_EXPANSION = 2       
+JACCARD_SIMILARITY_THRESHOLD = 0.8   
 
-# --- LanguageTool z Fallbackiem ---
-LT_TOOL_PL = None
+# Konfiguracja progu dla wykrywania zakazanych fraz (85 łapie "warto jednak zauważyć")
+BANNED_FUZZY_THRESHOLD = 85 
+
 try:
-    # Próbujemy lokalnie
     LT_TOOL_PL = language_tool_python.LanguageTool("pl-PL")
-except Exception as e:
-    print(f"⚠️ [LanguageTool] Local init failed: {e}. Trying remote...")
-    try:
-        # Fallback do publicznego API (wolniejsze, ale działa bez Javy)
-        LT_TOOL_PL = language_tool_python.LanguageToolPublicAPI("pl-PL")
-    except Exception as e2:
-        print(f"❌ [LanguageTool] Public API also failed: {e2}. Language QA will be disabled.")
-        LT_TOOL_PL = None
+except Exception:
+    LT_TOOL_PL = None
 
 SENTENCE_SEGMENTER = pysbd.Segmenter(language="pl", clean=True)
 
-# --- Gemini Configuration ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
+# --- BAZA ZAKAZANYCH FRAZ (HEAR 2.1) ---
+BANNED_PHRASES_DB = [
+    "w dzisiejszych czasach", "w dobie", "od zarania dziejów",
+    "warto zauważyć", "należy wspomnieć", "warto dodać", "co więcej",
+    "podsumowując", "reasumując", "w ostatecznym rozrachunku", "konkludując",
+    "gra warta świeczki", "strzał w dziesiątkę", "klucz do sukcesu", "wisienka na torcie",
+    "wszystko zależy od", "nie ma jednoznacznej odpowiedzi",
+    "nie ma wątpliwości", "bez wątpienia", "niezwykle ważny"
+]
+
 
 # ===========================================================
-# 🧠 SEMANTYKA (Embeddings + Cosine Similarity)
+# 🕵️‍♀️ DETEKCJA ZAKAZANYCH FRAZ (FUZZY + METAPHOR)
+# ===========================================================
+def detect_banned_fuzzy(text: str) -> list:
+    """
+    Sprawdza występowanie zakazanych fraz w trybie Fuzzy Token Set.
+    Wykrywa:
+    - "Warto zauważyć" w "Warto jednak zauważyć" (wtrącenia).
+    - "Gra warta świeczki" w "Gra nie była warta świeczki" (zmiany).
+    """
+    if not text.strip(): return []
+    
+    found_issues = []
+    # Analizujemy zdanie po zdaniu, żeby nie robić false positives na całym tekście
+    try:
+        sentences = [s.strip() for s in SENTENCE_SEGMENTER.segment(text) if s.strip()]
+    except:
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+
+    for sent in sentences:
+        sent_lower = sent.lower()
+        for banned in BANNED_PHRASES_DB:
+            # Używamy partial_token_set_ratio:
+            # - Ignoruje kolejność słów
+            # - Ignoruje "szum" (dodatkowe słowa wtrącone)
+            score = fuzz.partial_token_set_ratio(banned, sent_lower)
+            
+            if score >= BANNED_FUZZY_THRESHOLD:
+                # Sprawdzamy czy to nie false positive (np. bardzo krótkie słowa)
+                if len(banned) < 5 and score < 100: continue
+                
+                found_issues.append(f"'{banned}' (match: {score}%)")
+
+    # Usuwamy duplikaty
+    return list(set(found_issues))
+
+
+# ===========================================================
+# 🧠 SEMANTYKA (Embeddings)
 # ===========================================================
 def get_embedding(text):
     if not text or not text.strip(): return None
     try:
-        # Używamy modelu embedding-004 (jest dostępny i stabilny)
         result = genai.embed_content(
             model="models/text-embedding-004",
             content=text,
@@ -65,22 +102,20 @@ def get_embedding(text):
         )
         return result['embedding']
     except Exception as e:
-        print(f"⚠️ Embedding Error: {e}")
+        print(f"Embedding Error: {e}")
         return None
 
 def calculate_semantic_score(batch_text, main_topic):
     if not batch_text or not main_topic: return 1.0
     vec_text = get_embedding(batch_text)
     vec_topic = get_embedding(main_topic)
-
-    if not vec_text or not vec_topic: return 1.0 # Neutralny wynik przy błędzie
-
-    dot_product = np.dot(vec_text, vec_topic)
+    if not vec_text or not vec_topic: return 1.0
+    
+    dot = np.dot(vec_text, vec_topic)
     norm_a = np.linalg.norm(vec_text)
     norm_b = np.linalg.norm(vec_topic)
-    
     if norm_a == 0 or norm_b == 0: return 0.0
-    return float(dot_product / (norm_a * norm_b))
+    return float(dot / (norm_a * norm_b))
 
 
 # ===========================================================
@@ -93,37 +128,31 @@ def calculate_burstiness(text: str) -> float:
     except:
         sentences = re.split(r'(?<=[.!?])\s+', text)
     if not sentences: return 0.0
-    
     lengths = [len(s.split()) for s in sentences]
-    if not lengths: return 0.0
-    
-    mean_len = sum(lengths) / len(lengths)
-    variance = sum((l - mean_len) ** 2 for l in lengths) / len(lengths)
+    n = len(lengths)
+    if n == 0: return 0.0
+    mean = sum(lengths) / n
+    variance = sum((l - mean) ** 2 for l in lengths) / n
     return math.sqrt(variance)
 
 def calculate_fluff_ratio(text: str) -> float:
     if not text.strip(): return 0.0
     doc = nlp(text)
-    adv_adj_count = sum(1 for t in doc if t.pos_ in ("ADJ", "ADV"))
-    total_alpha = sum(1 for t in doc if t.is_alpha)
-    return float(adv_adj_count / total_alpha) if total_alpha > 0 else 0.0
+    adv_adj = sum(1 for t in doc if t.pos_ in ("ADJ", "ADV"))
+    total = sum(1 for t in doc if t.is_alpha)
+    return float(adv_adj / total) if total > 0 else 0.0
 
 def calculate_passive_ratio(text: str) -> float:
     if not text.strip(): return 0.0
     doc = nlp(text)
-    passive_count = 0
-    total_sents = 0
+    passive = 0
+    total = 0
     for sent in doc.sents:
-        total_sents += 1
+        total += 1
         has_zostac = any(t.lemma_ == "zostać" for t in sent)
-        has_imieslow = any(
-            (t.tag_ and "ppas" in t.tag_) or 
-            ("VerbForm=Part" in str(t.morph) and "Voice=Pass" in str(t.morph))
-            for t in sent
-        )
-        if has_zostac and has_imieslow:
-            passive_count += 1
-    return passive_count / total_sents if total_sents > 0 else 0.0
+        has_imieslow = any(("VerbForm=Part" in str(t.morph) and "Voice=Pass" in str(t.morph)) for t in sent)
+        if has_zostac and has_imieslow: passive += 1
+    return passive / total if total > 0 else 0.0
 
 def detect_repeated_sentence_starts(text: str, prefix_words: int = 3) -> list:
     if not text.strip(): return []
@@ -136,7 +165,7 @@ def detect_repeated_sentence_starts(text: str, prefix_words: int = 3) -> list:
         words = s.split()
         if len(words) < prefix_words: continue
         prefix = " ".join(words[:prefix_words]).lower()
-        if len(prefix) < 5: continue 
+        if len(prefix) < 5: continue
         prefix_counts[prefix] = prefix_counts.get(prefix, 0) + 1
     return [{"prefix": p, "count": c} for p, c in prefix_counts.items() if c >= 2]
 
@@ -151,46 +180,46 @@ def filter_repeated_starts_against_keywords(repeated_starts, keywords_state):
 
 
 # ===========================================================
-# ⚖️ GEMINI JUDGE (Fixed Model Name)
+# ⚖️ GEMINI JUDGE (Z Obsługą Fuzzy Banned)
 # ===========================================================
-def evaluate_with_gemini(text, meta_trace, burst, fluff, passive, repeated, semantic_score, topic=""):
+def evaluate_with_gemini(text, meta_trace, burst, fluff, passive, repeated, banned_detected, semantic_score, topic=""):
     if not GEMINI_API_KEY:
         return {"pass": True, "quality_score": 100, "feedback_for_writer": "No API Key"}
 
     try:
-       # ZMIANA: Używamy 'gemini-1.5-flash' - jest szybszy i bardziej dostępny niż Pro w API
-       model = genai.GenerativeModel("gemini-1.5-flash")
-    except Exception as e:
-        print(f"Gemini Init Error: {e}")
+       model = genai.GenerativeModel("gemini-1.5-pro")
+    except:
         return {"pass": True, "quality_score": 80, "feedback_for_writer": "Model Init Error"}
 
     meta = meta_trace or {}
     intent = meta.get("execution_intent", "Brak")
     rhythm = meta.get("rhythm_pattern_used", "Brak")
     
-    repeated_info = f"Powtórzenia: {repeated}" if repeated else "Brak powtórzeń."
+    repeated_info = f"Powtórzenia początków: {repeated}" if repeated else "Brak powtórzeń."
+    banned_info = f"⚠️ WYKRYTO ZAKAZANE FRAZY (Fuzzy Match): {banned_detected}" if banned_detected else "Brak zakazanych fraz (Exact/Fuzzy)."
 
     metrics_context = f"""
-    DANE TECH:
-    - Burstiness: {burst:.2f} (Cel > 6.0).
-    - Fluff: {fluff:.3f} (Cel < 0.15).
-    - Passive: {passive:.2f} (Cel < 0.15).
-    - Semantic: {semantic_score:.2f} (Cel > 0.75).
+    DANE TECHICZNE (FACTUAL DATA):
+    - Burstiness: {burst:.2f} (Norma > 6.0).
+    - Fluff Ratio: {fluff:.3f} (Norma < 0.15).
+    - Passive Voice: {passive:.2f} (Norma < 0.15).
+    - Semantic Score: {semantic_score:.2f} (Norma > 0.75).
     - {repeated_info}
+    - {banned_info}
     """
 
-    banned = "W dzisiejszych czasach, W dobie, Warto zauważyć, Należy wspomnieć, Podsumowując, Reasumując."
-
     prompt = f"""
-    Jesteś Surowym Sędzią SEO (HEAR 2.1).
+    Jesteś Surowym Sędzią Jakości SEO (HEAR 2.1).
     Temat: "{topic}".
+    
+    INTENCJA: {intent}
     {metrics_context}
-    BANNED: {banned}
 
-    OCENA:
-    1. SEMANTYKA < 0.75 -> FAIL.
-    2. STYL (Burst < 4.5 lub Fluff > 0.18) -> OSTRZEŻENIE.
-    3. BŁĘDY KRYTYCZNE (Passive > 0.20, Powtórzenia, Banned) -> FAIL.
+    ZASADY DECYZJI:
+    1. BANNED PHRASES: Jeśli 'banned_detected' nie jest puste -> FAIL. Komentarz: "Usuń zakazane frazy/metafory."
+    2. METAFORY: Jeśli widzisz metafory typu "strzał w 10", "złoty środek" (nawet jeśli skrypt ich nie wyłapał) -> FAIL.
+    3. STYL: Burstiness < 4.5 lub Fluff > 0.18 -> OSTRZEŻENIE.
+    4. SEMANTYKA: Off-topic -> FAIL.
     
     Zwróć JSON: {{ "pass": true/false, "quality_score": (0-100), "feedback_for_writer": "..." }}
     TEKST: "{text}"
@@ -201,16 +230,17 @@ def evaluate_with_gemini(text, meta_trace, burst, fluff, passive, repeated, sema
         clean = response.text.replace("```json", "").replace("```", "").strip()
         return json.loads(clean)
     except Exception as e:
-        print(f"Gemini Generate Error: {e}")
-        # Fail-safe: jeśli Gemini padnie, przepuszczamy tekst z ostrzeżeniem
-        return {"pass": True, "quality_score": 75, "feedback_for_writer": f"Gemini API Error: {e}. Check manually."}
+        return {"pass": True, "quality_score": 80, "feedback_for_writer": f"API Error: {e}"}
 
 
 # ===========================================================
 # 🔎 Language Audit
 # ===========================================================
 def analyze_language_quality(text: str) -> dict:
-    result = {"lt_issues_count": 0, "burstiness": 0.0, "fluff_ratio": 0.0, "passive_ratio": 0.0, "repeated_starts": [], "error": None}
+    result = {
+        "lt_issues_count": 0, "burstiness": 0.0, "fluff_ratio": 0.0, 
+        "passive_ratio": 0.0, "repeated_starts": [], "banned_detected": []
+    }
     if not text.strip(): return result
 
     if LT_TOOL_PL:
@@ -218,13 +248,15 @@ def analyze_language_quality(text: str) -> dict:
             matches = LT_TOOL_PL.check(text)
             result["lt_issues_count"] = len(matches)
             result["lt_issues_sample"] = [{"msg": m.message} for m in matches[:5]]
-        except Exception as e: result["error"] = str(e)
+        except: pass
 
     try:
         burst = calculate_burstiness(text)
         fluff = calculate_fluff_ratio(text)
         passive = calculate_passive_ratio(text)
         rep = detect_repeated_sentence_starts(text)
+        # NOWOŚĆ: Wykrywanie rozmytych zakazanych fraz
+        banned = detect_banned_fuzzy(text)
         
         raw_s = SENTENCE_SEGMENTER.segment(text)
         sents = [s for s in raw_s if s.strip()]
@@ -234,12 +266,13 @@ def analyze_language_quality(text: str) -> dict:
             "fluff_ratio": fluff, 
             "passive_ratio": passive, 
             "repeated_starts": rep,
+            "banned_detected": banned, # Dodajemy do raportu
             "readability": {
                 "sentence_count": len(sents),
                 "avg_sentence_length": (sum(len(s.split()) for s in sents)/len(sents)) if sents else 0
             }
         })
-    except Exception as e: print(f"Audit Error: {e}")
+    except: pass
     return result
 
 def apply_languagetool_fixes(text: str) -> str:
@@ -253,7 +286,7 @@ def apply_languagetool_fixes(text: str) -> str:
         return "".join(text_list)
     except: return text
 
-# --- FUZZY HELPERS ---
+# ... (Funkcje fuzzy liczenia słów: _count_fuzzy_on_lemmas - bez zmian) ...
 def _count_fuzzy_on_lemmas(target_tokens, text_lemma_list, exact_spans):
     if not target_tokens or not text_lemma_list: return 0
     text_len, target_len = len(text_lemma_list), len(target_tokens)
@@ -262,7 +295,7 @@ def _count_fuzzy_on_lemmas(target_tokens, text_lemma_list, exact_spans):
     kw_tokens_set = set(target_tokens)
     used_positions = set()
     for s, e in exact_spans: used_positions.update(range(s, e))
-    fuzzy = 0
+    fuzzy_hits = 0
     for start in range(text_len):
         for extra in range(MAX_FUZZY_WINDOW_EXPANSION + 1):
             end = start + target_len + extra
@@ -273,10 +306,10 @@ def _count_fuzzy_on_lemmas(target_tokens, text_lemma_list, exact_spans):
             rf = fuzz.token_set_ratio(kw_str, " ".join(win_tok))
             jac = textdistance.jaccard(kw_tokens_set, set(win_tok))
             if rf >= FUZZY_SIMILARITY_THRESHOLD or jac >= JACCARD_SIMILARITY_THRESHOLD:
-                fuzzy += 1
+                fuzzy_hits += 1
                 used_positions.update(range(start, end))
                 break
-    return fuzzy
+    return fuzzy_hits
 
 def count_hybrid_occurrences(text_raw, text_lemma_list, target_exact, target_lemma):
     text_lower = text_raw.lower()
@@ -331,31 +364,45 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
     project_data = doc.to_dict()
     topic = project_data.get("topic", "Nieznany")
 
-    # 1. AUDYT
+    # 1. AUDYT JĘZYKOWY + BANNED FUZZY
     language_audit = analyze_language_quality(batch_text)
     burst = language_audit.get("burstiness", 0.0)
     fluff = language_audit.get("fluff_ratio", 0.0)
     passive = language_audit.get("passive_ratio", 0.0)
-    
     rep = language_audit.get("repeated_starts", [])
     rep = filter_repeated_starts_against_keywords(rep, project_data.get("keywords_state", {}))
     language_audit["repeated_starts"] = rep
+    banned = language_audit.get("banned_detected", [])
 
     semantic_score = calculate_semantic_score(batch_text, topic)
     language_audit["semantic_score"] = semantic_score
 
-    # Hard Fail (Style)
-    if burst < 3.5 and fluff > 0.22:
+    # Hard Fail jeśli znaleziono zakazane frazy
+    if banned:
         return {
             "status": "REJECTED_QUALITY",
-            "error": "Style Gate Failed",
-            "gemini_feedback": {"pass": False, "quality_score": 40, "feedback_for_writer": "Tragiczny styl."},
+            "error": "Banned Phrases Detected",
+            "gemini_feedback": {
+                "pass": False, 
+                "quality_score": 0, 
+                "feedback_for_writer": f"Wykryto zakazane frazy (lub ich wariacje): {', '.join(banned)}. Usuń je lub zamień na konkrety."
+            },
             "language_audit": language_audit,
             "quality_alert": True
         }
 
-    # 2. GEMINI
-    gemini_verdict = evaluate_with_gemini(batch_text, meta_trace, burst, fluff, passive, rep, semantic_score, topic=topic)
+    # Hard Fail przy tragicznym stylu
+    if burst < 3.5 and fluff > 0.22:
+        return {
+            "status": "REJECTED_QUALITY",
+            "error": "Style Gate Failed (Hard)",
+            "gemini_feedback": {"pass": False, "quality_score": 40, "feedback_for_writer": "Tragiczny styl: monotonia i wata słowna."},
+            "language_audit": language_audit,
+            "quality_alert": True
+        }
+
+    # 2. GEMINI JUDGE (przekazujemy listę banned)
+    gemini_verdict = evaluate_with_gemini(batch_text, meta_trace, burst, fluff, passive, rep, banned, semantic_score, topic=topic)
     
     if not gemini_verdict.get("pass", True) or gemini_verdict.get("quality_score", 100) < 70:
         return {
@@ -366,7 +413,7 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
             "quality_alert": True
         }
 
-    # 3. SEO TRACKING
+    # 3. SEO TRACKING (Bez zmian)
     import copy
     keywords_state = copy.deepcopy(project_data.get("keywords_state", {}))
     doc_nlp = nlp(batch_text)
@@ -387,10 +434,8 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
             target_lemma = " ".join([t.lemma_.lower() for t in doc_tmp if t.is_alpha])
 
         occurrences = count_hybrid_occurrences(batch_text, text_lemma_list, target_exact, target_lemma)
-        
         if occurrences > local_limit:
             batch_local_over.append(f"{original_keyword} ({occurrences}x)")
-
         meta["actual_uses"] += occurrences
         meta["status"] = compute_status(meta["actual_uses"], meta["target_min"], meta["target_max"])
 
@@ -398,7 +443,7 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
         return {
             "status": "REJECTED_SEO",
             "error": "LOCAL_BATCH_LIMIT_EXCEEDED",
-            "gemini_feedback": {"pass": False, "feedback_for_writer": f"Lokalny limit: {', '.join(batch_local_over)}."},
+            "gemini_feedback": {"pass": False, "feedback_for_writer": f"Limit lokalny: {', '.join(batch_local_over)}."},
             "language_audit": language_audit,
             "quality_alert": True
         }
@@ -408,7 +453,7 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
         return {
             "status": "REJECTED_SEO",
             "error": "SEO Limits Exceeded",
-            "gemini_feedback": {"pass": False, "feedback_for_writer": f"Globalny limit LOCKED={locked}."},
+            "gemini_feedback": {"pass": False, "feedback_for_writer": f"Globalny limit: LOCKED={locked}."},
             "language_audit": language_audit,
             "quality_alert": True
         }
@@ -433,7 +478,8 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
     meta_prompt_summary = (
         f"UNDER={under}, OVER={over} | "
         f"Quality={gemini_verdict.get('quality_score')}% | "
-        f"Burst={burst:.1f}, Fluff={fluff:.2f}, Semantic={semantic_score:.2f} | "
+        f"Burst={burst:.1f}, Fluff={fluff:.2f}, Passive={passive:.2f} | "
+        f"BANNED={len(banned)} | "
         f"TOP_UNDER={', '.join(top_under_list) if top_under_list else 'NONE'}"
     )
     
@@ -448,7 +494,7 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
         "keywords_report": light_report 
     }
 
-# Endpointy GET
+# Endpointy GET bez zmian
 @tracker_routes.get("/api/project/<project_id>")
 def get_project(project_id):
     db = firestore.client()
