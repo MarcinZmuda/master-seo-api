@@ -23,14 +23,20 @@ except OSError:
     download("pl_core_news_sm")
     nlp = spacy.load("pl_core_news_sm")
 
+# Parametry z dokumentacji v7.6.0
 FUZZY_SIMILARITY_THRESHOLD = 90      
 MAX_FUZZY_WINDOW_EXPANSION = 2       
 JACCARD_SIMILARITY_THRESHOLD = 0.8   
 
+# Inicjalizacja LanguageTool (z obsługą błędu)
 try:
     LT_TOOL_PL = language_tool_python.LanguageTool("pl-PL")
-except Exception:
+except Exception as e:
+    print(f"⚠️ LanguageTool Init Error: {e}")
     LT_TOOL_PL = None
+
+# Konfiguracja TextStat dla PL
+textstat.set_lang("pl")
 
 SENTENCE_SEGMENTER = pysbd.Segmenter(language="pl", clean=True)
 
@@ -40,29 +46,18 @@ if GEMINI_API_KEY:
 
 
 # ===========================================================
-# 👮‍♂️ HARD GUARDRAILS (Szeryf) - Tylko struktura!
+# 👮‍♂️ HARD GUARDRAILS (Tylko struktura)
 # ===========================================================
 def validate_hard_rules(text: str) -> dict:
     errors = []
-    lines = text.split('\n')
-    bullet_count = 0
-    for line in lines:
-        stripped = line.strip()
-        if re.match(r'^[\-\*]\s+', stripped) or re.match(r'^\d+\.\s+', stripped):
-            bullet_count += 1
-    
-    if bullet_count > 0:
-        errors.append(f"WYKRYTO LISTĘ ({bullet_count} pkt). Zakaz punktorów. Użyj ciągłej narracji.")
+    # Sprawdzamy listy punktowane (zakazane w body)
+    if re.search(r'^[\-\*]\s+', text, re.MULTILINE) or re.search(r'^\d+\.\s+', text, re.MULTILINE):
+        matches = len(re.findall(r'^[\-\*]\s+', text, re.MULTILINE))
+        if matches > 1:
+            errors.append(f"WYKRYTO LISTĘ ({matches} pkt). Zakaz punktorów w narracji.")
 
-    sections = re.split(r'##\s+', text)
-    sections = [s for s in sections if len(s.strip()) > 50]
-    
-    # Asymetrię sprawdzamy tu tylko informacyjnie, nie blokujemy HARD, 
-    # bo GPT lepiej radzi sobie z tym przez prompt.
-    
     if errors:
         return {"valid": False, "msg": " | ".join(errors)}
-    
     return {"valid": True, "msg": "OK"}
 
 
@@ -77,69 +72,143 @@ def sanitize_typography(text: str) -> str:
 
 
 # ===========================================================
-# 📏 STYLOMETRIA HELPERS
+# 📏 PEŁNE AUDYTY (STYLOMETRIA + QA + READABILITY)
 # ===========================================================
-def calculate_burstiness(text: str) -> float:
-    if not text.strip(): return 0.0
+def analyze_language_quality(text: str) -> dict:
+    result = {
+        "burstiness": 0.0, 
+        "fluff_ratio": 0.0, 
+        "passive_ratio": 0.0, 
+        "readability_score": 0.0, # Flesch (Przywrócone!)
+        "lt_errors": [],          # LanguageTool (Przywrócone!)
+        "repeated_starts": [], 
+        "banned_detected": []
+    }
+    
+    if not text.strip(): return result
+    
     try:
+        # 1. Burstiness
         sentences = [s.strip() for s in SENTENCE_SEGMENTER.segment(text) if s.strip()]
-    except:
-        sentences = re.split(r'(?<=[.!?])\s+', text)
-    if not sentences: return 0.0
-    lengths = [len(s.split()) for s in sentences]
-    n = len(lengths)
-    if n == 0: return 0.0
-    mean_len = sum(lengths) / n
-    variance = sum((l - mean_len) ** 2 for l in lengths) / n
-    return math.sqrt(variance)
+        if not sentences: sentences = re.split(r'(?<=[.!?])\s+', text)
+        
+        lengths = [len(s.split()) for s in sentences]
+        if lengths:
+            mean_len = sum(lengths) / len(lengths)
+            variance = sum((l - mean_len) ** 2 for l in lengths) / len(lengths)
+            result["burstiness"] = math.sqrt(variance)
 
-def calculate_fluff_ratio(text: str) -> float:
-    if not text.strip(): return 0.0
-    doc = nlp(text)
-    adv_adj_count = sum(1 for token in doc if token.pos_ in ("ADJ", "ADV"))
-    total_alpha_words = sum(1 for token in doc if token.is_alpha)
-    return float(adv_adj_count / total_alpha_words) if total_alpha_words > 0 else 0.0
+        # 2. NLP (Fluff + Passive)
+        doc = nlp(text)
+        adv_adj = sum(1 for t in doc if t.pos_ in ("ADJ", "ADV"))
+        total_words = sum(1 for t in doc if t.is_alpha)
+        result["fluff_ratio"] = (adv_adj / total_words) if total_words > 0 else 0.0
+        
+        passive_cnt = 0
+        for sent in doc.sents:
+            if any(t.lemma_ == "zostać" for t in sent) and any("ppas" in (t.tag_ or "") for t in sent):
+                passive_cnt += 1
+        result["passive_ratio"] = passive_cnt / len(list(doc.sents)) if list(doc.sents) else 0.0
 
-def calculate_passive_ratio(text: str) -> float:
-    if not text.strip(): return 0.0
-    doc = nlp(text)
-    passive_count = 0
-    total_sents = 0
-    for sent in doc.sents:
-        total_sents += 1
-        has_zostac = any(t.lemma_ == "zostać" for t in sent)
-        has_imieslow = any(
-            (t.tag_ and "ppas" in t.tag_) or 
-            ("VerbForm=Part" in str(t.morph) and "Voice=Pass" in str(t.morph))
-            for t in sent
-        )
-        if has_zostac and has_imieslow:
-            passive_count += 1
-    return passive_count / total_sents if total_sents > 0 else 0.0
+        # 3. TEXTSTAT (Czytelność)
+        try:
+            result["readability_score"] = textstat.flesch_reading_ease(text)
+        except: pass
 
-def detect_repeated_sentence_starts(text: str, prefix_words: int = 3) -> list:
-    if not text.strip(): return []
-    try:
-        sentences = [s.strip() for s in SENTENCE_SEGMENTER.segment(text) if s.strip()]
-    except:
-        sentences = re.split(r'(?<=[.!?])\s+', text)
-    prefix_counts = {}
-    for s in sentences:
-        words = s.split()
-        if len(words) < prefix_words: continue
-        prefix = " ".join(words[:prefix_words]).lower()
-        if len(prefix) < 5: continue 
-        prefix_counts[prefix] = prefix_counts.get(prefix, 0) + 1
-    return [{"prefix": p, "count": c} for p, c in prefix_counts.items() if c >= 2]
+        # 4. LANGUAGE TOOL (Gramatyka)
+        if LT_TOOL_PL:
+            matches = LT_TOOL_PL.check(text)
+            serious_errors = [m.message for m in matches if m.ruleId not in ("WHITESPACE_RULE", "UPPERCASE_SENTENCE_START")]
+            result["lt_errors"] = serious_errors[:3]
 
-def filter_repeated_starts_against_keywords(repeated_starts, keywords_state):
-    if not repeated_starts or not keywords_state: return repeated_starts
-    keyword_strings = [meta.get("keyword", "").lower() for meta in keywords_state.values() if meta.get("keyword")]
-    filtered = []
-    for item in repeated_starts:
-        if any(kw in item["prefix"] for kw in keyword_strings): continue
-        filtered.append(item)
-    return filtered
+        # 5. REPEATED STARTS
+        prefix_counts = {}
+        for s in sentences:
+            words = s.split()
+            if len(words) > 2:
+                p = " ".join(words[:2]).lower()
+                prefix_counts[p] = prefix_counts.get(p, 0) + 1
+        result["repeated_starts"] = [p for p, c in prefix_counts.items() if c >= 2]
+
+        # 6. BANNED PHRASES (Fuzzy)
+        banned_phrases = ["warto zauważyć", "w dzisiejszych czasach", "podsumowując", "reasumując", "warto dodać", "nie da się ukryć"]
+        found_banned = []
+        text_lower = text.lower()
+        for b in banned_phrases:
+            if b in text_lower:
+                found_banned.append(b)
+                continue
+            if fuzz.partial_ratio(b, text_lower) > 92:
+                found_banned.append(b)
+        result["banned_detected"] = list(set(found_banned))
+
+    except Exception as e:
+        print(f"Audit Error: {e}")
+    
+    return result
+
+
+# ===========================================================
+# 🚀 CORE ENGINE: HYBRID LEMMA-FUZZY COUNTER (PEŁNY!)
+# ===========================================================
+def count_hybrid_occurrences(text_raw, text_lemma_list, target_exact, target_lemma):
+    text_lower = text_raw.lower()
+    
+    # 1. Exact Match
+    exact_hits = text_lower.count(target_exact.lower()) if target_exact.strip() else 0
+    
+    # 2. Lemma Logic (Exact + Fuzzy Sequence)
+    lemma_hits = 0
+    target_tok = target_lemma.split()
+    
+    if target_tok:
+        text_len = len(text_lemma_list)
+        target_len = len(target_tok)
+        used_indices = set()
+        
+        # A. Exact Lemma Sequence
+        for i in range(text_len - target_len + 1):
+            if text_lemma_list[i : i+target_len] == target_tok:
+                lemma_hits += 1
+                for k in range(i, i+target_len): used_indices.add(k)
+
+        # B. Fuzzy Lemma Sequence (Jaccard + RapidFuzz) - To było wycięte, teraz wraca!
+        min_win = max(1, target_len - MAX_FUZZY_WINDOW_EXPANSION)
+        max_win = target_len + MAX_FUZZY_WINDOW_EXPANSION
+        target_str = " ".join(target_tok)
+
+        for w_len in range(min_win, max_win + 1):
+            if w_len > text_len: continue
+            for i in range(text_len - w_len + 1):
+                # Skip overlap
+                if any(k in used_indices for k in range(i, i+w_len)): continue
+                
+                window_tok = text_lemma_list[i : i+w_len]
+                window_str = " ".join(window_tok)
+                
+                # Check metrics
+                score_fuzz = fuzz.token_set_ratio(target_str, window_str)
+                score_jaccard = textdistance.jaccard.normalized_similarity(target_tok, window_tok)
+                
+                if score_fuzz >= FUZZY_SIMILARITY_THRESHOLD or score_jaccard >= JACCARD_SIMILARITY_THRESHOLD:
+                    lemma_hits += 1
+                    for k in range(i, i+w_len): used_indices.add(k)
+
+    return max(exact_hits, lemma_hits)
+
+
+def compute_status(actual, target_min, target_max):
+    if actual < target_min: return "UNDER"
+    if actual > target_max: return "OVER"
+    return "OK"
+
+def global_keyword_stats(keywords_state):
+    under = sum(1 for v in keywords_state.values() if v["status"] == "UNDER")
+    over = sum(1 for v in keywords_state.values() if v["status"] == "OVER")
+    locked = 1 if over >= 4 else 0
+    ok = sum(1 for v in keywords_state.values() if v["status"] == "OK")
+    return under, over, locked, ok
+
 
 def get_embedding(text):
     if not text or not text.strip(): return None
@@ -160,72 +229,55 @@ def calculate_semantic_score(batch_text, main_topic):
     norm_b = np.linalg.norm(vec_topic)
     return float(dot_product / (norm_a * norm_b)) if norm_a > 0 and norm_b > 0 else 0.0
 
-def evaluate_with_gemini(text, meta_trace, burst, fluff, passive, repeated, banned_detected, semantic_score, topic=""):
+
+# ===========================================================
+# 🧠 GEMINI JUDGE (CONTEXT-AWARE - Przywrócony!)
+# ===========================================================
+def evaluate_with_gemini(text, meta_trace, burst, fluff, passive, repeated, banned_detected, semantic_score, topic="", previous_context=""):
     if not GEMINI_API_KEY: return {"pass": True, "quality_score": 100}
     try:
        model = genai.GenerativeModel("gemini-1.5-pro")
     except: return {"pass": True, "quality_score": 80, "feedback": "Init Error"}
 
-    metrics_context = f"Burst: {burst:.2f}, Fluff: {fluff:.3f}, Semantic: {semantic_score:.2f}"
+    # Budujemy kontekst z poprzedniego batcha
+    context_instruction = ""
+    if previous_context:
+        context_instruction = f"KONTEKST POPRZEDNIEGO BATCHA: '{previous_context[:300]}...'. Sprawdź spójność."
+
+    metrics_context = (
+        f"METRYKI: Burstiness={burst:.2f} (Cel >6), Fluff={fluff:.2f} (Cel <0.15), "
+        f"Semantic={semantic_score:.2f}. "
+        f"Banned: {banned_detected}."
+    )
+
     prompt = f"""
-    Sędzia SEO. Temat: "{topic}".
+    Jesteś Sędzią SEO (Quality Gate).
+    Temat: "{topic}".
+    {context_instruction}
+    
+    Twoim zadaniem jest ocena bieżącego fragmentu (Batcha).
     {metrics_context}
-    Sprawdź: Bezpieczeństwo (YMYL), Logikę, Styl.
-    Zwróć JSON: {{ "pass": true/false, "quality_score": 0-100, "feedback_for_writer": "..." }}
+
+    KRYTERIA (HEAR):
+    1. Harmony: Czy tekst jest spójny?
+    2. Authenticity: Czy unika AI-izmów?
+    3. Rhythm: Czy zdania mają różną długość?
+
+    Zwróć TYLKO JSON: 
+    {{ "pass": true/false, "quality_score": 0-100, "feedback_for_writer": "Krótka instrukcja co poprawić." }}
+
     TEKST: "{text}"
     """
     try:
         response = model.generate_content(prompt)
         clean = response.text.replace("```json", "").replace("```", "").strip()
         return json.loads(clean)
-    except Exception: return {"pass": True, "quality_score": 80}
-
-def analyze_language_quality(text: str) -> dict:
-    result = {"lt_issues_count": 0, "burstiness": 0.0, "fluff_ratio": 0.0, "passive_ratio": 0.0, "repeated_starts": [], "banned_detected": []}
-    if not text.strip(): return result
-    try:
-        burst = calculate_burstiness(text)
-        fluff = calculate_fluff_ratio(text)
-        passive = calculate_passive_ratio(text)
-        rep = detect_repeated_sentence_starts(text)
-        from rapidfuzz import fuzz
-        banned_phrases = ["warto zauważyć", "w dzisiejszych czasach", "podsumowując", "reasumując", "w niniejszym artykule"]
-        banned_found = []
-        for s in re.split(r'(?<=[.!?])\s+', text):
-            for b in banned_phrases:
-                if fuzz.partial_token_set_ratio(b, s.lower()) > 90: banned_found.append(b)
-            if "—" in s: banned_found.append("EM-DASH (—)")
-        result.update({"burstiness": burst, "fluff_ratio": fluff, "passive_ratio": passive, "repeated_starts": rep, "banned_detected": list(set(banned_found))})
-    except: pass
-    return result
-
-def count_hybrid_occurrences(text_raw, text_lemma_list, target_exact, target_lemma):
-    text_lower = text_raw.lower()
-    exact = text_lower.count(target_exact.lower()) if target_exact.strip() else 0
-    lemma_hits = 0
-    target_tok = target_lemma.split()
-    if target_tok:
-        text_len = len(text_lemma_list)
-        target_len = len(target_tok)
-        for i in range(text_len - target_len + 1):
-            if text_lemma_list[i : i+target_len] == target_tok: lemma_hits += 1
-    return max(exact, lemma_hits)
-
-def compute_status(actual, target_min, target_max):
-    if actual < target_min: return "UNDER"
-    if actual > target_max: return "OVER"
-    return "OK"
-
-def global_keyword_stats(keywords_state):
-    under = sum(1 for v in keywords_state.values() if v["status"] == "UNDER")
-    over = sum(1 for v in keywords_state.values() if v["status"] == "OVER")
-    locked = 1 if over >= 4 else 0
-    ok = sum(1 for v in keywords_state.values() if v["status"] == "OK")
-    return under, over, locked, ok
+    except Exception: 
+        return {"pass": True, "quality_score": 80, "feedback": "Gemini Error"}
 
 
 # ===========================================================
-# 🆕 ENDPOINT: REFINE (TYLKO AUDYT - BEZ SZATKOWANIA)
+# 🆕 ENDPOINT: REFINE (AUDYT)
 # ===========================================================
 @tracker_routes.post("/api/language_refine")
 def language_refine():
@@ -233,19 +285,18 @@ def language_refine():
     text = data.get("text", "")
     clean_text = sanitize_typography(text)
     
-    # Robimy tylko audyt. NIE używamy Gemini do Auto-Fix, bo psuje flow.
-    # GPT sam poprawi tekst na podstawie metryk, jeśli będzie trzeba.
+    # Wywołujemy PEŁNY audyt (Gramatyka + Stylometria)
     audit = analyze_language_quality(clean_text)
     
     return jsonify({
         "original_text": text,
-        "auto_fixed_text": clean_text, # Zwracamy tylko wyczyszczoną typografię
+        "auto_fixed_text": clean_text,
         "language_audit": audit
     })
 
 
 # ===========================================================
-# 🧠 MAIN PROCESS (V12.1 - Accept & Warn Strategy)
+# 🧠 MAIN PROCESS (Accept & Warn + Full Context)
 # ===========================================================
 def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dict = None):
     db = firestore.client()
@@ -257,42 +308,37 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
     project_data = doc.to_dict()
     topic = project_data.get("topic", "Nieznany")
 
-    # 0. HARD GUARDRAILS (Tylko listy punktowane odrzucają)
+    # 1. HARD GUARDRAILS
     hard_check = validate_hard_rules(batch_text)
     if not hard_check["valid"]:
         return {
             "status": "REJECTED_QUALITY",
             "error": "HARD RULE VIOLATION",
-            "gemini_feedback": {
-                "pass": False, 
-                "feedback_for_writer": f"BŁĄD STRUKTURY: {hard_check['msg']}. Usuń listy/punktory."
-            },
-            "language_audit": {},
+            "gemini_feedback": {"pass": False, "feedback_for_writer": hard_check['msg']},
             "next_action": "REWRITE"
         }
 
-    # 1. AUDYT
-    language_audit = analyze_language_quality(batch_text)
-    banned = language_audit.get("banned_detected", [])
-    
-    # Budujemy listę ostrzeżeń (zamiast błędów)
+    # 2. PEŁNY AUDYT JĘZYKOWY
+    audit = analyze_language_quality(batch_text)
     warnings = []
-    if banned:
-        warnings.append(f"⚠️ Użyto zakazanych fraz: {', '.join(banned)}.")
+    
+    if audit.get("banned_detected"):
+        warnings.append(f"⛔ Banned: {', '.join(audit['banned_detected'])}")
+    if audit.get("lt_errors"):
+        warnings.append(f"✍️ Gramatyka: {', '.join(audit['lt_errors'])}")
+    if audit.get("readability_score", 100) < 30:
+        warnings.append("📖 Tekst trudny (Flesch < 30).")
 
-    # 2. SEO TRACKING
+    # 3. SEO TRACKING (Hybrid Full)
     import copy
     keywords_state = copy.deepcopy(project_data.get("keywords_state", {}))
     doc_nlp = nlp(batch_text)
     text_lemma_list = [t.lemma_.lower() for t in doc_nlp if t.is_alpha]
     
-    batch_basic_hits = 0
-    batch_extended_hits = 0
     over_limit_hits = []
 
     for row_id, meta in keywords_state.items():
         original_keyword = meta.get("keyword", "")
-        kw_type = meta.get("type", "BASIC") 
         target_max = meta.get("target_max", 5)
         
         target_exact = meta.get("search_term_exact", original_keyword.lower())
@@ -304,10 +350,6 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
         occurrences = count_hybrid_occurrences(batch_text, text_lemma_list, target_exact, target_lemma)
         
         if occurrences > 0:
-            if kw_type == "BASIC": batch_basic_hits += occurrences
-            elif kw_type == "EXTENDED": batch_extended_hits += occurrences
-            
-            # Sprawdzenie czy przekroczono globalny limit
             if (meta.get("actual_uses", 0) + occurrences) > target_max:
                 over_limit_hits.append(original_keyword)
 
@@ -315,24 +357,39 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
         meta["status"] = compute_status(meta["actual_uses"], meta["target_min"], meta["target_max"])
 
     if over_limit_hits:
-        warnings.append(f"⚠️ Limit SEO przekroczony dla: {', '.join(over_limit_hits[:3])}...")
+        warnings.append(f"📈 Limit SEO: {', '.join(over_limit_hits[:3])}")
 
     under, over, locked, ok = global_keyword_stats(keywords_state)
     
-    # 3. GEMINI JUDGE (Opcjonalny, jako Quality Score)
-    burst = language_audit.get("burstiness", 0.0)
-    fluff = language_audit.get("fluff_ratio", 0.0)
-    # Judge nie blokuje, tylko ocenia
-    gemini_verdict = evaluate_with_gemini(batch_text, meta_trace, burst, fluff, 0, [], banned, 0, topic=topic)
+    # 4. GEMINI JUDGE (Z Context Awareness!)
+    previous_context = ""
+    existing_batches = project_data.get("batches", [])
+    if existing_batches:
+        last_batch = existing_batches[-1]
+        previous_context = last_batch.get("text", "")[-500:]
 
-    # 4. ZAPIS (Zapisujemy nawet z ostrzeżeniami!)
+    gemini_verdict = evaluate_with_gemini(
+        text=batch_text, 
+        meta_trace=meta_trace, 
+        burst=audit["burstiness"], 
+        fluff=audit["fluff_ratio"], 
+        passive=audit["passive_ratio"], 
+        repeated=audit["repeated_starts"], 
+        banned_detected=audit["banned_detected"], 
+        semantic_score=calculate_semantic_score(batch_text, topic), 
+        topic=topic,
+        previous_context=previous_context
+    )
+
+    # 5. ZAPIS
     batch_entry = {
         "text": batch_text, 
         "gemini_audit": gemini_verdict, 
-        "language_audit": language_audit,
+        "language_audit": audit,
         "warnings": warnings,
+        "meta_trace": meta_trace,
         "summary": {"under": under, "over": over, "ok": ok},
-        "used_h2": (meta_trace or {}).get("used_h2", [])
+        "timestamp": firestore.SERVER_TIMESTAMP
     }
     
     if "batches" not in project_data: project_data["batches"] = []
@@ -341,20 +398,17 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
     project_data["keywords_state"] = keywords_state
     doc_ref.set(project_data)
 
-    # 5. USTALENIE STATUSU I AKCJI
+    # 6. RESPONSE
     status = "BATCH_ACCEPTED"
-    feedback_msg = "Batch zapisany poprawnie."
-    
+    feedback_msg = "Tekst zapisany."
     if warnings:
         status = "BATCH_WARNING"
-        feedback_msg = "Zapisano z OSTRZEŻENIAMI: " + " | ".join(warnings)
+        feedback_msg = "Zapisano z UWAGAMI: " + " | ".join(warnings)
 
-    meta_prompt_summary = (
-        f"UNDER={under}, OVER={over} | Quality={gemini_verdict.get('quality_score')}% | "
-        f"Burst={burst:.1f} | {feedback_msg}"
-    )
+    meta_prompt_summary = f"UNDER={under} | Burst={audit['burstiness']:.1f} | {feedback_msg}"
     
-    light_report = [{"keyword": m.get("keyword"), "status": m["status"]} for _, m in keywords_state.items() if m["status"] in ("UNDER", "OVER")]
+    top_under = [m.get("keyword") for _, m in sorted(keywords_state.items(), key=lambda i: i[1].get("target_min", 0)-i[1].get("actual_uses", 0), reverse=True) if m["status"]=="UNDER"][:5]
+    meta_prompt_summary += f" | BRAKI: {', '.join(top_under)}"
 
     next_act = "GENERATE_NEXT"
     if under == 0 and len(project_data["batches"]) >= 3:
@@ -363,8 +417,7 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
     return {
         "status": status,
         "gemini_feedback": {"feedback_for_writer": feedback_msg},
-        "language_audit": language_audit,
+        "language_audit": audit,
         "meta_prompt_summary": meta_prompt_summary,
-        "keywords_report": light_report,
         "next_action": next_act
     }
