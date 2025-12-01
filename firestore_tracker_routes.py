@@ -7,11 +7,11 @@ from flask import Blueprint, jsonify, request
 from firebase_admin import firestore
 import spacy
 import google.generativeai as genai
-from rapidfuzz import fuzz           
-import language_tool_python         
-import textstat                     
-import textdistance                 
-import pysbd                        
+from rapidfuzz import fuzz           # fuzzy-matching (stringowy)
+import language_tool_python         # QA językowe
+import textstat                     # czytelność
+import textdistance                 # drugi fuzzy layer (tokenowy)
+import pysbd                        # segmentacja zdań
 
 tracker_routes = Blueprint("tracker_routes", __name__)
 
@@ -40,10 +40,11 @@ if GEMINI_API_KEY:
 
 
 # ===========================================================
-# 🧹 SANITIZER
+# 🧹 SANITIZER (Killer "AI-izmów" typograficznych)
 # ===========================================================
 def sanitize_typography(text: str) -> str:
     if not text: return ""
+    # Zamiana "—" (em-dash) na " – " (en-dash)
     text = text.replace("—", " – ")
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
@@ -117,7 +118,7 @@ def filter_repeated_starts_against_keywords(repeated_starts, keywords_state):
 
 
 # ===========================================================
-# 🧠 SEMANTYKA
+# 🧠 SEMANTYKA (Embeddings)
 # ===========================================================
 def get_embedding(text):
     if not text or not text.strip(): return None
@@ -175,7 +176,6 @@ def evaluate_with_gemini(text, meta_trace, burst, fluff, passive, repeated, bann
 
     banned = "W dzisiejszych czasach, W dobie, Warto zauważyć, Należy wspomnieć, Podsumowując, Reasumując, Gra warta świeczki, ZNAK '—' (em-dash)."
 
-    # --- NOWOŚĆ: ROZSZERZONY PROMPT ---
     prompt = f"""
     Jesteś Głównym Redaktorem Medyczno-Technicznym oraz Sędzią SEO (HEAR 2.1).
     Temat artykułu: "{topic}".
@@ -338,7 +338,7 @@ def language_refine():
 
 
 # ===========================================================
-# 🧠 MAIN PROCESS
+# 🧠 MAIN PROCESS (V11.6 Anti-Stuffing)
 # ===========================================================
 def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dict = None):
     db = firestore.client()
@@ -368,19 +368,19 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
     if burst < 3.5 and fluff > 0.22:
         return {"status": "REJECTED_QUALITY", "error": "Hard Style Fail", "gemini_feedback": {"pass": False, "feedback_for_writer": "Tragiczny styl."}, "language_audit": language_audit, "quality_alert": True}
 
-    # 2. GEMINI (v11.5 YMYL Check)
+    # 2. GEMINI
     gemini_verdict = evaluate_with_gemini(batch_text, meta_trace, burst, fluff, passive, rep, banned, semantic_score, topic=topic)
-    
     if not gemini_verdict.get("pass", True) or gemini_verdict.get("quality_score", 100) < 70:
         return {"status": "REJECTED_QUALITY", "error": "Gemini Rejection", "gemini_feedback": gemini_verdict, "language_audit": language_audit, "quality_alert": True}
 
-    # 3. SEO (Type Stats)
+    # 3. SEO TRACKING (Global Ceiling Check)
     import copy
     keywords_state = copy.deepcopy(project_data.get("keywords_state", {}))
     doc_nlp = nlp(batch_text)
     text_lemma_list = [t.lemma_.lower() for t in doc_nlp if t.is_alpha]
     
     batch_local_over = []
+    global_ceiling_hit = []
     batch_basic_hits = 0
     batch_extended_hits = 0
 
@@ -388,6 +388,10 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
         original_keyword = meta.get("keyword", "")
         kw_type = meta.get("type", "BASIC") 
         local_limit = 4 if kw_type == "BASIC" else 6 if kw_type == "EXTENDED" else 999
+        
+        # Pobieramy stan globalny PRZED tym batchem
+        current_global_usage = meta.get("actual_uses", 0)
+        target_max = meta.get("target_max", 5)
 
         target_exact = meta.get("search_term_exact", original_keyword.lower())
         target_lemma = meta.get("search_lemma", "")
@@ -400,6 +404,10 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
         if occurrences > 0:
             if kw_type == "BASIC": batch_basic_hits += occurrences
             elif kw_type == "EXTENDED": batch_extended_hits += occurrences
+            
+            # GLOBAL CEILING CHECK
+            if current_global_usage >= target_max:
+                 global_ceiling_hit.append(f"{original_keyword} (JEST: {current_global_usage}, MAX: {target_max}, DODAŁEŚ: {occurrences})")
 
         if occurrences > local_limit:
             batch_local_over.append(f"{original_keyword} ({occurrences}x)")
@@ -407,14 +415,17 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
         meta["actual_uses"] += occurrences
         meta["status"] = compute_status(meta["actual_uses"], meta["target_min"], meta["target_max"])
 
+    if global_ceiling_hit:
+        return {"status": "REJECTED_SEO", "error": "GLOBAL_CEILING_HIT", "gemini_feedback": {"pass": False, "feedback_for_writer": f"STOP! Użyłeś fraz już zrealizowanych: {', '.join(global_ceiling_hit[:3])}... Usuń je."}, "language_audit": language_audit, "quality_alert": True}
+
     if batch_local_over:
-        return {"status": "REJECTED_SEO", "error": "LOCAL_LIMIT", "gemini_feedback": {"pass": False, "feedback_for_writer": f"Limit przekroczony: {batch_local_over}"}, "language_audit": language_audit, "quality_alert": True}
+        return {"status": "REJECTED_SEO", "error": "LOCAL_LIMIT", "gemini_feedback": {"pass": False, "feedback_for_writer": f"Limit lokalny batcha: {batch_local_over}"}, "language_audit": language_audit, "quality_alert": True}
 
     under, over, locked, ok = global_keyword_stats(keywords_state)
     if locked >= 4 or over >= 15:
         return {"status": "REJECTED_SEO", "error": "GLOBAL_LIMIT", "gemini_feedback": {"pass": False, "feedback_for_writer": f"Globalny limit SEO! LOCKED={locked}."}, "language_audit": language_audit, "quality_alert": True}
 
-    # 4. SAVE
+    # 4. SAVE & REPORT
     top_under_list = [m.get("keyword") for _, m in sorted(keywords_state.items(), key=lambda i: i[1].get("target_min", 0)-i[1].get("actual_uses", 0), reverse=True) if m["status"]=="UNDER"][:5]
 
     batch_entry = {
