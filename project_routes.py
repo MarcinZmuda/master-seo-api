@@ -55,7 +55,7 @@ def parse_brief_text_uuid(brief_text: str):
         except Exception: continue
     return parsed_dict
 
-# --- S2 CREATE (Bez zmian) ---
+# --- S2 CREATE ---
 @project_routes.post("/api/project/create")
 def create_project():
     data = request.get_json()
@@ -75,7 +75,7 @@ def create_project():
     doc_ref.set(project_data)
     return jsonify({"status": "CREATED", "project_id": doc_ref.id, "topic": topic, "keywords": len(firestore_keywords)}), 201
 
-# --- S3 ADD BATCH (Bez zmian) ---
+# --- S3 ADD BATCH ---
 @project_routes.post("/api/project/<project_id>/add_batch")
 def add_batch_to_project(project_id):
     data = request.get_json()
@@ -90,7 +90,7 @@ def add_batch_to_project(project_id):
     return jsonify(result), status_code
 
 # ================================================================
-# 🆕 S4 — EXPORT (Pobierz tekst bez usuwania)
+# 🆕 S4 — EXPORT (Pobieranie Danych BEZ USUWANIA)
 # ================================================================
 @project_routes.get("/api/project/<project_id>/export")
 def export_project_data(project_id):
@@ -108,21 +108,35 @@ def export_project_data(project_id):
     full_text_parts = [b.get("text", "") for b in batches]
     full_article_text = "\n\n".join(full_text_parts)
 
-    # 2. Statystyki SEO
+    # 2. Statystyki SEO (Ogólne)
     keywords_state = data.get("keywords_state", {})
     under = sum(1 for k in keywords_state.values() if k["status"] == "UNDER")
     over = sum(1 for k in keywords_state.values() if k["status"] == "OVER")
     ok = sum(1 for k in keywords_state.values() if k["status"] == "OK")
     locked = 1 if over >= 4 else 0
 
-    # 3. Statystyki Jakości (Średnie)
+    # 3. LISTA SZCZEGÓŁOWA (Dla tabeli w GPT)
+    keyword_details = []
+    for row_id, meta in keywords_state.items():
+        keyword_details.append({
+            "keyword": meta.get("keyword", "Unknown"),
+            "type": meta.get("type", "BASIC"),
+            "target": f"{meta.get('target_min')}-{meta.get('target_max')}",
+            "actual": meta.get("actual_uses", 0),
+            "status": meta.get("status", "UNKNOWN")
+        })
+    keyword_details.sort(key=lambda x: (x['type'], x['keyword']))
+
+    # 4. Statystyki Jakości (Średnie)
     scores = [b.get("gemini_audit", {}).get("quality_score", 0) for b in batches if b.get("gemini_audit")]
     bursts = [b.get("language_audit", {}).get("burstiness", 0) for b in batches if b.get("language_audit")]
     fluffs = [b.get("language_audit", {}).get("fluff_ratio", 0) for b in batches if b.get("language_audit")]
+    passives = [b.get("language_audit", {}).get("passive_ratio", 0) for b in batches if b.get("language_audit")]
     
     avg_score = round(sum(scores) / len(scores), 1) if scores else 0
     avg_burst = round(sum(bursts) / len(bursts), 2) if bursts else 0
     avg_fluff = round(sum(fluffs) / len(fluffs), 3) if fluffs else 0
+    avg_passive = round(sum(passives) / len(passives), 3) if passives else 0
 
     return jsonify({
         "status": "EXPORT_READY",
@@ -132,12 +146,14 @@ def export_project_data(project_id):
         "quality_metrics": {
             "avg_score": avg_score,
             "avg_burstiness": avg_burst,
-            "avg_fluff": avg_fluff
-        }
+            "avg_fluff": avg_fluff,
+            "avg_passive": avg_passive
+        },
+        "keyword_details": keyword_details # <--- GPT to wyświetli w tabeli
     }), 200
 
 # ================================================================
-# 🗑️ S4 — DELETE ONLY (Tylko usuwa)
+# 🗑️ S4 — DELETE (Tylko czyszczenie)
 # ================================================================
 @project_routes.delete("/api/project/<project_id>")
 def delete_project_final(project_id):
@@ -145,4 +161,4 @@ def delete_project_final(project_id):
     doc_ref = db.collection("seo_projects").document(project_id)
     if not doc_ref.get().exists: return jsonify({"error": "Not found"}), 404
     doc_ref.delete()
-    return jsonify({"status": "DELETED", "message": "Project removed from Firestore."}), 200
+    return jsonify({"status": "DELETED", "message": "Project permanently removed."}), 200
