@@ -12,6 +12,7 @@ import language_tool_python
 import textstat                     
 import textdistance                 
 import pysbd                        
+import datetime # ADDED THIS IMPORT
 
 tracker_routes = Blueprint("tracker_routes", __name__)
 
@@ -46,7 +47,7 @@ if GEMINI_API_KEY:
 
 
 # ===========================================================
-# 👮‍♂️ HARD GUARDRAILS (Struktura)
+# 👮‍♂️ HARD GUARDRAILS (Tylko struktura)
 # ===========================================================
 def validate_hard_rules(text: str) -> dict:
     errors = []
@@ -80,8 +81,8 @@ def analyze_language_quality(text: str) -> dict:
         "fluff_ratio": 0.0, 
         "passive_ratio": 0.0, 
         "readability_score": 0.0, # Flesch
-        "smog_index": 0.0,        # SMOG (Dodane!)
-        "sentence_count": 0,      # Potrzebne do Pacingu (Dodane!)
+        "smog_index": 0.0,        # SMOG
+        "sentence_count": 0,      # Potrzebne do Pacingu
         "lt_errors": [],          
         "repeated_starts": [], 
         "banned_detected": []
@@ -328,14 +329,14 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
     if audit.get("readability_score", 100) < 30:
         warnings.append("📖 Tekst trudny (Flesch < 30).")
     
-    # 3. SEO TRACKING & PACING CHECK (Dodane!)
+    # 3. SEO TRACKING & PACING CHECK
     import copy
     keywords_state = copy.deepcopy(project_data.get("keywords_state", {}))
     doc_nlp = nlp(batch_text)
     text_lemma_list = [t.lemma_.lower() for t in doc_nlp if t.is_alpha]
     
     over_limit_hits = []
-    total_batch_hits = 0 # Do liczenia gęstości
+    total_batch_hits = 0 
 
     for row_id, meta in keywords_state.items():
         original_keyword = meta.get("keyword", "")
@@ -360,17 +361,16 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
     if over_limit_hits:
         warnings.append(f"📈 Limit SEO: {', '.join(over_limit_hits[:3])}")
 
-    # PACING CHECK (Zasada 3:1 -> Zagęszczenie)
+    # PACING CHECK
     sentence_count = audit.get("sentence_count", 1)
     if sentence_count > 0:
         density = total_batch_hits / sentence_count
-        # Jeśli średnio więcej niż 0.4 frazy na zdanie, to może być spam
         if density > 0.4:
-            warnings.append(f"🚨 Keyword Stuffing? Gęstość: {density:.2f} fraz/zdanie (Zalecane < 0.3).")
+            warnings.append(f"🚨 Keyword Stuffing? Gęstość: {density:.2f} fraz/zdanie.")
 
     under, over, locked, ok = global_keyword_stats(keywords_state)
     
-    # 4. GEMINI JUDGE (Z kontekstem)
+    # 4. GEMINI JUDGE
     previous_context = ""
     existing_batches = project_data.get("batches", [])
     if existing_batches:
@@ -390,7 +390,7 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
         previous_context=previous_context
     )
 
-    # 5. ZAPIS
+    # 5. ZAPIS (Z poprawionym timestampem!)
     batch_entry = {
         "text": batch_text, 
         "gemini_audit": gemini_verdict, 
@@ -398,7 +398,8 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
         "warnings": warnings,
         "meta_trace": meta_trace,
         "summary": {"under": under, "over": over, "ok": ok},
-        "timestamp": firestore.SERVER_TIMESTAMP
+        "used_h2": (meta_trace or {}).get("used_h2", []),
+        "timestamp": datetime.datetime.now(datetime.timezone.utc) # FIX: Native Python datetime
     }
     
     if "batches" not in project_data: project_data["batches"] = []
