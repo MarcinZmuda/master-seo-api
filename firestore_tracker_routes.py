@@ -12,7 +12,16 @@ from rapidfuzz import fuzz
 import language_tool_python         
 import textstat                     
 import textdistance                 
-import pysbd                        
+import pysbd
+
+# ⭐ NEW: Import SEO Optimizer functions (v12.25.1)
+from seo_optimizer import (
+    build_rolling_context,
+    calculate_semantic_drift,
+    analyze_transition_quality,
+    calculate_keyword_position_score,
+    optimize_for_featured_snippet
+)
 
 tracker_routes = Blueprint("tracker_routes", __name__)
 
@@ -42,26 +51,26 @@ if GEMINI_API_KEY:
 
 
 # ===========================================================
-# 👮‍♂️ HARD GUARDRAILS
+# 💮‍♂️ HARD GUARDRAILS
 # ===========================================================
 def validate_hard_rules(text: str) -> dict:
     errors = []
     if re.search(r'^[\-\*]\s+', text, re.MULTILINE) or re.search(r'^\d+\.\s+', text, re.MULTILINE):
         matches = len(re.findall(r'^[\-\*]\s+', text, re.MULTILINE))
         if matches > 1:
-            errors.append(f"WYKRYTO LISTĘ ({matches} pkt). Zakaz punktorów.")
+            errors.append(f"WYKRYTO LISTĘ ({matches} pkt). Zakaz punktów.")
     if errors:
         return {"valid": False, "msg": " | ".join(errors)}
     return {"valid": True, "msg": "OK"}
 
 def sanitize_typography(text: str) -> str:
     if not text: return ""
-    text = text.replace("—", " – ")
+    text = text.replace("—", " — ")
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
 # ===========================================================
-# 📏 AUDYT
+# 🔍 AUDYT
 # ===========================================================
 def analyze_language_quality(text: str) -> dict:
     result = {
@@ -179,23 +188,43 @@ def calculate_semantic_score(batch_text, main_topic):
     if not vec_text or not vec_topic: return 1.0
     return float(np.dot(vec_text, vec_topic) / (np.linalg.norm(vec_text) * np.linalg.norm(vec_topic)))
 
-def evaluate_with_gemini(text, meta_trace, burst, fluff, passive, repeated, banned_detected, semantic_score, topic="", previous_context=""):
+def evaluate_with_gemini(text, meta_trace, burst, fluff, passive, repeated, banned_detected, semantic_score, topic="", project_data=None):
+    """
+    ⭐ UPDATED v12.25.1: Używa build_rolling_context zamiast ostatnich 500 znaków
+    """
     if not GEMINI_API_KEY: return {"pass": True, "quality_score": 100}
     try: model = genai.GenerativeModel("gemini-1.5-pro")
     except: return {"pass": True, "quality_score": 80}
     
-    ctx = f"KONTEKST: '{previous_context[:300]}...'" if previous_context else ""
+    # ⭐ FIX #1: Rolling Context Window (zamiast prev_context[-500:])
+    if project_data:
+        ctx = build_rolling_context(project_data, window_size=3)
+    else:
+        ctx = ""
+    
     prompt = f"""
-    Sędzia SEO. Temat: "{topic}". {ctx}
-    METRYKI: Burst={burst:.1f}, Fluff={fluff:.2f}. Banned={banned_detected}.
-    Oceń: Harmonia, Empatia, Autentyczność, Rytm.
-    JSON: {{ "pass": bool, "quality_score": 0-100, "feedback_for_writer": "string" }}
-    TEKST: "{text}"
+    Sędzia SEO. Temat: "{topic}". 
+    
+    {ctx}
+    
+    METRYKI BIEŻĄCEGO BATCHA: 
+    - Burstiness={burst:.1f} (cel: >6.0)
+    - Fluff={fluff:.2f} (cel: <0.15)
+    - Banned phrases={banned_detected}
+    
+    Oceń: Harmonia, Empatia, Autentyczność, Rytm (HEAR Framework).
+    
+    Zwróć JSON: {{ "pass": bool, "quality_score": 0-100, "feedback_for_writer": "string" }}
+    
+    TEKST DO OCENY: "{text[:4000]}"
     """
     try:
         response = model.generate_content(prompt)
-        return json.loads(response.text.replace("```json", "").replace("```", "").strip())
-    except: return {"pass": True, "quality_score": 80}
+        result = json.loads(response.text.replace("```json", "").replace("```", "").strip())
+        return result
+    except Exception as e:
+        print(f"Gemini eval error: {e}")
+        return {"pass": True, "quality_score": 80, "feedback_for_writer": f"Błąd oceny: {e}"}
 
 @tracker_routes.post("/api/language_refine")
 def language_refine():
@@ -206,9 +235,12 @@ def language_refine():
     return jsonify({"original_text": text, "auto_fixed_text": clean_text, "language_audit": audit})
 
 # ===========================================================
-# 🧠 MAIN PROCESS (Logic V12.19: Hard Ceiling)
+# 🧠 MAIN PROCESS (Logic V12.25.1: All Fixes Integrated)
 # ===========================================================
 def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dict = None):
+    """
+    ⭐ UPDATED v12.25.1: Dodane FIX #1-4
+    """
     db = firestore.client()
     doc_ref = db.collection("seo_projects").document(project_id)
     doc = doc_ref.get()
@@ -223,11 +255,29 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
     if not hard_check["valid"]:
         return {"status": "REJECTED_QUALITY", "error": "HARD RULE", "gemini_feedback": {"feedback_for_writer": hard_check['msg']}, "next_action": "REWRITE"}
 
-    # 2. AUDYT
+    # 2. AUDYT JĘZYKOWY (Burstiness, Fluff, etc.)
     audit = analyze_language_quality(batch_text)
     warnings = []
     if audit.get("banned_detected"): warnings.append(f"⛔ Banned: {', '.join(audit['banned_detected'])}")
     if audit.get("readability_score", 100) < 30: warnings.append("📖 Tekst trudny.")
+
+    # ⭐ FIX #2: SEMANTIC DRIFT CHECK
+    previous_batches = project_data.get("batches", [])
+    drift_check = calculate_semantic_drift(batch_text, previous_batches, threshold=0.65)
+    audit["semantic_drift"] = drift_check
+    
+    if drift_check["status"] == "DRIFT_WARNING":
+        warnings.append(f"🌀 {drift_check['message']}")
+
+    # ⭐ FIX #3: TRANSITION QUALITY ANALYSIS
+    transition_check = analyze_transition_quality(
+        batch_text,
+        previous_batches[-1] if previous_batches else None
+    )
+    audit["transition_quality"] = transition_check
+    
+    if transition_check["status"] == "CHOPPY":
+        warnings.append(f"🔗 {transition_check['message']}")
 
     # 3. SEO TRACKING (Critical Overuse Logic)
     import copy
@@ -236,12 +286,13 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
     text_lemma_list = [t.lemma_.lower() for t in doc_nlp if t.is_alpha]
     
     over_limit_hits = []
-    critical_reject = [] # Nowa lista dla drastycznych przekroczeń
+    critical_reject = []
 
     for row_id, meta in keywords_state.items():
         kw = meta.get("keyword", "")
         target_max = meta.get("target_max", 5)
-        # Logika liczenia...
+        
+        # Logika liczenia (Hybrid Counter)
         t_exact = meta.get("search_term_exact", kw.lower())
         t_lemma = meta.get("search_lemma", "")
         if not t_lemma: t_lemma = " ".join([t.lemma_.lower() for t in nlp(kw) if t.is_alpha])
@@ -252,7 +303,7 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
             current_total = meta.get("actual_uses", 0)
             new_total = current_total + found
             
-            # NOWA LOGIKA: Hard Ceiling (+3 over limit)
+            # Hard Ceiling (+3 over limit)
             if new_total > target_max:
                 if new_total >= (target_max + 3):
                     critical_reject.append(f"{kw} (Użyto {new_total}/{target_max})")
@@ -261,6 +312,16 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
 
             meta["actual_uses"] = new_total
             meta["status"] = compute_status(new_total, meta["target_min"], target_max)
+            
+            # ⭐ FIX #4: POSITION-WEIGHTED SCORING
+            position_score = calculate_keyword_position_score(batch_text, kw)
+            meta["position_score"] = position_score["score"]
+            meta["position_quality"] = position_score["quality"]
+            meta["early_count"] = position_score["early_count"]
+            
+            # Warning jeśli słaba pozycja
+            if found > 0 and position_score["quality"] in ["WEAK", "NONE"]:
+                warnings.append(f"📍 '{kw}': słaba pozycja (score: {position_score['score']:.1f})")
 
     # JEŚLI MAMY KRYTYCZNE PRZEKROCZENIE -> REJECT!
     if critical_reject:
@@ -278,21 +339,28 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
     if over_limit_hits:
         warnings.append(f"📈 Limit SEO (+1/2): {', '.join(over_limit_hits[:3])}")
 
-    # Pacing
+    # Pacing check
     if audit["sentence_count"] > 0 and (sum(1 for _ in keywords_state) / audit["sentence_count"]) > 0.5:
         warnings.append("🚨 Keyword Stuffing (zbyt gęsto).")
 
     under, over, locked, ok = global_keyword_stats(keywords_state)
     
-    # 4. GEMINI JUDGE
-    prev_ctx = ""
-    if project_data.get("batches"): prev_ctx = project_data["batches"][-1].get("text", "")[-500:]
-    gemini_verdict = evaluate_with_gemini(batch_text, meta_trace, audit["burstiness"], audit["fluff_ratio"], 0, [], audit["banned_detected"], 0, topic=topic, previous_context=prev_ctx)
+    # 4. GEMINI JUDGE (z nowym rolling context)
+    gemini_verdict = evaluate_with_gemini(
+        batch_text, meta_trace, 
+        audit["burstiness"], audit["fluff_ratio"], 
+        0, [], audit["banned_detected"], 0, 
+        topic=topic, 
+        project_data=project_data  # ⭐ Przekazujemy cały project_data dla rolling context
+    )
 
     # 5. SAVE
     batch_entry = {
-        "text": batch_text, "gemini_audit": gemini_verdict, "language_audit": audit,
-        "warnings": warnings, "meta_trace": meta_trace,
+        "text": batch_text, 
+        "gemini_audit": gemini_verdict, 
+        "language_audit": audit,
+        "warnings": warnings, 
+        "meta_trace": meta_trace,
         "summary": {"under": under, "over": over, "ok": ok},
         "timestamp": datetime.datetime.now(datetime.timezone.utc)
     }
