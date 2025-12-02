@@ -128,40 +128,132 @@ def analyze_language_quality(text: str) -> dict:
     except Exception as e: print(f"Audit Error: {e}")
     return result
 
+
 # ===========================================================
-# 🚀 HYBRID COUNTER
+# 🚀 HYBRID COUNTER - FIXED v12.25.2
 # ===========================================================
-def count_hybrid_occurrences(text_raw, text_lemma_list, target_exact, target_lemma):
+
+def count_hybrid_occurrences(text_raw, text_lemma_list, target_exact, target_lemma, debug=False):
+    """
+    ✅ FIXED v12.25.2: Eliminuje loop-bug i duplikaty form fleksyjnych.
+    
+    ZMIANY:
+    1. Tracking używanych pozycji (used_positions set)
+    2. Lemma exact match najpierw zajmuje pozycje
+    3. Fuzzy match TYLKO dla niezajętych pozycji
+    4. Break po znalezieniu fuzzy match w danym oknie
+    5. Return MAX(exact, lemma+fuzzy) zamiast sumowania
+    
+    Strategia:
+    - Exact match (literal string)
+    - Lemma match (morfologia) - tracked positions
+    - Fuzzy match (tylko dla nowych pozycji) - tracked positions
+    
+    Zwraca: MAX z (exact, lemma+fuzzy_deduplicated)
+    """
     text_lower = text_raw.lower()
+    
+    # === 1. EXACT MATCH (Literal) ===
     exact_hits = text_lower.count(target_exact.lower()) if target_exact.strip() else 0
     
-    lemma_hits = 0
+    # === 2. LEMMA + FUZZY MATCH (Deduplicated) ===
+    lemma_fuzzy_hits = 0
     target_tok = target_lemma.split()
+    
     if target_tok:
         text_len = len(text_lemma_list)
         target_len = len(target_tok)
-        used_indices = set()
         
-        # Exact Lemma
+        # ⭐ CRITICAL FIX: Track używane pozycje (unikamy duplikatów)
+        used_positions = set()
+        
+        # --- 2A. EXACT LEMMA MATCH ---
         for i in range(text_len - target_len + 1):
+            # Sprawdź czy to dokładnie ta sekwencja lematów
             if text_lemma_list[i : i+target_len] == target_tok:
-                lemma_hits += 1
-                for k in range(i, i+target_len): used_indices.add(k)
+                # Sprawdź czy pozycja nie jest zajęta
+                position_range = range(i, i+target_len)
+                if not any(pos in used_positions for pos in position_range):
+                    lemma_fuzzy_hits += 1
+                    # Zaznacz pozycje jako użyte
+                    for pos in position_range:
+                        used_positions.add(pos)
         
-        # Fuzzy Lemma
-        min_win = max(1, target_len - MAX_FUZZY_WINDOW_EXPANSION)
-        max_win = target_len + MAX_FUZZY_WINDOW_EXPANSION
-        target_str = " ".join(target_tok)
-        for w_len in range(min_win, max_win + 1):
-            if w_len > text_len: continue
-            for i in range(text_len - w_len + 1):
-                if any(k in used_indices for k in range(i, i+w_len)): continue
-                window_tok = text_lemma_list[i : i+w_len]
-                window_str = " ".join(window_tok)
-                if fuzz.token_set_ratio(target_str, window_str) >= FUZZY_SIMILARITY_THRESHOLD or textdistance.jaccard.normalized_similarity(target_tok, window_tok) >= JACCARD_SIMILARITY_THRESHOLD:
-                    lemma_hits += 1
-                    for k in range(i, i+w_len): used_indices.add(k)
-    return max(exact_hits, lemma_hits)
+        # --- 2B. FUZZY MATCH (tylko dla NOWYCH pozycji) ---
+        # TYLKO jeśli fuzzy threshold jest wysoki (90+)
+        if FUZZY_SIMILARITY_THRESHOLD >= 90:
+            min_win = max(1, target_len - MAX_FUZZY_WINDOW_EXPANSION)
+            max_win = target_len + MAX_FUZZY_WINDOW_EXPANSION
+            target_str = " ".join(target_tok)
+            
+            for w_len in range(min_win, max_win + 1):
+                if w_len > text_len: 
+                    continue
+                    
+                for i in range(text_len - w_len + 1):
+                    position_range = range(i, i+w_len)
+                    
+                    # ⭐ FIX: SKIP jeśli pozycja zajęta (to już policzone!)
+                    if any(pos in used_positions for pos in position_range):
+                        continue
+                    
+                    window_tok = text_lemma_list[i : i+w_len]
+                    window_str = " ".join(window_tok)
+                    
+                    # Fuzzy check
+                    fuzzy_score = fuzz.token_set_ratio(target_str, window_str)
+                    jaccard_score = textdistance.jaccard.normalized_similarity(target_tok, window_tok)
+                    
+                    if fuzzy_score >= FUZZY_SIMILARITY_THRESHOLD or jaccard_score >= JACCARD_SIMILARITY_THRESHOLD:
+                        lemma_fuzzy_hits += 1
+                        # Zaznacz pozycje jako użyte
+                        for pos in position_range:
+                            used_positions.add(pos)
+                        # ⭐ FIX: BREAK z tego okna (nie szukaj więcej w tym miejscu)
+                        break
+    
+    # === 3. RETURN MAX (exact lub lemma+fuzzy) ===
+    # ⭐ FIX: MAX zamiast sumowania (exact i lemma mogą się pokrywać)
+    final_count = max(exact_hits, lemma_fuzzy_hits)
+    
+    # ⭐ DEBUG MODE (do usunięcia po weryfikacji)
+    if debug and (exact_hits > 5 or lemma_fuzzy_hits > 5):
+        print(f"\n🔍 DEBUG COUNT for '{target_exact}':")
+        print(f"   Exact hits: {exact_hits}")
+        print(f"   Lemma+Fuzzy hits: {lemma_fuzzy_hits}")
+        print(f"   Used positions: {len(used_positions)}")
+        print(f"   Final count: {final_count}")
+    
+    return final_count
+
+
+def validate_keyword_count(keyword, found_count, target_max, batch_text):
+    """
+    ✅ NEW v12.25.2: Smart validation - sprawdza czy overuse jest rzeczywisty czy artefakt.
+    
+    Jeśli hybrid count > 2x target_max, porównujemy z prostym countem.
+    Jeśli simple count OK, a hybrid dużo wyższy → false positive.
+    
+    Returns:
+        tuple: (validated_count, is_false_positive, warning_message)
+    """
+    # 1. Jeśli count > 2x target_max → prawdopodobnie bug
+    if found_count > (target_max * 2):
+        # Sprawdź metodą "naiwną" (prosty count w tekście)
+        text_lower = batch_text.lower()
+        keyword_lower = keyword.lower()
+        
+        # Simple count (bez fuzzy/lemma)
+        simple_count = text_lower.count(keyword_lower)
+        
+        # Jeśli simple_count << found_count → false positive
+        if simple_count <= target_max and found_count > (target_max + 3):
+            warning = f"⚠️ Auto-corrected '{keyword}': Hybrid={found_count} → Simple={simple_count} (false positive detected)"
+            print(warning)
+            return simple_count, True, warning
+    
+    return found_count, False, None
+
 
 def compute_status(actual, target_min, target_max):
     if actual < target_min: return "UNDER"
@@ -235,11 +327,14 @@ def language_refine():
     return jsonify({"original_text": text, "auto_fixed_text": clean_text, "language_audit": audit})
 
 # ===========================================================
-# 🧠 MAIN PROCESS (Logic V12.25.1: All Fixes Integrated)
+# 🧠 MAIN PROCESS (Logic V12.25.2: Fixed Counting + Validation)
 # ===========================================================
 def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dict = None):
     """
-    ⭐ UPDATED v12.25.1: Dodane FIX #1-4
+    ⭐ UPDATED v12.25.2: 
+    - Fixed count_hybrid_occurrences (eliminuje duplikaty)
+    - Dodana validate_keyword_count (false positive detection)
+    - Debug mode dla pierwszych 3 batchy
     """
     db = firestore.client()
     doc_ref = db.collection("seo_projects").document(project_id)
@@ -279,7 +374,7 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
     if transition_check["status"] == "CHOPPY":
         warnings.append(f"🔗 {transition_check['message']}")
 
-    # 3. SEO TRACKING (Critical Overuse Logic)
+    # 3. SEO TRACKING (Critical Overuse Logic) - FIXED v12.25.2
     import copy
     keywords_state = copy.deepcopy(project_data.get("keywords_state", {}))
     doc_nlp = nlp(batch_text)
@@ -287,21 +382,34 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
     
     over_limit_hits = []
     critical_reject = []
+    
+    # ⭐ DEBUG MODE: Enable dla pierwszych 3 batchy
+    is_debug_mode = len(previous_batches) < 3
 
     for row_id, meta in keywords_state.items():
         kw = meta.get("keyword", "")
         target_max = meta.get("target_max", 5)
         
-        # Logika liczenia (Hybrid Counter)
+        # Logika liczenia (Hybrid Counter - FIXED)
         t_exact = meta.get("search_term_exact", kw.lower())
         t_lemma = meta.get("search_lemma", "")
         if not t_lemma: t_lemma = " ".join([t.lemma_.lower() for t in nlp(kw) if t.is_alpha])
         
-        found = count_hybrid_occurrences(batch_text, text_lemma_list, t_exact, t_lemma)
+        # ⭐ FIXED: count_hybrid_occurrences z deduplication
+        found = count_hybrid_occurrences(batch_text, text_lemma_list, t_exact, t_lemma, debug=is_debug_mode)
         
         if found > 0:
             current_total = meta.get("actual_uses", 0)
             new_total = current_total + found
+            
+            # ⭐ NEW: VALIDATION LAYER (false positive detection)
+            validated_total, is_false_positive, validation_warning = validate_keyword_count(
+                kw, new_total, target_max, batch_text
+            )
+            
+            if is_false_positive:
+                warnings.append(validation_warning)
+                new_total = validated_total  # Use corrected count
             
             # Hard Ceiling (+3 over limit)
             if new_total > target_max:
@@ -351,7 +459,7 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
         audit["burstiness"], audit["fluff_ratio"], 
         0, [], audit["banned_detected"], 0, 
         topic=topic, 
-        project_data=project_data  # ⭐ Przekazujemy cały project_data dla rolling context
+        project_data=project_data
     )
 
     # 5. SAVE
@@ -369,6 +477,7 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
     project_data["batches"].append(batch_entry)
     project_data["total_batches"] = len(project_data["batches"])
     project_data["keywords_state"] = keywords_state
+    project_data["version"] = "v12.25.2"  # ⭐ Updated version
     doc_ref.set(project_data)
 
     status = "BATCH_WARNING" if warnings else "BATCH_ACCEPTED"
