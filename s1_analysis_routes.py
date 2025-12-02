@@ -1,6 +1,6 @@
 # ================================================================
 # s1_analysis_routes.py — Turbo S1 (Fixed noun_chunks for PL)
-# v7.3.3-stable
+# v12.25.1 - Added FIX #6 (Competitive Gap Analysis)
 # ================================================================
 
 import os
@@ -42,6 +42,76 @@ except OSError:
 
 # Blueprint
 s1_routes = Blueprint("s1_routes", __name__)
+
+
+# ================================================
+# ⭐ FIX #6: COMPETITIVE GAP ANALYSIS
+# ================================================
+
+def analyze_competitive_gaps(competitor_h2_list, user_h2_plan):
+    """
+    Porównuje H2 użytkownika z top competitor headings.
+    Zwraca: co mają konkurenci, czego użytkownik nie ma.
+    """
+    if not competitor_h2_list or not user_h2_plan:
+        return []
+    
+    # Normalizacja
+    competitor_h2 = [h.lower().strip() for h in competitor_h2_list if h]
+    your_h2 = [h.lower().strip() for h in user_h2_plan if h]
+    
+    # Extract core topics (usuwamy question words)
+    def extract_core_topic(heading):
+        # Remove question words
+        heading = re.sub(
+            r'^(co to jest|jak|dlaczego|kiedy|gdzie|czym jest|po co)\s+', 
+            '', 
+            heading, 
+            flags=re.IGNORECASE
+        )
+        
+        # Get main nouns (spaCy)
+        try:
+            doc = nlp(heading)
+            nouns = [t.text.lower() for t in doc if t.pos_ == "NOUN"]
+            return " ".join(nouns[:2]) if nouns else heading
+        except:
+            return heading
+    
+    competitor_topics = [extract_core_topic(h) for h in competitor_h2]
+    your_topics = [extract_core_topic(h) for h in your_h2]
+    
+    # Count frequency of each topic in competitors
+    topic_counter = Counter(competitor_topics)
+    total_competitors = len(competitor_h2)
+    
+    # Find gaps
+    gaps = []
+    for topic, count in topic_counter.most_common():
+        if not topic or len(topic) < 3:  # Skip very short topics
+            continue
+        
+        # Check if user has this topic
+        is_missing = not any(topic in your_topic for your_topic in your_topics)
+        
+        if is_missing:
+            coverage = count / total_competitors if total_competitors > 0 else 0
+            
+            # Only report if >30% of competitors have it
+            if coverage >= 0.3:
+                priority = "HIGH" if coverage >= 0.6 else "MEDIUM"
+                
+                gaps.append({
+                    "topic": topic,
+                    "coverage": f"{coverage*100:.0f}%",
+                    "priority": priority,
+                    "competitor_count": count
+                })
+    
+    # Sort by coverage (descending)
+    gaps.sort(key=lambda x: x["competitor_count"], reverse=True)
+    
+    return gaps[:10]  # Top 10 gaps
 
 
 # ------------------------------------------------
@@ -337,4 +407,41 @@ def perform_s1_analysis():
 
     except Exception as e:
         print(f"❌ Błąd /api/s1_analysis: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+# ================================================
+# ⭐ NEW ENDPOINT: /api/gap_analysis
+# FIX #6: Competitive Gap Analysis
+# ================================================
+
+@s1_routes.route("/api/gap_analysis", methods=["POST"])
+def perform_gap_analysis():
+    """
+    Porównuje plan H2 użytkownika z competitive headings.
+    Zwraca: Missing topics (gaps).
+    """
+    try:
+        data = request.get_json() or {}
+        
+        competitor_headings = data.get("competitor_headings", [])
+        user_h2_plan = data.get("user_h2_plan", [])
+        
+        if not competitor_headings:
+            return jsonify({"error": "Brak 'competitor_headings'"}), 400
+        
+        if not user_h2_plan:
+            return jsonify({"error": "Brak 'user_h2_plan'"}), 400
+        
+        gaps = analyze_competitive_gaps(competitor_headings, user_h2_plan)
+        
+        return jsonify({
+            "status": "success",
+            "gaps_found": len(gaps),
+            "gaps": gaps,
+            "message": f"Znaleziono {len(gaps)} tematów, których brakuje w Twoim planie" if gaps else "Brak braków - dobry coverage!"
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Błąd /api/gap_analysis: {e}")
         return jsonify({"error": str(e)}), 500
