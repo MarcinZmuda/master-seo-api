@@ -15,9 +15,19 @@ import textdistance
 import pysbd                        
 
 # ===========================================================
-# Version: v12.25.4
+# Version: v12.25.6
 # Last updated: 2024-12-03
-# Changes: Disabled Gemini auto-fix (quality issues), warnings only
+# Changes: 
+# - v12.25.4: Disabled Gemini auto-fix (quality issues), warnings only
+# - v12.25.5: Fixed false positive keyword counting (stricter fuzzy thresholds)
+#   * FUZZY_SIMILARITY_THRESHOLD: 90 → 95
+#   * MAX_FUZZY_WINDOW_EXPANSION: 2 → 1
+#   * JACCARD_THRESHOLD: 0.8 → 0.85
+#   * Added 60% word overlap requirement for fuzzy matches
+# - v12.25.6: Added paragraph structure validation
+#   * Min 4 sentences per paragraph (was 3)
+#   * Min 1 compound sentence per paragraph (with comma or conjunction)
+#   * Backend REJECTS if paragraph rules violated
 # ===========================================================
 
 tracker_routes = Blueprint("tracker_routes", __name__)
@@ -30,9 +40,9 @@ except OSError:
     download("pl_core_news_sm")
     nlp = spacy.load("pl_core_news_sm")
 
-FUZZY_SIMILARITY_THRESHOLD = 90      
-MAX_FUZZY_WINDOW_EXPANSION = 2       
-JACCARD_SIMILARITY_THRESHOLD = 0.8   
+FUZZY_SIMILARITY_THRESHOLD = 95  # v12.25.5: Increased from 90 to reduce false positives    
+MAX_FUZZY_WINDOW_EXPANSION = 1   # v12.25.5: Reduced from 2 to 1 (stricter matching)    
+JACCARD_SIMILARITY_THRESHOLD = 0.85  # v12.25.5: Increased from 0.8 to 0.85   
 
 try:
     LT_TOOL_PL = language_tool_python.LanguageTool("pl-PL")
@@ -50,6 +60,44 @@ if GEMINI_API_KEY:
 # ===========================================================
 # 👮‍♂️ HARD GUARDRAILS
 # ===========================================================
+def validate_paragraph_structure(text: str) -> dict:
+    """
+    Waliduje strukturę akapitów:
+    - Min 4 zdania na akapit
+    - Min 1 zdanie złożone (z przecinkiem lub spójnikiem) na akapit
+    v12.25.6
+    """
+    errors = []
+    
+    # Rozdziel na akapity (podwójny newline lub ## heading)
+    paragraphs = re.split(r'\n\n+|^##\s+.+$', text, flags=re.MULTILINE)
+    paragraphs = [p.strip() for p in paragraphs if p.strip() and not p.startswith('#')]
+    
+    for i, para in enumerate(paragraphs, 1):
+        # Segmentacja zdań
+        try:
+            sentences = [s.strip() for s in SENTENCE_SEGMENTER.segment(para) if s.strip()]
+        except:
+            sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', para) if s.strip()]
+        
+        if len(sentences) < 4:
+            errors.append(f"Akapit {i}: {len(sentences)} zdań (min: 4)")
+        
+        # Sprawdź zdanie złożone (z przecinkiem lub spójnikiem)
+        has_compound = False
+        for sent in sentences:
+            # Zdanie złożone: ma przecinek LUB spójnik (który, ale, jednak, ponieważ, gdyż, jeśli)
+            if ',' in sent or any(conj in sent.lower() for conj in [' który', ' która', ' które', ' ale ', ' jednak ', ' ponieważ ', ' gdyż ', ' jeśli ', ' gdy ', ' bo ']):
+                has_compound = True
+                break
+        
+        if not has_compound and len(sentences) >= 4:
+            errors.append(f"Akapit {i}: brak zdania złożonego (min: 1)")
+    
+    if errors:
+        return {"valid": False, "msg": " | ".join(errors[:3])}  # Max 3 errors
+    return {"valid": True, "msg": "OK"}
+
 def validate_hard_rules(text: str) -> dict:
     """Sprawdza twarde reguły (listy punktowane)"""
     errors = []
@@ -158,16 +206,19 @@ def analyze_language_quality(text: str) -> dict:
 # ===========================================================
 # 🚀 HYBRID KEYWORD COUNTER (v12.25.2 - Fixed Loop Bug)
 # ===========================================================
-def count_hybrid_occurrences(text_raw, text_lemma_list, target_exact, target_lemma):
+def count_hybrid_occurrences(text_raw, text_lemma_list, target_exact, target_lemma, debug=False):
     """
     Hybrid counter: exact + lemma + fuzzy
     v12.25.2: Fixed false positive loop bug with position tracking
+    v12.25.5: Stricter thresholds + validation to reduce false positives
     """
     text_lower = text_raw.lower()
     exact_hits = text_lower.count(target_exact.lower()) if target_exact.strip() else 0
     
     lemma_hits = 0
     target_tok = target_lemma.split()
+    fuzzy_matches = []  # v12.25.5: Track what fuzzy catches (for debugging)
+    
     if target_tok:
         text_len = len(text_lemma_list)
         target_len = len(target_tok)
@@ -195,12 +246,41 @@ def count_hybrid_occurrences(text_raw, text_lemma_list, target_exact, target_lem
                 window_tok = text_lemma_list[i : i+w_len]
                 window_str = " ".join(window_tok)
                 
-                # Fuzzy match
-                if (fuzz.token_set_ratio(target_str, window_str) >= FUZZY_SIMILARITY_THRESHOLD or 
-                    textdistance.jaccard.normalized_similarity(target_tok, window_tok) >= JACCARD_SIMILARITY_THRESHOLD):
+                # v12.25.5: STRICT VALIDATION - prevent false positives
+                # 1. Require at least 60% word overlap
+                common_words = set(target_tok) & set(window_tok)
+                word_overlap = len(common_words) / len(target_tok) if target_tok else 0
+                
+                if word_overlap < 0.6:
+                    continue  # Skip if less than 60% words match
+                
+                # 2. Fuzzy match (now with higher thresholds)
+                token_set = fuzz.token_set_ratio(target_str, window_str)
+                jaccard = textdistance.jaccard.normalized_similarity(target_tok, window_tok)
+                
+                if (token_set >= FUZZY_SIMILARITY_THRESHOLD or jaccard >= JACCARD_SIMILARITY_THRESHOLD):
                     lemma_hits += 1
+                    
+                    # v12.25.5: Log what fuzzy caught (for debugging)
+                    if debug:
+                        fuzzy_matches.append({
+                            "matched": window_str,
+                            "token_set_score": token_set,
+                            "jaccard_score": jaccard,
+                            "word_overlap": word_overlap
+                        })
+                    
                     for k in range(i, i+w_len): 
                         used_indices.add(k)
+    
+    # v12.25.5: Debug logging
+    if debug and fuzzy_matches:
+        print(f"\n🔍 FUZZY DEBUG for '{target_exact}':")
+        print(f"  Exact hits: {exact_hits}")
+        print(f"  Lemma hits: {lemma_hits}")
+        print(f"  Fuzzy matches found: {len(fuzzy_matches)}")
+        for m in fuzzy_matches[:5]:  # Show first 5
+            print(f"    - '{m['matched']}' (token_set: {m['token_set_score']}, overlap: {m['word_overlap']:.1%})")
     
     # Return MAX (not sum) to avoid double-counting
     return max(exact_hits, lemma_hits)
@@ -563,6 +643,18 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
             "error": "HARD RULE VIOLATION",
             "gemini_feedback": {
                 "feedback_for_writer": hard_check['msg']
+            },
+            "next_action": "REWRITE"
+        }
+    
+    # 1.5 PARAGRAPH STRUCTURE CHECK (v12.25.6: min 4 sentences, 1 compound)
+    para_check = validate_paragraph_structure(batch_text)
+    if not para_check["valid"]:
+        return {
+            "status": "REJECTED_QUALITY",
+            "error": "PARAGRAPH STRUCTURE VIOLATION",
+            "gemini_feedback": {
+                "feedback_for_writer": f"⛔ STRUKTURA AKAPITÓW: {para_check['msg']}"
             },
             "next_action": "REWRITE"
         }
