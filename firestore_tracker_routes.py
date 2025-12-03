@@ -136,20 +136,6 @@ def analyze_language_quality(text: str) -> dict:
 def count_hybrid_occurrences(text_raw, text_lemma_list, target_exact, target_lemma, debug=False):
     """
     ✅ FIXED v12.25.2: Eliminuje loop-bug i duplikaty form fleksyjnych.
-    
-    ZMIANY:
-    1. Tracking używanych pozycji (used_positions set)
-    2. Lemma exact match najpierw zajmuje pozycje
-    3. Fuzzy match TYLKO dla niezajętych pozycji
-    4. Break po znalezieniu fuzzy match w danym oknie
-    5. Return MAX(exact, lemma+fuzzy) zamiast sumowania
-    
-    Strategia:
-    - Exact match (literal string)
-    - Lemma match (morfologia) - tracked positions
-    - Fuzzy match (tylko dla nowych pozycji) - tracked positions
-    
-    Zwraca: MAX z (exact, lemma+fuzzy_deduplicated)
     """
     text_lower = text_raw.lower()
     
@@ -164,23 +150,19 @@ def count_hybrid_occurrences(text_raw, text_lemma_list, target_exact, target_lem
         text_len = len(text_lemma_list)
         target_len = len(target_tok)
         
-        # ⭐ CRITICAL FIX: Track używane pozycje (unikamy duplikatów)
+        # ⭐ CRITICAL FIX: Track używane pozycje
         used_positions = set()
         
         # --- 2A. EXACT LEMMA MATCH ---
         for i in range(text_len - target_len + 1):
-            # Sprawdź czy to dokładnie ta sekwencja lematów
             if text_lemma_list[i : i+target_len] == target_tok:
-                # Sprawdź czy pozycja nie jest zajęta
                 position_range = range(i, i+target_len)
                 if not any(pos in used_positions for pos in position_range):
                     lemma_fuzzy_hits += 1
-                    # Zaznacz pozycje jako użyte
                     for pos in position_range:
                         used_positions.add(pos)
         
         # --- 2B. FUZZY MATCH (tylko dla NOWYCH pozycji) ---
-        # TYLKO jeśli fuzzy threshold jest wysoki (90+)
         if FUZZY_SIMILARITY_THRESHOLD >= 90:
             min_win = max(1, target_len - MAX_FUZZY_WINDOW_EXPANSION)
             max_win = target_len + MAX_FUZZY_WINDOW_EXPANSION
@@ -193,30 +175,26 @@ def count_hybrid_occurrences(text_raw, text_lemma_list, target_exact, target_lem
                 for i in range(text_len - w_len + 1):
                     position_range = range(i, i+w_len)
                     
-                    # ⭐ FIX: SKIP jeśli pozycja zajęta (to już policzone!)
+                    # ⭐ FIX: SKIP jeśli pozycja zajęta
                     if any(pos in used_positions for pos in position_range):
                         continue
                     
                     window_tok = text_lemma_list[i : i+w_len]
                     window_str = " ".join(window_tok)
                     
-                    # Fuzzy check
                     fuzzy_score = fuzz.token_set_ratio(target_str, window_str)
                     jaccard_score = textdistance.jaccard.normalized_similarity(target_tok, window_tok)
                     
                     if fuzzy_score >= FUZZY_SIMILARITY_THRESHOLD or jaccard_score >= JACCARD_SIMILARITY_THRESHOLD:
                         lemma_fuzzy_hits += 1
-                        # Zaznacz pozycje jako użyte
                         for pos in position_range:
                             used_positions.add(pos)
-                        # ⭐ FIX: BREAK z tego okna (nie szukaj więcej w tym miejscu)
                         break
     
-    # === 3. RETURN MAX (exact lub lemma+fuzzy) ===
-    # ⭐ FIX: MAX zamiast sumowania (exact i lemma mogą się pokrywać)
+    # === 3. RETURN MAX ===
     final_count = max(exact_hits, lemma_fuzzy_hits)
     
-    # ⭐ DEBUG MODE (do usunięcia po weryfikacji)
+    # ⭐ DEBUG MODE
     if debug and (exact_hits > 5 or lemma_fuzzy_hits > 5):
         print(f"\n🔍 DEBUG COUNT for '{target_exact}':")
         print(f"   Exact hits: {exact_hits}")
@@ -229,26 +207,15 @@ def count_hybrid_occurrences(text_raw, text_lemma_list, target_exact, target_lem
 
 def validate_keyword_count(keyword, found_count, target_max, batch_text):
     """
-    ✅ NEW v12.25.2: Smart validation - sprawdza czy overuse jest rzeczywisty czy artefakt.
-    
-    Jeśli hybrid count > 2x target_max, porównujemy z prostym countem.
-    Jeśli simple count OK, a hybrid dużo wyższy → false positive.
-    
-    Returns:
-        tuple: (validated_count, is_false_positive, warning_message)
+    ✅ NEW v12.25.2: Smart validation - false positive detection
     """
-    # 1. Jeśli count > 2x target_max → prawdopodobnie bug
     if found_count > (target_max * 2):
-        # Sprawdź metodą "naiwną" (prosty count w tekście)
         text_lower = batch_text.lower()
         keyword_lower = keyword.lower()
-        
-        # Simple count (bez fuzzy/lemma)
         simple_count = text_lower.count(keyword_lower)
         
-        # Jeśli simple_count << found_count → false positive
         if simple_count <= target_max and found_count > (target_max + 3):
-            warning = f"⚠️ Auto-corrected '{keyword}': Hybrid={found_count} → Simple={simple_count} (false positive detected)"
+            warning = f"⚠️ Auto-corrected '{keyword}': Hybrid={found_count} → Simple={simple_count}"
             print(warning)
             return simple_count, True, warning
     
@@ -267,56 +234,199 @@ def global_keyword_stats(keywords_state):
     ok = sum(1 for v in keywords_state.values() if v["status"] == "OK")
     return under, over, locked, ok
 
-def get_embedding(text):
-    if not text or not text.strip(): return None
-    try:
-        return genai.embed_content(model="models/text-embedding-004", content=text, task_type="retrieval_document")['embedding']
-    except: return None
 
-def calculate_semantic_score(batch_text, main_topic):
-    if not batch_text or not main_topic: return 1.0
-    vec_text = get_embedding(batch_text)
-    vec_topic = get_embedding(main_topic)
-    if not vec_text or not vec_topic: return 1.0
-    return float(np.dot(vec_text, vec_topic) / (np.linalg.norm(vec_text) * np.linalg.norm(vec_topic)))
+# ===========================================================
+# 🤖 GEMINI EVALUATION + AUTO-FIX (v12.25.3)
+# ===========================================================
 
 def evaluate_with_gemini(text, meta_trace, burst, fluff, passive, repeated, banned_detected, semantic_score, topic="", project_data=None):
     """
-    ⭐ UPDATED v12.25.1: Używa build_rolling_context zamiast ostatnich 500 znaków
+    ⭐ UPDATED v12.25.3: Zwraca issue_severity (CRITICAL/MINOR/OK)
     """
-    if not GEMINI_API_KEY: return {"pass": True, "quality_score": 100}
-    try: model = genai.GenerativeModel("gemini-1.5-pro")
-    except: return {"pass": True, "quality_score": 80}
+    if not GEMINI_API_KEY: 
+        return {
+            "pass": True, 
+            "quality_score": 100,
+            "issue_severity": "OK"
+        }
     
-    # ⭐ FIX #1: Rolling Context Window (zamiast prev_context[-500:])
+    try: 
+        model = genai.GenerativeModel("gemini-1.5-pro")
+    except: 
+        return {
+            "pass": True, 
+            "quality_score": 80,
+            "issue_severity": "OK"
+        }
+    
+    # Rolling Context
     if project_data:
         ctx = build_rolling_context(project_data, window_size=3)
     else:
         ctx = ""
     
     prompt = f"""
-    Sędzia SEO. Temat: "{topic}". 
+Sędzia SEO. Temat: "{topic}". 
+
+{ctx}
+
+METRYKI BIEŻĄCEGO BATCHA: 
+- Burstiness={burst:.1f} (cel: >6.0)
+- Fluff={fluff:.2f} (cel: <0.15)
+- Banned phrases={banned_detected}
+
+Oceń: Harmonia, Empatia, Autentyczność, Rytm (HEAR Framework).
+
+Zwróć JSON:
+{{
+  "pass": bool,
+  "quality_score": 0-100,
+  "feedback_for_writer": "string",
+  "issue_severity": "CRITICAL|MINOR|OK",
+  "fixable_issues": ["lista problemów do auto-fix"]
+}}
+
+SEVERITY:
+- CRITICAL: Keyword stuffing, off-topic, spam, lista punktowa → NIE DA SIĘ AUTO-FIX
+- MINOR: Słaby burstiness, brak transition words, pasywna strona → DA SIĘ FIX
+- OK: Wszystko w porządku
+
+TEKST DO OCENY: "{text[:4000]}"
+"""
     
-    {ctx}
-    
-    METRYKI BIEŻĄCEGO BATCHA: 
-    - Burstiness={burst:.1f} (cel: >6.0)
-    - Fluff={fluff:.2f} (cel: <0.15)
-    - Banned phrases={banned_detected}
-    
-    Oceń: Harmonia, Empatia, Autentyczność, Rytm (HEAR Framework).
-    
-    Zwróć JSON: {{ "pass": bool, "quality_score": 0-100, "feedback_for_writer": "string" }}
-    
-    TEKST DO OCENY: "{text[:4000]}"
-    """
     try:
         response = model.generate_content(prompt)
         result = json.loads(response.text.replace("```json", "").replace("```", "").strip())
+        
+        # Ensure severity exists
+        if "issue_severity" not in result:
+            if result.get("pass"):
+                result["issue_severity"] = "OK"
+            else:
+                issues = result.get("fixable_issues", [])
+                if any(word in str(issues).lower() for word in ["keyword", "spam", "lista", "punkty"]):
+                    result["issue_severity"] = "CRITICAL"
+                else:
+                    result["issue_severity"] = "MINOR"
+        
         return result
+        
     except Exception as e:
         print(f"Gemini eval error: {e}")
-        return {"pass": True, "quality_score": 80, "feedback_for_writer": f"Błąd oceny: {e}"}
+        return {
+            "pass": True, 
+            "quality_score": 80, 
+            "feedback_for_writer": f"Błąd oceny: {e}",
+            "issue_severity": "OK"
+        }
+
+
+def auto_fix_with_gemini(original_text, issues, topic, project_data=None):
+    """
+    ✅ NEW v12.25.3: Gemini automatycznie poprawia minor issues.
+    
+    Returns:
+        dict: {
+            "success": bool,
+            "fixed_text": str,
+            "changes_made": [list],
+            "original_issues": [list]
+        }
+    """
+    if not GEMINI_API_KEY:
+        return {
+            "success": False, 
+            "fixed_text": original_text, 
+            "changes_made": [], 
+            "reason": "No Gemini API"
+        }
+    
+    try:
+        model = genai.GenerativeModel("gemini-1.5-flash")  # Flash dla szybkości
+    except:
+        return {
+            "success": False, 
+            "fixed_text": original_text, 
+            "changes_made": [], 
+            "reason": "Model unavailable"
+        }
+    
+    # Rolling context
+    ctx = ""
+    if project_data:
+        ctx = build_rolling_context(project_data, window_size=3)
+    
+    # Lista issues
+    issues_text = "\n".join([f"- {issue}" for issue in issues])
+    
+    prompt = f"""
+Jesteś ekspertem SEO content editor. Temat: "{topic}".
+
+{ctx}
+
+TEKST DO POPRAWY:
+\"\"\"
+{original_text}
+\"\"\"
+
+WYKRYTE PROBLEMY:
+{issues_text}
+
+ZADANIE:
+1. Popraw TYLKO wykryte problemy
+2. Zachowaj oryginalną strukturę H2/H3
+3. Zachowaj długość tekstu (±10%)
+4. NIE zmieniaj dobrych fragmentów
+5. ZERO meta-komentarzy ("w tym artykule...")
+6. Minimum 3 zdania na akapit
+
+ZWRÓĆ JSON:
+{{
+  "fixed_text": "poprawiony tekst (pełny)",
+  "changes_made": ["lista konkretnych zmian"]
+}}
+
+TYLKO JSON, bez markdown.
+"""
+    
+    try:
+        response = model.generate_content(prompt)
+        response_text = response.text.strip()
+        
+        # Clean JSON
+        response_text = response_text.replace("```json", "").replace("```", "").strip()
+        
+        result = json.loads(response_text)
+        
+        fixed_text = result.get("fixed_text", original_text)
+        changes = result.get("changes_made", [])
+        
+        # Validation: check if fixed text is reasonable
+        if len(fixed_text) < len(original_text) * 0.5:
+            # Text skrócił się o >50% - prawdopodobnie błąd
+            return {
+                "success": False,
+                "fixed_text": original_text,
+                "changes_made": [],
+                "reason": "Fixed text too short (possible error)"
+            }
+        
+        return {
+            "success": True,
+            "fixed_text": fixed_text,
+            "changes_made": changes,
+            "original_issues": issues
+        }
+        
+    except Exception as e:
+        print(f"❌ Gemini auto-fix error: {e}")
+        return {
+            "success": False,
+            "fixed_text": original_text,
+            "changes_made": [],
+            "reason": str(e)
+        }
+
 
 @tracker_routes.post("/api/language_refine")
 def language_refine():
@@ -326,20 +436,22 @@ def language_refine():
     audit = analyze_language_quality(clean_text)
     return jsonify({"original_text": text, "auto_fixed_text": clean_text, "language_audit": audit})
 
+
 # ===========================================================
-# 🧠 MAIN PROCESS (Logic V12.25.2: Fixed Counting + Validation)
+# 🧠 MAIN PROCESS (Logic V12.25.3: Auto-Fix Integration)
 # ===========================================================
 def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dict = None):
     """
-    ⭐ UPDATED v12.25.2: 
-    - Fixed count_hybrid_occurrences (eliminuje duplikaty)
-    - Dodana validate_keyword_count (false positive detection)
-    - Debug mode dla pierwszych 3 batchy
+    ⭐ UPDATED v12.25.3: 
+    - Gemini auto-fix dla MINOR issues (przed zapisem)
+    - CRITICAL → reject (bez auto-fix)
+    - OK → zapis bez zmian
     """
     db = firestore.client()
     doc_ref = db.collection("seo_projects").document(project_id)
     doc = doc_ref.get()
-    if not doc.exists: return {"error": "Project not found", "status": 404}
+    if not doc.exists: 
+        return {"error": "Project not found", "status": 404}
     
     batch_text = sanitize_typography(batch_text)
     project_data = doc.to_dict()
@@ -348,13 +460,20 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
     # 1. HARD RULE (Struktura)
     hard_check = validate_hard_rules(batch_text)
     if not hard_check["valid"]:
-        return {"status": "REJECTED_QUALITY", "error": "HARD RULE", "gemini_feedback": {"feedback_for_writer": hard_check['msg']}, "next_action": "REWRITE"}
+        return {
+            "status": "REJECTED_QUALITY", 
+            "error": "HARD RULE", 
+            "gemini_feedback": {"feedback_for_writer": hard_check['msg']}, 
+            "next_action": "REWRITE"
+        }
 
-    # 2. AUDYT JĘZYKOWY (Burstiness, Fluff, etc.)
+    # 2. AUDYT JĘZYKOWY
     audit = analyze_language_quality(batch_text)
     warnings = []
-    if audit.get("banned_detected"): warnings.append(f"⛔ Banned: {', '.join(audit['banned_detected'])}")
-    if audit.get("readability_score", 100) < 30: warnings.append("📖 Tekst trudny.")
+    if audit.get("banned_detected"): 
+        warnings.append(f"⛔ Banned: {', '.join(audit['banned_detected'])}")
+    if audit.get("readability_score", 100) < 30: 
+        warnings.append("📖 Tekst trudny.")
 
     # ⭐ FIX #2: SEMANTIC DRIFT CHECK
     previous_batches = project_data.get("batches", [])
@@ -374,44 +493,117 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
     if transition_check["status"] == "CHOPPY":
         warnings.append(f"🔗 {transition_check['message']}")
 
-    # 3. SEO TRACKING (Critical Overuse Logic) - FIXED v12.25.2
+    # 4. GEMINI JUDGE + AUTO-FIX (v12.25.3)
+    gemini_verdict = evaluate_with_gemini(
+        batch_text, meta_trace, 
+        audit["burstiness"], audit["fluff_ratio"], 
+        0, [], audit["banned_detected"], 0, 
+        topic=topic, 
+        project_data=project_data
+    )
+
+    # ⭐ NEW: AUTO-FIX LOGIC
+    final_batch_text = batch_text  # Default: original
+    auto_fix_applied = False
+    auto_fix_details = None
+
+    if not gemini_verdict.get("pass"):
+        issue_severity = gemini_verdict.get("issue_severity", "MINOR")
+        
+        if issue_severity == "CRITICAL":
+            # CRITICAL → Reject (nie da się auto-fix)
+            return {
+                "status": "REJECTED_QUALITY",
+                "error": "CRITICAL_ISSUES",
+                "gemini_feedback": {
+                    "pass": False,
+                    "feedback_for_writer": gemini_verdict.get("feedback_for_writer", "Krytyczne problemy jakości."),
+                    "issue_severity": "CRITICAL"
+                },
+                "language_audit": audit,
+                "next_action": "REWRITE"
+            }
+        
+        elif issue_severity == "MINOR":
+            # MINOR → Auto-fix
+            fixable_issues = gemini_verdict.get("fixable_issues", ["Problemy z płynością tekstu"])
+            
+            print(f"🔧 Attempting auto-fix for: {', '.join(fixable_issues)}")
+            
+            auto_fix_result = auto_fix_with_gemini(
+                batch_text, 
+                fixable_issues, 
+                topic, 
+                project_data
+            )
+            
+            if auto_fix_result["success"]:
+                final_batch_text = auto_fix_result["fixed_text"]
+                auto_fix_applied = True
+                auto_fix_details = {
+                    "original_issues": fixable_issues,
+                    "changes_made": auto_fix_result["changes_made"]
+                }
+                
+                # Re-audit fixed text
+                audit = analyze_language_quality(final_batch_text)
+                
+                # Update warning
+                changes_summary = ", ".join(auto_fix_result['changes_made'][:2])
+                warnings.append(f"🔧 Auto-fixed: {changes_summary}")
+                
+                print(f"✅ Auto-fix successful: {len(auto_fix_result['changes_made'])} changes")
+            else:
+                # Auto-fix failed → Reject
+                return {
+                    "status": "REJECTED_QUALITY",
+                    "error": "AUTO_FIX_FAILED",
+                    "gemini_feedback": {
+                        "pass": False,
+                        "feedback_for_writer": f"Nie udało się automatycznie poprawić: {gemini_verdict.get('feedback_for_writer')}",
+                        "auto_fix_attempted": True,
+                        "auto_fix_reason": auto_fix_result.get("reason", "Unknown")
+                    },
+                    "language_audit": audit,
+                    "next_action": "REWRITE"
+                }
+
+    # 3. SEO TRACKING (używamy final_batch_text, który może być fixed)
     import copy
     keywords_state = copy.deepcopy(project_data.get("keywords_state", {}))
-    doc_nlp = nlp(batch_text)
+    doc_nlp = nlp(final_batch_text)
     text_lemma_list = [t.lemma_.lower() for t in doc_nlp if t.is_alpha]
     
     over_limit_hits = []
     critical_reject = []
     
-    # ⭐ DEBUG MODE: Enable dla pierwszych 3 batchy
     is_debug_mode = len(previous_batches) < 3
 
     for row_id, meta in keywords_state.items():
         kw = meta.get("keyword", "")
         target_max = meta.get("target_max", 5)
         
-        # Logika liczenia (Hybrid Counter - FIXED)
         t_exact = meta.get("search_term_exact", kw.lower())
         t_lemma = meta.get("search_lemma", "")
-        if not t_lemma: t_lemma = " ".join([t.lemma_.lower() for t in nlp(kw) if t.is_alpha])
+        if not t_lemma: 
+            t_lemma = " ".join([t.lemma_.lower() for t in nlp(kw) if t.is_alpha])
         
-        # ⭐ FIXED: count_hybrid_occurrences z deduplication
-        found = count_hybrid_occurrences(batch_text, text_lemma_list, t_exact, t_lemma, debug=is_debug_mode)
+        found = count_hybrid_occurrences(final_batch_text, text_lemma_list, t_exact, t_lemma, debug=is_debug_mode)
         
         if found > 0:
             current_total = meta.get("actual_uses", 0)
             new_total = current_total + found
             
-            # ⭐ NEW: VALIDATION LAYER (false positive detection)
+            # Validation layer
             validated_total, is_false_positive, validation_warning = validate_keyword_count(
-                kw, new_total, target_max, batch_text
+                kw, new_total, target_max, final_batch_text
             )
             
             if is_false_positive:
                 warnings.append(validation_warning)
-                new_total = validated_total  # Use corrected count
+                new_total = validated_total
             
-            # Hard Ceiling (+3 over limit)
+            # Hard Ceiling
             if new_total > target_max:
                 if new_total >= (target_max + 3):
                     critical_reject.append(f"{kw} (Użyto {new_total}/{target_max})")
@@ -421,24 +613,23 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
             meta["actual_uses"] = new_total
             meta["status"] = compute_status(new_total, meta["target_min"], target_max)
             
-            # ⭐ FIX #4: POSITION-WEIGHTED SCORING
-            position_score = calculate_keyword_position_score(batch_text, kw)
+            # Position scoring
+            position_score = calculate_keyword_position_score(final_batch_text, kw)
             meta["position_score"] = position_score["score"]
             meta["position_quality"] = position_score["quality"]
             meta["early_count"] = position_score["early_count"]
             
-            # Warning jeśli słaba pozycja
             if found > 0 and position_score["quality"] in ["WEAK", "NONE"]:
                 warnings.append(f"📍 '{kw}': słaba pozycja (score: {position_score['score']:.1f})")
 
-    # JEŚLI MAMY KRYTYCZNE PRZEKROCZENIE -> REJECT!
+    # CRITICAL OVERUSE → REJECT
     if critical_reject:
         return {
             "status": "REJECTED_SEO",
             "error": "CRITICAL OVERUSE",
             "gemini_feedback": {
                 "pass": False, 
-                "feedback_for_writer": f"⛔ DRASTYCZNE PRZEOPT. FRAZ: {', '.join(critical_reject)}. Usuń je z tego batcha natychmiast!"
+                "feedback_for_writer": f"⛔ DRASTYCZNE PRZEOPT. FRAZ: {', '.join(critical_reject)}. Usuń je natychmiast!"
             },
             "language_audit": audit,
             "next_action": "REWRITE"
@@ -452,19 +643,13 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
         warnings.append("🚨 Keyword Stuffing (zbyt gęsto).")
 
     under, over, locked, ok = global_keyword_stats(keywords_state)
-    
-    # 4. GEMINI JUDGE (z nowym rolling context)
-    gemini_verdict = evaluate_with_gemini(
-        batch_text, meta_trace, 
-        audit["burstiness"], audit["fluff_ratio"], 
-        0, [], audit["banned_detected"], 0, 
-        topic=topic, 
-        project_data=project_data
-    )
 
-    # 5. SAVE
+    # 5. SAVE (z final_batch_text)
     batch_entry = {
-        "text": batch_text, 
+        "text": final_batch_text,  # ⭐ Fixed text (jeśli był auto-fix)
+        "original_text": batch_text if auto_fix_applied else None,  # ⭐ Backup
+        "auto_fix_applied": auto_fix_applied,
+        "auto_fix_details": auto_fix_details,
         "gemini_audit": gemini_verdict, 
         "language_audit": audit,
         "warnings": warnings, 
@@ -473,11 +658,12 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
         "timestamp": datetime.datetime.now(datetime.timezone.utc)
     }
     
-    if "batches" not in project_data: project_data["batches"] = []
+    if "batches" not in project_data: 
+        project_data["batches"] = []
     project_data["batches"].append(batch_entry)
     project_data["total_batches"] = len(project_data["batches"])
     project_data["keywords_state"] = keywords_state
-    project_data["version"] = "v12.25.2"  # ⭐ Updated version
+    project_data["version"] = "v12.25.3"
     doc_ref.set(project_data)
 
     status = "BATCH_WARNING" if warnings else "BATCH_ACCEPTED"
@@ -493,5 +679,7 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
         "gemini_feedback": {"feedback_for_writer": fb_msg},
         "language_audit": audit,
         "meta_prompt_summary": meta_summary,
-        "next_action": next_act
+        "next_action": next_act,
+        "auto_fix_applied": auto_fix_applied,  # ⭐ Info dla GPT
+        "auto_fix_details": auto_fix_details if auto_fix_applied else None
     }
