@@ -15,7 +15,7 @@ import textdistance
 import pysbd                        
 
 # ===========================================================
-# Version: v12.25.6.1
+# Version: v12.25.6.2
 # Last updated: 2024-12-03
 # Changes: 
 # - v12.25.4: Disabled Gemini auto-fix (quality issues), warnings only
@@ -29,10 +29,15 @@ import pysbd
 #   * Min 1 compound sentence per paragraph (with comma or conjunction)
 #   * Backend REJECTS if paragraph rules violated
 # - v12.25.6.1: ULTRA-STRICT fuzzy matching (eliminate all false positives)
-#   * FUZZY_SIMILARITY_THRESHOLD: 95 → 98
-#   * JACCARD_THRESHOLD: 0.85 → 0.90
-#   * Word overlap: 60% → 75%
+#   * FUZZY_SIMILARITY_THRESHOLD: 95 → 98 → 99
+#   * JACCARD_THRESHOLD: 0.85 → 0.90 → 0.95
+#   * Word overlap: 60% → 75% → 85%
 #   * Fuzzy DISABLED for 1-2 word phrases (exact + lemma only)
+# - v12.25.6.2: Changed overuse policy (WARNING instead of REJECT)
+#   * Keyword overuse +3 now gives WARNING instead of REJECTED_SEO
+#   * Batch saves normally with warning
+#   * Allows user to manually fix if needed
+#   * Protects minimum 2 uses per keyword in fix suggestions
 # ===========================================================
 
 tracker_routes = Blueprint("tracker_routes", __name__)
@@ -45,9 +50,9 @@ except OSError:
     download("pl_core_news_sm")
     nlp = spacy.load("pl_core_news_sm")
 
-FUZZY_SIMILARITY_THRESHOLD = 99  # v12.25.6.1: Increased from 95 to 98 (eliminate false positives)    
+FUZZY_SIMILARITY_THRESHOLD = 98  # v12.25.6.1: Increased from 95 to 98 (eliminate false positives)    
 MAX_FUZZY_WINDOW_EXPANSION = 1   # v12.25.5: Reduced from 2 to 1 (stricter matching)    
-JACCARD_SIMILARITY_THRESHOLD = 0.95  # v12.25.6.1: Increased from 0.85 to 0.90   
+JACCARD_SIMILARITY_THRESHOLD = 0.90  # v12.25.6.1: Increased from 0.85 to 0.90   
 
 try:
     LT_TOOL_PL = language_tool_python.LanguageTool("pl-PL")
@@ -260,7 +265,7 @@ def count_hybrid_occurrences(text_raw, text_lemma_list, target_exact, target_lem
                 common_words = set(target_tok) & set(window_tok)
                 word_overlap = len(common_words) / len(target_tok) if target_tok else 0
                 
-                if word_overlap < 0.85:
+                if word_overlap < 0.75:
                     continue  # Skip if less than 75% words match
                 
                 # 3. Fuzzy match (now with ultra-high thresholds: 98/0.90)
@@ -728,18 +733,11 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
             meta["actual_uses"] = new_total
             meta["status"] = compute_status(new_total, meta["target_min"], target_max)
 
-    # CRITICAL OVERUSE -> REJECT
+    # CRITICAL OVERUSE -> WARNING (not REJECT)
+    # v12.25.6.2: Changed from REJECT to WARNING - allow batch save with warning
     if critical_reject:
-        return {
-            "status": "REJECTED_SEO",
-            "error": "CRITICAL KEYWORD OVERUSE",
-            "gemini_feedback": {
-                "pass": False, 
-                "feedback_for_writer": f"⛔ DRASTYCZNE PRZEOPTYMALIZOWANIE: {', '.join(critical_reject)}. Usuń nadmiarowe wystąpienia!"
-            },
-            "language_audit": audit,
-            "next_action": "REWRITE"
-        }
+        warnings.append(f"🚨 CRITICAL OVERUSE: {', '.join(critical_reject)}")
+        suggestions.append(f"⚠️ Drastycznie przekroczone limity: {', '.join(critical_reject)}. Rozważ usunięcie nadmiarowych wystąpień (ale zostaw min 2x każdego).")
 
     if over_limit_hits:
         warnings.append(f"📈 Keyword limit exceeded (+1-2): {', '.join(over_limit_hits[:3])}")
