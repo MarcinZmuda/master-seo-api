@@ -15,7 +15,7 @@ import textdistance
 import pysbd                        
 
 # ===========================================================
-# Version: v12.25.6
+# Version: v12.25.6.1
 # Last updated: 2024-12-03
 # Changes: 
 # - v12.25.4: Disabled Gemini auto-fix (quality issues), warnings only
@@ -28,6 +28,11 @@ import pysbd
 #   * Min 4 sentences per paragraph (was 3)
 #   * Min 1 compound sentence per paragraph (with comma or conjunction)
 #   * Backend REJECTS if paragraph rules violated
+# - v12.25.6.1: ULTRA-STRICT fuzzy matching (eliminate all false positives)
+#   * FUZZY_SIMILARITY_THRESHOLD: 95 → 98
+#   * JACCARD_THRESHOLD: 0.85 → 0.90
+#   * Word overlap: 60% → 75%
+#   * Fuzzy DISABLED for 1-2 word phrases (exact + lemma only)
 # ===========================================================
 
 tracker_routes = Blueprint("tracker_routes", __name__)
@@ -40,9 +45,9 @@ except OSError:
     download("pl_core_news_sm")
     nlp = spacy.load("pl_core_news_sm")
 
-FUZZY_SIMILARITY_THRESHOLD = 95  # v12.25.5: Increased from 90 to reduce false positives    
+FUZZY_SIMILARITY_THRESHOLD = 98  # v12.25.6.1: Increased from 95 to 98 (eliminate false positives)    
 MAX_FUZZY_WINDOW_EXPANSION = 1   # v12.25.5: Reduced from 2 to 1 (stricter matching)    
-JACCARD_SIMILARITY_THRESHOLD = 0.85  # v12.25.5: Increased from 0.8 to 0.85   
+JACCARD_SIMILARITY_THRESHOLD = 0.90  # v12.25.6.1: Increased from 0.85 to 0.90   
 
 try:
     LT_TOOL_PL = language_tool_python.LanguageTool("pl-PL")
@@ -246,15 +251,19 @@ def count_hybrid_occurrences(text_raw, text_lemma_list, target_exact, target_lem
                 window_tok = text_lemma_list[i : i+w_len]
                 window_str = " ".join(window_tok)
                 
-                # v12.25.5: STRICT VALIDATION - prevent false positives
-                # 1. Require at least 60% word overlap
+                # v12.25.6.1: ULTRA-STRICT VALIDATION - prevent false positives
+                # 1. Skip fuzzy for short phrases (1-2 words) - exact + lemma only
+                if len(target_tok) <= 2:
+                    continue  # Fuzzy disabled for short phrases
+                
+                # 2. Require at least 75% word overlap (increased from 60%)
                 common_words = set(target_tok) & set(window_tok)
                 word_overlap = len(common_words) / len(target_tok) if target_tok else 0
                 
-                if word_overlap < 0.6:
-                    continue  # Skip if less than 60% words match
+                if word_overlap < 0.75:
+                    continue  # Skip if less than 75% words match
                 
-                # 2. Fuzzy match (now with higher thresholds)
+                # 3. Fuzzy match (now with ultra-high thresholds: 98/0.90)
                 token_set = fuzz.token_set_ratio(target_str, window_str)
                 jaccard = textdistance.jaccard.normalized_similarity(target_tok, window_tok)
                 
