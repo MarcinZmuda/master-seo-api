@@ -45,9 +45,9 @@ except OSError:
     download("pl_core_news_sm")
     nlp = spacy.load("pl_core_news_sm")
 
-FUZZY_SIMILARITY_THRESHOLD = 98  # v12.25.6.1: Increased from 95 to 98 (eliminate false positives)    
+FUZZY_SIMILARITY_THRESHOLD = 99  # v12.25.6.1: Increased from 95 to 98 (eliminate false positives)    
 MAX_FUZZY_WINDOW_EXPANSION = 1   # v12.25.5: Reduced from 2 to 1 (stricter matching)    
-JACCARD_SIMILARITY_THRESHOLD = 0.90  # v12.25.6.1: Increased from 0.85 to 0.90   
+JACCARD_SIMILARITY_THRESHOLD = 0.95  # v12.25.6.1: Increased from 0.85 to 0.90   
 
 try:
     LT_TOOL_PL = language_tool_python.LanguageTool("pl-PL")
@@ -260,7 +260,7 @@ def count_hybrid_occurrences(text_raw, text_lemma_list, target_exact, target_lem
                 common_words = set(target_tok) & set(window_tok)
                 word_overlap = len(common_words) / len(target_tok) if target_tok else 0
                 
-                if word_overlap < 0.75:
+                if word_overlap < 0.85:
                     continue  # Skip if less than 75% words match
                 
                 # 3. Fuzzy match (now with ultra-high thresholds: 98/0.90)
