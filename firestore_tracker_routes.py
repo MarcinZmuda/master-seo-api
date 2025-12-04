@@ -15,7 +15,7 @@ import textdistance
 import pysbd                        
 
 # ===========================================================
-# Version: v12.25.6.2
+# Version: v12.25.6.3
 # Last updated: 2024-12-03
 # Changes: 
 # - v12.25.4: Disabled Gemini auto-fix (quality issues), warnings only
@@ -38,6 +38,11 @@ import pysbd
 #   * Batch saves normally with warning
 #   * Allows user to manually fix if needed
 #   * Protects minimum 2 uses per keyword in fix suggestions
+# - v12.25.6.3: AUTO-FIX keyword overuse (automated workflow)
+#   * Automatically reduces overuse by ~50%
+#   * ALWAYS keeps minimum 2 uses per keyword
+#   * Removes from END of text (preserves early high-weight occurrences)
+#   * No user intervention needed
 # ===========================================================
 
 tracker_routes = Blueprint("tracker_routes", __name__)
@@ -66,6 +71,49 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
+
+# ===========================================================
+# 🔧 AUTO-FIX OVERUSE (v12.25.6.3)
+# ===========================================================
+def auto_fix_keyword_overuse(text: str, keyword: str, current_count: int, target_max: int) -> str:
+    """
+    Automatically reduces keyword overuse by 50%
+    ALWAYS keeps minimum 2 uses
+    v12.25.6.3
+    """
+    if current_count <= target_max:
+        return text  # No fix needed
+    
+    # Calculate how many to remove (50% of overuse, but keep min 2)
+    overuse = current_count - target_max
+    to_remove = max(1, overuse // 2)  # Remove at least 1, max 50% of overuse
+    target_final = max(2, current_count - to_remove)  # Never go below 2
+    
+    # Find all occurrences (case-insensitive)
+    import re
+    pattern = re.compile(re.escape(keyword), re.IGNORECASE)
+    matches = list(pattern.finditer(text))
+    
+    if len(matches) == 0:
+        return text
+    
+    # Calculate how many to actually remove
+    actual_remove = len(matches) - target_final
+    if actual_remove <= 0:
+        return text
+    
+    # Remove matches from END of text (keep early ones for SEO)
+    # Strategy: Keep first occurrences (high position weight), remove last ones
+    indices_to_remove = sorted([m.start() for m in matches], reverse=True)[:actual_remove]
+    
+    # Remove from text (work backwards to preserve indices)
+    result = text
+    for idx in sorted(indices_to_remove, reverse=True):
+        # Find full match at this position
+        match_len = len(keyword)
+        result = result[:idx] + result[idx + match_len:]
+    
+    return result
 
 # ===========================================================
 # 👮‍♂️ HARD GUARDRAILS
@@ -733,11 +781,50 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
             meta["actual_uses"] = new_total
             meta["status"] = compute_status(new_total, meta["target_min"], target_max)
 
-    # CRITICAL OVERUSE -> WARNING (not REJECT)
-    # v12.25.6.2: Changed from REJECT to WARNING - allow batch save with warning
+    # CRITICAL OVERUSE -> AUTO-FIX (v12.25.6.3)
+    # Automatically reduce overuse by 50%, keep min 2x
+    fixed_text = batch_text
     if critical_reject:
-        warnings.append(f"🚨 CRITICAL OVERUSE: {', '.join(critical_reject)}")
-        suggestions.append(f"⚠️ Drastycznie przekroczone limity: {', '.join(critical_reject)}. Rozważ usunięcie nadmiarowych wystąpień (ale zostaw min 2x każdego).")
+        for overuse_info in critical_reject:
+            # Parse "keyword (X/Y)" format
+            parts = overuse_info.split(" (")
+            if len(parts) == 2:
+                kw = parts[0]
+                counts = parts[1].rstrip(")").split("/")
+                if len(counts) == 2:
+                    current = int(counts[0])
+                    limit = int(counts[1])
+                    
+                    # Auto-fix: reduce by 50%, keep min 2
+                    fixed_text = auto_fix_keyword_overuse(fixed_text, kw, current, limit)
+        
+        # Re-count after auto-fix
+        doc_nlp_fixed = nlp(fixed_text)
+        text_lemma_list_fixed = [t.lemma_.lower() for t in doc_nlp_fixed if t.is_alpha]
+        
+        fixed_counts = []
+        for row_id, meta in keywords_state.items():
+            kw = meta.get("keyword", "")
+            t_exact = meta.get("search_term_exact", kw.lower())
+            t_lemma = meta.get("search_lemma", "")
+            if not t_lemma:
+                t_lemma = " ".join([t.lemma_.lower() for t in nlp(kw) if t.is_alpha])
+            
+            found = count_hybrid_occurrences(fixed_text, text_lemma_list_fixed, t_exact, t_lemma)
+            if found > 0:
+                meta["actual_uses"] = found
+                meta["status"] = compute_status(found, meta["target_min"], meta["target_max"])
+                if found > meta["target_max"]:
+                    fixed_counts.append(f"{kw} ({found}/{meta['target_max']})")
+        
+        # Update batch_text with fixed version
+        batch_text = fixed_text
+        
+        # Add warning about auto-fix
+        if fixed_counts:
+            warnings.append(f"⚠️ AUTO-FIXED overuse (reduced by ~50%): {', '.join(fixed_counts[:3])}")
+        else:
+            warnings.append(f"✅ AUTO-FIXED overuse (now within limits)")
 
     if over_limit_hits:
         warnings.append(f"📈 Keyword limit exceeded (+1-2): {', '.join(over_limit_hits[:3])}")
