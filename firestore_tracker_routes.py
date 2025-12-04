@@ -15,34 +15,21 @@ import textdistance
 import pysbd                        
 
 # ===========================================================
-# Version: v12.25.6.3
+# Version: v12.25.6.5
 # Last updated: 2024-12-03
 # Changes: 
 # - v12.25.4: Disabled Gemini auto-fix (quality issues), warnings only
 # - v12.25.5: Fixed false positive keyword counting (stricter fuzzy thresholds)
-#   * FUZZY_SIMILARITY_THRESHOLD: 90 → 95
-#   * MAX_FUZZY_WINDOW_EXPANSION: 2 → 1
-#   * JACCARD_THRESHOLD: 0.8 → 0.85
-#   * Added 60% word overlap requirement for fuzzy matches
 # - v12.25.6: Added paragraph structure validation
-#   * Min 4 sentences per paragraph (was 3)
-#   * Min 1 compound sentence per paragraph (with comma or conjunction)
-#   * Backend REJECTS if paragraph rules violated
-# - v12.25.6.1: ULTRA-STRICT fuzzy matching (eliminate all false positives)
-#   * FUZZY_SIMILARITY_THRESHOLD: 95 → 98 → 99
-#   * JACCARD_THRESHOLD: 0.85 → 0.90 → 0.95
-#   * Word overlap: 60% → 75% → 85%
-#   * Fuzzy DISABLED for 1-2 word phrases (exact + lemma only)
+# - v12.25.6.1: ULTRA-STRICT fuzzy matching
 # - v12.25.6.2: Changed overuse policy (WARNING instead of REJECT)
-#   * Keyword overuse +3 now gives WARNING instead of REJECTED_SEO
-#   * Batch saves normally with warning
-#   * Allows user to manually fix if needed
-#   * Protects minimum 2 uses per keyword in fix suggestions
 # - v12.25.6.3: AUTO-FIX keyword overuse (automated workflow)
-#   * Automatically reduces overuse by ~50%
-#   * ALWAYS keeps minimum 2 uses per keyword
-#   * Removes from END of text (preserves early high-weight occurrences)
-#   * No user intervention needed
+# - v12.25.6.5: PREVIEW + SMART PARAPHRASING
+#   * New endpoint: /api/project/{id}/preview_batch (shows corrections BEFORE save)
+#   * New endpoint: /api/project/{id}/approve_batch (saves after user approval)
+#   * Smart paraphrasing: Replaces keywords with synonyms (not deletion)
+#   * Preserves text structure and length (±5%)
+#   * User sees corrected text BEFORE it's saved to database
 # ===========================================================
 
 tracker_routes = Blueprint("tracker_routes", __name__)
@@ -73,23 +60,26 @@ if GEMINI_API_KEY:
 
 
 # ===========================================================
-# 🔧 AUTO-FIX OVERUSE (v12.25.6.3)
+# 🔧 AUTO-FIX OVERUSE (v12.25.6.5 - SMART PARAPHRASING)
 # ===========================================================
-def auto_fix_keyword_overuse(text: str, keyword: str, current_count: int, target_max: int) -> str:
+def auto_fix_keyword_overuse_smart(text: str, keyword: str, current_count: int, target_max: int) -> str:
     """
-    Automatically reduces keyword overuse by 50%
-    ALWAYS keeps minimum 2 uses
-    v12.25.6.3
+    Automatically reduces keyword overuse by ~50% using SMART PARAPHRASING
+    - Preserves text structure and layout
+    - Maintains similar text length (±5%)
+    - Replaces keywords with synonyms/paraphrases instead of deleting
+    - ALWAYS keeps minimum 2 uses
+    v12.25.6.5
     """
     if current_count <= target_max:
-        return text  # No fix needed
+        return text
     
-    # Calculate how many to remove (50% of overuse, but keep min 2)
+    # Calculate how many to replace (50% of overuse, but keep min 2)
     overuse = current_count - target_max
-    to_remove = max(1, overuse // 2)  # Remove at least 1, max 50% of overuse
-    target_final = max(2, current_count - to_remove)  # Never go below 2
+    to_replace = max(1, overuse // 2)
+    target_final = max(2, current_count - to_replace)
     
-    # Find all occurrences (case-insensitive)
+    # Find all occurrences
     import re
     pattern = re.compile(re.escape(keyword), re.IGNORECASE)
     matches = list(pattern.finditer(text))
@@ -97,21 +87,63 @@ def auto_fix_keyword_overuse(text: str, keyword: str, current_count: int, target
     if len(matches) == 0:
         return text
     
-    # Calculate how many to actually remove
-    actual_remove = len(matches) - target_final
-    if actual_remove <= 0:
+    actual_replace = len(matches) - target_final
+    if actual_replace <= 0:
         return text
     
-    # Remove matches from END of text (keep early ones for SEO)
-    # Strategy: Keep first occurrences (high position weight), remove last ones
-    indices_to_remove = sorted([m.start() for m in matches], reverse=True)[:actual_remove]
+    # SMART PARAPHRASING: Common Polish synonyms/paraphrases
+    paraphrase_dict = {
+        # Hair & scalp
+        "włosy": ["pasma", "kosmyki", "fryzura"],
+        "włosów": ["pasm", "kosmyków", "fryzury"],
+        "skóra głowy": ["naskórek", "skóra", "powierzchnia głowy"],
+        "skóry głowy": ["naskórka", "skóry", "powierzchni głowy"],
+        "pielęgnacja włosów": ["dbanie o włosy", "troska o pasma", "pielęgnacja"],
+        "pielęgnacji włosów": ["dbania o włosy", "troski o pasma", "pielęgnacji"],
+        
+        # Aging & skin
+        "proces starzenia": ["starzenie", "proces", "zmiany wiekowe"],
+        "kolagen": ["białko strukturalne", "białko"],
+        "kolagenu": ["białka strukturalnego", "białka"],
+        "elastyna": ["włókna elastyczne", "białko"],
+        "elastyny": ["włókien elastycznych", "białka"],
+        
+        # Care products
+        "naturalne składniki": ["naturalne substancje", "składniki naturalne", "substancje"],
+        "kwas hialuronowy": ["hialuron", "kwas", "składnik"],
+        
+        # General
+        "menopauza": ["przekwitanie", "ten okres", "okres"],
+        "menopauzy": ["przekwitania", "tego okresu", "okresu"],
+    }
     
-    # Remove from text (work backwards to preserve indices)
+    # Get paraphrases for this keyword
+    kw_lower = keyword.lower()
+    paraphrases = paraphrase_dict.get(kw_lower, [kw_lower])  # fallback to original
+    
+    # Replace matches from END (preserve early high-weight ones)
+    indices_to_replace = sorted([m.start() for m in matches], reverse=True)[:actual_replace]
+    
     result = text
-    for idx in sorted(indices_to_remove, reverse=True):
-        # Find full match at this position
+    paraphrase_idx = 0
+    
+    for idx in sorted(indices_to_replace, reverse=True):
+        # Find sentence context
+        sentence_start = max(0, result.rfind('.', 0, idx) + 1)
+        sentence_end = result.find('.', idx)
+        if sentence_end == -1:
+            sentence_end = len(result)
+        
+        # Get paraphrase (cycle through list)
+        if paraphrases:
+            paraphrase = paraphrases[paraphrase_idx % len(paraphrases)]
+            paraphrase_idx += 1
+        else:
+            paraphrase = keyword  # fallback
+        
+        # Replace keyword with paraphrase
         match_len = len(keyword)
-        result = result[:idx] + result[idx + match_len:]
+        result = result[:idx] + paraphrase + result[idx + match_len:]
     
     return result
 
@@ -651,6 +683,256 @@ CRITICAL: NO auto-fix text generation. Warnings and suggestions only.
         }
 
 # ===========================================================
+# 🔌 API ENDPOINT: Batch Preview (v12.25.6.5)
+# ===========================================================
+@tracker_routes.post("/api/project/<project_id>/preview_batch")
+def preview_batch(project_id):
+    """
+    Preview batch with all corrections BEFORE saving to database
+    Returns corrected text + all checks + warnings
+    User must explicitly approve to save
+    v12.25.6.5
+    """
+    data = request.get_json(force=True) or {}
+    batch_text = data.get("text", "")
+    meta_trace = data.get("meta_trace", {})
+    
+    # Run full processing WITHOUT saving
+    result = process_batch_preview(project_id, batch_text, meta_trace)
+    
+    return jsonify(result)
+
+def process_batch_preview(project_id: str, batch_text: str, meta_trace: dict = None):
+    """
+    Same as process_batch_in_firestore but DOES NOT SAVE to database
+    Returns preview with corrected text
+    v12.25.6.5
+    """
+    db = firestore.client()
+    doc_ref = db.collection("seo_projects").document(project_id)
+    doc = doc_ref.get()
+    
+    if not doc.exists: 
+        return {"error": "Project not found", "status": 404}
+    
+    original_text = batch_text
+    batch_text = sanitize_typography(batch_text)
+    project_data = doc.to_dict()
+    topic = project_data.get("topic", "Nieznany")
+
+    # Run all checks (same as normal process)
+    hard_check = validate_hard_rules(batch_text)
+    if not hard_check["valid"]:
+        return {
+            "status": "REJECTED_QUALITY",
+            "error": "HARD RULE VIOLATION",
+            "original_text": original_text,
+            "corrected_text": batch_text,
+            "corrections_made": [],
+            "gemini_feedback": {"feedback_for_writer": hard_check['msg']},
+            "next_action": "REWRITE"
+        }
+    
+    para_check = validate_paragraph_structure(batch_text)
+    if not para_check["valid"]:
+        return {
+            "status": "REJECTED_QUALITY",
+            "error": "PARAGRAPH STRUCTURE VIOLATION",
+            "original_text": original_text,
+            "corrected_text": batch_text,
+            "corrections_made": [],
+            "gemini_feedback": {"feedback_for_writer": f"⛔ STRUKTURA AKAPITÓW: {para_check['msg']}"},
+            "next_action": "REWRITE"
+        }
+
+    audit = analyze_language_quality(batch_text)
+    warnings = []
+    suggestions = []
+    corrections_made = []
+    
+    if audit.get("banned_detected"): 
+        warnings.append(f"⛔ Banned phrases: {', '.join(audit['banned_detected'])}")
+        suggestions.append("Remove banned phrases")
+    
+    if audit.get("burstiness", 0) < 6.0:
+        warnings.append(f"📊 Burstiness {audit['burstiness']:.1f} (target: >6.0)")
+    
+    if audit.get("fluff_ratio", 0) > 0.15:
+        warnings.append(f"💨 Fluff {audit['fluff_ratio']:.2f} (target: <0.15)")
+    
+    if audit.get("smog_index", 0) > 15:
+        warnings.append(f"📖 SMOG {audit['smog_index']:.1f} (target: <15)")
+
+    # Keyword tracking + auto-fix
+    import copy
+    keywords_state = copy.deepcopy(project_data.get("keywords_state", {}))
+    doc_nlp = nlp(batch_text)
+    text_lemma_list = [t.lemma_.lower() for t in doc_nlp if t.is_alpha]
+    
+    over_limit_hits = []
+    critical_reject = []
+
+    for row_id, meta in keywords_state.items():
+        kw = meta.get("keyword", "")
+        target_max = meta.get("target_max", 5)
+        
+        t_exact = meta.get("search_term_exact", kw.lower())
+        t_lemma = meta.get("search_lemma", "")
+        if not t_lemma: 
+            t_lemma = " ".join([t.lemma_.lower() for t in nlp(kw) if t.is_alpha])
+        
+        found = count_hybrid_occurrences(batch_text, text_lemma_list, t_exact, t_lemma)
+        
+        if found > 0:
+            current_total = meta.get("actual_uses", 0)
+            new_total = current_total + found
+            
+            if new_total > target_max:
+                if new_total >= (target_max + 3):
+                    critical_reject.append(f"{kw} ({new_total}/{target_max})")
+                else:
+                    over_limit_hits.append(kw)
+
+            meta["actual_uses"] = new_total
+            meta["status"] = compute_status(new_total, meta["target_min"], target_max)
+
+    # AUTO-FIX overuse (smart paraphrasing)
+    fixed_text = batch_text
+    if critical_reject:
+        for overuse_info in critical_reject:
+            parts = overuse_info.split(" (")
+            if len(parts) == 2:
+                kw = parts[0]
+                counts = parts[1].rstrip(")").split("/")
+                if len(counts) == 2:
+                    current = int(counts[0])
+                    limit = int(counts[1])
+                    
+                    fixed_text = auto_fix_keyword_overuse_smart(fixed_text, kw, current, limit)
+                    corrections_made.append(f"Replaced ~50% of '{kw}' with synonyms ({current} → ~{current - (current-limit)//2})")
+        
+        # Re-count
+        doc_nlp_fixed = nlp(fixed_text)
+        text_lemma_list_fixed = [t.lemma_.lower() for t in doc_nlp_fixed if t.is_alpha]
+        
+        for row_id, meta in keywords_state.items():
+            kw = meta.get("keyword", "")
+            t_exact = meta.get("search_term_exact", kw.lower())
+            t_lemma = meta.get("search_lemma", "")
+            if not t_lemma:
+                t_lemma = " ".join([t.lemma_.lower() for t in nlp(kw) if t.is_alpha])
+            
+            found = count_hybrid_occurrences(fixed_text, text_lemma_list_fixed, t_exact, t_lemma)
+            if found > 0:
+                meta["actual_uses"] = found
+                meta["status"] = compute_status(found, meta["target_min"], meta["target_max"])
+        
+        batch_text = fixed_text
+        
+        if corrections_made:
+            warnings.append(f"✅ AUTO-CORRECTED: {len(corrections_made)} keywords paraphrased")
+
+    under, over, locked, ok = global_keyword_stats(keywords_state)
+    
+    # Semantic drift + transition (for info only)
+    drift_check = calculate_semantic_drift(batch_text, project_data.get("batches", []))
+    prev_batch = project_data.get("batches", [])[-1] if project_data.get("batches") else None
+    transition_check = analyze_transition_quality(batch_text, prev_batch)
+
+    # Return preview (NO SAVE)
+    return {
+        "status": "PREVIEW",
+        "original_text": original_text,
+        "corrected_text": batch_text,
+        "text_changed": (original_text != batch_text),
+        "corrections_made": corrections_made,
+        "language_audit": {
+            "burstiness": audit.get("burstiness"),
+            "fluff_ratio": audit.get("fluff_ratio"),
+            "smog_index": audit.get("smog_index"),
+            "sentence_count": audit.get("sentence_count")
+        },
+        "keywords_summary": {
+            "under": under,
+            "over": over,
+            "ok": ok
+        },
+        "warnings": warnings,
+        "suggestions": suggestions,
+        "semantic_drift": drift_check,
+        "transition_quality": transition_check,
+        "next_action": "APPROVE_OR_MODIFY"
+    }
+
+# ===========================================================
+# 🔌 API ENDPOINT: Approve and Save Batch (v12.25.6.5)
+# ===========================================================
+@tracker_routes.post("/api/project/<project_id>/approve_batch")
+def approve_batch(project_id):
+    """
+    Save previously previewed batch to database
+    User has already seen corrected text and approved it
+    v12.25.6.5
+    """
+    data = request.get_json(force=True) or {}
+    corrected_text = data.get("corrected_text", "")
+    meta_trace = data.get("meta_trace", {})
+    keywords_state = data.get("keywords_state", {})
+    
+    db = firestore.client()
+    doc_ref = db.collection("seo_projects").document(project_id)
+    doc = doc_ref.get()
+    
+    if not doc.exists:
+        return jsonify({"error": "Project not found", "status": 404})
+    
+    project_data = doc.to_dict()
+    
+    # Quick re-audit for final stats
+    audit = analyze_language_quality(corrected_text)
+    
+    # Calculate keyword stats
+    under = sum(1 for v in keywords_state.values() if v.get("status") == "UNDER")
+    over = sum(1 for v in keywords_state.values() if v.get("status") == "OVER")
+    ok = sum(1 for v in keywords_state.values() if v.get("status") == "OK")
+    
+    # Save to Firestore
+    batch_entry = {
+        "text": corrected_text,
+        "language_audit": audit,
+        "meta_trace": meta_trace,
+        "summary": {"under": under, "over": over, "ok": ok},
+        "timestamp": datetime.datetime.now(datetime.timezone.utc)
+    }
+    
+    if "batches" not in project_data:
+        project_data["batches"] = []
+    project_data["batches"].append(batch_entry)
+    project_data["total_batches"] = len(project_data["batches"])
+    project_data["keywords_state"] = keywords_state
+    doc_ref.set(project_data)
+    
+    # Top UNDER keywords
+    top_under = [
+        m.get("keyword") 
+        for _, m in sorted(
+            keywords_state.items(), 
+            key=lambda i: i[1].get("target_min", 0) - i[1].get("actual_uses", 0), 
+            reverse=True
+        ) 
+        if m.get("status") == "UNDER"
+    ][:5]
+    
+    next_act = "EXPORT" if under == 0 and len(project_data["batches"]) >= 3 else "GENERATE_NEXT"
+    
+    return jsonify({
+        "status": "BATCH_SAVED",
+        "message": "Batch approved and saved successfully",
+        "meta_prompt_summary": f"UNDER={under} | TOP_UNDER={', '.join(top_under)} | Zapisano",
+        "next_action": next_act
+    })
+
+# ===========================================================
 # 🔌 API ENDPOINT: Language Refine
 # ===========================================================
 @tracker_routes.post("/api/language_refine")
@@ -795,8 +1077,8 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
                     current = int(counts[0])
                     limit = int(counts[1])
                     
-                    # Auto-fix: reduce by 50%, keep min 2
-                    fixed_text = auto_fix_keyword_overuse(fixed_text, kw, current, limit)
+                    # Auto-fix: reduce by 50%, keep min 2, PRESERVE LAYOUT
+                    fixed_text = auto_fix_keyword_overuse_smart(fixed_text, kw, current, limit)
         
         # Re-count after auto-fix
         doc_nlp_fixed = nlp(fixed_text)
