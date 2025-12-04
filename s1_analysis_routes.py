@@ -1,8 +1,3 @@
-# ===========================================================
-# S1 Analysis Routes - v12.25.6.7 FIXED
-# Real SerpAPI + Parallel URL processing
-# ===========================================================
-
 from flask import Blueprint, request, jsonify
 import concurrent.futures
 import time
@@ -14,21 +9,12 @@ import re
 
 s1_routes = Blueprint("s1_routes", __name__)
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# SerpAPI Key
 SERP_API_KEY = os.getenv("SERP_API_KEY")
 
-# ===========================================================
-# 🔍 SERP API CALL
-# ===========================================================
-
 def call_serp_api(topic: str, target_keywords: list) -> dict:
-    """
-    Call SerpAPI to get top search results
-    """
     if not SERP_API_KEY:
         logger.error("❌ SERP_API_KEY not set!")
         raise ValueError("SERP_API_KEY environment variable not configured")
@@ -54,11 +40,7 @@ def call_serp_api(topic: str, target_keywords: list) -> dict:
         raise
 
 def extract_top_urls(serp_results: dict, limit: int = 5) -> list:
-    """
-    Extract top N URLs from SERP results
-    """
     urls = []
-    
     organic_results = serp_results.get("organic_results", [])
     
     for result in organic_results[:limit]:
@@ -69,14 +51,7 @@ def extract_top_urls(serp_results: dict, limit: int = 5) -> list:
     logger.info(f"📊 Extracted {len(urls)} URLs from SERP")
     return urls
 
-# ===========================================================
-# 🔍 URL CONTENT EXTRACTION
-# ===========================================================
-
 def extract_h2_count(html_content: str) -> int:
-    """
-    Count H2 tags in HTML
-    """
     try:
         soup = BeautifulSoup(html_content, 'html.parser')
         h2_tags = soup.find_all('h2')
@@ -85,19 +60,13 @@ def extract_h2_count(html_content: str) -> int:
         return 0
 
 def extract_text_content(html_content: str) -> str:
-    """
-    Extract clean text from HTML
-    """
     try:
         soup = BeautifulSoup(html_content, 'html.parser')
         
-        # Remove script and style elements
         for script in soup(["script", "style"]):
             script.decompose()
         
         text = soup.get_text()
-        
-        # Clean whitespace
         lines = (line.strip() for line in text.splitlines())
         chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
         text = ' '.join(chunk for chunk in chunks if chunk)
@@ -107,10 +76,6 @@ def extract_text_content(html_content: str) -> str:
         return ""
 
 def process_single_url(url: str, timeout: int = 10) -> dict:
-    """
-    Process single URL with timeout
-    Returns extracted data or None if failed
-    """
     try:
         start_time = time.time()
         
@@ -124,10 +89,7 @@ def process_single_url(url: str, timeout: int = 10) -> dict:
             logger.warning(f"Failed to fetch {url}: HTTP {response.status_code}")
             return None
         
-        # Extract H2 count
         h2_count = extract_h2_count(response.text)
-        
-        # Extract text (first 5000 chars for analysis)
         text_content = extract_text_content(response.text)[:5000]
         
         elapsed = time.time() - start_time
@@ -149,11 +111,6 @@ def process_single_url(url: str, timeout: int = 10) -> dict:
         return None
 
 def fetch_competitor_data_parallel(urls: list, max_workers: int = 5, timeout: int = 10) -> list:
-    """
-    Fetch multiple URLs in parallel using ThreadPoolExecutor
-    
-    Speed improvement: 5x faster than serial processing
-    """
     results = []
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -174,26 +131,15 @@ def fetch_competitor_data_parallel(urls: list, max_workers: int = 5, timeout: in
     
     return results
 
-# ===========================================================
-# 🔍 TEXT ANALYSIS
-# ===========================================================
-
 def extract_common_topics(competitor_data: list) -> list:
-    """
-    Extract common topics from competitor content
-    Simple keyword frequency analysis
-    """
     all_text = " ".join([c.get("content", "") for c in competitor_data])
-    
-    # Simple word frequency (this is a placeholder - you can improve with spaCy)
     words = re.findall(r'\b\w+\b', all_text.lower())
     word_freq = {}
     
     for word in words:
-        if len(word) > 4:  # Skip short words
+        if len(word) > 4:
             word_freq[word] = word_freq.get(word, 0) + 1
     
-    # Get top 10
     sorted_words = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)
     
     common_topics = [
@@ -204,33 +150,14 @@ def extract_common_topics(competitor_data: list) -> list:
     return common_topics
 
 def extract_top_ngrams(competitor_data: list) -> list:
-    """
-    Extract top 4-grams for intro
-    Placeholder - can be improved with proper NLP
-    """
-    # Simple implementation - returns placeholder
-    # You can improve this with spaCy n-gram extraction
     return [
         "naturalne składniki",
         "zdrowe włosy",
         "pielęgnacja skóry"
     ]
 
-# ===========================================================
-# 🔌 API ENDPOINT: S1 Analysis
-# ===========================================================
-
 @s1_routes.post("/api/s1_analysis")
 def s1_analysis():
-    """
-    S1 Competitor Analysis with parallel URL fetching
-    
-    v12.25.6.7:
-    - Real SerpAPI integration
-    - Parallel URL processing (5x faster)
-    - H2 counting from real competitors
-    - Topic extraction from content
-    """
     data = request.get_json(force=True) or {}
     topic = data.get("topic", "")
     target_keywords = data.get("target_keywords", [])
@@ -241,7 +168,6 @@ def s1_analysis():
     logger.info(f"🔍 S1 Analysis started: {topic}")
     start_time = time.time()
     
-    # Step 1: Get SerpAPI results
     try:
         serp_results = call_serp_api(topic, target_keywords)
         top_urls = extract_top_urls(serp_results, limit=5)
@@ -255,7 +181,6 @@ def s1_analysis():
         logger.error(f"❌ SerpAPI failed: {e}")
         return jsonify({"error": f"Failed to fetch SERP results: {str(e)}"}), 500
     
-    # Step 2: Fetch competitor content in PARALLEL
     try:
         competitor_data = fetch_competitor_data_parallel(
             urls=top_urls,
@@ -272,21 +197,14 @@ def s1_analysis():
         logger.error(f"❌ Parallel fetch failed: {e}")
         return jsonify({"error": "Failed to process competitors"}), 500
     
-    # Step 3: Analyze competitor data
     try:
-        # Extract H2 counts
         h2_counts = [c.get("h2_count", 0) for c in competitor_data]
-        
-        # Calculate average
         avg_h2 = sum(h2_counts) / len(h2_counts) if h2_counts else 7
         avg_h2 = round(avg_h2)
         
         logger.info(f"📊 H2 counts: {h2_counts} → avg: {avg_h2}")
         
-        # Extract common topics
         common_topics = extract_common_topics(competitor_data)
-        
-        # Extract top N-grams
         top_ngrams = extract_top_ngrams(competitor_data)
         
         elapsed = time.time() - start_time
@@ -309,13 +227,8 @@ def s1_analysis():
         logger.error(f"❌ Analysis failed: {e}")
         return jsonify({"error": f"Failed to analyze competitors: {str(e)}"}), 500
 
-# ===========================================================
-# 🎯 MONITORING HELPER
-# ===========================================================
-
 @s1_routes.get("/api/s1_health")
 def s1_health():
-    """Health check endpoint"""
     serp_configured = bool(SERP_API_KEY)
     
     return jsonify({
@@ -327,9 +240,6 @@ def s1_health():
             "real_serp_api",
             "parallel_url_fetching",
             "h2_counting",
-            "topic_extraction",
-            "timeout_handling",
-            "error_logging"
+            "topic_extraction"
         ]
     })
-```
