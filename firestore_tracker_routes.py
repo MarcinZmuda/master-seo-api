@@ -1,10 +1,11 @@
 # ===========================================================
-# Version: v12.25.6.7 - FIXED MISSING FUNCTION + LIST SUPPORT
-# Last updated: 2024-12-04
+# Version: v12.25.6.7-FIXED - ALL BUGS RESOLVED
+# Last updated: 2024-12-05
 # Changes:
-# - RESTORED: process_batch_in_firestore (Fixed ImportError)
-# - UPDATED: validate_hard_rules (Allows lists for Key Takeaways)
-# - v12.25.6.6: LanguageTool Remote API (no Java)
+# - ADDED: Missing imports from seo_optimizer
+# - ADDED: global_keyword_stats() helper function
+# - INTEGRATED: Position scoring in preview
+# - INTEGRATED: Featured snippet check for Batch 1
 # ===========================================================
 
 from flask import Blueprint, request, jsonify
@@ -17,6 +18,14 @@ import spacy
 from rapidfuzz import fuzz
 import pysbd
 import textstat
+
+# ⭐ FIX #1: Import seo_optimizer functions
+from seo_optimizer import (
+    calculate_semantic_drift,
+    analyze_transition_quality,
+    calculate_keyword_position_score,
+    optimize_for_featured_snippet
+)
 
 # LanguageTool - Remote API (no Java needed!)
 try:
@@ -162,6 +171,15 @@ def analyze_language_quality(text: str) -> dict:
             
     return result
 
+# ⭐ FIX #2: Add missing helper function
+def global_keyword_stats(keywords_state: dict) -> tuple:
+    """Calculate global keyword statistics"""
+    under = sum(1 for meta in keywords_state.values() if meta.get("status") == "UNDER")
+    over = sum(1 for meta in keywords_state.values() if meta.get("status") == "OVER")
+    ok = sum(1 for meta in keywords_state.values() if meta.get("status") == "OK")
+    locked = 1 if over >= 4 else 0
+    return under, over, locked, ok
+
 # ===========================================================
 # 🔍 HYBRID KEYWORD COUNTER
 # ===========================================================
@@ -185,7 +203,7 @@ def compute_status(actual: int, target_min: int, target_max: int) -> str:
     else: return "OK"
 
 # ===========================================================
-# 🚨 RESTORED FUNCTION (FIXES IMPORT ERROR)
+# 🚨 LEGACY FUNCTION (for backward compatibility)
 # ===========================================================
 
 def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dict = None) -> dict:
@@ -312,6 +330,13 @@ def process_batch_preview(project_id, batch_text, meta_trace):
     if audit.get("fluff_ratio", 0) > 0.15:
         warnings.append(f"💨 Fluff {audit['fluff_ratio']:.2f} (target: <0.15)")
     
+    # ⭐ FIX #3: Check if this is Batch 1 for Featured Snippet optimization
+    batch_num = len(project_data.get("batches", [])) + 1
+    if batch_num == 1:
+        snippet_check = optimize_for_featured_snippet(batch_text)
+        if not snippet_check["optimized"]:
+            warnings.append(f"📌 Intro optimization: {snippet_check['recommendation']}")
+    
     # Keyword tracking logic...
     import copy
     keywords_state = copy.deepcopy(project_data.get("keywords_state", {}))
@@ -343,6 +368,11 @@ def process_batch_preview(project_id, batch_text, meta_trace):
 
                 meta["actual_uses"] = new_total
                 meta["status"] = compute_status(new_total, meta["target_min"], target_max)
+                
+                # ⭐ FIX #4: Add position scoring
+                position_data = calculate_keyword_position_score(batch_text, kw)
+                meta["position_score"] = position_data["score"]
+                meta["position_quality"] = position_data["quality"]
 
         # AUTO-FIX
         fixed_text = batch_text
@@ -362,11 +392,12 @@ def process_batch_preview(project_id, batch_text, meta_trace):
             if corrections_made:
                 warnings.append(f"✅ AUTO-CORRECTED: {len(corrections_made)} keywords paraphrased")
 
-    # Drift check
+    # Drift check (now properly imported)
     drift_check = calculate_semantic_drift(batch_text, project_data.get("batches", []))
     prev_batch = project_data.get("batches", [])[-1] if project_data.get("batches") else None
     transition_check = analyze_transition_quality(batch_text, prev_batch)
     
+    # Stats calculation (now properly defined)
     under, over, locked, ok = global_keyword_stats(keywords_state)
 
     return {
