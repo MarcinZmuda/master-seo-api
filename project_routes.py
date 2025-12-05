@@ -12,14 +12,18 @@ import google.generativeai as genai
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
+else:
+    print("[WARNING] ⚠️ GEMINI_API_KEY not set - LSI enrichment will use frequency-based fallback")
 
-# Global spaCy
+# ⭐ FIX #3: Unify spaCy model to pl_core_news_lg (matches Dockerfile)
 try:
-    nlp = spacy.load("pl_core_news_sm")
+    nlp = spacy.load("pl_core_news_lg")
+    print("[INIT] ✅ spaCy pl_core_news_lg loaded (unified)")
 except OSError:
+    print("[WARNING] ⚠️ spaCy model not found. Attempting download...")
     from spacy.cli import download
-    download("pl_core_news_sm")
-    nlp = spacy.load("pl_core_news_sm")
+    download("pl_core_news_lg")
+    nlp = spacy.load("pl_core_news_lg")
 
 project_routes = Blueprint("project_routes", __name__)
 
@@ -71,6 +75,7 @@ def extract_lsi_candidates(s1_data, main_keywords):
     # 3. Semantic filtering przez Gemini (jeśli dostępny)
     if not GEMINI_API_KEY:
         # Fallback: zwróć top 15 najczęstszych
+        print("[INFO] Using frequency-based LSI selection (Gemini not available)")
         return list(candidates)[:15]
     
     try:
@@ -97,12 +102,13 @@ def extract_lsi_candidates(s1_data, main_keywords):
         lsi_terms = json.loads(response_text)
         
         if isinstance(lsi_terms, list):
+            print(f"[INFO] Gemini selected {len(lsi_terms)} LSI keywords")
             return lsi_terms[:15]
         else:
             return list(candidates)[:15]
             
     except Exception as e:
-        print(f"LSI extraction error: {e}")
+        print(f"[WARNING] LSI extraction error: {e} - using fallback")
         return list(candidates)[:15]
 
 
@@ -225,6 +231,7 @@ def create_project():
                         "type": "LSI_AUTO"  # Nowy typ: automatycznie dodany LSI
                     }
                     lsi_added_count += 1
+            print(f"[INFO] Added {lsi_added_count} LSI keywords automatically")
 
     db = firestore.client()
     doc_ref = db.collection("seo_projects").document()
@@ -238,7 +245,7 @@ def create_project():
         "created_at": firestore.SERVER_TIMESTAMP,
         "batches": [],
         "total_batches": 0,
-        "version": "v12.25.1",  # ⭐ Updated version
+        "version": "v12.25.6.7-FIXED",  # ⭐ Updated version
         "lsi_enrichment": {
             "enabled": lsi_added_count > 0,
             "count": lsi_added_count
@@ -252,7 +259,7 @@ def create_project():
         "project_id": doc_ref.id,
         "topic": topic,
         "keywords": len(firestore_keywords),
-        "version": "v12.25.1"
+        "version": "v12.25.6.7-FIXED"
     }
     
     # ⭐ Informuj o LSI enrichment
@@ -284,7 +291,7 @@ def add_batch_to_project(project_id):
     return jsonify(result), status_code
 
 # ================================================================
-# 🆕 S4 — EXPORT
+# 🆕 S4 – EXPORT
 # ================================================================
 @project_routes.get("/api/project/<project_id>/export")
 def export_project_data(project_id):
@@ -340,11 +347,11 @@ def export_project_data(project_id):
             "avg_burstiness": avg_burst
         },
         "keyword_details": keyword_details,
-        "version": data.get("version", "v12.0")
+        "version": data.get("version", "v12.25.6.7-FIXED")
     }), 200
 
 # ================================================================
-# 🗑️ S4 — DELETE
+# 🗑️ S4 – DELETE
 # ================================================================
 @project_routes.delete("/api/project/<project_id>")
 def delete_project_final(project_id):
