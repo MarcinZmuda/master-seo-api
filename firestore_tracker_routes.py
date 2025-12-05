@@ -181,21 +181,76 @@ def global_keyword_stats(keywords_state: dict) -> tuple:
     return under, over, locked, ok
 
 # ===========================================================
-# 🔍 HYBRID KEYWORD COUNTER
+# 🔍 HYBRID LEMMA-FUZZY KEYWORD COUNTER (v7.6.0-morphological)
+# ===========================================================
+# Enhanced counting with full morphological form recognition:
+# - Exact substring matches
+# - ALL lemma matches (token-by-token for single words)
+# - Sequential lemma for multi-word phrases
+# - Optional fuzzy matching for complex cases
 # ===========================================================
 
 def count_hybrid_occurrences(text: str, text_lemma_list: list, search_term_exact: str, search_lemma: str) -> int:
-    text_lower = text.lower()
-    count = text_lower.count(search_term_exact.lower())
+    """
+    Hybrid counting that matches SEO tool behavior:
+    - For single-word keywords: counts ALL morphological forms
+    - For multi-word keywords: sequential lemma + fuzzy fallback
     
-    if nlp and search_lemma:
-        lemma_tokens = search_lemma.split()
-        lemma_len = len(lemma_tokens)
+    This ensures backend counting aligns with SEO tools (Surfer/Neuron/etc)
+    which recognize all forms like: umorzenie, umorzenia, umorzeniu, etc.
+    """
+    from rapidfuzz import fuzz
+    
+    # Parse keyword
+    if not search_lemma or not nlp:
+        # Fallback to exact counting only
+        return text.lower().count(search_term_exact.lower())
+    
+    target_lemmas = search_lemma.split()
+    
+    # === SINGLE-WORD KEYWORD: Count ALL morphological forms ===
+    if len(target_lemmas) == 1:
+        target_lemma = target_lemmas[0]
+        count = 0
+        
+        # Process text with spaCy to get all tokens
+        doc = nlp(text)
+        
+        for token in doc:
+            # Match lemma (handles all morphological forms)
+            if token.is_alpha and token.lemma_.lower() == target_lemma:
+                count += 1
+        
+        return count
+    
+    # === MULTI-WORD KEYWORD: Sequential + Fuzzy ===
+    else:
+        count = 0
+        lemma_len = len(target_lemmas)
+        
+        # Build lemma list if not provided
+        if not text_lemma_list:
+            doc = nlp(text)
+            text_lemma_list = [t.lemma_.lower() for t in doc if t.is_alpha]
+        
+        # Scan through windows
         for i in range(len(text_lemma_list) - lemma_len + 1):
             window = text_lemma_list[i:i + lemma_len]
-            if window == lemma_tokens:
+            
+            # Exact lemma sequence match
+            if window == target_lemmas:
                 count += 1
-    return count
+            else:
+                # Fuzzy match (allows slight variations/reordering)
+                window_str = " ".join(window)
+                target_str = " ".join(target_lemmas)
+                
+                score = fuzz.token_set_ratio(window_str, target_str)
+                
+                if score >= 90:  # 90% threshold
+                    count += 1
+        
+        return count
 
 def compute_status(actual: int, target_min: int, target_max: int) -> str:
     if actual < target_min: return "UNDER"
