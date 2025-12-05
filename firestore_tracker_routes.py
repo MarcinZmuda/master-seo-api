@@ -188,16 +188,57 @@ def global_keyword_stats(keywords_state: dict) -> tuple:
 # - ALL lemma matches (token-by-token for single words)
 # - Sequential lemma for multi-word phrases
 # - Optional fuzzy matching for complex cases
+# - INCLUDES H2/H3 counting (like Surfer SEO)
 # ===========================================================
 
-def count_hybrid_occurrences(text: str, text_lemma_list: list, search_term_exact: str, search_lemma: str) -> int:
+def extract_headings_from_markdown(text: str) -> dict:
     """
-    Hybrid counting that matches SEO tool behavior:
-    - For single-word keywords: counts ALL morphological forms
-    - For multi-word keywords: sequential lemma + fuzzy fallback
+    Extract H2 and H3 headings from markdown text.
+    Returns: {"h2_list": [...], "h3_list": [...], "content_only": "..."}
+    """
+    import re
     
-    This ensures backend counting aligns with SEO tools (Surfer/Neuron/etc)
-    which recognize all forms like: umorzenie, umorzenia, umorzeniu, etc.
+    h2_list = []
+    h3_list = []
+    
+    # Extract H2 (## Title)
+    h2_pattern = r'^## (.+)$'
+    h2_matches = re.findall(h2_pattern, text, re.MULTILINE)
+    h2_list.extend(h2_matches)
+    
+    # Extract H3 (### Title)
+    h3_pattern = r'^### (.+)$'
+    h3_matches = re.findall(h3_pattern, text, re.MULTILINE)
+    h3_list.extend(h3_matches)
+    
+    # Remove headings from text to get content only
+    content_only = re.sub(r'^##+ .+$', '', text, flags=re.MULTILINE)
+    content_only = content_only.strip()
+    
+    return {
+        "h2_list": h2_list,
+        "h3_list": h3_list,
+        "content_only": content_only,
+        "all_headings": h2_list + h3_list
+    }
+
+def count_hybrid_occurrences(text: str, text_lemma_list: list, search_term_exact: str, search_lemma: str, include_headings: bool = True) -> int:
+    """
+    Hybrid counting that matches SEO tool behavior (Surfer/Neuron):
+    - Counts ALL morphological forms
+    - Includes H2/H3 headings in count (like Surfer does)
+    - For single-word keywords: token-by-token
+    - For multi-word keywords: sequential lemma + fuzzy
+    
+    Args:
+        text: Full markdown text (with ## H2 and ### H3)
+        text_lemma_list: Pre-computed lemma list (optional)
+        search_term_exact: Exact keyword string
+        search_lemma: Lemmatized form
+        include_headings: If True, counts keywords in H2/H3 (default: True, like Surfer)
+    
+    Returns:
+        Total count including headings and content
     """
     from rapidfuzz import fuzz
     
@@ -208,29 +249,54 @@ def count_hybrid_occurrences(text: str, text_lemma_list: list, search_term_exact
     
     target_lemmas = search_lemma.split()
     
+    # Extract headings and content
+    if include_headings:
+        extracted = extract_headings_from_markdown(text)
+        content_text = extracted["content_only"]
+        all_headings_text = " ".join(extracted["all_headings"])
+        
+        # Count in headings separately (exact + lemma)
+        heading_count = 0
+        if all_headings_text:
+            # Simple exact count in headings
+            heading_count = all_headings_text.lower().count(search_term_exact.lower())
+            
+            # Add lemma matches in headings
+            if len(target_lemmas) == 1:
+                doc_h = nlp(all_headings_text)
+                for token in doc_h:
+                    if token.is_alpha and token.lemma_.lower() == target_lemmas[0]:
+                        heading_count += 1
+        
+        # Use content_only for main counting
+        text_for_content = content_text
+    else:
+        heading_count = 0
+        text_for_content = text
+    
     # === SINGLE-WORD KEYWORD: Count ALL morphological forms ===
     if len(target_lemmas) == 1:
         target_lemma = target_lemmas[0]
-        count = 0
+        content_count = 0
         
         # Process text with spaCy to get all tokens
-        doc = nlp(text)
+        doc = nlp(text_for_content)
         
         for token in doc:
             # Match lemma (handles all morphological forms)
             if token.is_alpha and token.lemma_.lower() == target_lemma:
-                count += 1
+                content_count += 1
         
-        return count
+        return heading_count + content_count
     
     # === MULTI-WORD KEYWORD: Sequential + Fuzzy ===
     else:
-        count = 0
+        content_count = 0
         lemma_len = len(target_lemmas)
         
         # Build lemma list if not provided
         if not text_lemma_list:
-            doc = nlp(text)
+            doc = nlp(text_for_content)
             text_lemma_list = [t.lemma_.lower() for t in doc if t.is_alpha]
         
         # Scan through windows
@@ -239,7 +305,7 @@ def count_hybrid_occurrences(text: str, text_lemma_list: list, search_term_exact
             
             # Exact lemma sequence match
             if window == target_lemmas:
-                count += 1
+                content_count += 1
             else:
                 # Fuzzy match (allows slight variations/reordering)
                 window_str = " ".join(window)
@@ -248,9 +314,9 @@ def count_hybrid_occurrences(text: str, text_lemma_list: list, search_term_exact
                 score = fuzz.token_set_ratio(window_str, target_str)
                 
                 if score >= 90:  # 90% threshold
-                    count += 1
+                    content_count += 1
         
-        return count
+        return heading_count + content_count
 
 def compute_status(actual: int, target_min: int, target_max: int) -> str:
     if actual < target_min: return "UNDER"
