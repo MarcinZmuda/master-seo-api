@@ -51,13 +51,32 @@ def extract_top_urls(serp_results: dict, limit: int = 5) -> list:
     logger.info(f"📊 Extracted {len(urls)} URLs from SERP")
     return urls
 
-def extract_h2_count(html_content: str) -> int:
+def extract_h2_data(html_content: str) -> dict:
+    """
+    Extract both H2 count AND titles from HTML.
+    Returns: {"count": int, "titles": list}
+    """
     try:
         soup = BeautifulSoup(html_content, 'html.parser')
         h2_tags = soup.find_all('h2')
-        return len(h2_tags)
-    except:
-        return 0
+        
+        h2_titles = []
+        for h2 in h2_tags:
+            text = h2.get_text().strip()
+            # Clean up - remove extra whitespace
+            text = ' '.join(text.split())
+            
+            # Filter out very short/empty H2
+            if text and len(text) > 3:
+                h2_titles.append(text)
+        
+        return {
+            "count": len(h2_titles),
+            "titles": h2_titles
+        }
+    except Exception as e:
+        logger.warning(f"Error extracting H2: {e}")
+        return {"count": 0, "titles": []}
 
 def extract_text_content(html_content: str) -> str:
     try:
@@ -89,15 +108,16 @@ def process_single_url(url: str, timeout: int = 10) -> dict:
             logger.warning(f"Failed to fetch {url}: HTTP {response.status_code}")
             return None
         
-        h2_count = extract_h2_count(response.text)
+        h2_data = extract_h2_data(response.text)
         text_content = extract_text_content(response.text)[:5000]
         
         elapsed = time.time() - start_time
-        logger.info(f"✅ Fetched {url} in {elapsed:.2f}s - H2: {h2_count}")
+        logger.info(f"✅ Fetched {url} in {elapsed:.2f}s - H2: {h2_data['count']}")
         
         return {
             "url": url,
-            "h2_count": h2_count,
+            "h2_count": h2_data["count"],
+            "h2_titles": h2_data["titles"],
             "content": text_content,
             "status": "success",
             "fetch_time": elapsed
@@ -149,11 +169,96 @@ def extract_common_topics(competitor_data: list) -> list:
     
     return common_topics
 
-def extract_top_ngrams(competitor_data: list) -> list:
+def extract_top_ngrams(competitor_data: list, n: int = 4, top_k: int = 20) -> list:
+    """
+    Extract real n-grams (default 4-grams) from competitor text.
+    Returns top_k most frequent n-grams.
+    """
+    from collections import Counter
+    
+    all_text = " ".join([c.get("content", "") for c in competitor_data])
+    
+    # Tokenize (Polish-friendly - includes ąćęłńóśźż)
+    words = re.findall(r'\b[a-ząćęłńóśźż]+\b', all_text.lower())
+    
+    # Create n-grams
+    ngrams = []
+    for i in range(len(words) - n + 1):
+        ngram = " ".join(words[i:i+n])
+        
+        # Basic filtering - skip if contains too many common stopwords
+        stopword_count = sum(1 for stop in ["to", "jest", "się", "być", "oraz", "które"] if stop in ngram)
+        if stopword_count < 2:  # Allow max 1 stopword per 4-gram
+            ngrams.append(ngram)
+    
+    # Count frequency
+    ngram_freq = Counter(ngrams)
+    
+    # Return top k
     return [
-        "naturalne składniki",
-        "zdrowe włosy",
-        "pielęgnacja skóry"
+        {"ngram": ng, "frequency": freq}
+        for ng, freq in ngram_freq.most_common(top_k)
+    ]
+
+def analyze_h2_topics(competitor_data: list) -> list:
+    """
+    Analyze H2 titles from competitors to find common topics.
+    Returns topics sorted by frequency across competitors.
+    """
+    from collections import Counter
+    
+    all_h2_titles = []
+    h2_by_competitor = []
+    
+    # Collect all H2 titles
+    for competitor in competitor_data:
+        h2_titles = competitor.get("h2_titles", [])
+        all_h2_titles.extend(h2_titles)
+        h2_by_competitor.append({
+            "url": competitor.get("url", ""),
+            "h2_titles": h2_titles
+        })
+    
+    if not all_h2_titles:
+        return []
+    
+    # Extract 2-3 word phrases from H2 titles (main topics)
+    topic_freq = Counter()
+    topic_examples = {}
+    
+    for h2 in all_h2_titles:
+        h2_lower = h2.lower()
+        words = re.findall(r'\b[a-ząćęłńóśźż]+\b', h2_lower)
+        
+        # Extract 2-word and 3-word phrases
+        for length in [3, 2]:  # Try 3-word first, then 2-word
+            for i in range(len(words) - length + 1):
+                phrase = " ".join(words[i:i+length])
+                
+                # Filter meaningful phrases (min 10 chars, not all stopwords)
+                if len(phrase) >= 10:
+                    stopwords = ["to", "jest", "się", "być", "oraz", "które", "przez", "dla"]
+                    if not all(word in stopwords for word in words[i:i+length]):
+                        topic_freq[phrase] += 1
+                        
+                        # Store example H2 titles for this topic
+                        if phrase not in topic_examples:
+                            topic_examples[phrase] = []
+                        if h2 not in topic_examples[phrase]:
+                            topic_examples[phrase].append(h2)
+    
+    # Calculate coverage (how many competitors have this topic)
+    total_competitors = len(competitor_data)
+    
+    # Return top 15 topics with examples
+    return [
+        {
+            "topic": topic,
+            "frequency": freq,
+            "coverage": f"{min(freq, total_competitors)}/{total_competitors}",
+            "example_titles": topic_examples.get(topic, [])[:3]  # Max 3 examples
+        }
+        for topic, freq in topic_freq.most_common(15)
     ]
 
 @s1_routes.post("/api/s1_analysis")
@@ -204,8 +309,16 @@ def s1_analysis():
         
         logger.info(f"📊 H2 counts: {h2_counts} → avg: {avg_h2}")
         
+        # NEW: Analyze H2 topics from competitors
+        h2_topics = analyze_h2_topics(competitor_data)
+        logger.info(f"📊 Found {len(h2_topics)} unique H2 topics")
+        
+        # Extract common words (legacy - kept for backward compatibility)
         common_topics = extract_common_topics(competitor_data)
-        top_ngrams = extract_top_ngrams(competitor_data)
+        
+        # Extract real n-grams (not hardcoded)
+        top_ngrams = extract_top_ngrams(competitor_data, n=4, top_k=20)
+        logger.info(f"📊 Extracted {len(top_ngrams)} 4-grams")
         
         elapsed = time.time() - start_time
         logger.info(f"✅ S1 Analysis completed in {elapsed:.2f}s")
@@ -215,8 +328,9 @@ def s1_analysis():
             "analysis": {
                 "avg_h2_count": avg_h2,
                 "h2_counts": h2_counts,
-                "common_topics": common_topics,
-                "top_ngrams": top_ngrams,
+                "h2_topics": h2_topics,  # NEW: Actual H2 topics with examples
+                "common_topics": common_topics,  # Legacy: single words
+                "top_ngrams": top_ngrams,  # Real n-grams (not hardcoded)
                 "competitors_analyzed": len(competitor_data),
                 "competitor_urls": [c["url"] for c in competitor_data],
                 "processing_time": round(elapsed, 2)
