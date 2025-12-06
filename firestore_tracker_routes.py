@@ -1,11 +1,12 @@
 # ===========================================================
-# Version: v12.25.6.7-FIXED - ALL BUGS RESOLVED
-# Last updated: 2024-12-05
+# Version: v12.25.6.13 - KEYWORD VALIDATION MANDATORY
+# Last updated: 2024-12-06
 # Changes:
-# - ADDED: Missing imports from seo_optimizer
-# - ADDED: global_keyword_stats() helper function
-# - INTEGRATED: Position scoring in preview
-# - INTEGRATED: Featured snippet check for Batch 1
+# - ADDED: /validate_article endpoint (checks BASIC/EXTENDED usage)
+# - ADDED: Keyword validation in /approve_batch
+# - ADDED: Completeness check in /export
+# - FIXED: All redundant imports removed
+# - FIXED: numpy added to requirements.txt
 # ===========================================================
 
 from flask import Blueprint, request, jsonify
@@ -14,7 +15,9 @@ import datetime
 import re
 import json
 import os
+import copy
 import spacy
+import statistics
 from rapidfuzz import fuzz
 import pysbd
 import textstat
@@ -69,7 +72,6 @@ def auto_fix_keyword_overuse_smart(text: str, keyword: str, current_count: int, 
     to_replace = max(1, overuse // 2)
     target_final = max(2, current_count - to_replace)
     
-    import re
     pattern = re.compile(re.escape(keyword), re.IGNORECASE)
     matches = list(pattern.finditer(text))
     
@@ -157,7 +159,6 @@ def analyze_language_quality(text: str) -> dict:
     if sentences:
         lengths = [len(s.split()) for s in sentences]
         if len(lengths) > 1:
-            import statistics
             mean_len = statistics.mean(lengths)
             stdev_len = statistics.stdev(lengths)
             result["burstiness"] = stdev_len / mean_len if mean_len > 0 else 0
@@ -205,8 +206,6 @@ def extract_headings_from_markdown(text: str) -> dict:
     Extract H2 and H3 headings from markdown text.
     Returns: {"h2_list": [...], "h3_list": [...], "content_only": "..."}
     """
-    import re
-    
     h2_list = []
     h3_list = []
     
@@ -249,8 +248,6 @@ def count_hybrid_occurrences(text: str, text_lemma_list: list, search_term_exact
     Returns:
         Total count including headings and content
     """
-    from rapidfuzz import fuzz
-    
     # Parse keyword
     if not search_lemma or not nlp:
         # Fallback to exact counting only
@@ -367,9 +364,11 @@ def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dic
         for meta in keywords_state.values():
             kw = meta.get("keyword", "")
             found = count_hybrid_occurrences(
-                batch_text, text_lemma_list, 
+                batch_text, 
+                text_lemma_list, 
                 meta.get("search_term_exact", kw.lower()), 
-                meta.get("search_lemma", "")
+                meta.get("search_lemma", ""),
+                include_headings=True
             )
             if found > 0:
                 meta["actual_uses"] = meta.get("actual_uses", 0) + found
@@ -468,7 +467,6 @@ def process_batch_preview(project_id, batch_text, meta_trace):
             warnings.append(f"📌 Intro optimization: {snippet_check['recommendation']}")
     
     # Keyword tracking logic...
-    import copy
     keywords_state = copy.deepcopy(project_data.get("keywords_state", {}))
     
     if nlp:
@@ -486,7 +484,13 @@ def process_batch_preview(project_id, batch_text, meta_trace):
             if not t_lemma: 
                 t_lemma = " ".join([t.lemma_.lower() for t in nlp(kw) if t.is_alpha])
             
-            found = count_hybrid_occurrences(batch_text, text_lemma_list, t_exact, t_lemma)
+            found = count_hybrid_occurrences(
+                batch_text, 
+                text_lemma_list, 
+                t_exact, 
+                t_lemma,
+                include_headings=True
+            )
             
             if found > 0:
                 current_total = meta.get("actual_uses", 0)
@@ -546,6 +550,73 @@ def process_batch_preview(project_id, batch_text, meta_trace):
         "next_action": "APPROVE_OR_MODIFY"
     }
 
+@tracker_routes.post("/api/project/<project_id>/validate_article")
+def validate_article(project_id):
+    """
+    Validates that ALL BASIC and EXTENDED keywords are used at least once
+    in the complete article (all batches combined).
+    
+    Returns:
+        - valid: True if all required keywords used
+        - missing_keywords: List of unused keywords
+        - article_ready: True if article can be finalized
+    """
+    db = firestore.client()
+    doc_ref = db.collection("seo_projects").document(project_id)
+    doc = doc_ref.get()
+    
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+    
+    project_data = doc.to_dict()
+    keywords_state = project_data.get("keywords_state", {})
+    batches = project_data.get("batches", [])
+    
+    # Combine all batch texts
+    full_article = "\n\n".join([b.get("text", "") for b in batches])
+    
+    # Check only BASIC and EXTENDED keywords
+    missing_keywords = []
+    unused_basic = []
+    unused_extended = []
+    
+    for row_id, meta in keywords_state.items():
+        kw_type = meta.get("type", "BASIC").upper()
+        
+        # Only validate BASIC and EXTENDED (skip LSI)
+        if kw_type not in ["BASIC", "EXTENDED"]:
+            continue
+        
+        keyword = meta.get("keyword", "")
+        actual_uses = meta.get("actual_uses", 0)
+        
+        # Check if keyword is used at least once
+        if actual_uses == 0:
+            missing_keywords.append({
+                "keyword": keyword,
+                "type": kw_type,
+                "target_min": meta.get("target_min", 1),
+                "target_max": meta.get("target_max", 5)
+            })
+            
+            if kw_type == "BASIC":
+                unused_basic.append(keyword)
+            elif kw_type == "EXTENDED":
+                unused_extended.append(keyword)
+    
+    is_valid = len(missing_keywords) == 0
+    
+    return jsonify({
+        "valid": is_valid,
+        "missing_keywords": missing_keywords,
+        "unused_basic": unused_basic,
+        "unused_extended": unused_extended,
+        "article_ready": is_valid,
+        "total_batches": len(batches),
+        "article_length": len(full_article),
+        "message": "All keywords used ✅" if is_valid else f"⚠️ {len(missing_keywords)} keywords not used yet"
+    })
+
 @tracker_routes.post("/api/project/<project_id>/approve_batch")
 def approve_batch(project_id):
     data = request.get_json(force=True) or {}
@@ -560,7 +631,18 @@ def approve_batch(project_id):
     if not doc.exists: return jsonify({"error": "Not found"}), 404
     project_data = doc.to_dict()
     
-    # Save
+    # Check for unused BASIC/EXTENDED keywords
+    unused_required = []
+    for row_id, meta in keywords_state.items():
+        kw_type = meta.get("type", "BASIC").upper()
+        if kw_type in ["BASIC", "EXTENDED"]:
+            if meta.get("actual_uses", 0) == 0:
+                unused_required.append({
+                    "keyword": meta.get("keyword", ""),
+                    "type": kw_type
+                })
+    
+    # Save batch
     batch_entry = {
         "text": corrected_text,
         "meta_trace": meta_trace,
@@ -572,7 +654,21 @@ def approve_batch(project_id):
     project_data["keywords_state"] = keywords_state
     doc_ref.set(project_data)
     
-    return jsonify({"status": "BATCH_SAVED", "next_action": "GENERATE_NEXT"})
+    # Return with warning if there are unused required keywords
+    response = {
+        "status": "BATCH_SAVED",
+        "next_action": "GENERATE_NEXT"
+    }
+    
+    if unused_required:
+        response["warning"] = f"⚠️ {len(unused_required)} required keywords not used yet"
+        response["unused_keywords"] = unused_required
+        response["article_complete"] = False
+    else:
+        response["article_complete"] = True
+        response["message"] = "✅ All required keywords used"
+    
+    return jsonify(response)
 
 @tracker_routes.post("/api/language_refine")
 def language_refine():
@@ -587,6 +683,47 @@ def export_article(project_id):
     doc_ref = db.collection("seo_projects").document(project_id)
     doc = doc_ref.get()
     if not doc.exists: return jsonify({"error": "Not found"}), 404
+    
     project_data = doc.to_dict()
-    full_text = "\n\n".join([b.get("text", "") for b in project_data.get("batches", [])])
-    return jsonify({"status": "success", "article": full_text})
+    batches = project_data.get("batches", [])
+    keywords_state = project_data.get("keywords_state", {})
+    
+    # Combine all batches
+    full_text = "\n\n".join([b.get("text", "") for b in batches])
+    
+    # Check for unused BASIC/EXTENDED keywords
+    unused_required = []
+    all_keywords_stats = []
+    
+    for row_id, meta in keywords_state.items():
+        kw_type = meta.get("type", "BASIC").upper()
+        keyword = meta.get("keyword", "")
+        actual_uses = meta.get("actual_uses", 0)
+        target_min = meta.get("target_min", 1)
+        target_max = meta.get("target_max", 5)
+        
+        all_keywords_stats.append({
+            "keyword": keyword,
+            "type": kw_type,
+            "uses": actual_uses,
+            "target": f"{target_min}-{target_max}",
+            "status": meta.get("status", "UNDER")
+        })
+        
+        if kw_type in ["BASIC", "EXTENDED"] and actual_uses == 0:
+            unused_required.append({
+                "keyword": keyword,
+                "type": kw_type
+            })
+    
+    article_complete = len(unused_required) == 0
+    
+    return jsonify({
+        "status": "success",
+        "article": full_text,
+        "article_complete": article_complete,
+        "total_batches": len(batches),
+        "unused_required_keywords": unused_required,
+        "all_keywords": all_keywords_stats,
+        "warning": None if article_complete else f"⚠️ Article incomplete: {len(unused_required)} required keywords not used"
+    })
