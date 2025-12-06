@@ -11,8 +11,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install spaCy Polish model (matching spacy==3.7.2)
-RUN python -m spacy download pl_core_news_lg
+# Install spaCy Polish model (pl_core_news_lg 3.7.0 for spacy 3.7.2)
+RUN pip install https://github.com/explosion/spacy-models/releases/download/pl_core_news_lg-3.7.0/pl_core_news_lg-3.7.0-py3-none-any.whl --no-cache-dir
 
 COPY . .
 
