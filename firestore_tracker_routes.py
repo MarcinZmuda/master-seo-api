@@ -37,13 +37,22 @@ except Exception as e:
     LT_TOOL_PL = None
     print(f"[WARNING] ⚠️ LanguageTool init failed: {e}")
 
-# spaCy for lemmatization
+# spaCy for lemmatization - CRITICAL for morphological counting
 try:
     nlp = spacy.load("pl_core_news_lg")
-    print("[INIT] ✅ spaCy Polish model loaded.")
-except:
-    print("[WARNING] ⚠️ spaCy model not found. Run in Dockerfile.")
-    nlp = None
+    print("[INIT] ✅ spaCy Polish model loaded (pl_core_news_lg).")
+except OSError:
+    print("[WARNING] ⚠️ spaCy model not found. Attempting auto-download...")
+    try:
+        from spacy.cli import download
+        download("pl_core_news_lg")
+        nlp = spacy.load("pl_core_news_lg")
+        print("[INIT] ✅ spaCy model downloaded and loaded successfully.")
+    except Exception as download_error:
+        print(f"[ERROR] ❌ Failed to download spaCy model: {download_error}")
+        print("[ERROR] ❌ CRITICAL: Morphological counting will NOT work without spaCy!")
+        print("[ERROR] ❌ Please run: python -m spacy download pl_core_news_lg")
+        nlp = None
 
 tracker_routes = Blueprint("tracker_routes", __name__)
 
