@@ -309,6 +309,24 @@ def s1_analysis():
         
         logger.info(f"📊 H2 counts: {h2_counts} → avg: {avg_h2}")
         
+        # NEW: Calculate average article length from competitors
+        competitor_lengths = []
+        for comp in competitor_data:
+            word_count = len(comp.get("full_text", "").split())
+            if word_count > 0:
+                competitor_lengths.append(word_count)
+        
+        if competitor_lengths:
+            avg_competitor_length = int(sum(competitor_lengths) / len(competitor_lengths))
+            min_length = min(competitor_lengths)
+            max_length = max(competitor_lengths)
+        else:
+            avg_competitor_length = 2000  # Default if can't calculate
+            min_length = 1500
+            max_length = 2500
+        
+        logger.info(f"📊 Article lengths: avg={avg_competitor_length}w, range={min_length}-{max_length}w")
+        
         # NEW: Analyze H2 topics from competitors
         h2_topics = analyze_h2_topics(competitor_data)
         logger.info(f"📊 Found {len(h2_topics)} unique H2 topics")
@@ -328,6 +346,12 @@ def s1_analysis():
             "analysis": {
                 "avg_h2_count": avg_h2,
                 "h2_counts": h2_counts,
+                "avg_article_length": avg_competitor_length,  # NEW
+                "article_length_range": {  # NEW
+                    "min": min_length,
+                    "max": max_length,
+                    "avg": avg_competitor_length
+                },
                 "h2_topics": h2_topics,  # NEW: Actual H2 topics with examples
                 "common_topics": common_topics,  # Legacy: single words
                 "top_ngrams": top_ngrams,  # Real n-grams (not hardcoded)
@@ -348,7 +372,7 @@ def s1_health():
     return jsonify({
         "status": "healthy",
         "service": "s1_analysis",
-        "version": "12.25.6.7",
+        "version": "12.25.6.15",
         "serp_api_configured": serp_configured,
         "features": [
             "real_serp_api",
