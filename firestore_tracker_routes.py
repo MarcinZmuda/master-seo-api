@@ -1,12 +1,13 @@
 # ===========================================================
-# Version: v12.25.6.13 - KEYWORD VALIDATION MANDATORY
+# Version: v12.25.6.15 - HTML STRUCTURE + DENSITY + LENGTH + LSI + BURSTINESS
 # Last updated: 2024-12-06
-# Changes:
-# - ADDED: /validate_article endpoint (checks BASIC/EXTENDED usage)
-# - ADDED: Keyword validation in /approve_batch
-# - ADDED: Completeness check in /export
-# - FIXED: All redundant imports removed
-# - FIXED: numpy added to requirements.txt
+# Changes from v13:
+# - ADDED: HTML structure validation (reject Markdown, require <h2>/<h3>)
+# - ADDED: Keyword density control (block if >3.0%, warn if >2.5%)
+# - ADDED: Article length validation from S1 competitor data (70% minimum)
+# - ADDED: LSI coverage validation (60%+ required, block if <40%)
+# - CHANGED: Burstiness now BLOCKING (was warning-only)
+# - All v13 features retained (keyword validation, etc.)
 # ===========================================================
 
 from flask import Blueprint, request, jsonify
@@ -189,6 +190,289 @@ def global_keyword_stats(keywords_state: dict) -> tuple:
     ok = sum(1 for meta in keywords_state.values() if meta.get("status") == "OK")
     locked = 1 if over >= 4 else 0
     return under, over, locked, ok
+
+# ===========================================================
+# 🆕 v12.25.6.15 - NEW VALIDATION FUNCTIONS
+# ===========================================================
+
+def validate_html_structure(text: str, expected_h2_count: int) -> dict:
+    """
+    Validate presence of proper HTML h2/h3 tags (not Markdown).
+    Rejects if Markdown format detected.
+    """
+    # Check for HTML tags
+    h2_found = len(re.findall(r'<h2[^>]*>.*?</h2>', text, re.DOTALL | re.IGNORECASE))
+    h3_found = len(re.findall(r'<h3[^>]*>.*?</h3>', text, re.DOTALL | re.IGNORECASE))
+    
+    # Check for forbidden Markdown (## or ###)
+    markdown_h2 = len(re.findall(r'^##\s+', text, re.MULTILINE))
+    markdown_h3 = len(re.findall(r'^###\s+', text, re.MULTILINE))
+    
+    if markdown_h2 > 0 or markdown_h3 > 0:
+        return {
+            "valid": False,
+            "error": f"❌ Markdown format detected ({markdown_h2} ##, {markdown_h3} ###). Use HTML: <h2></h2> and <h3></h3>",
+            "markdown_found": {"h2": markdown_h2, "h3": markdown_h3},
+            "suggestion": "Replace ## with <h2>Title</h2> and ### with <h3>Subtitle</h3>"
+        }
+    
+    if h2_found == 0:
+        return {
+            "valid": False,
+            "error": "❌ No <h2> tags found. Use proper HTML structure: <h2>Section Title</h2>",
+            "expected": expected_h2_count,
+            "found": 0
+        }
+    
+    if h2_found != expected_h2_count:
+        return {
+            "valid": False,
+            "warning": f"⚠️ Expected {expected_h2_count} <h2> tags, found {h2_found}",
+            "expected": expected_h2_count,
+            "found": h2_found
+        }
+    
+    return {
+        "valid": True,
+        "h2_count": h2_found,
+        "h3_count": h3_found,
+        "status": "✅ HTML structure OK"
+    }
+
+def calculate_keyword_density(text: str, keyword: str) -> dict:
+    """
+    Calculate keyword density as % of total words.
+    Google limit: 2.5% (warning), 3.0% (critical).
+    """
+    words = text.split()
+    total_words = len(words)
+    
+    if total_words == 0:
+        return {"keyword": keyword, "density": 0, "status": "OK"}
+    
+    # Count using hybrid method (morphological)
+    keyword_count = count_hybrid_occurrences(text, keyword, include_headings=True)
+    
+    density = (keyword_count / total_words) * 100
+    
+    # Status thresholds
+    if density > 3.0:
+        status = "CRITICAL"
+    elif density > 2.5:
+        status = "WARNING"
+    else:
+        status = "OK"
+    
+    return {
+        "keyword": keyword,
+        "count": keyword_count,
+        "total_words": total_words,
+        "density_percent": round(density, 2),
+        "status": status,
+        "recommended_max": int(total_words * 0.025)  # 2.5% of total
+    }
+
+def validate_all_densities(text: str, keywords_list: list) -> dict:
+    """
+    Check all BASIC keywords for overstuffing.
+    Returns validation result with critical/warning lists.
+    """
+    critical = []
+    warnings = []
+    
+    for kw_id, kw_data in keywords_list.items():
+        if kw_data.get("type") == "BASIC":
+            kw = kw_data["keyword"]
+            result = calculate_keyword_density(text, kw)
+            
+            if result["status"] == "CRITICAL":
+                critical.append({
+                    "keyword": kw,
+                    "density": result["density_percent"],
+                    "count": result["count"],
+                    "max_allowed": result["recommended_max"],
+                    "suggestion": f"Reduce to {result['recommended_max']} uses (currently {result['count']})"
+                })
+            elif result["status"] == "WARNING":
+                warnings.append({
+                    "keyword": kw,
+                    "density": result["density_percent"],
+                    "count": result["count"]
+                })
+    
+    if critical:
+        return {
+            "valid": False,
+            "critical": critical,
+            "error": f"❌ Keyword stuffing detected: {len(critical)} keywords over 3.0% density",
+            "fix_suggestion": "Use synonyms: 'dokument', 'uprawnienia', 'zatrzymanie' instead of repeating main keyword"
+        }
+    
+    return {
+        "valid": True,
+        "warnings": warnings,
+        "status": "OK" if not warnings else "ACCEPTABLE"
+    }
+
+def validate_article_length(article_text: str, avg_competitor_length: int, h2_count: int) -> dict:
+    """
+    Validate article meets competitive length based on S1 competitor data.
+    Minimum = 70% of competitor average (flexible).
+    Optimal = 90-110% of competitor average.
+    """
+    current_words = len(article_text.split())
+    
+    # Calculate thresholds
+    minimum_words = int(avg_competitor_length * 0.7)
+    recommended_min = int(avg_competitor_length * 0.9)
+    recommended_max = int(avg_competitor_length * 1.1)
+    
+    # Per-H2 average
+    words_per_h2 = current_words / h2_count if h2_count > 0 else 0
+    
+    if current_words < minimum_words:
+        gap = minimum_words - current_words
+        return {
+            "valid": False,
+            "current_words": current_words,
+            "minimum_words": minimum_words,
+            "competitor_avg": avg_competitor_length,
+            "gap": gap,
+            "words_per_h2": int(words_per_h2),
+            "error": f"❌ Article too short: {current_words}w (need {minimum_words}w minimum = 70% of top competitors)",
+            "suggestion": f"Add {gap} more words (~{int(gap/h2_count)} words per section)"
+        }
+    
+    if current_words < recommended_min:
+        gap = recommended_min - current_words
+        return {
+            "valid": True,
+            "current_words": current_words,
+            "recommended_min": recommended_min,
+            "competitor_avg": avg_competitor_length,
+            "gap": gap,
+            "warning": f"⚠️ Below optimal length: {current_words}w (competitors avg {avg_competitor_length}w)",
+            "suggestion": f"Consider adding {gap} more words for better competitiveness"
+        }
+    
+    return {
+        "valid": True,
+        "current_words": current_words,
+        "competitor_avg": avg_competitor_length,
+        "status": "✅ Competitive length",
+        "percentage": round((current_words / avg_competitor_length) * 100, 1)
+    }
+
+def validate_lsi_coverage(full_article: str, keywords_state: dict) -> dict:
+    """
+    Check what % of LSI keywords are used.
+    Target: 60%+ coverage (SEMI_MANDATORY).
+    BLOCK if <40%, WARN if <60%, OK if ≥60%.
+    """
+    lsi_keywords = {k: v for k, v in keywords_state.items() if v.get("type") == "LSI_AUTO"}
+    
+    if not lsi_keywords:
+        return {
+            "valid": True,
+            "coverage": 100,
+            "message": "No LSI keywords in project"
+        }
+    
+    used_count = 0
+    unused = []
+    used = []
+    
+    for kw_id, kw_data in lsi_keywords.items():
+        kw = kw_data["keyword"]
+        count = count_hybrid_occurrences(full_article, kw, include_headings=True)
+        
+        if count >= 1:
+            used_count += 1
+            used.append({"keyword": kw, "count": count})
+        else:
+            unused.append(kw)
+    
+    total_lsi = len(lsi_keywords)
+    coverage = (used_count / total_lsi) * 100
+    
+    # BLOCK if <40%
+    if coverage < 40:
+        return {
+            "valid": False,
+            "coverage": round(coverage, 1),
+            "used": used_count,
+            "total": total_lsi,
+            "unused": unused,
+            "error": f"❌ LSI coverage too low: {coverage:.1f}% (need 60%+ minimum, currently only {used_count}/{total_lsi} used)",
+            "suggestion": f"Add {len(unused)} more LSI keywords from list"
+        }
+    
+    # WARN if <60%
+    if coverage < 60:
+        return {
+            "valid": True,
+            "coverage": round(coverage, 1),
+            "used": used_count,
+            "total": total_lsi,
+            "unused": unused,
+            "warning": f"⚠️ LSI coverage below optimal: {coverage:.1f}% (recommended 60%+, currently {used_count}/{total_lsi})"
+        }
+    
+    return {
+        "valid": True,
+        "coverage": round(coverage, 1),
+        "used": used_count,
+        "total": total_lsi,
+        "status": f"✅ Good LSI coverage: {coverage:.1f}% ({used_count}/{total_lsi} keywords used)"
+    }
+
+def suggest_burstiness_improvements(text: str, current_burstiness: float) -> list:
+    """
+    Analyze text and suggest specific improvements for burstiness.
+    Returns actionable suggestions list.
+    """
+    segmenter = pysbd.Segmenter(language="pl", clean=False)
+    sentences = segmenter.segment(text)
+    
+    if len(sentences) < 3:
+        return ["Text too short to analyze (need 3+ sentences)"]
+    
+    lengths = [len(s.split()) for s in sentences]
+    
+    avg_length = statistics.mean(lengths)
+    stdev = statistics.stdev(lengths) if len(lengths) > 1 else 0
+    
+    suggestions = []
+    
+    # Check variance
+    if stdev < 4:
+        suggestions.append(f"❌ Very low sentence variety - almost all sentences same length (std dev: {stdev:.1f}, need 5+)")
+        suggestions.append("→ Mix short (5-8w), medium (11-18w), and long (20-30w) sentences")
+    
+    # Check long sentences
+    long_count = sum(1 for l in lengths if l >= 20)
+    long_percent = (long_count / len(sentences)) * 100
+    
+    if long_percent < 15:
+        needed = max(1, int(len(sentences) * 0.2) - long_count)
+        suggestions.append(f"❌ Need {needed} more long sentences (20-30 words)")
+        suggestions.append("→ Combine 2-3 short sentences into one complex sentence with clauses")
+    
+    # Check short sentences
+    short_count = sum(1 for l in lengths if l <= 8)
+    short_percent = (short_count / len(sentences)) * 100
+    
+    if short_percent > 60:
+        suggestions.append(f"⚠️ Too many short sentences: {short_percent:.0f}% (should be max 50%)")
+        suggestions.append("→ Expand 2-3 sentences with additional details or examples")
+    
+    # Specific recommendation based on score
+    if current_burstiness < 5.0:
+        suggestions.append("🔴 CRITICAL: Add 3-4 complex sentences immediately")
+    elif current_burstiness < 6.0:
+        suggestions.append("🟡 Add 1-2 longer sentences to reach minimum threshold (6.0)")
+    
+    return suggestions if suggestions else ["Text burstiness is acceptable"]
 
 # ===========================================================
 # 🔍 HYBRID LEMMA-FUZZY KEYWORD COUNTER (v7.6.0-morphological)
@@ -453,8 +737,21 @@ def process_batch_preview(project_id, batch_text, meta_trace):
         warnings.append(f"⛔ Banned phrases: {', '.join(audit['banned_detected'])}")
         suggestions.append("Remove banned phrases")
     
-    if audit.get("burstiness", 0) < 6.0:
-        warnings.append(f"📊 Burstiness {audit['burstiness']:.1f} (target: >6.0)")
+    # v12.25.6.15: Burstiness is now BLOCKING (not just warning)
+    burstiness = audit.get("burstiness", 0)
+    if burstiness < 6.0:
+        burst_suggestions = suggest_burstiness_improvements(batch_text, burstiness)
+        return {
+            "status": "REJECTED_QUALITY",
+            "error": "BURSTINESS TOO LOW",
+            "burstiness_score": round(burstiness, 1),
+            "minimum_required": 6.0,
+            "suggestions": burst_suggestions,
+            "gemini_feedback": {
+                "feedback_for_writer": f"❌ Burstiness: {burstiness:.1f}/10 (need ≥6.0). Text is too monotonous. {' '.join(burst_suggestions[:2])}"
+            },
+            "next_action": "REWRITE"
+        }
     
     if audit.get("fluff_ratio", 0) > 0.15:
         warnings.append(f"💨 Fluff {audit['fluff_ratio']:.2f} (target: <0.15)")
@@ -631,6 +928,32 @@ def approve_batch(project_id):
     if not doc.exists: return jsonify({"error": "Not found"}), 404
     project_data = doc.to_dict()
     
+    # ===== NEW VALIDATIONS (v12.25.6.15) =====
+    
+    # 1. HTML Structure validation
+    current_batch_num = len(project_data.get("batches", [])) + 1
+    batch_h2_count = meta_trace.get("h2_count", 2)  # Expected H2 in this batch
+    
+    html_check = validate_html_structure(corrected_text, batch_h2_count)
+    if not html_check["valid"]:
+        return jsonify({
+            "error": html_check["error"],
+            "suggestion": html_check.get("suggestion", "Use HTML tags: <h2>Title</h2>"),
+            "details": html_check
+        }), 400
+    
+    # 2. Keyword Density validation (BASIC keywords only)
+    density_check = validate_all_densities(corrected_text, keywords_state)
+    if not density_check["valid"]:
+        return jsonify({
+            "error": "❌ Keyword stuffing detected",
+            "overstuffed_keywords": density_check["critical"],
+            "message": "Reduce keyword usage to <2.5% density",
+            "suggestion": density_check.get("fix_suggestion", "Use synonyms")
+        }), 400
+    
+    # ===== END NEW VALIDATIONS =====
+    
     # Check for unused BASIC/EXTENDED keywords
     unused_required = []
     for row_id, meta in keywords_state.items():
@@ -718,6 +1041,45 @@ def export_article(project_id):
     
     article_complete = len(unused_required) == 0
     
+    # ===== NEW VALIDATIONS (v12.25.6.15) =====
+    
+    # 1. Article Length validation (from S1 competitor data)
+    avg_competitor_length = project_data.get("avg_competitor_length", 2000)
+    h2_structure = project_data.get("h2_structure", [])
+    h2_count = len(h2_structure) if h2_structure else 7  # Default to 7 if not stored
+    
+    length_check = validate_article_length(full_text, avg_competitor_length, h2_count)
+    if not length_check["valid"]:
+        return jsonify({
+            "error": length_check["error"],
+            "current_words": length_check["current_words"],
+            "minimum_words": length_check["minimum_words"],
+            "competitor_avg": length_check["competitor_avg"],
+            "gap": length_check["gap"],
+            "suggestion": length_check["suggestion"],
+            "article_complete": False
+        }), 400
+    
+    # 2. LSI Coverage validation (60%+ required)
+    lsi_check = validate_lsi_coverage(full_text, keywords_state)
+    if not lsi_check["valid"]:
+        return jsonify({
+            "error": lsi_check["error"],
+            "lsi_coverage": lsi_check["coverage"],
+            "unused_lsi": lsi_check["unused"],
+            "suggestion": lsi_check.get("suggestion", "Add more LSI keywords"),
+            "article_complete": False
+        }), 400
+    
+    # ===== END NEW VALIDATIONS =====
+    
+    # Add warnings to response if present
+    export_warnings = []
+    if "warning" in length_check:
+        export_warnings.append(length_check["warning"])
+    if "warning" in lsi_check:
+        export_warnings.append(lsi_check["warning"])
+    
     return jsonify({
         "status": "success",
         "article": full_text,
@@ -725,5 +1087,18 @@ def export_article(project_id):
         "total_batches": len(batches),
         "unused_required_keywords": unused_required,
         "all_keywords": all_keywords_stats,
+        "length_info": {
+            "current_words": length_check["current_words"],
+            "competitor_avg": length_check["competitor_avg"],
+            "percentage": length_check.get("percentage", 100),
+            "status": length_check.get("status", "OK")
+        },
+        "lsi_coverage": {
+            "coverage_percent": lsi_check["coverage"],
+            "used": lsi_check["used"],
+            "total": lsi_check["total"],
+            "status": lsi_check.get("status", "OK")
+        },
+        "warnings": export_warnings if export_warnings else None,
         "warning": None if article_complete else f"⚠️ Article incomplete: {len(unused_required)} required keywords not used"
     })
