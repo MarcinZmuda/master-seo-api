@@ -1024,7 +1024,10 @@ def approve_batch(project_id):
             "suggestion": total_density_check.get("suggestion", "Reduce overall keyword usage")
         }), 400
     
-    # 4. BLOCKING validation for unused BASIC/EXTENDED keywords
+    # 4. PROGRESS TRACKING (NOT BLOCKING) - v15.2 CARRY-OVER LOGIC
+    # Calculate what's missing, but DON'T block batch save
+    # Block only at EXPORT (S4) when article must be complete
+    
     unused_basic = []
     unused_extended = []
     
@@ -1034,30 +1037,24 @@ def approve_batch(project_id):
         actual_uses = meta.get("actual_uses", 0)
         target_min = meta.get("target_min", 1)
         
-        if kw_type == "BASIC" and actual_uses < target_min:
-            unused_basic.append({
+        # Calculate missing count for entire article (not just this batch)
+        if actual_uses < target_min:
+            missing_count = target_min - actual_uses
+            missing_info = {
                 "keyword": kw,
                 "type": kw_type,
-                "required": target_min,
-                "used": actual_uses
-            })
-        elif kw_type == "EXTENDED" and actual_uses < target_min:
-            unused_extended.append({
-                "keyword": kw,
-                "type": kw_type,
-                "required": target_min,
-                "used": actual_uses
-            })
+                "required_total": target_min,  # Goal for entire article
+                "current": actual_uses,         # Current usage across all batches
+                "missing": missing_count        # How many more needed
+            }
+            
+            if kw_type == "BASIC":
+                unused_basic.append(missing_info)
+            elif kw_type == "EXTENDED":
+                unused_extended.append(missing_info)
     
-    # BLOCK if ANY BASIC keywords not meeting minimum
-    if unused_basic:
-        return jsonify({
-            "error": "❌ Required BASIC keywords not used in this batch",
-            "unused_keywords": unused_basic,
-            "message": f"{len(unused_basic)} BASIC keywords below minimum usage",
-            "suggestion": "Review batch text and integrate these keywords naturally before approval",
-            "note": "Backend BLOCKS approval until all BASIC keywords meet minimum requirements"
-        }), 400
+    # NO BLOCKING HERE - just track progress
+    # GPT will receive missing lists and must use keywords in next batches
     
     # 5. LSI progress monitoring (warning only, not blocking per batch)
     lsi_keywords = {k: v for k, v in keywords_state.items() if v.get("type") == "LSI_AUTO"}
@@ -1069,7 +1066,7 @@ def approve_batch(project_id):
         if lsi_coverage < 30:
             lsi_warning = f"⚠️ LSI coverage: {lsi_coverage:.0f}% (target: 60%+ by export)"
     
-    # Save batch (only if all validations passed)
+    # Save batch (all validations passed except keyword completion - which is OK)
     batch_entry = {
         "text": corrected_text,
         "meta_trace": meta_trace,
@@ -1081,23 +1078,34 @@ def approve_batch(project_id):
     project_data["keywords_state"] = keywords_state
     doc_ref.set(project_data)
     
-    # Return with comprehensive status
+    # Return with CARRY-OVER lists for GPT
+    article_complete = (len(unused_basic) == 0 and len(unused_extended) == 0)
+    
     response = {
         "status": "BATCH_SAVED",
-        "next_action": "GENERATE_NEXT",
+        "next_action": "GENERATE_NEXT" if not article_complete else "READY_FOR_EXPORT",
+        "article_complete": article_complete,
         "validations": {
             "html_structure": "✅ Valid",
             "keyword_density": "✅ Within limits",
             "total_density": f"✅ {total_density_check['total_density']}%",
-            "basic_keywords": "✅ All used",
-            "extended_keywords": f"⚠️ {len(unused_extended)} still unused" if unused_extended else "✅ Complete"
+        },
+        "progress": {
+            "basic_remaining": len(unused_basic),
+            "extended_remaining": len(unused_extended),
+            "basic_complete": len(unused_basic) == 0,
+            "extended_complete": len(unused_extended) == 0
         }
     }
     
-    # Add warnings if applicable
+    # CRITICAL: Add carry-over lists for GPT to read
+    if unused_basic:
+        response["warning_basic"] = f"⚠️ {len(unused_basic)} BASIC keywords need more uses in next batch"
+        response["missing_basic_list"] = unused_basic  # GPT must read this!
+        
     if unused_extended:
-        response["warning"] = f"⚠️ {len(unused_extended)} EXTENDED keywords not used yet (not blocking)"
-        response["unused_extended"] = unused_extended
+        response["warning_extended"] = f"⚠️ {len(unused_extended)} EXTENDED keywords carry over to next batch"
+        response["missing_extended_list"] = unused_extended  # CRITICAL for EXTENDED!
         response["article_complete"] = False
     elif lsi_warning:
         response["warning"] = lsi_warning
