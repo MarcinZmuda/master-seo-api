@@ -245,7 +245,9 @@ def create_project():
         "created_at": firestore.SERVER_TIMESTAMP,
         "batches": [],
         "total_batches": 0,
-        "version": "v12.25.6.7-FIXED",  # ⭐ Updated version
+        "avg_competitor_length": data.get("avg_competitor_length", 2000),  # NEW: from S1
+        "h2_structure": data.get("h2_structure", []),  # NEW: store H2 list
+        "version": "v12.25.6.15",  # ⭐ Updated version
         "lsi_enrichment": {
             "enabled": lsi_added_count > 0,
             "count": lsi_added_count
@@ -259,7 +261,7 @@ def create_project():
         "project_id": doc_ref.id,
         "topic": topic,
         "keywords": len(firestore_keywords),
-        "version": "v12.25.6.7-FIXED"
+        "version": "v12.25.6.15"
     }
     
     # ⭐ Informuj o LSI enrichment
