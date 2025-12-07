@@ -1,13 +1,13 @@
 # ===========================================================
-# Version: v12.25.6.15 - HTML STRUCTURE + DENSITY + LENGTH + LSI + BURSTINESS
+# Version: v12.25.6.15.1 - KEYWORD ENFORCEMENT BLOCKING + TOTAL DENSITY
 # Last updated: 2024-12-06
-# Changes from v13:
-# - ADDED: HTML structure validation (reject Markdown, require <h2>/<h3>)
-# - ADDED: Keyword density control (block if >3.0%, warn if >2.5%)
-# - ADDED: Article length validation from S1 competitor data (70% minimum)
-# - ADDED: LSI coverage validation (60%+ required, block if <40%)
-# - CHANGED: Burstiness now BLOCKING (was warning-only)
-# - All v13 features retained (keyword validation, etc.)
+# Changes from v15:
+# - ADDED: BLOCKING validation in approve_batch (not just warning)
+# - ADDED: Total keyword density check (all BASIC keywords combined)
+# - ADDED: LSI progress monitoring per batch
+# - CHANGED: Unused BASIC keywords now BLOCK approval (400 error)
+# - CHANGED: EXTENDED keywords still warn but don't block
+# - All v15 features retained
 # ===========================================================
 
 from flask import Blueprint, request, jsonify
@@ -473,6 +473,66 @@ def suggest_burstiness_improvements(text: str, current_burstiness: float) -> lis
         suggestions.append("🟡 Add 1-2 longer sentences to reach minimum threshold (6.0)")
     
     return suggestions if suggestions else ["Text burstiness is acceptable"]
+
+def calculate_total_keyword_density(text: str, keywords_state: dict) -> dict:
+    """
+    Calculate TOTAL density of all BASIC keywords combined.
+    Prevents overall keyword stuffing even if individual keywords are within limits.
+    
+    Example: 
+    - 5 BASIC keywords × 2% each = 10% total (too much!)
+    - Limit: 8% total = avg ~1.5% per keyword = natural
+    """
+    words = text.split()
+    total_words = len(words)
+    
+    if total_words == 0:
+        return {"valid": True, "total_density": 0}
+    
+    total_keyword_words = 0
+    keyword_breakdown = []
+    
+    for kw_id, meta in keywords_state.items():
+        if meta.get("type") == "BASIC":
+            kw = meta["keyword"]
+            count = count_hybrid_occurrences(text, kw, include_headings=True)
+            kw_words = len(kw.split())
+            kw_total_words = count * kw_words
+            total_keyword_words += kw_total_words
+            
+            keyword_breakdown.append({
+                "keyword": kw,
+                "count": count,
+                "words_contributed": kw_total_words
+            })
+    
+    total_density = (total_keyword_words / total_words) * 100
+    
+    # Critical threshold: 8% total (allows avg 1.5-2% per keyword)
+    if total_density > 8.0:
+        return {
+            "valid": False,
+            "total_density": round(total_density, 2),
+            "total_keyword_words": total_keyword_words,
+            "total_words": total_words,
+            "breakdown": keyword_breakdown,
+            "error": f"❌ Total keyword density: {total_density:.1f}% (max 8.0%)",
+            "suggestion": "Reduce keyword usage across all BASIC keywords or use more synonyms"
+        }
+    
+    # Warning threshold: 6%
+    if total_density > 6.0:
+        return {
+            "valid": True,
+            "total_density": round(total_density, 2),
+            "warning": f"⚠️ Total keyword density: {total_density:.1f}% (approaching limit of 8.0%)"
+        }
+    
+    return {
+        "valid": True,
+        "total_density": round(total_density, 2),
+        "status": f"✅ Total keyword density: {total_density:.1f}% (optimal)"
+    }
 
 # ===========================================================
 # 🔍 HYBRID LEMMA-FUZZY KEYWORD COUNTER (v7.6.0-morphological)
@@ -954,18 +1014,62 @@ def approve_batch(project_id):
     
     # ===== END NEW VALIDATIONS =====
     
-    # Check for unused BASIC/EXTENDED keywords
-    unused_required = []
+    # 3. Total Keyword Density validation (all BASIC keywords combined)
+    total_density_check = calculate_total_keyword_density(corrected_text, keywords_state)
+    if not total_density_check["valid"]:
+        return jsonify({
+            "error": total_density_check["error"],
+            "total_density": total_density_check["total_density"],
+            "breakdown": total_density_check.get("breakdown", []),
+            "suggestion": total_density_check.get("suggestion", "Reduce overall keyword usage")
+        }), 400
+    
+    # 4. BLOCKING validation for unused BASIC/EXTENDED keywords
+    unused_basic = []
+    unused_extended = []
+    
     for row_id, meta in keywords_state.items():
         kw_type = meta.get("type", "BASIC").upper()
-        if kw_type in ["BASIC", "EXTENDED"]:
-            if meta.get("actual_uses", 0) == 0:
-                unused_required.append({
-                    "keyword": meta.get("keyword", ""),
-                    "type": kw_type
-                })
+        kw = meta.get("keyword", "")
+        actual_uses = meta.get("actual_uses", 0)
+        target_min = meta.get("target_min", 1)
+        
+        if kw_type == "BASIC" and actual_uses < target_min:
+            unused_basic.append({
+                "keyword": kw,
+                "type": kw_type,
+                "required": target_min,
+                "used": actual_uses
+            })
+        elif kw_type == "EXTENDED" and actual_uses < target_min:
+            unused_extended.append({
+                "keyword": kw,
+                "type": kw_type,
+                "required": target_min,
+                "used": actual_uses
+            })
     
-    # Save batch
+    # BLOCK if ANY BASIC keywords not meeting minimum
+    if unused_basic:
+        return jsonify({
+            "error": "❌ Required BASIC keywords not used in this batch",
+            "unused_keywords": unused_basic,
+            "message": f"{len(unused_basic)} BASIC keywords below minimum usage",
+            "suggestion": "Review batch text and integrate these keywords naturally before approval",
+            "note": "Backend BLOCKS approval until all BASIC keywords meet minimum requirements"
+        }), 400
+    
+    # 5. LSI progress monitoring (warning only, not blocking per batch)
+    lsi_keywords = {k: v for k, v in keywords_state.items() if v.get("type") == "LSI_AUTO"}
+    lsi_warning = None
+    if lsi_keywords:
+        lsi_used = sum(1 for v in lsi_keywords.values() if v.get("actual_uses", 0) >= 1)
+        lsi_coverage = (lsi_used / len(lsi_keywords)) * 100
+        
+        if lsi_coverage < 30:
+            lsi_warning = f"⚠️ LSI coverage: {lsi_coverage:.0f}% (target: 60%+ by export)"
+    
+    # Save batch (only if all validations passed)
     batch_entry = {
         "text": corrected_text,
         "meta_trace": meta_trace,
@@ -977,19 +1081,33 @@ def approve_batch(project_id):
     project_data["keywords_state"] = keywords_state
     doc_ref.set(project_data)
     
-    # Return with warning if there are unused required keywords
+    # Return with comprehensive status
     response = {
         "status": "BATCH_SAVED",
-        "next_action": "GENERATE_NEXT"
+        "next_action": "GENERATE_NEXT",
+        "validations": {
+            "html_structure": "✅ Valid",
+            "keyword_density": "✅ Within limits",
+            "total_density": f"✅ {total_density_check['total_density']}%",
+            "basic_keywords": "✅ All used",
+            "extended_keywords": f"⚠️ {len(unused_extended)} still unused" if unused_extended else "✅ Complete"
+        }
     }
     
-    if unused_required:
-        response["warning"] = f"⚠️ {len(unused_required)} required keywords not used yet"
-        response["unused_keywords"] = unused_required
+    # Add warnings if applicable
+    if unused_extended:
+        response["warning"] = f"⚠️ {len(unused_extended)} EXTENDED keywords not used yet (not blocking)"
+        response["unused_extended"] = unused_extended
+        response["article_complete"] = False
+    elif lsi_warning:
+        response["warning"] = lsi_warning
         response["article_complete"] = False
     else:
         response["article_complete"] = True
         response["message"] = "✅ All required keywords used"
+    
+    if total_density_check.get("warning"):
+        response["density_warning"] = total_density_check["warning"]
     
     return jsonify(response)
 
