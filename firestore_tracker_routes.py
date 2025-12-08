@@ -1,7 +1,7 @@
 """
-SEO Content Tracker Routes - v40 Brajen Semantic
+SEO Content Tracker Routes - v40 Brajen Semantic (Google-Like Counting)
 Features:
-- Robust NLP Counting (Exact + Lemma + Fuzzy Lemma via RapidFuzz)
+- Robust NLP Counting (Exact + Lemma + Fuzzy Lemma + Stem)
 - Firestore Persistent Update (Preview + Approve)
 - Keyword Status: UNDER / OK / OVER / LOCKED
 - Diagnostic Route (/api/debug/<project_id>)
@@ -28,7 +28,7 @@ except OSError:
     nlp = spacy.load("pl_core_news_lg")
 
 # ============================================================================
-# 1. ROBUST COUNTING (EXACT + LEMMA + FUZZY)
+# 1. ROBUST COUNTING (EXACT + LEMMA + STEM + FUZZY)
 # ============================================================================
 def count_robust(doc, keyword_meta):
     """
@@ -36,6 +36,7 @@ def count_robust(doc, keyword_meta):
     - Exact Match (ciąg znaków)
     - Exact Lemma Match (dokładna forma lematyczna)
     - Fuzzy Lemma Match (np. zatrzyma / zatrzymuje / zatrzymany / zatrzymanie)
+    - STEM Match (heurystyczne dopasowanie rdzenia, np. zatrzyma → zatrzymanie)
     """
     if not doc:
         return 0
@@ -68,7 +69,27 @@ def count_robust(doc, keyword_meta):
         if score >= 90:
             lemma_fuzzy_hits += lemma_str.count(token)
 
-    total_hits = max(exact_hits, lemma_exact_hits + lemma_fuzzy_hits)
+    # 4️⃣ STEM Match (Google-like: zatrzymanie = zatrzyma)
+    kw_stem = kw_lemma[: min(5, len(kw_lemma))]  # rdzeń np. 'zatrz'
+    stem_hits = sum(1 for token in lemmas if token.startswith(kw_stem) and len(token) > 4)
+
+    # 5️⃣ Fuzzy Stem Match (dla odmian: zatrzymaniu / zatrzymany)
+    fuzzy_stem_hits = 0
+    for token in set(lemmas):
+        score = fuzz.partial_ratio(kw_stem, token)
+        if score >= 85:
+            fuzzy_stem_hits += lemma_str.count(token)
+
+    # 🔹 SUMARYCZNY WYNIK
+    total_hits = max(exact_hits, lemma_exact_hits + lemma_fuzzy_hits + stem_hits + fuzzy_stem_hits)
+
+    # 🔹 LOG DEBUG
+    if total_hits > 0:
+        print(
+            f"[COUNT] '{kw_exact}' → exact={exact_hits}, lemma={lemma_exact_hits}, "
+            f"fuzzy={lemma_fuzzy_hits}, stem={stem_hits}, fuzzy_stem={fuzzy_stem_hits}, total={total_hits}"
+        )
+
     return total_hits
 
 # ============================================================================
