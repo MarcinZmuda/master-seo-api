@@ -1,6 +1,6 @@
 # ================================================================
 # seo_optimizer.py - Advanced SEO & Content Quality Optimizations
-# v12.25.1 - FIX #1-6, #8
+# v15.4 - FIX: Unified SpaCy Model (LG) & Full Functionality Preserved
 # ================================================================
 
 import re
@@ -13,12 +13,16 @@ from collections import Counter
 import pysbd
 
 # Import from main tracker
+# ⭐ FIX: Używamy pl_core_news_lg (zgodnie z Dockerfile)
+# Zapobiega to błędom ładowania i zapewnia lepszą jakość analizy kontekstu
 try:
-    nlp = spacy.load("pl_core_news_sm")
+    nlp = spacy.load("pl_core_news_lg")
+    print("[SEO_OPT] ✅ Załadowano model pl_core_news_lg")
 except OSError:
+    print("[SEO_OPT] ⚠️ Model lg nieznaleziony, próba pobierania...")
     from spacy.cli import download
-    download("pl_core_news_sm")
-    nlp = spacy.load("pl_core_news_sm")
+    download("pl_core_news_lg")
+    nlp = spacy.load("pl_core_news_lg")
 
 SENTENCE_SEGMENTER = pysbd.Segmenter(language="pl", clean=True)
 
@@ -42,8 +46,13 @@ def build_rolling_context(project_data, window_size=3):
     for i, batch in enumerate(recent_batches):
         batch_text = batch.get("text", "")
         
-        h2_pattern = r'##\s+(.+?)(?:\n|$)'
-        headings = re.findall(h2_pattern, batch_text)
+        # Fallback dla Markdown jeśli HTML nie jest wykryty, ale preferujemy HTML
+        if "<h2>" in batch_text:
+             h2_pattern = r'<h2[^>]*>(.+?)</h2>'
+        else:
+             h2_pattern = r'##\s+(.+?)(?:\n|$)'
+
+        headings = re.findall(h2_pattern, batch_text, re.IGNORECASE)
         
         snippet = batch_text[:300].replace("\n", " ").strip()
         
@@ -326,7 +335,7 @@ def calculate_keyword_position_score(batch_text, keyword):
         char_pos_estimate = pos * 5
         text_before = batch_text[max(0, char_pos_estimate-100):char_pos_estimate]
         
-        if "##" in text_before:
+        if "##" in text_before or "h2" in text_before.lower():
             weight *= 1.5
         
         scores.append(weight)
