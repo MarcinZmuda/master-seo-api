@@ -1,6 +1,8 @@
 """
-SEO Content Tracker Routes - v15.7 FIXED IMPORT
-Added legacy support for project_routes.py while keeping new logic.
+SEO Content Tracker Routes - v15.8
+Zmiany:
+- Burstiness: Wyłączono blokowanie (Warning only / Info)
+- Keyword Max: Włączono TWARDĄ blokadę (Error 400 przy przekroczeniu target_max)
 """
 
 from flask import Blueprint, request, jsonify
@@ -26,7 +28,7 @@ except OSError:
 # ============================================================================
 def count_robust(doc, keyword_meta):
     """
-    Liczy max(exact, lemma). Rozwiązuje problem 'actual_uses: 0'.
+    Liczy max(exact, lemma).
     """
     if not doc: return 0
     kw_exact = keyword_meta.get("keyword", "").lower().strip()
@@ -47,7 +49,7 @@ def count_robust(doc, keyword_meta):
     return max(count_exact, count_lemma)
 
 # ============================================================================
-# 2. VALIDATIONS (HARD GATES)
+# 2. VALIDATIONS
 # ============================================================================
 def validate_structure(text, expected_h2_count=2):
     # Markdown Check
@@ -64,9 +66,8 @@ def validate_structure(text, expected_h2_count=2):
     for h2 in h2_matches:
         clean = h2.lower().strip()
         for ban in banned:
-            # Check exact match or "Wstęp do..."
             if ban == clean or clean.startswith(f"{ban} ") or clean.endswith(f" {ban}"):
-                return {"valid": False, "error": f"❌ ZAKAZANY NAGŁÓWEK: '{h2}'. H2 musi być opisowy i zawierać słowa kluczowe SEO! Zmień tytuł."}
+                return {"valid": False, "error": f"❌ ZAKAZANY NAGŁÓWEK: '{h2}'. H2 musi być opisowy i zawierać słowa kluczowe SEO!"}
     
     return {"valid": True}
 
@@ -81,19 +82,18 @@ def calculate_burstiness(text):
     return round((math.sqrt(variance) / mean) * 10, 1)
 
 def validate_quality(text, keywords_state, current_doc):
-    # Burstiness
+    # 1. Burstiness (INFO ONLY - NO BLOCK)
     burstiness = calculate_burstiness(text)
-    if burstiness < 6.0:
-        return {"valid": False, "error": f"❌ Monotonia zdań (Burstiness: {burstiness:.1f}). Mieszaj długie i krótkie zdania."}
+    # Ignorujemy wynik burstiness, nie zwracamy błędu.
     
-    # Density Check
+    # 2. Density Check (Stuffing Guard - Local)
     word_count = len(text.split())
     if word_count > 0:
         for row_id, meta in keywords_state.items():
             count = count_robust(current_doc, meta)
             density = (count / word_count) * 100
-            if density > 3.5: # Slight tolerance above 3.0 for small batches
-                return {"valid": False, "error": f"❌ Keyword Stuffing: '{meta['keyword']}' ma {density:.1f}% w tym fragmencie (max 3.0-3.5%)."}
+            if density > 4.0: # Podniesiony limit lokalny, globalny jest ważniejszy
+                return {"valid": False, "error": f"❌ Keyword Stuffing: '{meta['keyword']}' ma {density:.1f}% w tym fragmencie (max 4.0%)."}
     
     return {"valid": True}
 
@@ -110,9 +110,7 @@ def generate_gpt_instruction(current_batch, total_batches, keywords_state, batch
 2. STRUKTURA: Naprzemiennie LONG (250w+) i SHORT (150w).
 3. OBOWIĄZKOWE SŁOWA KLUCZOWE (Użyj w tym fragmencie):
 """
-    # Calculate simple targets
     targets = []
-    # Prioritize BASIC keywords that are lagging behind
     for meta in keywords_state.values():
         if meta.get("type") == "BASIC":
             total_needed = meta.get("target_max", 0)
@@ -120,11 +118,8 @@ def generate_gpt_instruction(current_batch, total_batches, keywords_state, batch
             remaining_uses = max(0, total_needed - current)
             
             if remaining_uses > 0:
-                # Distribute remaining uses across remaining batches
                 per_batch = math.ceil(remaining_uses / remaining_batches)
                 target = per_batch
-                
-                # Dynamic adjustment: if last batch, must use all remaining min
                 if remaining_batches == 1:
                     min_needed = max(0, meta.get("target_min", 1) - current)
                     target = max(target, min_needed)
@@ -132,35 +127,26 @@ def generate_gpt_instruction(current_batch, total_batches, keywords_state, batch
                 if target > 0:
                     targets.append(f"   - '{meta['keyword']}': użyj ok. {target}x")
     
-    # Add top 6 priority keywords
     instruction += "\n".join(targets[:6])
     
-    # Add Extended reminder
     unused_ext = [m['keyword'] for m in keywords_state.values() if m.get("type") == "EXTENDED" and m.get("actual_uses", 0) == 0]
     if unused_ext:
-        instruction += "\n\n4. FRAZY WSPIERAJĄCE (Wpleć naturalnie 2-3 z listy):\n" + "\n".join([f"   - {k}" for k in unused_ext[:5]])
+        instruction += "\n\n4. FRAZY WSPIERAJĄCE (Wpleć 2-3 z listy):\n" + "\n".join([f"   - {k}" for k in unused_ext[:5]])
         
     return instruction
 
 # ============================================================================
-# 4. LEGACY SUPPORT (FIX FOR IMPORT ERROR)
+# 4. LEGACY SUPPORT
 # ============================================================================
 def process_batch_in_firestore(project_id, batch_text, meta_trace=None):
-    """
-    Funkcja dla kompatybilności wstecznej z project_routes.py.
-    Używa nowej logiki zliczania, ale zachowuje stary interfejs.
-    """
+    # Wrapper dla kompatybilności z project_routes
     db = firestore.client()
     doc_ref = db.collection("seo_projects").document(project_id)
     doc = doc_ref.get()
-    
-    if not doc.exists:
-        return {"error": "Project not found", "status_code": 404}
+    if not doc.exists: return {"error": "Project not found", "status_code": 404}
     
     project_data = doc.to_dict()
     keywords_state = project_data.get("keywords_state", {})
-    
-    # Use new robust counter
     doc_nlp = nlp(batch_text)
     
     for row_id, meta in keywords_state.items():
@@ -169,24 +155,17 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None):
         keywords_state[row_id] = meta
     
     batch_entry = {
-        "text": batch_text,
-        "meta_trace": meta_trace or {},
+        "text": batch_text, "meta_trace": meta_trace or {},
         "timestamp": datetime.datetime.now(datetime.timezone.utc),
         "burstiness": calculate_burstiness(batch_text)
     }
     
-    if "batches" not in project_data:
-        project_data["batches"] = []
+    if "batches" not in project_data: project_data["batches"] = []
     project_data["batches"].append(batch_entry)
     project_data["keywords_state"] = keywords_state
-    
     doc_ref.set(project_data)
     
-    return {
-        "status": "BATCH_SAVED",
-        "message": "Batch saved successfully (legacy mode)",
-        "status_code": 200
-    }
+    return {"status": "BATCH_SAVED", "message": "Legacy OK", "status_code": 200}
 
 # ============================================================================
 # ROUTES
@@ -202,8 +181,6 @@ def preview_batch(project_id):
     
     project_data = doc.to_dict()
     keywords_state = project_data.get("keywords_state", {})
-    
-    # Process ONCE for performance
     doc_nlp = nlp(text)
     
     updated = {}
@@ -216,11 +193,7 @@ def preview_batch(project_id):
             "used_in_current_batch": count
         }
         
-    return jsonify({
-        "status": "PREVIEW", 
-        "corrected_text": text, 
-        "keywords_state": updated
-    }), 200
+    return jsonify({"status": "PREVIEW", "corrected_text": text, "keywords_state": updated}), 200
 
 @tracker_routes.post("/api/project/<project_id>/approve_batch")
 def approve_batch(project_id):
@@ -237,7 +210,7 @@ def approve_batch(project_id):
     current_batch = len(project_data.get("batches", [])) + 1
     plan = project_data.get("batches_plan", []) or [{"word_count": 500}] * 5
     
-    # 1. Robust Count & State Update
+    # 1. Update Counts
     doc_nlp = nlp(text)
     keywords_state = project_data.get("keywords_state", {})
     
@@ -247,11 +220,25 @@ def approve_batch(project_id):
         keywords_state[rid] = meta
 
     # 2. VALIDATIONS
+    
+    # A. Structure
     struct_check = validate_structure(text, meta_trace.get("h2_count", 2))
     if not struct_check["valid"]: return jsonify(struct_check), 400
     
+    # B. Quality (Burstiness removed as blocker)
     qual_check = validate_quality(text, keywords_state, doc_nlp)
     if not qual_check["valid"]: return jsonify(qual_check), 400
+
+    # C. ⭐ HARD MAX LIMIT CHECK (NEW)
+    # Sprawdzamy czy którykolwiek keyword nie przekroczył TOTAL MAX
+    for rid, meta in keywords_state.items():
+        if meta.get("type") == "BASIC":
+            actual = meta.get("actual_uses", 0)
+            maximum = meta.get("target_max", 999)
+            if actual > maximum:
+                return jsonify({
+                    "error": f"❌ PRZEKROCZONO LIMIT: '{meta['keyword']}' użyto łącznie {actual}x. Maksymalny limit to {maximum}x. Usuń {actual - maximum} wystąpień z tego batcha."
+                }), 400
 
     # 3. SAVE
     batch_entry = {
@@ -267,15 +254,10 @@ def approve_batch(project_id):
     project_data["keywords_state"] = keywords_state
     doc_ref.set(project_data)
     
-    # 4. NEXT INSTRUCTION GENERATION
+    # 4. NEXT INSTRUCTION
     is_complete = current_batch >= len(plan)
     next_len = plan[current_batch]["word_count"] if not is_complete else 0
-    
-    instruction = ""
-    if not is_complete:
-        instruction = generate_gpt_instruction(current_batch, len(plan), keywords_state, next_len)
-    else:
-        instruction = "ARTYKUŁ UKOŃCZONY. Przejdź do walidacji końcowej (/validate_article)."
+    instruction = generate_gpt_instruction(current_batch, len(plan), keywords_state, next_len) if not is_complete else "ARTYKUŁ UKOŃCZONY."
 
     return jsonify({
         "status": "BATCH_SAVED",
@@ -284,25 +266,20 @@ def approve_batch(project_id):
         "gpt_instruction": instruction
     }), 200
 
+# (Walidacja i eksport - bez zmian)
 @tracker_routes.post("/api/project/<project_id>/validate_article")
 def validate_article(project_id):
     db = firestore.client()
-    data = db.collection("seo_projects").document(project_id).get().to_dict()
-    kw = data.get("keywords_state", {})
-    
+    kw = db.collection("seo_projects").document(project_id).get().to_dict().get("keywords_state", {})
     ext_missing = [m['keyword'] for m in kw.values() if m.get("type") == "EXTENDED" and m.get("actual_uses", 0) == 0]
     
     if ext_missing:
-        return jsonify({
-            "error": f"❌ Brakuje fraz EXTENDED ({len(ext_missing)}). Musisz użyć wszystkich.",
-            "missing": ext_missing
-        }), 400
+        return jsonify({"error": f"❌ Brakuje fraz EXTENDED ({len(ext_missing)}).", "missing": ext_missing}), 400
         
     return jsonify({"status": "ARTICLE_READY"}), 200
 
 @tracker_routes.get("/api/project/<project_id>/export")
 def export_article(project_id):
-    db = firestore.client()
-    data = db.collection("seo_projects").document(project_id).get().to_dict()
+    data = firestore.client().collection("seo_projects").document(project_id).get().to_dict()
     full_text = "\n\n".join([b.get("text", "") for b in data.get("batches", [])])
     return jsonify({"status": "EXPORTED", "full_article": full_text}), 200
