@@ -1,16 +1,16 @@
 # ================================================================
-# 🧠 final_review_routes.py — Expert Review & Auto Correction (v18.5)
+# 🧠 final_review_routes.py — Expert Review & Interactive Correction (v19.5)
 # ================================================================
 """
-Moduł końcowego audytu artykułu po zakończeniu wszystkich batchy.
-1. Łączy tekst z Firestore.
-2. Wysyła zapytanie do Gemini (merytoryka, redakcja, język).
-3. Zapisuje raport oraz poprawioną wersję w Firestore.
-4. Można wywołać ręcznie lub automatycznie po eksporcie.
+Tryb interaktywny:
+1️⃣ Po zakończeniu artykułu system wysyła tekst do Gemini i tworzy raport.
+2️⃣ Wynik raportu zwracany jest użytkownikowi (bez korekty).
+3️⃣ Backend pyta: „Czy chcesz wprowadzić poprawki?”
+4️⃣ Jeśli użytkownik potwierdzi — drugi endpoint generuje poprawioną wersję.
 """
 
 import os
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 from firebase_admin import firestore
 import google.generativeai as genai
 
@@ -31,20 +31,17 @@ else:
 final_review_routes = Blueprint("final_review_routes", __name__)
 
 # ------------------------------------------------------------
-# 🧩 Główna funkcja: analiza i korekta
+# 🧩 Główna funkcja: analiza końcowa (bez korekty)
 # ------------------------------------------------------------
 @final_review_routes.post("/api/project/<project_id>/final_review")
 def perform_final_review(project_id):
-    """
-    Analizuje gotowy artykuł i zwraca raport + opcjonalnie poprawioną wersję.
-    """
+    """Tworzy końcowy raport Gemini i pyta, czy zastosować poprawki."""
     if not GEMINI_API_KEY:
         return jsonify({"error": "Gemini API key not configured"}), 500
 
     db = firestore.client()
     doc_ref = db.collection("seo_projects").document(project_id)
     doc = doc_ref.get()
-
     if not doc.exists:
         return jsonify({"error": "Project not found"}), 404
 
@@ -53,23 +50,19 @@ def perform_final_review(project_id):
     if not batches:
         return jsonify({"error": "No article content found"}), 400
 
-    # 🔹 Złącz pełny tekst artykułu
+    # 🔹 Złącz artykuł
     full_article = "\n\n".join([b.get("text", "") for b in batches]).strip()
     if not full_article:
-        return jsonify({"error": "Article text empty"}), 400
+        return jsonify({"error": "Empty article text"}), 400
 
     model = genai.GenerativeModel("gemini-1.5-pro")
-
-    # --------------------------------------------------------
-    # 1️⃣ AUDYT EKSPERCKI
-    # --------------------------------------------------------
     review_prompt = (
         "Podaj w punktach szczegółową ocenę przesłanego artykułu pod kątem:\n"
         "1. merytorycznym (zgodność faktów, aktualność, błędy logiczne),\n"
         "2. redakcyjnym (struktura, powtórzenia, styl),\n"
         "3. językowym (poprawność gramatyczna, płynność),\n"
         "a także zaproponuj konkretne poprawki dla każdego problemu.\n\n"
-        "Artykuł:\n---\n" + full_article[:15000]  # limit zabezpieczający
+        "Artykuł:\n---\n" + full_article[:15000]
     )
 
     try:
@@ -77,52 +70,85 @@ def perform_final_review(project_id):
         review_response = model.generate_content(review_prompt)
         review_text = review_response.text.strip()
     except Exception as e:
-        print(f"[REVIEW] ❌ Błąd podczas generowania oceny: {e}")
+        print(f"[REVIEW] ❌ Błąd podczas generowania raportu: {e}")
         return jsonify({"error": str(e)}), 500
 
-    # --------------------------------------------------------
-    # 2️⃣ AUTOMATYCZNA KOREKTA (jeśli aktywna)
-    # --------------------------------------------------------
-    corrected_text = None
-    if os.getenv("AUTO_CORRECT_AFTER_REVIEW", "true").lower() == "true":
-        try:
-            correction_prompt = (
-                "Popraw poniższy artykuł zgodnie z sugestiami z raportu, "
-                "zachowując sens, ton i oryginalną strukturę H2/H3.\n"
-                "RAPORT:\n" + review_text + "\n\n"
-                "---\n\nARTYKUŁ DO POPRAWY:\n" + full_article
-            )
-            print("[REVIEW] ✏️ Generowanie poprawionej wersji artykułu...")
-            correction_response = model.generate_content(correction_prompt)
-            corrected_text = correction_response.text.strip()
-        except Exception as e:
-            print(f"[REVIEW] ⚠️ Błąd korekty: {e}")
-            corrected_text = None
-
-    # --------------------------------------------------------
-    # 3️⃣ Zapis wyników w Firestore
-    # --------------------------------------------------------
+    # 🔹 Zapisz sam raport (bez korekty)
     try:
         doc_ref.update({
             "final_review": {
                 "review_text": review_text,
-                "corrected_text": corrected_text,
+                "corrected_text": None,
                 "created_at": firestore.SERVER_TIMESTAMP,
                 "model": "gemini-1.5-pro",
-                "auto_correct_applied": bool(corrected_text)
+                "status": "REVIEW_READY"
             }
         })
-        print(f"[REVIEW] ✅ Raport końcowy zapisany w Firestore → {project_id}")
+        print(f"[REVIEW] ✅ Raport zapisany w Firestore (bez korekty) → {project_id}")
     except Exception as e:
-        print(f"[REVIEW] ⚠️ Błąd zapisu do Firestore: {e}")
+        print(f"[REVIEW] ⚠️ Błąd zapisu raportu: {e}")
 
-    # --------------------------------------------------------
-    # 4️⃣ Zwrócenie wyników do frontu / API
-    # --------------------------------------------------------
     return jsonify({
-        "status": "REVIEW_COMPLETE",
+        "status": "REVIEW_READY",
         "project_id": project_id,
         "review": review_text,
-        "corrected_text": corrected_text,
-        "auto_correct": bool(corrected_text)
+        "next_action": "Czy chcesz wprowadzić poprawki automatycznie? (POST /api/project/<id>/apply_final_corrections)"
+    }), 200
+
+
+# ------------------------------------------------------------
+# 🧩 Drugi etap: zastosowanie poprawek po potwierdzeniu
+# ------------------------------------------------------------
+@final_review_routes.post("/api/project/<project_id>/apply_final_corrections")
+def apply_final_corrections(project_id):
+    """Tworzy poprawioną wersję artykułu na podstawie wcześniejszego raportu."""
+    if not GEMINI_API_KEY:
+        return jsonify({"error": "Gemini API key not configured"}), 500
+
+    db = firestore.client()
+    doc_ref = db.collection("seo_projects").document(project_id)
+    doc = doc_ref.get()
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+
+    data = doc.to_dict()
+    final_review = data.get("final_review", {})
+    batches = data.get("batches", [])
+    if not final_review or not batches:
+        return jsonify({"error": "Missing review or article text"}), 400
+
+    review_text = final_review.get("review_text", "")
+    full_article = "\n\n".join([b.get("text", "") for b in batches]).strip()
+    if not review_text or not full_article:
+        return jsonify({"error": "Invalid review or article"}), 400
+
+    model = genai.GenerativeModel("gemini-1.5-pro")
+    correction_prompt = (
+        "Na podstawie poniższego raportu wprowadź poprawki do artykułu, "
+        "zachowując sens, styl i strukturę (H2/H3).\n\n"
+        f"RAPORT:\n{review_text}\n\n---\n\nARTYKUŁ DO POPRAWY:\n{full_article}"
+    )
+
+    try:
+        print(f"[REVIEW] ✏️ Generowanie poprawionej wersji artykułu ({project_id})...")
+        correction_response = model.generate_content(correction_prompt)
+        corrected_text = correction_response.text.strip()
+    except Exception as e:
+        print(f"[REVIEW] ❌ Błąd podczas korekty: {e}")
+        return jsonify({"error": str(e)}), 500
+
+    try:
+        doc_ref.update({
+            "final_review.corrected_text": corrected_text,
+            "final_review.status": "CORRECTED",
+            "final_review.updated_at": firestore.SERVER_TIMESTAMP
+        })
+        print(f"[REVIEW] ✅ Poprawiona wersja zapisana w Firestore → {project_id}")
+    except Exception as e:
+        print(f"[REVIEW] ⚠️ Błąd zapisu korekty: {e}")
+
+    return jsonify({
+        "status": "CORRECTION_APPLIED",
+        "project_id": project_id,
+        "corrected_text": corrected_text
     }), 200
