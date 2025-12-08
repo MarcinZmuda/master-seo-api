@@ -228,6 +228,60 @@ def validate_section_structure(batch_text, batch_num):
     }
 
 # ============================================================================
+# LEGACY FUNCTION (for project_routes.py compatibility)
+# ============================================================================
+
+def process_batch_in_firestore(project_id: str, batch_text: str, meta_trace: dict = None) -> dict:
+    """
+    Legacy function used by project_routes.py for direct saving.
+    Kept for backward compatibility with existing imports.
+    
+    NOTE: New code should use approve_batch endpoint instead.
+    """
+    db = firestore.client()
+    doc_ref = db.collection("seo_projects").document(project_id)
+    doc = doc_ref.get()
+    
+    if not doc.exists:
+        return {"error": "Project not found", "status_code": 404}
+        
+    project_data = doc.to_dict()
+    keywords_state = project_data.get("keywords_state", {})
+    
+    # Count keyword occurrences in this batch
+    for row_id, meta in keywords_state.items():
+        kw = meta.get("keyword", "")
+        count_in_batch = count_hybrid_occurrences(batch_text, kw, include_headings=True)
+        
+        # Update cumulative count
+        previous_uses = meta.get("actual_uses", 0)
+        meta["actual_uses"] = previous_uses + count_in_batch
+    
+    # Calculate burstiness
+    burstiness_score = calculate_burstiness(batch_text)
+    
+    # Save batch
+    batch_entry = {
+        "text": batch_text,
+        "meta_trace": meta_trace or {},
+        "timestamp": datetime.datetime.now(datetime.timezone.utc),
+        "burstiness": burstiness_score
+    }
+    
+    if "batches" not in project_data:
+        project_data["batches"] = []
+    project_data["batches"].append(batch_entry)
+    project_data["keywords_state"] = keywords_state
+    
+    doc_ref.set(project_data)
+    
+    return {
+        "status": "BATCH_SAVED",
+        "message": "Batch saved successfully (legacy mode)",
+        "status_code": 200
+    }
+
+# ============================================================================
 # ROUTES
 # ============================================================================
 
