@@ -1,26 +1,32 @@
+# ================================================================
+# 🧠 Brajen Semantic Engine v18.0 — Requirements
+# ================================================================
+
 # --- CORE ---
-Flask==3.0.0
-Flask-CORS==4.0.0
+Flask==3.0.2
+Flask-CORS==4.0.1
 gunicorn==21.2.0
-requests==2.31.0
-python-dotenv==1.0.0
+requests==2.32.3
+python-dotenv==1.0.1
 
 # --- FIREBASE / DATABASE ---
-firebase-admin==6.3.0
+firebase-admin==6.5.0
 
 # --- NLP + SEMANTYKA ---
-spacy==3.7.2
+spacy==3.7.4
 pl-core-news-lg @ https://github.com/explosion/spacy-models/releases/download/pl_core_news_lg-3.7.0/pl_core_news_lg-3.7.0-py3-none-any.whl
-rapidfuzz==3.6.1
-language-tool-python==2.8.1
-textstat==0.7.3
+rapidfuzz==3.6.2
 pysbd==0.3.4
-numpy==1.24.3
-beautifulsoup4==4.12.2
+numpy==1.26.4
+textstat==0.7.4
+beautifulsoup4==4.12.3
 
-# --- AI / GENERATIVE ---
-google-generativeai==0.3.1
+# --- AI / GENERATIVE (Google Gemini + Embeddings) ---
+google-generativeai==0.5.2
 
-# --- DEV (opcjonalnie) ---
-# pytest==7.4.3
-# black==23.12.1
+# --- LOGGING + DEBUG ---
+rich==13.7.1
+
+# --- DEV / TEST (opcjonalnie) ---
+# black==24.3.0
+# pytest==8.2.0
