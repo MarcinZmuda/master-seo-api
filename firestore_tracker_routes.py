@@ -17,14 +17,14 @@ import os
 
 tracker_routes = Blueprint("tracker_routes", __name__)
 
-# --- INIT SPACY (LG for Polish) ---
+# --- INIT SPACY (MD for Polish - fix for Docker timeout) ---
 try:
-    nlp = spacy.load("pl_core_news_lg")
-    print("[TRACKER] ✅ Załadowano model pl_core_news_lg")
+    nlp = spacy.load("pl_core_news_md")
+    print("[TRACKER] ✅ Załadowano model pl_core_news_md")
 except OSError:
     from spacy.cli import download
-    download("pl_core_news_lg")
-    nlp = spacy.load("pl_core_news_lg")
+    download("pl_core_news_md")
+    nlp = spacy.load("pl_core_news_md")
 
 # --- Gemini Config ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
