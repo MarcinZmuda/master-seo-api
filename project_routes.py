@@ -16,14 +16,15 @@ if GEMINI_API_KEY:
 else:
     print("[WARNING] ⚠️ GEMINI_API_KEY not set - LSI enrichment fallback mode")
 
-# spaCy model
+# spaCy model - POPRAWKA: Używamy wersji MD (Medium) zgodnej z Dockerfile
 try:
-    nlp = spacy.load("pl_core_news_lg")
-    print("[INIT] ✅ spaCy pl_core_news_lg loaded")
+    nlp = spacy.load("pl_core_news_md")
+    print("[INIT] ✅ spaCy pl_core_news_md loaded")
 except OSError:
     from spacy.cli import download
-    download("pl_core_news_lg")
-    nlp = spacy.load("pl_core_news_lg")
+    print("⚠️ Downloading pl_core_news_md fallback...")
+    download("pl_core_news_md")
+    nlp = spacy.load("pl_core_news_md")
 
 project_routes = Blueprint("project_routes", __name__)
 
