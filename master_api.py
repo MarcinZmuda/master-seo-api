@@ -31,20 +31,27 @@ app = Flask(__name__)
 CORS(app)
 
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-VERSION = "v18.0-brajen-semantic"
+VERSION = "v18.5-semantic-firestore"
 
 # ================================================================
 # 📦 Import blueprintów (po inicjalizacji Firestore)
 # ================================================================
 from project_routes import project_routes
 from firestore_tracker_routes import tracker_routes
-from s1_analysis_routes import s1_routes
-from seo_optimizer import unified_prevalidation  # ✅ globalne wywołania
+from seo_optimizer import unified_prevalidation
+
+# 🔄 Nowy zintegrowany moduł S1 (ngram_entity_analysis)
+try:
+    from api.index import app as s1_app
+    print("[MASTER] ✅ Zarejestrowano nowy moduł S1: api/index.py")
+except ImportError:
+    print("[MASTER] ⚠️ Nie znaleziono modułu api/index.py — sprawdź ścieżkę")
 
 # Rejestracja blueprintów
 app.register_blueprint(project_routes)
 app.register_blueprint(tracker_routes)
-app.register_blueprint(s1_routes)
+if "s1_app" in locals():
+    app.register_blueprint(s1_app, url_prefix="/api")
 
 # ================================================================
 # 🧠 MASTER DEBUG ROUTES (diagnostyka)
@@ -67,16 +74,30 @@ def master_debug(project_id):
         if warns:
             all_warnings.extend(warns)
 
+    semantic_scores = [
+        b.get("language_audit", {}).get("semantic_score")
+        for b in batches if b.get("language_audit")
+    ]
+    avg_semantic = (
+        round(sum([s for s in semantic_scores if s]) / len(semantic_scores), 3)
+        if semantic_scores else 0
+    )
+
     return jsonify({
         "project_id": project_id,
         "topic": data.get("topic"),
         "total_batches": total_batches,
         "keywords_count": len(keywords),
         "warnings_total": len(all_warnings),
-        "semantic_scores": [b.get("language_audit", {}).get("semantic_score") for b in batches if b.get("language_audit")],
-        "avg_density": round(sum([b.get("language_audit", {}).get("density", 0) for b in batches]) / max(1, total_batches), 2),
-        "burstiness_avg": round(sum([b.get("burstiness", 0) for b in batches]) / max(1, total_batches), 2),
-        "last_update": batches[-1]["timestamp"].isoformat() if batches else None
+        "avg_semantic_score": avg_semantic,
+        "avg_density": round(
+            sum([b.get("language_audit", {}).get("density", 0) for b in batches]) / max(1, total_batches), 2
+        ),
+        "burstiness_avg": round(
+            sum([b.get("burstiness", 0) for b in batches]) / max(1, total_batches), 2
+        ),
+        "last_update": batches[-1]["timestamp"].isoformat() if batches else None,
+        "lsi_keywords": data.get("lsi_enrichment", {}).get("count", 0),
     }), 200
 
 
@@ -90,8 +111,14 @@ def health():
         "message": "Master SEO API działa",
         "version": VERSION,
         "timestamp": datetime.utcnow().isoformat(),
-        "modules": ["project_routes", "firestore_tracker_routes", "s1_analysis_routes", "seo_optimizer"],
-        "debug_mode": DEBUG_MODE
+        "modules": [
+            "project_routes",
+            "firestore_tracker_routes",
+            "api/index (S1 consolidated)",
+            "seo_optimizer"
+        ],
+        "debug_mode": DEBUG_MODE,
+        "firebase_connected": True
     }), 200
 
 
@@ -105,10 +132,10 @@ def version_info():
         "engine": "Brajen Semantic Engine",
         "api_version": VERSION,
         "components": {
-            "project_routes": "v18.0",
-            "firestore_tracker_routes": "v18.0",
-            "seo_optimizer": "v18.0",
-            "s1_analysis_routes": "v17.x-compatible"
+            "project_routes": "v18.5",
+            "firestore_tracker_routes": "v18.5",
+            "seo_optimizer": "v18.5",
+            "api/index": "v18.5-semantic-firestore"
         },
         "environment": {
             "debug_mode": DEBUG_MODE,
