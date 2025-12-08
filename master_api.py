@@ -31,7 +31,7 @@ app = Flask(__name__)
 CORS(app)
 
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-VERSION = "v18.5-semantic-firestore"
+VERSION = "v19.0-final-review-gemini"
 
 # ================================================================
 # 📦 Import blueprintów (po inicjalizacji Firestore)
@@ -39,6 +39,7 @@ VERSION = "v18.5-semantic-firestore"
 from project_routes import project_routes
 from firestore_tracker_routes import tracker_routes
 from seo_optimizer import unified_prevalidation
+from final_review_routes import final_review_routes  # ✅ Nowy moduł audytu końcowego
 
 # 🔄 Nowy zintegrowany moduł S1 (ngram_entity_analysis)
 try:
@@ -47,9 +48,13 @@ try:
 except ImportError:
     print("[MASTER] ⚠️ Nie znaleziono modułu api/index.py — sprawdź ścieżkę")
 
-# Rejestracja blueprintów
+# ================================================================
+# 🔗 Rejestracja blueprintów
+# ================================================================
 app.register_blueprint(project_routes)
 app.register_blueprint(tracker_routes)
+app.register_blueprint(final_review_routes)
+
 if "s1_app" in locals():
     app.register_blueprint(s1_app, url_prefix="/api")
 
@@ -98,6 +103,7 @@ def master_debug(project_id):
         ),
         "last_update": batches[-1]["timestamp"].isoformat() if batches else None,
         "lsi_keywords": data.get("lsi_enrichment", {}).get("count", 0),
+        "has_final_review": "final_review" in data,
     }), 200
 
 
@@ -115,7 +121,8 @@ def health():
             "project_routes",
             "firestore_tracker_routes",
             "api/index (S1 consolidated)",
-            "seo_optimizer"
+            "seo_optimizer",
+            "final_review_routes"
         ],
         "debug_mode": DEBUG_MODE,
         "firebase_connected": True
@@ -132,10 +139,11 @@ def version_info():
         "engine": "Brajen Semantic Engine",
         "api_version": VERSION,
         "components": {
-            "project_routes": "v18.5",
-            "firestore_tracker_routes": "v18.5",
-            "seo_optimizer": "v18.5",
-            "api/index": "v18.5-semantic-firestore"
+            "project_routes": "v19.0",
+            "firestore_tracker_routes": "v19.0",
+            "seo_optimizer": "v19.0",
+            "api/index": "v19.0-semantic-firestore",
+            "final_review_routes": "v19.0-gemini"
         },
         "environment": {
             "debug_mode": DEBUG_MODE,
@@ -165,6 +173,23 @@ def manual_check():
         "readability": result["readability"],
         "warnings": result["warnings"]
     }), 200
+
+
+# ================================================================
+# 🧩 AUTO FINAL REVIEW TRIGGER (po eksporcie)
+# ================================================================
+@app.post("/api/auto_final_review/<project_id>")
+def auto_final_review(project_id):
+    """
+    Automatycznie uruchamia audyt Gemini po zakończeniu artykułu.
+    Wywołuje endpoint /api/project/<id>/final_review.
+    """
+    from final_review_routes import perform_final_review
+    try:
+        response = perform_final_review(project_id)
+        return response
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # ================================================================
