@@ -32,6 +32,29 @@ except OSError:
     print("[SEO_OPT] ✅ Model pobrany i załadowany")
 
 # ================================================================
+# 🛡️ HELPER: Safe Gemini Call (Anti-Crash)
+# ================================================================
+def safe_generate_content(model, prompt: str, max_retries=1):
+    """
+    Bezpieczne wywołanie Gemini z obsługą błędów długości.
+    Jeśli prompt jest za długi, przycina go i próbuje ponownie.
+    """
+    try:
+        return model.generate_content(prompt)
+    except Exception as e:
+        error_msg = str(e).lower()
+        if "too large" in error_msg or "exhausted" in error_msg or "400" in error_msg:
+            print(f"[SEO_OPT] ⚠️ Gemini Payload too large! Truncating input... Error: {e}")
+            if max_retries > 0:
+                # Drastyczne cięcie - bierzemy ostatnie 15k znaków lub pierwsze 15k
+                safe_prompt = prompt[:15000] + "\n\n[TRUNCATED FOR SAFETY]"
+                return safe_generate_content(model, safe_prompt, max_retries - 1)
+        
+        # Jeśli to inny błąd lub retries się skończyły
+        print(f"[SEO_OPT] ❌ Gemini Critical Error: {e}")
+        raise e
+
+# ================================================================
 # 🧩 Funkcja: ekstrakcja słów kluczowych z tekstu
 # ================================================================
 def extract_keywords(text: str, top_n: int = 15) -> List[str]:
@@ -77,11 +100,11 @@ def generate_semantic_outline(topic: str, keywords: List[str]) -> str:
         - H2: ...
         - H3: ...
         """
-        response = model.generate_content(prompt)
+        response = safe_generate_content(model, prompt)
         return response.text.strip()
     except Exception as e:
         print(f"[SEO_OPT] ❌ Gemini Outline Error: {e}")
-        return "Błąd podczas generowania outline."
+        return "Błąd podczas generowania outline (API Error)."
 
 # ================================================================
 # 🧩 Funkcja: prewalidacja tekstu SEO
@@ -134,9 +157,10 @@ def ai_validate_text(text: str, topic: str = "") -> Dict[str, any]:
         Zwróć ocenę od 0 do 100 i listę brakujących elementów.
 
         Tekst:
-        {text[:8000]}
+        {text[:25000]} 
         """
-        response = model.generate_content(prompt)
+        # Używamy safe_generate_content zamiast bezpośredniego wywołania
+        response = safe_generate_content(model, prompt)
         return {"status": "ok", "validation_result": response.text}
     except Exception as e:
         print(f"[SEO_OPT] ❌ AI validation failed: {e}")
@@ -162,7 +186,7 @@ def enrich_with_semantics(project_data: dict, text: str) -> dict:
         return project_data
 
 # ================================================================
-# 🆕 Funkcja: Analiza rytmu akapitów (DODANO BRAKUJĄCĄ FUNKCJĘ)
+# 🆕 Funkcja: Analiza rytmu akapitów (Essential for S1/S2)
 # ================================================================
 def detect_paragraph_rhythm(text: str) -> str:
     """
@@ -212,7 +236,7 @@ def unified_prevalidation(text: str, project_id: str = None) -> dict:
     """
     try:
         result = optimize_text(text)
-        # Wywołujemy nową funkcję rytmu, żeby była też w metadanych
+        # Wywołujemy funkcję rytmu
         rhythm = detect_paragraph_rhythm(text)
         
         return {
