@@ -14,6 +14,7 @@ firebase-admin==6.5.0
 
 # --- NLP + SEMANTYKA ---
 spacy==3.7.4
+pl-core-news-md @ https://github.com/explosion/spacy-models/releases/download/pl_core_news_md-3.7.0/pl_core_news_md-3.7.0-py3-none-any.whl
 rapidfuzz==3.6.2
 pysbd==0.3.4
 numpy==1.26.4
