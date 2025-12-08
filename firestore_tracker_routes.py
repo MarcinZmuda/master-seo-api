@@ -1,6 +1,6 @@
 """
-SEO Content Tracker Routes - v18.0 Brajen Semantic Engine
-Upgraded for Manual Correction + Unified Validation + Firestore Safe Save
+SEO Content Tracker Routes - v19.5 Brajen Semantic Engine
++ Interactive Final Review (Gemini)
 """
 
 from flask import Blueprint, request, jsonify
@@ -10,8 +10,10 @@ import math
 import datetime
 import spacy
 from rapidfuzz import fuzz
-from seo_optimizer import unified_prevalidation  # 🔗 Nowe połączenie
+from seo_optimizer import unified_prevalidation
 from google.api_core.exceptions import InvalidArgument
+import google.generativeai as genai
+import os
 
 tracker_routes = Blueprint("tracker_routes", __name__)
 
@@ -24,8 +26,16 @@ except OSError:
     download("pl_core_news_lg")
     nlp = spacy.load("pl_core_news_lg")
 
+# --- Gemini Config ---
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    print("[TRACKER] ✅ Gemini API aktywny (Final Review Mode)")
+else:
+    print("[TRACKER] ⚠️ Brak GEMINI_API_KEY — Final Review nieaktywny")
+
 # ============================================================================
-# 1. ROBUST COUNTING (EXACT + LEMMA + STEM + FUZZY)
+# 1. ROBUST COUNTING
 # ============================================================================
 def count_robust(doc, keyword_meta):
     if not doc:
@@ -55,12 +65,10 @@ def count_robust(doc, keyword_meta):
         if fuzz.partial_ratio(kw_stem, token) >= 85
     )
     total_hits = max(exact_hits, lemma_exact_hits + lemma_fuzzy_hits + stem_hits + fuzzy_stem_hits)
-    if total_hits > 0:
-        print(f"[COUNT] '{kw_exact}' → {total_hits} (E:{exact_hits}, L:{lemma_exact_hits}, F:{lemma_fuzzy_hits}, S:{stem_hits})")
     return total_hits
 
 # ============================================================================
-# 2. STRUCTURE + QUALITY VALIDATION
+# 2. VALIDATIONS
 # ============================================================================
 def validate_structure(text):
     if "##" in text or "###" in text:
@@ -82,7 +90,7 @@ def calculate_burstiness(text):
     return round((math.sqrt(variance) / mean) * 10, 2) if mean else 0.0
 
 # ============================================================================
-# 3. FIRESTORE PROCESSOR (Manual + Forced Safe Mode)
+# 3. FIRESTORE PROCESSOR
 # ============================================================================
 def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=False):
     db = firestore.client()
@@ -95,7 +103,6 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
     keywords_state = project_data.get("keywords_state", {})
     doc_nlp = nlp(batch_text)
 
-    # --- Count and update keyword statuses
     for rid, meta in keywords_state.items():
         count = count_robust(doc_nlp, meta)
         meta["actual_uses"] = meta.get("actual_uses", 0) + count
@@ -110,7 +117,6 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
             meta["status"] = "LOCKED"
         keywords_state[rid] = meta
 
-    # --- Unified prevalidation (SEO + Semantics + Style)
     precheck = unified_prevalidation(batch_text, keywords_state)
     warnings = precheck.get("warnings", [])
     semantic_score = precheck.get("semantic_score", 1.0)
@@ -118,12 +124,10 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
     smog = precheck.get("smog", 0.0)
     burstiness = calculate_burstiness(batch_text)
 
-    # --- Structure check
     struct_check = validate_structure(batch_text)
     valid_struct = struct_check["valid"]
     warning_text = struct_check.get("error") if not valid_struct else None
 
-    # --- Decide status
     status = "APPROVED"
     if warnings or not valid_struct:
         status = "WARN"
@@ -149,9 +153,7 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
     project_data["keywords_state"] = keywords_state
     try:
         doc_ref.set(project_data)
-        print(f"[FIRESTORE] ✅ Batch zapisany ({status}) – {len(warnings)} ostrzeżeń, drift {semantic_score:.2f}")
     except InvalidArgument:
-        print("[FIRESTORE] ⚠️ InvalidArgument – automatyczne naprawianie danych...")
         doc_ref.set({k: v for k, v in project_data.items() if v is not None})
     except Exception as e:
         print(f"[FIRESTORE] ⚠️ Błąd zapisu: {e}")
@@ -177,15 +179,64 @@ def preview_batch(project_id):
     result["mode"] = "PREVIEW_ONLY"
     return jsonify(result), 200
 
+
 @tracker_routes.post("/api/project/<project_id>/approve_batch")
 def approve_batch(project_id):
+    """
+    Zapisuje batch i automatycznie uruchamia końcowy audyt (Gemini),
+    jeśli to był ostatni batch.
+    """
     data = request.get_json(force=True)
     text = data.get("corrected_text", "")
     meta_trace = data.get("meta_trace", {})
     forced = data.get("forced", False)
+
+    # Zapisz batch
     result = process_batch_in_firestore(project_id, text, meta_trace, forced)
     result["mode"] = "APPROVE"
+
+    # 🔹 Sprawdź, czy to ostatni batch
+    db = firestore.client()
+    doc_ref = db.collection("seo_projects").document(project_id)
+    doc = doc_ref.get()
+    if not doc.exists:
+        return jsonify(result), 200
+
+    project_data = doc.to_dict()
+    total_planned = len(project_data.get("batches_plan", []))
+    total_current = len(project_data.get("batches", []))
+
+    if total_planned and total_current >= total_planned and GEMINI_API_KEY:
+        try:
+            print(f"[TRACKER] 🧠 Final batch detected → uruchamiam Gemini review dla {project_id}")
+            model = genai.GenerativeModel("gemini-1.5-pro")
+            full_article = "\n\n".join([b.get("text", "") for b in project_data.get("batches", [])])[:15000]
+            review_prompt = (
+                "Podaj w punktach szczegółową ocenę przesłanego artykułu pod kątem:\n"
+                "1. merytorycznym,\n2. redakcyjnym,\n3. językowym.\n"
+                "Dla każdego punktu zaproponuj, jak to poprawić.\n\n"
+                f"---\n{full_article}"
+            )
+            review_response = model.generate_content(review_prompt)
+            review_text = review_response.text.strip()
+            doc_ref.update({
+                "final_review": {
+                    "review_text": review_text,
+                    "created_at": firestore.SERVER_TIMESTAMP,
+                    "model": "gemini-1.5-pro",
+                    "status": "REVIEW_READY"
+                }
+            })
+            result["final_review"] = review_text
+            result["next_action"] = "Czy chcesz wprowadzić poprawki automatycznie? (POST /api/project/<id>/apply_final_corrections)"
+            result["final_review_status"] = "READY"
+            print(f"[TRACKER] ✅ Raport Gemini zapisany w Firestore → {project_id}")
+        except Exception as e:
+            print(f"[TRACKER] ⚠️ Błąd Gemini review: {e}")
+            result["final_review_error"] = str(e)
+
     return jsonify(result), 200
+
 
 @tracker_routes.get("/api/debug/<project_id>")
 def debug_keywords(project_id):
