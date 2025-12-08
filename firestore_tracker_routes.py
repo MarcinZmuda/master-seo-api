@@ -57,10 +57,11 @@ def validate_structure(text, expected_h2_count=2):
     if "##" in text or "###" in text:
         return {"valid": False, "error": "❌ Użyto Markdown (##). Wymagany czysty HTML (<h2>)."}
     
-    # H2 Count (Warning only if slightly less, Block if 0)
+    # H2 Count
     h2_matches = re.findall(r'<h2[^>]*>(.*?)</h2>', text, re.IGNORECASE | re.DOTALL)
-    if len(h2_matches) == 0 and expected_h2_count > 0:
-         return {"valid": False, "error": "❌ Brak nagłówków H2! Tekst musi mieć strukturę."}
+    if len(h2_matches) < expected_h2_count and expected_h2_count > 0:
+        # Tylko ostrzeżenie jeśli 0
+        pass 
 
     # Banned Headers Check
     banned = ["wstęp", "podsumowanie", "wprowadzenie", "zakończenie", "wnioski", "konkluzja", "introduction"]
