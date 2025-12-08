@@ -1,5 +1,5 @@
 # ================================================================
-# 🧠 Brajen Semantic Engine v18.0 — Requirements
+# 🧠 Brajen Semantic Engine v19.5 — Requirements (Stable for Render)
 # ================================================================
 
 # --- CORE ---
@@ -14,7 +14,6 @@ firebase-admin==6.5.0
 
 # --- NLP + SEMANTYKA ---
 spacy==3.7.4
-pl-core-news-lg @ https://github.com/explosion/spacy-models/releases/download/pl_core_news_lg-3.7.0/pl_core_news_lg-3.7.0-py3-none-any.whl
 rapidfuzz==3.6.2
 pysbd==0.3.4
 numpy==1.26.4
@@ -27,6 +26,6 @@ google-generativeai==0.5.2
 # --- LOGGING + DEBUG ---
 rich==13.7.1
 
-# --- DEV / TEST (opcjonalnie) ---
+# --- OPTIONAL DEV / TEST ---
 # black==24.3.0
 # pytest==8.2.0
