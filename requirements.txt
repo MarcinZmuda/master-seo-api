@@ -1,18 +1,26 @@
+# --- CORE ---
 Flask==3.0.0
 Flask-CORS==4.0.0
 gunicorn==21.2.0
+requests==2.31.0
+python-dotenv==1.0.0
+
+# --- FIREBASE / DATABASE ---
 firebase-admin==6.3.0
+
+# --- NLP + SEMANTYKA ---
 spacy==3.7.2
+pl-core-news-lg @ https://github.com/explosion/spacy-models/releases/download/pl_core_news_lg-3.7.0/pl_core_news_lg-3.7.0-py3-none-any.whl
+rapidfuzz==3.6.1
 language-tool-python==2.8.1
 textstat==0.7.3
 pysbd==0.3.4
-rapidfuzz==3.5.2
-requests==2.31.0
-google-generativeai==0.3.1
-python-dotenv==1.0.0
 numpy==1.24.3
 beautifulsoup4==4.12.2
 
-# Development dependencies (optional, comment out for production)
+# --- AI / GENERATIVE ---
+google-generativeai==0.3.1
+
+# --- DEV (opcjonalnie) ---
 # pytest==7.4.3
 # black==23.12.1
