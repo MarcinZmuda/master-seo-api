@@ -7,358 +7,230 @@ from flask import Blueprint, request, jsonify
 from firebase_admin import firestore
 from firestore_tracker_routes import process_batch_in_firestore
 import google.generativeai as genai
+from seo_optimizer import unified_prevalidation, detect_paragraph_rhythm
 
 # Gemini API configuration
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 else:
-    print("[WARNING] ⚠️ GEMINI_API_KEY not set - LSI enrichment will use frequency-based fallback")
+    print("[WARNING] ⚠️ GEMINI_API_KEY not set - LSI enrichment fallback mode")
 
-# ⭐ FIX #3: Unify spaCy model to pl_core_news_lg (matches Dockerfile)
+# spaCy model
 try:
     nlp = spacy.load("pl_core_news_lg")
-    print("[INIT] ✅ spaCy pl_core_news_lg loaded (unified)")
+    print("[INIT] ✅ spaCy pl_core_news_lg loaded")
 except OSError:
-    print("[WARNING] ⚠️ spaCy model not found. Attempting download...")
     from spacy.cli import download
     download("pl_core_news_lg")
     nlp = spacy.load("pl_core_news_lg")
 
 project_routes = Blueprint("project_routes", __name__)
 
-
 # ================================================================
-# ⭐ FIX #5: LSI KEYWORD ENRICHMENT
+# 🧱 H2 CUSTOM LIST + BASIC/EXTENDED + PROJECT INIT
 # ================================================================
-
-def extract_lsi_candidates(s1_data, main_keywords):
-    """
-    Z danych S1 (n-gramy + entities) wybiera LSI candidates,
-    które NIE są w main keywords, ale są semantycznie związane.
-    """
-    if not s1_data or not isinstance(s1_data, dict):
-        return []
-    
-    # 1. Zbierz wszystkie n-gramy i encje
-    all_ngrams = []
-    ngram_summary = s1_data.get("ngram_summary", {})
-    if isinstance(ngram_summary, dict):
-        top_ngrams = ngram_summary.get("top_ngrams", [])
-        if isinstance(top_ngrams, list):
-            all_ngrams = [ng.get("ngram", "") for ng in top_ngrams if isinstance(ng, dict)]
-    
-    all_entities = []
-    entities_summary = s1_data.get("entities_summary", {})
-    if isinstance(entities_summary, dict):
-        entities_per_url = entities_summary.get("entities_per_url", [])
-        if isinstance(entities_per_url, list):
-            for url_data in entities_per_url:
-                if isinstance(url_data, dict):
-                    entities = url_data.get("entities", [])
-                    if isinstance(entities, list):
-                        for ent in entities:
-                            if isinstance(ent, dict):
-                                all_entities.append(ent.get("text", "").lower())
-    
-    # 2. Combine and filter
-    candidates = set(all_ngrams + all_entities)
-    candidates = {c for c in candidates if c and len(c.split()) <= 4}  # Max 4-gram
-    
-    # Remove exact matches z main keywords
-    main_kw_lower = {kw.lower() for kw in main_keywords if kw}
-    candidates = candidates - main_kw_lower
-    
-    if not candidates:
-        return []
-    
-    # 3. Semantic filtering przez Gemini (jeśli dostępny)
-    if not GEMINI_API_KEY:
-        # Fallback: zwróć top 15 najczęstszych
-        print("[INFO] Using frequency-based LSI selection (Gemini not available)")
-        return list(candidates)[:15]
-    
-    try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        
-        main_kw_sample = ', '.join(list(main_kw_lower)[:5])
-        candidates_sample = ', '.join(list(candidates)[:50])  # Limit 50 dla API
-        
-        prompt = f"""
-        Główne słowa kluczowe: {main_kw_sample}
-        
-        Kandydaci na LSI keywords: {candidates_sample}
-        
-        Wybierz 15 najbardziej semantycznie powiązanych terminów.
-        Zwróć TYLKO JSON list: ["term1", "term2", ...]
-        """
-        
-        response = model.generate_content(prompt)
-        response_text = response.text.strip()
-        
-        # Clean JSON (usuń markdown)
-        response_text = response_text.replace("```json", "").replace("```", "").strip()
-        
-        lsi_terms = json.loads(response_text)
-        
-        if isinstance(lsi_terms, list):
-            print(f"[INFO] Gemini selected {len(lsi_terms)} LSI keywords")
-            return lsi_terms[:15]
-        else:
-            return list(candidates)[:15]
-            
-    except Exception as e:
-        print(f"[WARNING] LSI extraction error: {e} - using fallback")
-        return list(candidates)[:15]
-
-
-# --- PARSER (Zachowany ze starego kodu dla wstecznej kompatybilności) ---
-def parse_brief_text_uuid(brief_text: str):
-    lines = brief_text.split("\n")
-    parsed_dict = {}
-    for line in lines:
-        line = line.strip()
-        if not line: continue
-        kw_type = "BASIC"
-        upper_line = line.upper()
-        if "[EXTENDED]" in upper_line:
-            kw_type = "EXTENDED"
-            line = re.sub(r"\[EXTENDED\]", "", line, flags=re.IGNORECASE).strip()
-        elif "[BASIC]" in upper_line:
-            kw_type = "BASIC"
-            line = re.sub(r"\[BASIC\]", "", line, flags=re.IGNORECASE).strip()
-        if ":" not in line: continue
-        try:
-            parts = line.rsplit(":", 1)
-            original_keyword = parts[0].strip()
-            counts_part = parts[1].strip().lower()
-            numbers = re.findall(r"\d+", counts_part)
-            if not numbers: continue
-            if len(numbers) >= 2: min_val, max_val = int(numbers[0]), int(numbers[1])
-            else: min_val, max_val = int(numbers[0]), int(numbers[0])
-            doc = nlp(original_keyword)
-            search_lemma = " ".join(t.lemma_.lower() for t in doc if t.is_alpha)
-            row_id = str(uuid.uuid4())
-            parsed_dict[row_id] = {
-                "keyword": original_keyword,
-                "search_term_exact": original_keyword.lower(),
-                "search_lemma": search_lemma,
-                "target_min": min_val,
-                "target_max": max_val,
-                "actual_uses": 0,
-                "status": "UNDER",
-                "type": kw_type
-            }
-        except Exception: continue
-    return parsed_dict
-
-# --- S2 CREATE (V12.25.1: JSON First + LSI Enrichment) ---
 @project_routes.post("/api/project/create")
 def create_project():
     data = request.get_json()
     if not data or "topic" not in data:
         return jsonify({"error": "Required field: topic"}), 400
-    
-    topic = data["topic"]
-    
-    # 1. Próba użycia nowego formatu JSON (V12)
+
+    topic = data["topic"].strip()
+    h2_structure = data.get("h2_structure", [])
     raw_keywords = data.get("keywords_list", [])
+
     firestore_keywords = {}
-
-    if raw_keywords:
-        # Nowy tryb JSON
-        for item in raw_keywords:
-            term = item.get("term", "").strip()
-            if not term: continue
-            
-            doc = nlp(term)
-            search_lemma = " ".join(t.lemma_.lower() for t in doc if t.is_alpha)
-            row_id = str(uuid.uuid4())
-            
-            firestore_keywords[row_id] = {
-                "keyword": term,
-                "search_term_exact": term.lower(),
-                "search_lemma": search_lemma,
-                "target_min": item.get("min", 1),
-                "target_max": item.get("max", 5),
-                "actual_uses": 0,
-                "status": "UNDER",
-                "type": item.get("type", "BASIC").upper()
-            }
-        brief_raw = "JSON_MODE_V12"
-    
-    # 2. Fallback do starego trybu tekstowego (V11)
-    elif "brief_text" in data:
-        brief_raw = data["brief_text"]
-        firestore_keywords = parse_brief_text_uuid(brief_raw)
-    
-    else:
-        return jsonify({"error": "Missing 'keywords_list' (JSON) or 'brief_text' (Legacy)."}), 400
-
-    if not firestore_keywords:
-        return jsonify({"error": "No valid keywords parsed."}), 400
-
-    # ⭐ FIX #5: LSI AUTO-ENRICHMENT
-    # Jeśli user przesłał dane S1, automatycznie dodaj LSI keywords
-    s1_data = data.get("s1_data", None)  # Opcjonalne: dane z poprzedniego /api/s1_analysis
-    lsi_added_count = 0
-    
-    if s1_data and isinstance(s1_data, dict):
-        main_keywords = [meta["keyword"] for meta in firestore_keywords.values()]
-        lsi_keywords = extract_lsi_candidates(s1_data, main_keywords)
-        
-        if lsi_keywords:
-            for lsi_term in lsi_keywords:
-                # Sprawdź czy już nie istnieje
-                already_exists = any(
-                    meta["keyword"].lower() == lsi_term.lower() 
-                    for meta in firestore_keywords.values()
-                )
-                
-                if not already_exists:
-                    doc = nlp(lsi_term)
-                    search_lemma = " ".join(t.lemma_.lower() for t in doc if t.is_alpha)
-                    row_id = str(uuid.uuid4())
-                    
-                    firestore_keywords[row_id] = {
-                        "keyword": lsi_term,
-                        "search_term_exact": lsi_term.lower(),
-                        "search_lemma": search_lemma,
-                        "target_min": 1,
-                        "target_max": 3,  # Soft target dla LSI
-                        "actual_uses": 0,
-                        "status": "UNDER",
-                        "type": "LSI_AUTO"  # Nowy typ: automatycznie dodany LSI
-                    }
-                    lsi_added_count += 1
-            print(f"[INFO] Added {lsi_added_count} LSI keywords automatically")
+    for item in raw_keywords:
+        term = item.get("term", "").strip()
+        if not term:
+            continue
+        doc = nlp(term)
+        search_lemma = " ".join(t.lemma_.lower() for t in doc if t.is_alpha)
+        row_id = str(uuid.uuid4())
+        firestore_keywords[row_id] = {
+            "keyword": term,
+            "search_term_exact": term.lower(),
+            "search_lemma": search_lemma,
+            "target_min": item.get("min", 1),
+            "target_max": item.get("max", 5),
+            "actual_uses": 0,
+            "status": "UNDER",
+            "type": item.get("type", "BASIC").upper()
+        }
 
     db = firestore.client()
     doc_ref = db.collection("seo_projects").document()
-    
     project_data = {
         "topic": topic,
-        "brief_raw": brief_raw,
+        "h2_structure": h2_structure,
         "keywords_state": firestore_keywords,
-        "counting_mode": "uuid_hybrid",
-        "continuous_counting": True,
         "created_at": firestore.SERVER_TIMESTAMP,
         "batches": [],
         "total_batches": 0,
-        "avg_competitor_length": data.get("avg_competitor_length", 2000),  # NEW: from S1
-        "h2_structure": data.get("h2_structure", []),  # NEW: store H2 list
-        "version": "v12.25.6.15",  # ⭐ Updated version
-        "lsi_enrichment": {
-            "enabled": lsi_added_count > 0,
-            "count": lsi_added_count
-        }
+        "version": "v18.0",
+        "manual_mode": True
     }
-    
     doc_ref.set(project_data)
-    
-    response = {
+
+    return jsonify({
         "status": "CREATED",
         "project_id": doc_ref.id,
         "topic": topic,
         "keywords": len(firestore_keywords),
-        "version": "v12.25.6.15"
-    }
-    
-    # ⭐ Informuj o LSI enrichment
-    if lsi_added_count > 0:
-        response["lsi_enrichment"] = f"Dodano {lsi_added_count} LSI keywords automatycznie (typ: LSI_AUTO)"
-    
-    return jsonify(response), 201
+        "h2_sections": len(h2_structure)
+    }), 201
 
-# --- S3 ADD BATCH (Z obsługą next_action) ---
+# ================================================================
+# ✏️ ADD BATCH + MANUAL CORRECTION MODE
+# ================================================================
 @project_routes.post("/api/project/<project_id>/add_batch")
 def add_batch_to_project(project_id):
     data = request.get_json()
     if not data or "text" not in data:
         return jsonify({"error": "Field 'text' is required"}), 400
-        
+
     batch_text = data["text"]
     meta_trace = data.get("meta_trace", {})
-    
+
+    # 🔍 Wstępna analiza rytmu akapitów
+    rhythm = detect_paragraph_rhythm(batch_text)
+    print(f"[DEBUG] Paragraph rhythm: {rhythm}")
+
     result = process_batch_in_firestore(project_id, batch_text, meta_trace)
-    
-    # Obsługa status code (zachowujemy logikę ze starego pliku)
-    status_code = result.get("status_code", 200)
-    if "status" in result and isinstance(result["status"], str):
-         status_code = 200
-    
-    # Dodajemy tekst batcha do odpowiedzi (czasami przydatne dla debugu)
     result["batch_text_snippet"] = batch_text[:50] + "..."
-    
-    return jsonify(result), status_code
+    result["paragraph_rhythm"] = rhythm
+
+    return jsonify(result), 200
 
 # ================================================================
-# 🆕 S4 – EXPORT
+# 🔁 MANUAL CORRECTION ENDPOINT
+# ================================================================
+@project_routes.post("/api/project/<project_id>/manual_correct")
+def manual_correct_batch(project_id):
+    data = request.get_json()
+    if not data or "text" not in data:
+        return jsonify({"error": "Field 'text' is required"}), 400
+
+    corrected_text = data["text"]
+    meta_trace = data.get("meta_trace", {})
+    forced = data.get("forced", False)
+
+    # Wykonaj prewalidację wszystkiego
+    db = firestore.client()
+    doc = db.collection("seo_projects").document(project_id).get()
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+
+    project_data = doc.to_dict()
+    keywords_state = project_data.get("keywords_state", {})
+    precheck = unified_prevalidation(corrected_text, keywords_state)
+
+    summary = (
+        f"Semantic drift: {precheck['semantic_score']:.2f}, "
+        f"Transition: {precheck['transition_score']:.2f}, "
+        f"Density: {precheck['density']:.2f}, "
+        f"Warnings: {len(precheck['warnings'])}"
+    )
+
+    if forced:
+        print("[FORCED APPROVAL] Saving corrected batch despite warnings.")
+
+    # Zapis do Firestore
+    batch_data = {
+        "id": str(uuid.uuid4()),
+        "text": corrected_text,
+        "meta_trace": meta_trace,
+        "status": "FORCED" if forced else "APPROVED",
+        "language_audit": {
+            "semantic_score": precheck["semantic_score"],
+            "transition_score": precheck["transition_score"],
+            "density": precheck["density"]
+        },
+        "warnings": precheck["warnings"],
+        "corrected": True
+    }
+
+    doc_ref = db.collection("seo_projects").document(project_id)
+    doc_ref.update({
+        "batches": firestore.ArrayUnion([batch_data]),
+        "total_batches": firestore.Increment(1)
+    })
+
+    return jsonify({
+        "status": "CORRECTED_SAVED",
+        "project_id": project_id,
+        "summary": summary,
+        "forced": forced
+    }), 200
+
+# ================================================================
+# 🧠 UNIFIED PRE-VALIDATION (SEO + SEMANTICS + STYLE)
+# ================================================================
+@project_routes.post("/api/project/<project_id>/preview_all_checks")
+def preview_all_checks(project_id):
+    data = request.get_json()
+    if not data or "text" not in data:
+        return jsonify({"error": "Field 'text' is required"}), 400
+
+    db = firestore.client()
+    doc = db.collection("seo_projects").document(project_id).get()
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+
+    project_data = doc.to_dict()
+    keywords_state = project_data.get("keywords_state", {})
+
+    report = unified_prevalidation(data["text"], keywords_state)
+
+    return jsonify({
+        "status": "CHECKED",
+        "semantic_score": report["semantic_score"],
+        "transition_score": report["transition_score"],
+        "density": report["density"],
+        "warnings": report["warnings"],
+        "summary": f"Semantic: {report['semantic_score']:.2f}, "
+                   f"Transition: {report['transition_score']:.2f}, "
+                   f"Density: {report['density']:.2f}, "
+                   f"Warnings: {len(report['warnings'])}"
+    }), 200
+
+# ================================================================
+# 🆕 FORCE APPROVE (ZAPIS MIMO BŁĘDÓW)
+# ================================================================
+@project_routes.post("/api/project/<project_id>/force_approve_batch")
+def force_approve_batch(project_id):
+    data = request.get_json()
+    if not data or "text" not in data:
+        return jsonify({"error": "Field 'text' is required"}), 400
+
+    batch_text = data["text"]
+    meta_trace = data.get("meta_trace", {})
+
+    print("[FORCE APPROVE] User requested forced save.")
+    return manual_correct_batch(project_id)
+
+# ================================================================
+# 📦 EXPORT (Late HTML Injection)
 # ================================================================
 @project_routes.get("/api/project/<project_id>/export")
 def export_project_data(project_id):
     db = firestore.client()
     doc_ref = db.collection("seo_projects").document(project_id)
     doc = doc_ref.get()
-
     if not doc.exists:
         return jsonify({"error": "Not found"}), 404
 
     data = doc.to_dict()
-    
-    # 1. Zszywanie tekstu
     batches = data.get("batches", [])
-    full_text_parts = [b.get("text", "") for b in batches]
-    full_article_text = "\n\n".join(full_text_parts)
+    full_text = "\n\n".join(b.get("text", "") for b in batches)
 
-    # 2. Statystyki SEO (Ogólne)
-    keywords_state = data.get("keywords_state", {})
-    under = sum(1 for k in keywords_state.values() if k["status"] == "UNDER")
-    over = sum(1 for k in keywords_state.values() if k["status"] == "OVER")
-    ok = sum(1 for k in keywords_state.values() if k["status"] == "OK")
-    locked = 1 if over >= 4 else 0
-
-    # 3. LISTA SZCZEGÓŁOWA
-    keyword_details = []
-    for row_id, meta in keywords_state.items():
-        keyword_details.append({
-            "keyword": meta.get("keyword", "Unknown"),
-            "type": meta.get("type", "BASIC"),
-            "target": f"{meta.get('target_min')}-{meta.get('target_max')}",
-            "actual": meta.get("actual_uses", 0),
-            "status": meta.get("status", "UNKNOWN"),
-            "position_score": meta.get("position_score", 0),  # ⭐ NEW (FIX #4)
-            "position_quality": meta.get("position_quality", "NONE")  # ⭐ NEW (FIX #4)
-        })
-    keyword_details.sort(key=lambda x: (x['type'], x['keyword']))
-
-    # 4. Statystyki Jakości (Średnie)
-    scores = [b.get("gemini_audit", {}).get("quality_score", 0) for b in batches if b.get("gemini_audit")]
-    bursts = [b.get("language_audit", {}).get("burstiness", 0) for b in batches if b.get("language_audit")]
-    
-    avg_score = round(sum(scores) / len(scores), 1) if scores else 0
-    avg_burst = round(sum(bursts) / len(bursts), 2) if bursts else 0
+    html_ready = f"<article><p>{full_text.replace(chr(10)*2, '</p><p>')}</p></article>"
 
     return jsonify({
         "status": "EXPORT_READY",
         "topic": data.get("topic"),
-        "full_article_text": full_article_text,
-        "final_stats": {"UNDER": under, "OVER": over, "LOCKED": locked, "OK": ok},
-        "quality_metrics": {
-            "avg_score": avg_score,
-            "avg_burstiness": avg_burst
-        },
-        "keyword_details": keyword_details,
-        "version": data.get("version", "v12.25.6.7-FIXED")
+        "article_html": html_ready,
+        "batch_count": len(batches),
+        "version": "v18.0"
     }), 200
-
-# ================================================================
-# 🗑️ S4 – DELETE
-# ================================================================
-@project_routes.delete("/api/project/<project_id>")
-def delete_project_final(project_id):
-    db = firestore.client()
-    doc_ref = db.collection("seo_projects").document(project_id)
-    if not doc_ref.get().exists: return jsonify({"error": "Not found"}), 404
-    doc_ref.delete()
-    return jsonify({"status": "DELETED", "message": "Project permanently removed."}), 200
