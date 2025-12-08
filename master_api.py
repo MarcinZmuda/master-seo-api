@@ -28,10 +28,14 @@ db = firestore.client()
 # ⚙️ Flask App Initialization
 # ================================================================
 app = Flask(__name__)
+
+# 🔧 FIX: Zwiększenie limitu payloadu do 32MB (dla dużych analiz SERP/S1)
+app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024  # 32 MB
+
 CORS(app)
 
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-VERSION = "v19.0-final-review-gemini"
+VERSION = "v19.1-hotfix-large-payloads"
 
 # ================================================================
 # 📦 Import blueprintów (po inicjalizacji Firestore)
@@ -39,7 +43,7 @@ VERSION = "v19.0-final-review-gemini"
 from project_routes import project_routes
 from firestore_tracker_routes import tracker_routes
 from seo_optimizer import unified_prevalidation
-from final_review_routes import final_review_routes  # ✅ Nowy moduł audytu końcowego
+from final_review_routes import final_review_routes
 
 # 🔄 Nowy zintegrowany moduł S1 (ngram_entity_analysis)
 try:
@@ -106,6 +110,16 @@ def master_debug(project_id):
         "has_final_review": "final_review" in data,
     }), 200
 
+# ================================================================
+# 🚨 ERROR HANDLERS (Globalne)
+# ================================================================
+@app.errorhandler(413)
+def request_entity_too_large(error):
+    return jsonify({"error": "Request Entity Too Large", "message": "Payload przekracza 32MB"}), 413
+
+@app.errorhandler(500)
+def internal_server_error(error):
+    return jsonify({"error": "Internal Server Error", "message": str(error)}), 500
 
 # ================================================================
 # 🔍 HEALTHCHECK
@@ -128,22 +142,20 @@ def health():
         "firebase_connected": True
     }), 200
 
-
 # ================================================================
 # 🔎 VERSION CHECK
 # ================================================================
 @app.get("/api/version")
 def version_info():
-    """Zwraca aktualną wersję wszystkich komponentów."""
     return jsonify({
         "engine": "Brajen Semantic Engine",
         "api_version": VERSION,
         "components": {
-            "project_routes": "v19.0",
-            "firestore_tracker_routes": "v19.0",
-            "seo_optimizer": "v19.0",
-            "api/index": "v19.0-semantic-firestore",
-            "final_review_routes": "v19.0-gemini"
+            "project_routes": "v19.1",
+            "firestore_tracker_routes": "v19.1",
+            "seo_optimizer": "v19.1-safe-gemini",
+            "api/index": "v19.1-semantic-firestore",
+            "final_review_routes": "v19.1-gemini"
         },
         "environment": {
             "debug_mode": DEBUG_MODE,
@@ -151,13 +163,11 @@ def version_info():
         }
     }), 200
 
-
 # ================================================================
 # 🧩 MANUAL CHECK ENDPOINT (test unified_prevalidation)
 # ================================================================
 @app.post("/api/manual_check")
 def manual_check():
-    """Szybki endpoint do testowania unified_prevalidation z dowolnym tekstem."""
     data = request.get_json()
     if not data or "text" not in data:
         return jsonify({"error": "Missing text"}), 400
@@ -174,16 +184,11 @@ def manual_check():
         "warnings": result["warnings"]
     }), 200
 
-
 # ================================================================
 # 🧩 AUTO FINAL REVIEW TRIGGER (po eksporcie)
 # ================================================================
 @app.post("/api/auto_final_review/<project_id>")
 def auto_final_review(project_id):
-    """
-    Automatycznie uruchamia audyt Gemini po zakończeniu artykułu.
-    Wywołuje endpoint /api/project/<id>/final_review.
-    """
     from final_review_routes import perform_final_review
     try:
         response = perform_final_review(project_id)
@@ -191,9 +196,8 @@ def auto_final_review(project_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
 # ================================================================
-# 🏁 Local Run (Render używa Gunicorna)
+# 🏁 Local Run
 # ================================================================
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8080))
