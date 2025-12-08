@@ -1,152 +1,177 @@
 # ================================================================
-# seo_optimizer.py - Advanced SEO & Content Quality Optimizations
-# v18.0 - FULL + UNIFIED PREVALIDATION + RHYTHM DETECTION
+# 🧠 SEO Optimizer — SpaCy + Semantic Engine v19.5 (Light Edition)
+# ================================================================
+# Ładowanie SpaCy w trybie "bezpiecznym" (bez runtime download)
+# Obsługa NLP dla języka polskiego — z pl_core_news_md
 # ================================================================
 
-import re
-import json
-import math
-import numpy as np
 import spacy
-import google.generativeai as genai
-from collections import Counter
-import pysbd
-
-# Import from main tracker
-try:
-    nlp = spacy.load("pl_core_news_lg")
-    print("[SEO_OPT] ✅ Załadowano model pl_core_news_lg")
-except OSError:
-    print("[SEO_OPT] ⚠️ Model lg nieznaleziony, próba pobierania...")
-    from spacy.cli import download
-    download("pl_core_news_lg")
-    nlp = spacy.load("pl_core_news_lg")
-
-SENTENCE_SEGMENTER = pysbd.Segmenter(language="pl", clean=True)
+from spacy.matcher import PhraseMatcher
+from spacy.tokens import Doc
+from rich import print
+import textstat
+import re
+from typing import List, Dict
 
 # ================================================================
-# 1–4. (Twoje istniejące funkcje: build_rolling_context, calculate_semantic_drift, 
-# analyze_transition_quality, calculate_keyword_position_score itd.)
-# NIE ZMIENIAMY ANI JEDNEJ LINIJKI – zostają bez zmian
+# 🧩 SAFE MODEL LOADER — bezpieczne ładowanie modelu SpaCy
 # ================================================================
-
-
-# ================================================================
-# 🧠 5. UNIFIED PRE-VALIDATION LAYER (SEO + SEMANTYKA + STYL)
-# ================================================================
-
-def check_keyword_density(text, keywords_state):
-    """Sprawdza nasycenie fraz względem ich targetów."""
-    text_lower = text.lower()
-    total_words = len(re.findall(r'\w+', text_lower))
-    results = {"density": 0.0, "warnings": []}
-    
-    if total_words == 0:
-        return results
-
-    total_hits = 0
-    for kw_id, meta in keywords_state.items():
-        keyword = meta.get("keyword", "").lower()
-        if not keyword:
-            continue
-        count = text_lower.count(keyword)
-        total_hits += count
-        if count < meta.get("target_min", 1):
-            results["warnings"].append(f"UNDER: {keyword} ({count}/{meta.get('target_min')})")
-        elif count > meta.get("target_max", 3):
-            results["warnings"].append(f"OVER: {keyword} ({count}/{meta.get('target_max')})")
-    
-    results["density"] = round((total_hits / total_words) * 100, 2)
-    return results
-
-
-def style_check(text):
-    """Analiza długości zdań, proporcji długich i krótkich, SMOG-like metric."""
+def load_polish_model():
+    """
+    Bezpieczne ładowanie modelu SpaCy dla języka polskiego.
+    Używa pl_core_news_md (średni model ~200 MB).
+    Nigdy nie pobiera dużego modelu 'lg' w runtime (oszczędność RAM).
+    """
     try:
-        sentences = [s.strip() for s in SENTENCE_SEGMENTER.segment(text) if s.strip()]
-    except Exception:
-        sentences = [s.strip() for s in text.split('.') if s.strip()]
+        nlp = spacy.load("pl_core_news_md")
+        print("[SEO_OPT] ✅ Załadowano model pl_core_news_md (Light Edition)")
+        return nlp
+    except OSError:
+        try:
+            print("[SEO_OPT] ⚠️ Model MD nieznaleziony, próba pobierania...")
+            from spacy.cli import download
+            download("pl_core_news_md")
+            nlp = spacy.load("pl_core_news_md")
+            return nlp
+        except Exception as e:
+            print("[SEO_OPT] ❌ Błąd przy ładowaniu modelu SpaCy:", e)
+            raise SystemExit("❌ Nie udało się załadować modelu NLP. Zatrzymano proces.")
 
-    if not sentences:
-        return {"smog": 0, "avg_len": 0, "readability": "N/A"}
-    
-    word_counts = [len(re.findall(r'\w+', s)) for s in sentences]
-    avg_len = np.mean(word_counts)
-    smog = round(1.043 * math.sqrt(len([w for w in word_counts if w > 20])) + 3.1291, 2)
-    readability = "OK" if smog <= 14 else "HARD"
-
-    return {"smog": smog, "avg_len": round(avg_len, 1), "readability": readability}
+# Inicjalizacja globalnego modelu SpaCy
+nlp = load_polish_model()
 
 
-def unified_prevalidation(text, keywords_state):
+# ================================================================
+# 🔍 Keyword density & semantic checks
+# ================================================================
+def calculate_keyword_density(text: str, keywords: List[str]) -> Dict[str, float]:
     """
-    Jedno wspólne sprawdzenie SEO, semantyki i stylu.
-    Zwraca JSON z wynikami oraz raport tekstowy.
+    Oblicza gęstość słów kluczowych (w %) dla zadanej listy fraz.
     """
-    # Keyword density
-    kw_result = check_keyword_density(text, keywords_state)
-    warnings = kw_result["warnings"]
+    text_lower = text.lower()
+    total_words = len(text.split())
+    densities = {}
 
-    # Style & readability
-    style_result = style_check(text)
+    for kw in keywords:
+        count = len(re.findall(rf"\b{re.escape(kw.lower())}\b", text_lower))
+        densities[kw] = round((count / total_words) * 100, 2) if total_words > 0 else 0.0
 
-    # Semantic drift (bez kontekstu - single batch check)
-    semantic_score = 1.0
-    transition_score = 1.0
+    return densities
 
-    # Gęstość i SMOG
-    density = kw_result["density"]
-    smog = style_result["smog"]
-    readability = style_result["readability"]
 
-    # Wskaźnik łączny
-    overall_score = round((semantic_score * 0.4 + transition_score * 0.3 + (14 - smog) / 14 * 0.3), 2)
-    return {
-        "semantic_score": semantic_score,
-        "transition_score": transition_score,
-        "density": density,
-        "smog": smog,
+# ================================================================
+# 🧠 Semantic similarity checks
+# ================================================================
+def compute_semantic_similarity(text_a: str, text_b: str) -> float:
+    """
+    Oblicza semantyczne podobieństwo (cosine similarity) między dwoma tekstami.
+    """
+    doc_a = nlp(text_a)
+    doc_b = nlp(text_b)
+    similarity = round(doc_a.similarity(doc_b), 4)
+    return similarity
+
+
+# ================================================================
+# 🧮 Readability metrics (SMOG / FOG / Flesch)
+# ================================================================
+def compute_readability_metrics(text: str) -> Dict[str, float]:
+    """
+    Oblicza podstawowe wskaźniki czytelności.
+    """
+    metrics = {
+        "flesch_reading_ease": textstat.flesch_reading_ease(text),
+        "smog_index": textstat.smog_index(text),
+        "gunning_fog": textstat.gunning_fog(text),
+        "avg_sentence_length": textstat.avg_sentence_length(text),
+    }
+    return metrics
+
+
+# ================================================================
+# 🧱 Keyword phrase matcher
+# ================================================================
+def find_keyword_occurrences(text: str, keywords: List[str]) -> Dict[str, int]:
+    """
+    Znajduje wystąpienia fraz kluczowych w tekście (dokładne dopasowania).
+    """
+    matcher = PhraseMatcher(nlp.vocab, attr="LOWER")
+    patterns = [nlp.make_doc(kw) for kw in keywords]
+    matcher.add("KEYWORDS", patterns)
+
+    doc = nlp(text)
+    matches = matcher(doc)
+    occurrences = {}
+
+    for match_id, start, end in matches:
+        span = doc[start:end].text
+        occurrences[span.lower()] = occurrences.get(span.lower(), 0) + 1
+
+    return occurrences
+
+
+# ================================================================
+# 🧩 SEO Optimizer Core
+# ================================================================
+def analyze_text(text: str, keywords: List[str]) -> Dict:
+    """
+    Główna funkcja optymalizacji SEO:
+    - Liczy wystąpienia słów kluczowych
+    - Oblicza gęstość
+    - Analizuje czytelność
+    - Zwraca wyniki w formacie JSON-ready
+    """
+    if not text.strip():
+        return {"error": "Brak treści do analizy"}
+
+    occurrences = find_keyword_occurrences(text, keywords)
+    density = calculate_keyword_density(text, keywords)
+    readability = compute_readability_metrics(text)
+
+    report = {
+        "keyword_occurrences": occurrences,
+        "keyword_density": density,
         "readability": readability,
-        "warnings": warnings,
-        "overall_score": overall_score
+        "total_words": len(text.split()),
+        "unique_keywords_used": len([k for k, v in occurrences.items() if v > 0]),
     }
 
+    print("[SEO_OPT] 🔍 Analiza SEO zakończona pomyślnie.")
+    return report
+
 
 # ================================================================
-# 🧩 6. PARAGRAPH RHYTHM DETECTION (LONG / SHORT)
+# 🧠 Semantic drift checker
 # ================================================================
-
-def detect_paragraph_rhythm(text):
+def check_semantic_drift(reference_text: str, generated_text: str) -> Dict:
     """
-    Wykrywa naprzemienny rytm akapitów LONG / SHORT.
-    LONG = 250–400 słów
-    SHORT = 150–250 słów
+    Sprawdza, czy wygenerowany tekst nie odchodzi semantycznie od oryginału.
     """
-    paragraphs = [p.strip() for p in text.split("\n") if len(p.strip()) > 30]
-    if not paragraphs:
-        return {"pattern": "NONE", "long": 0, "short": 0}
-    
-    rhythm = []
-    long_count = 0
-    short_count = 0
+    similarity = compute_semantic_similarity(reference_text, generated_text)
+    drift = round((1 - similarity) * 100, 2)
+    status = "OK" if similarity >= 0.75 else "DRIFT"
 
-    for p in paragraphs:
-        wc = len(re.findall(r'\w+', p))
-        if wc >= 250:
-            rhythm.append("LONG")
-            long_count += 1
-        elif wc >= 150:
-            rhythm.append("SHORT")
-            short_count += 1
-        else:
-            rhythm.append("MINI")
+    result = {
+        "semantic_similarity": similarity,
+        "drift_percent": drift,
+        "status": status,
+    }
 
-    # Naprzemienność
-    alternating = True
-    for i in range(1, len(rhythm)):
-        if rhythm[i] == rhythm[i - 1]:
-            alternating = False
-            break
+    print(f"[SEO_OPT] 🧩 Semantyka: {similarity} ({status})")
+    return result
 
-    pattern = "ALTERNATING" if alternating else "IMBALANCED"
-    return {"pattern": pattern, "long": long_count, "short": short_count, "sequence": rhythm}
+
+# ================================================================
+# 🧪 Local test entrypoint (optional)
+# ================================================================
+if __name__ == "__main__":
+    sample_text = """
+    Prawo jazdy to dokument potwierdzający uprawnienia do prowadzenia pojazdów mechanicznych.
+    Aby je uzyskać, należy zdać egzamin teoretyczny i praktyczny w ośrodku WORD.
+    """
+    keywords = ["prawo jazdy", "egzamin", "WORD"]
+
+    report = analyze_text(sample_text, keywords)
+    print("\n=== SEO REPORT ===")
+    for k, v in report.items():
+        print(f"{k}: {v}")
