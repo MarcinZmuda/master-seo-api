@@ -7,7 +7,7 @@ from flask import Blueprint, request, jsonify
 from firebase_admin import firestore
 from firestore_tracker_routes import process_batch_in_firestore
 import google.generativeai as genai
-from seo_optimizer import unified_prevalidation, detect_paragraph_rhythm
+from seo_optimizer import unified_prevalidation
 
 # Gemini API configuration
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -94,8 +94,18 @@ def add_batch_to_project(project_id):
     batch_text = data["text"]
     meta_trace = data.get("meta_trace", {})
 
-    # 🔍 Wstępna analiza rytmu akapitów
-    rhythm = detect_paragraph_rhythm(batch_text)
+    # 🔍 Wstępna analiza - wywołujemy unified_prevalidation, które wewnętrznie używa detect_paragraph_rhythm
+    db = firestore.client()
+    doc = db.collection("seo_projects").document(project_id).get()
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+
+    project_data = doc.to_dict()
+    keywords_state = project_data.get("keywords_state", {})
+    precheck = unified_prevalidation(batch_text, keywords_state)
+    
+    # Wyciągamy rytm z meta jeśli istnieje
+    rhythm = precheck.get("meta", {}).get("paragraph_rhythm", "Unknown")
     print(f"[DEBUG] Paragraph rhythm: {rhythm}")
 
     result = process_batch_in_firestore(project_id, batch_text, meta_trace)
@@ -105,7 +115,7 @@ def add_batch_to_project(project_id):
     return jsonify(result), 200
 
 # ================================================================
-# 🔁 MANUAL CORRECTION ENDPOINT
+# 🔍 MANUAL CORRECTION ENDPOINT
 # ================================================================
 @project_routes.post("/api/project/<project_id>/manual_correct")
 def manual_correct_batch(project_id):
