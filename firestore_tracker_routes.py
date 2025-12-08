@@ -1,7 +1,7 @@
 """
-SEO Content Tracker Routes - v39 Brajen Semantic
+SEO Content Tracker Routes - v40 Brajen Semantic
 Features:
-- Robust NLP Counting (Exact + Lemma + Fuzzy Lemma)
+- Robust NLP Counting (Exact + Lemma + Fuzzy Lemma via RapidFuzz)
 - Firestore Persistent Update (Preview + Approve)
 - Keyword Status: UNDER / OK / OVER / LOCKED
 - Diagnostic Route (/api/debug/<project_id>)
@@ -27,45 +27,49 @@ except OSError:
     download("pl_core_news_lg")
     nlp = spacy.load("pl_core_news_lg")
 
-
 # ============================================================================
 # 1. ROBUST COUNTING (EXACT + LEMMA + FUZZY)
 # ============================================================================
 def count_robust(doc, keyword_meta):
-    """Zlicza max(exact, lemma_exact, lemma_fuzzy)."""
+    """
+    Zlicza wystąpienia frazy kluczowej uwzględniając:
+    - Exact Match (ciąg znaków)
+    - Exact Lemma Match (dokładna forma lematyczna)
+    - Fuzzy Lemma Match (np. zatrzyma / zatrzymuje / zatrzymany / zatrzymanie)
+    """
     if not doc:
         return 0
-    
+
     kw_exact = keyword_meta.get("keyword", "").lower().strip()
-    
-    # Lemma base
-    kw_lemma = keyword_meta.get("search_lemma", "")
-    if not kw_lemma:
-        kw_doc = nlp(kw_exact)
-        kw_lemma = " ".join([t.lemma_.lower() for t in kw_doc if t.is_alpha])
-    
-    # 1️⃣ Exact Match
+    if not kw_exact:
+        return 0
+
+    # Utwórz lemat bazowy dla frazy
+    kw_doc = nlp(kw_exact)
+    kw_lemma = " ".join([t.lemma_.lower() for t in kw_doc if t.is_alpha]) or kw_exact
+
+    # --- Tekst czysty ---
     raw_text = getattr(doc, "text", "").lower()
     clean_text = re.sub(r"<[^>]+>", " ", raw_text)
     clean_text = re.sub(r"\s+", " ", clean_text)
+
+    # 1️⃣ Exact Match
     exact_hits = len(re.findall(rf"\b{re.escape(kw_exact)}\b", clean_text))
-    
+
     # 2️⃣ Lemma Exact Match
-    doc_lemmas = " ".join([t.lemma_.lower() for t in doc if t.is_alpha])
-    lemma_exact_hits = len(re.findall(rf"\b{re.escape(kw_lemma)}\b", doc_lemmas))
-    
-    # 3️⃣ Fuzzy Lemma Match
-    lemma_tokens = kw_lemma.split()
+    lemmas = [t.lemma_.lower() for t in doc if t.is_alpha]
+    lemma_str = " ".join(lemmas)
+    lemma_exact_hits = len(re.findall(rf"\b{re.escape(kw_lemma)}\b", lemma_str))
+
+    # 3️⃣ Fuzzy Lemma Match (np. zatrzyma vs zatrzymuje)
     lemma_fuzzy_hits = 0
-    tokens = doc_lemmas.split()
-    for i in range(len(tokens) - len(lemma_tokens) + 1):
-        window = " ".join(tokens[i:i + len(lemma_tokens)])
-        if fuzz.token_set_ratio(window, kw_lemma) >= 90:
-            lemma_fuzzy_hits += 1
-    
+    for token in set(lemmas):
+        score = fuzz.token_set_ratio(kw_lemma, token)
+        if score >= 90:
+            lemma_fuzzy_hits += lemma_str.count(token)
+
     total_hits = max(exact_hits, lemma_exact_hits + lemma_fuzzy_hits)
     return total_hits
-
 
 # ============================================================================
 # 2. VALIDATIONS
@@ -83,7 +87,6 @@ def validate_structure(text, expected_h2_count=2):
                 return {"valid": False, "error": f"❌ ZAKAZANY NAGŁÓWEK: '{h2}'."}
     return {"valid": True}
 
-
 def calculate_burstiness(text):
     sentences = re.split(r'[.!?]+', text)
     sentences = [s.strip() for s in sentences if s.strip()]
@@ -96,7 +99,6 @@ def calculate_burstiness(text):
         return 0.0
     return round((math.sqrt(variance) / mean) * 10, 1)
 
-
 def validate_quality_and_limits(text, keywords_state, current_doc):
     burst = calculate_burstiness(text)
     word_count = len(text.split())
@@ -107,7 +109,6 @@ def validate_quality_and_limits(text, keywords_state, current_doc):
             if density > 4.5:
                 return {"valid": False, "error": f"❌ Keyword Stuffing: '{meta['keyword']}' {density:.1f}%."}
     return {"valid": True}
-
 
 # ============================================================================
 # 3. GPT INSTRUCTION GENERATOR
@@ -133,7 +134,6 @@ def generate_gpt_instruction(current_batch, total_batches, keywords_state, batch
     instruction += "\n".join(targets[:6])
     return instruction
 
-
 # ============================================================================
 # 4. PROCESS + FIRESTORE SAVE
 # ============================================================================
@@ -143,15 +143,15 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None):
     doc = doc_ref.get()
     if not doc.exists:
         return {"error": "Project not found", "status_code": 404}
-    
+
     project_data = doc.to_dict()
     keywords_state = project_data.get("keywords_state", {})
     doc_nlp = nlp(batch_text)
-    
+
     for row_id, meta in keywords_state.items():
         count = count_robust(doc_nlp, meta)
         meta["actual_uses"] = meta.get("actual_uses", 0) + count
-        
+
         min_t, max_t = meta.get("target_min", 0), meta.get("target_max", 999)
         if meta["actual_uses"] < min_t:
             meta["status"] = "UNDER"
@@ -162,7 +162,7 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None):
         else:
             meta["status"] = "LOCKED"
         keywords_state[row_id] = meta
-    
+
     batch_entry = {
         "text": batch_text,
         "meta_trace": meta_trace or {},
@@ -177,12 +177,11 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None):
         print(f"[FIRESTORE] ✅ Zaktualizowano projekt {project_id}, fraz: {len(keywords_state)}")
     except Exception as e:
         print(f"[FIRESTORE] ⚠️ Błąd zapisu: {e}")
-    
+
     return {"status": "BATCH_SAVED", "status_code": 200}
 
-
 # ============================================================================
-# ROUTES
+# 5. ROUTES
 # ============================================================================
 @tracker_routes.post("/api/project/<project_id>/preview_batch")
 def preview_batch(project_id):
@@ -196,7 +195,7 @@ def preview_batch(project_id):
     project_data = doc.to_dict()
     keywords_state = project_data.get("keywords_state", {})
     doc_nlp = nlp(text)
-    
+
     updated = {}
     for rid, meta in keywords_state.items():
         count = count_robust(doc_nlp, meta)
@@ -211,13 +210,12 @@ def preview_batch(project_id):
         db.collection("seo_projects").document(project_id).update({"keywords_state": updated})
     except Exception as e:
         print(f"[FIRESTORE] ⚠️ Update error: {e}")
-    
+
     return jsonify({
         "status": "PREVIEW",
         "corrected_text": text,
         "keywords_state": updated
     }), 200
-
 
 @tracker_routes.post("/api/project/<project_id>/approve_batch")
 def approve_batch(project_id):
@@ -230,7 +228,7 @@ def approve_batch(project_id):
     doc = doc_ref.get()
     if not doc.exists:
         return jsonify({"error": "Not found"}), 404
-    
+
     project_data = doc.to_dict()
     current_batch = len(project_data.get("batches", [])) + 1
     plan = project_data.get("batches_plan", []) or [{"word_count": 500}] * 5
@@ -277,9 +275,8 @@ def approve_batch(project_id):
         "gpt_instruction": instruction
     }), 200
 
-
 # ============================================================================
-# 5. VALIDATE + EXPORT
+# 6. VALIDATE + EXPORT
 # ============================================================================
 @tracker_routes.post("/api/project/<project_id>/validate_article")
 def validate_article(project_id):
@@ -291,16 +288,14 @@ def validate_article(project_id):
         return jsonify({"error": f"❌ Brakuje fraz EXTENDED ({len(ext_missing)}).", "missing": ext_missing}), 400
     return jsonify({"status": "ARTICLE_READY"}), 200
 
-
 @tracker_routes.get("/api/project/<project_id>/export")
 def export_article(project_id):
     data = firestore.client().collection("seo_projects").document(project_id).get().to_dict()
     full_text = "\n\n".join([b.get("text", "") for b in data.get("batches", [])])
     return jsonify({"status": "EXPORTED", "full_article": full_text}), 200
 
-
 # ============================================================================
-# 6. DEBUG ROUTE — STATUS + STATS
+# 7. DEBUG ROUTE — STATUS + STATS
 # ============================================================================
 @tracker_routes.get("/api/debug/<project_id>")
 def debug_keywords(project_id):
@@ -309,13 +304,13 @@ def debug_keywords(project_id):
     doc = db.collection("seo_projects").document(project_id).get()
     if not doc.exists:
         return jsonify({"error": "Project not found"}), 404
-    
+
     data = doc.to_dict()
     keywords = data.get("keywords_state", {})
     batches = data.get("batches", [])
     last_burst = batches[-1]["burstiness"] if batches else 0
     last_time = batches[-1]["timestamp"].isoformat() if batches else None
-    
+
     result = []
     total_words = sum(len(b["text"].split()) for b in batches) or 1
     for rid, meta in keywords.items():
@@ -329,7 +324,7 @@ def debug_keywords(project_id):
             "status": meta.get("status", "UNDER"),
             "density": f"{density}%",
         })
-    
+
     return jsonify({
         "project_id": project_id,
         "keywords_count": len(result),
