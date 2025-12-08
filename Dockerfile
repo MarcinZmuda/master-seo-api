@@ -1,58 +1,84 @@
 # ================================================================
-# 🧠 Brajen Semantic Engine v19.5 — Dockerfile (Final Review Ready)
+# 🧠 Brajen Semantic Engine v19.6 — Dockerfile (Render/Cloud Run Ready)
 # ================================================================
 
-FROM python:3.10-slim
+FROM python:3.11-slim
 
-# --- System setup ---
+# ================================================================
+# 🔧 System setup
+# ================================================================
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc g++ git curl wget build-essential \
+    gcc g++ git curl wget build-essential locales \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# --- Working directory ---
+# --- Set locale (for Polish NLP) ---
+RUN sed -i '/pl_PL.UTF-8/s/^# //g' /etc/locale.gen && locale-gen
+ENV LANG=pl_PL.UTF-8
+ENV LC_ALL=pl_PL.UTF-8
+
+# ================================================================
+# 📁 Working directory
+# ================================================================
 WORKDIR /app
 
-# --- Copy dependency list first (for build caching) ---
+# ================================================================
+# 📦 Dependency installation
+# ================================================================
 COPY requirements.txt .
 
-# --- Install Python dependencies ---
 RUN pip install --upgrade pip setuptools wheel
 RUN pip install --no-cache-dir -r requirements.txt
 
 # ================================================================
-# 🧩 Install Polish spaCy model with fallback
+# 🧩 Install Polish SpaCy model (3.7.0) — with fallback and verification
 # ================================================================
-# 1️⃣ Try official model URL with version (stable)
-# 2️⃣ If that fails — use spaCy CLI (auto-detect latest)
-# 3️⃣ Prevent build failure on network hiccups
-RUN python -m spacy validate || true && \
+RUN echo "⚙️ Installing Polish SpaCy model..." && \
     (python -m spacy download pl_core_news_lg || \
-     pip install https://github.com/explosion/spacy-models/releases/download/pl_core_news_lg-3.7.0/pl_core_news_lg-3.7.0.tar.gz || true)
+     pip install https://github.com/explosion/spacy-models/releases/download/pl_core_news_lg-3.7.0/pl_core_news_lg-3.7.0.tar.gz) && \
+    python -m spacy validate && \
+    python -m spacy info pl_core_news_lg
+
+# ================================================================
+# 🧠 Optional test (confirms NLP model installed correctly)
+# ================================================================
+RUN python - <<'PYCODE'
+import spacy
+try:
+    nlp = spacy.load("pl_core_news_lg")
+    print("✅ SpaCy Polish model loaded successfully.")
+    doc = nlp("To jest test poprawnego działania modelu języka polskiego.")
+    print("Example tokenization:", [t.text for t in doc[:5]])
+except Exception as e:
+    print("❌ SpaCy model test failed:", e)
+PYCODE
 
 # ================================================================
 # 🧱 Copy application files
 # ================================================================
 COPY . .
 
-# --- Environment configuration ---
+# ================================================================
+# ⚙️ Environment configuration
+# ================================================================
 ENV PORT=8080
 ENV PYTHONUNBUFFERED=1
 ENV FIREBASE_CREDS_JSON=""
 ENV DEBUG_MODE=false
 ENV GEMINI_API_KEY=""
-ENV LANG=pl_PL.UTF-8
-ENV LC_ALL=pl_PL.UTF-8
 
-# --- Create non-root user for safety ---
+# ================================================================
+# 👤 Create non-root user (security best practice)
+# ================================================================
 RUN adduser --disabled-password --gecos '' brajenuser && chown -R brajenuser /app
 USER brajenuser
 
-# --- Healthcheck (optional for Render / Cloud Run) ---
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+# ================================================================
+# 🩺 Healthcheck (for Render / Cloud Run)
+# ================================================================
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD curl -f http://localhost:$PORT/health || exit 1
 
 # ================================================================
-# 🚀 Launch application
+# 🚀 Launch Gunicorn (1 worker = less RAM, still multithreaded)
 # ================================================================
-# Gunicorn for production-ready serving
-CMD exec gunicorn --bind 0.0.0.0:$PORT --workers 2 --threads 4 master_api:app
+CMD exec gunicorn --bind 0.0.0.0:$PORT --workers 1 --threads 4 master_api:app
