@@ -56,6 +56,9 @@ USER brajenuser
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD curl -f http://localhost:$PORT/health || exit 1
 
+  # Force remove any cached spaCy large models
+RUN pip uninstall -y pl-core-news-lg || true
+
 # ================================================================
 # 🚀 Run app (1 worker, low RAM mode)
 # ================================================================
