@@ -1,12 +1,11 @@
 """
-SEO Content Tracker Routes - v38 Brajen Semantic
+SEO Content Tracker Routes - v39 Brajen Semantic
 Features:
 - Robust NLP Counting (Exact + Lemma + Fuzzy Lemma)
-- Preview Fix (Widzi słowa w podglądzie)
-- Firestore Persistent Update
-- Hard Max Limit Guard (blokuje stuffing)
+- Firestore Persistent Update (Preview + Approve)
+- Keyword Status: UNDER / OK / OVER / LOCKED
+- Diagnostic Route (/api/debug/<project_id>)
 - Burstiness Monitor
-- Status Engine: UNDER / OK / OVER / LOCKED
 """
 
 from flask import Blueprint, request, jsonify
@@ -28,6 +27,7 @@ except OSError:
     download("pl_core_news_lg")
     nlp = spacy.load("pl_core_news_lg")
 
+
 # ============================================================================
 # 1. ROBUST COUNTING (EXACT + LEMMA + FUZZY)
 # ============================================================================
@@ -44,27 +44,28 @@ def count_robust(doc, keyword_meta):
         kw_doc = nlp(kw_exact)
         kw_lemma = " ".join([t.lemma_.lower() for t in kw_doc if t.is_alpha])
     
-    # 1️⃣ Exact Match (literalne dopasowanie, po czyszczeniu HTML)
+    # 1️⃣ Exact Match
     raw_text = getattr(doc, "text", "").lower()
     clean_text = re.sub(r"<[^>]+>", " ", raw_text)
     clean_text = re.sub(r"\s+", " ", clean_text)
     exact_hits = len(re.findall(rf"\b{re.escape(kw_exact)}\b", clean_text))
     
-    # 2️⃣ Lemma Exact Match (pełna zgodność lematów)
+    # 2️⃣ Lemma Exact Match
     doc_lemmas = " ".join([t.lemma_.lower() for t in doc if t.is_alpha])
     lemma_exact_hits = len(re.findall(rf"\b{re.escape(kw_lemma)}\b", doc_lemmas))
     
-    # 3️⃣ Fuzzy Lemma Match (RapidFuzz – tolerancja kolejności i fleksji)
+    # 3️⃣ Fuzzy Lemma Match
     lemma_tokens = kw_lemma.split()
     lemma_fuzzy_hits = 0
-    for i in range(len(doc_lemmas.split()) - len(lemma_tokens) + 1):
-        window = " ".join(doc_lemmas.split()[i:i + len(lemma_tokens)])
+    tokens = doc_lemmas.split()
+    for i in range(len(tokens) - len(lemma_tokens) + 1):
+        window = " ".join(tokens[i:i + len(lemma_tokens)])
         if fuzz.token_set_ratio(window, kw_lemma) >= 90:
             lemma_fuzzy_hits += 1
     
-    # Finalna suma
     total_hits = max(exact_hits, lemma_exact_hits + lemma_fuzzy_hits)
     return total_hits
+
 
 # ============================================================================
 # 2. VALIDATIONS
@@ -82,15 +83,19 @@ def validate_structure(text, expected_h2_count=2):
                 return {"valid": False, "error": f"❌ ZAKAZANY NAGŁÓWEK: '{h2}'."}
     return {"valid": True}
 
+
 def calculate_burstiness(text):
     sentences = re.split(r'[.!?]+', text)
     sentences = [s.strip() for s in sentences if s.strip()]
-    if len(sentences) < 3: return 0.0
+    if len(sentences) < 3:
+        return 0.0
     lengths = [len(s.split()) for s in sentences]
     mean = sum(lengths) / len(lengths)
     variance = sum((x - mean) ** 2 for x in lengths) / len(lengths)
-    if mean == 0: return 0.0
+    if mean == 0:
+        return 0.0
     return round((math.sqrt(variance) / mean) * 10, 1)
+
 
 def validate_quality_and_limits(text, keywords_state, current_doc):
     burst = calculate_burstiness(text)
@@ -102,6 +107,7 @@ def validate_quality_and_limits(text, keywords_state, current_doc):
             if density > 4.5:
                 return {"valid": False, "error": f"❌ Keyword Stuffing: '{meta['keyword']}' {density:.1f}%."}
     return {"valid": True}
+
 
 # ============================================================================
 # 3. GPT INSTRUCTION GENERATOR
@@ -127,6 +133,7 @@ def generate_gpt_instruction(current_batch, total_batches, keywords_state, batch
     instruction += "\n".join(targets[:6])
     return instruction
 
+
 # ============================================================================
 # 4. PROCESS + FIRESTORE SAVE
 # ============================================================================
@@ -145,7 +152,6 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None):
         count = count_robust(doc_nlp, meta)
         meta["actual_uses"] = meta.get("actual_uses", 0) + count
         
-        # Status logic
         min_t, max_t = meta.get("target_min", 0), meta.get("target_max", 999)
         if meta["actual_uses"] < min_t:
             meta["status"] = "UNDER"
@@ -166,7 +172,6 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None):
     project_data.setdefault("batches", []).append(batch_entry)
     project_data["keywords_state"] = keywords_state
 
-    # ✅ Save persistently
     try:
         doc_ref.set(project_data)
         print(f"[FIRESTORE] ✅ Zaktualizowano projekt {project_id}, fraz: {len(keywords_state)}")
@@ -174,6 +179,7 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None):
         print(f"[FIRESTORE] ⚠️ Błąd zapisu: {e}")
     
     return {"status": "BATCH_SAVED", "status_code": 200}
+
 
 # ============================================================================
 # ROUTES
@@ -201,7 +207,6 @@ def preview_batch(project_id):
             "used_in_current_batch": count
         }
 
-    # persist update
     try:
         db.collection("seo_projects").document(project_id).update({"keywords_state": updated})
     except Exception as e:
@@ -212,6 +217,7 @@ def preview_batch(project_id):
         "corrected_text": text,
         "keywords_state": updated
     }), 200
+
 
 @tracker_routes.post("/api/project/<project_id>/approve_batch")
 def approve_batch(project_id):
@@ -244,11 +250,10 @@ def approve_batch(project_id):
         return jsonify(qual_check), 400
 
     for rid, meta in keywords_state.items():
-        if meta.get("type") == "BASIC":
-            if meta["actual_uses"] > meta.get("target_max", 999):
-                return jsonify({
-                    "error": f"❌ LIMIT: '{meta['keyword']}' użyto {meta['actual_uses']}x (limit {meta['target_max']})."
-                }), 400
+        if meta.get("type") == "BASIC" and meta["actual_uses"] > meta.get("target_max", 999):
+            return jsonify({
+                "error": f"❌ LIMIT: '{meta['keyword']}' użyto {meta['actual_uses']}x (limit {meta['target_max']})."
+            }), 400
 
     batch_entry = {
         "batch_number": current_batch,
@@ -272,6 +277,10 @@ def approve_batch(project_id):
         "gpt_instruction": instruction
     }), 200
 
+
+# ============================================================================
+# 5. VALIDATE + EXPORT
+# ============================================================================
 @tracker_routes.post("/api/project/<project_id>/validate_article")
 def validate_article(project_id):
     db = firestore.client()
@@ -282,8 +291,49 @@ def validate_article(project_id):
         return jsonify({"error": f"❌ Brakuje fraz EXTENDED ({len(ext_missing)}).", "missing": ext_missing}), 400
     return jsonify({"status": "ARTICLE_READY"}), 200
 
+
 @tracker_routes.get("/api/project/<project_id>/export")
 def export_article(project_id):
     data = firestore.client().collection("seo_projects").document(project_id).get().to_dict()
     full_text = "\n\n".join([b.get("text", "") for b in data.get("batches", [])])
     return jsonify({"status": "EXPORTED", "full_article": full_text}), 200
+
+
+# ============================================================================
+# 6. DEBUG ROUTE — STATUS + STATS
+# ============================================================================
+@tracker_routes.get("/api/debug/<project_id>")
+def debug_keywords(project_id):
+    """Zwraca pełne dane słów kluczowych + burstiness + status."""
+    db = firestore.client()
+    doc = db.collection("seo_projects").document(project_id).get()
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+    
+    data = doc.to_dict()
+    keywords = data.get("keywords_state", {})
+    batches = data.get("batches", [])
+    last_burst = batches[-1]["burstiness"] if batches else 0
+    last_time = batches[-1]["timestamp"].isoformat() if batches else None
+    
+    result = []
+    total_words = sum(len(b["text"].split()) for b in batches) or 1
+    for rid, meta in keywords.items():
+        density = round((meta.get("actual_uses", 0) / total_words) * 100, 2)
+        result.append({
+            "keyword": meta.get("keyword"),
+            "type": meta.get("type"),
+            "actual_uses": meta.get("actual_uses", 0),
+            "target_min": meta.get("target_min"),
+            "target_max": meta.get("target_max"),
+            "status": meta.get("status", "UNDER"),
+            "density": f"{density}%",
+        })
+    
+    return jsonify({
+        "project_id": project_id,
+        "keywords_count": len(result),
+        "burstiness_last": last_burst,
+        "last_update": last_time,
+        "keywords": result
+    }), 200
