@@ -23,19 +23,21 @@ RUN pip install --upgrade pip setuptools wheel
 RUN pip install --no-cache-dir -r requirements.txt
 
 # ================================================================
-# 🧩 Install smaller Polish SpaCy model (medium instead of large)
+# 🧩 Install Polish SpaCy model (MD - Medium) directly via URL
 # ================================================================
-RUN echo "⚙️ Installing lightweight Polish SpaCy model (md)..." && \
-    (python -m spacy download pl_core_news_md || \
-     pip install https://github.com/explosion/spacy-models/releases/download/pl_core_news_md-3.7.0/pl_core_news_md-3.7.0.tar.gz) && \
-    python -m spacy validate && \
-    python -m spacy info pl_core_news_md
+# Używamy bezpośredniego linku do .whl, aby uniknąć błędów 404 przy spacy download
+RUN pip install --no-cache-dir https://github.com/explosion/spacy-models/releases/download/pl_core_news_md-3.7.0/pl_core_news_md-3.7.0-py3-none-any.whl && \
+    python -m spacy validate
 
 # --- Optional test (NLP sanity check) ---
 RUN python - <<'PYCODE'
 import spacy
-nlp = spacy.load("pl_core_news_md")
-print("✅ SpaCy Polish model (MD) loaded successfully.")
+try:
+    nlp = spacy.load("pl_core_news_md")
+    print("✅ SpaCy Polish model (MD) loaded successfully.")
+except Exception as e:
+    print(f"❌ Failed to load model: {e}")
+    exit(1)
 PYCODE
 
 # --- Copy project files ---
@@ -55,9 +57,6 @@ USER brajenuser
 # --- Healthcheck ---
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD curl -f http://localhost:$PORT/health || exit 1
-
-  # Force remove any cached spaCy large models
-RUN pip uninstall -y pl-core-news-lg || true
 
 # ================================================================
 # 🚀 Run app (1 worker, low RAM mode)
