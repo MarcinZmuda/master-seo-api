@@ -94,21 +94,13 @@ def add_batch_to_project(project_id):
     batch_text = data["text"]
     meta_trace = data.get("meta_trace", {})
 
-    # 🔍 Wstępna analiza - wywołujemy unified_prevalidation, które wewnętrznie używa detect_paragraph_rhythm
-    db = firestore.client()
-    doc = db.collection("seo_projects").document(project_id).get()
-    if not doc.exists:
-        return jsonify({"error": "Project not found"}), 404
-
-    project_data = doc.to_dict()
-    keywords_state = project_data.get("keywords_state", {})
-    precheck = unified_prevalidation(batch_text, keywords_state)
-    
-    # Wyciągamy rytm z meta jeśli istnieje
-    rhythm = precheck.get("meta", {}).get("paragraph_rhythm", "Unknown")
-    print(f"[DEBUG] Paragraph rhythm: {rhythm}")
-
+    # 🔍 Wstępna analiza używa process_batch_in_firestore, które wewnętrznie wywołuje unified_prevalidation
     result = process_batch_in_firestore(project_id, batch_text, meta_trace)
+    
+    # Wyciągamy rytm jeśli istnieje w wyniku
+    rhythm = result.get("meta", {}).get("paragraph_rhythm", "Unknown")
+    print(f"[DEBUG] Paragraph rhythm: {rhythm}")
+    
     result["batch_text_snippet"] = batch_text[:50] + "..."
     result["paragraph_rhythm"] = rhythm
 
