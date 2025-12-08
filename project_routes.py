@@ -168,6 +168,155 @@ def manual_correct_batch(project_id):
     }), 200
 
 # ================================================================
+# 🆕 AUTO-CORRECT ENDPOINT (S6)
+# ================================================================
+@project_routes.post("/api/project/<project_id>/auto_correct")
+def auto_correct_batch(project_id):
+    """
+    Automatyczna korekta batcha używając Gemini 1.5 Flash:
+    - Analizuje które frazy są UNDER lub OVER
+    - Generuje poprawioną wersję tekstu
+    - Zachowuje strukturę HTML i ton
+    """
+    data = request.get_json()
+    if not data or "text" not in data:
+        return jsonify({"error": "Field 'text' is required"}), 400
+
+    batch_text = data["text"]
+    
+    db = firestore.client()
+    doc = db.collection("seo_projects").document(project_id).get()
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+
+    project_data = doc.to_dict()
+    keywords_state = project_data.get("keywords_state", {})
+    
+    # 🔍 Sprawdź które frazy są UNDER lub OVER
+    under_keywords = []
+    over_keywords = []
+    
+    for rid, meta in keywords_state.items():
+        actual = meta.get("actual_uses", 0)
+        min_target = meta.get("target_min", 0)
+        max_target = meta.get("target_max", 999)
+        keyword = meta.get("keyword", "")
+        kw_type = meta.get("type", "BASIC")
+        
+        if actual < min_target:
+            under_keywords.append({
+                "keyword": keyword,
+                "missing": min_target - actual,
+                "type": kw_type,
+                "current": actual,
+                "target_min": min_target
+            })
+        elif actual > max_target:
+            over_keywords.append({
+                "keyword": keyword,
+                "excess": actual - max_target,
+                "type": kw_type,
+                "current": actual,
+                "target_max": max_target
+            })
+    
+    # Jeśli nie ma czego korygować
+    if not under_keywords and not over_keywords:
+        return jsonify({
+            "status": "NO_CORRECTIONS_NEEDED",
+            "message": "All keywords within target ranges",
+            "corrected_text": batch_text,
+            "keyword_report": {
+                "under": [],
+                "over": []
+            }
+        }), 200
+    
+    # 🤖 Użyj Gemini do inteligentnej korekty
+    if not GEMINI_API_KEY:
+        return jsonify({
+            "status": "ERROR",
+            "error": "Gemini API key not configured - cannot perform auto-correction",
+            "keyword_report": {
+                "under": under_keywords,
+                "over": over_keywords
+            }
+        }), 500
+    
+    try:
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        
+        # Przygotuj instrukcje korekty
+        correction_instructions = []
+        
+        if under_keywords:
+            under_list = "\n".join([
+                f"  - '{kw['keyword']}': Dodaj {kw['missing']}× (obecnie {kw['current']}/{kw['target_min']})"
+                for kw in under_keywords
+            ])
+            correction_instructions.append(f"DODAJ te frazy naturalnie:\n{under_list}")
+        
+        if over_keywords:
+            over_list = "\n".join([
+                f"  - '{kw['keyword']}': Usuń {kw['excess']}× (obecnie {kw['current']}, max {kw['target_max']})"
+                for kw in over_keywords
+            ])
+            correction_instructions.append(f"USUŃ nadmiar tych fraz:\n{over_list}")
+        
+        correction_prompt = f"""
+Popraw poniższy tekst SEO według instrukcji:
+
+{chr(10).join(correction_instructions)}
+
+ZASADY:
+1. Zachowaj WSZYSTKIE tagi HTML (<h2>, <h3>, <p>)
+2. NIE zmieniaj struktury ani tonu tekstu
+3. Dodawaj frazy naturalnie w kontekście
+4. Usuwaj frazy poprzez parafrazy lub synonimy
+5. Zachowaj profesjonalny, formalny styl
+
+TEKST DO POPRAWY:
+---
+{batch_text[:10000]}
+---
+
+Zwróć TYLKO poprawiony tekst HTML, bez żadnych komentarzy.
+"""
+        
+        print(f"[AUTO_CORRECT] Wysyłam do Gemini: {len(under_keywords)} UNDER, {len(over_keywords)} OVER")
+        response = model.generate_content(correction_prompt)
+        corrected_text = response.text.strip()
+        
+        # Usuń ewentualne markdown wrapper
+        corrected_text = re.sub(r'^```html\n?', '', corrected_text)
+        corrected_text = re.sub(r'\n?```$', '', corrected_text)
+        
+        print(f"[AUTO_CORRECT] ✅ Gemini zwrócił poprawiony tekst ({len(corrected_text)} znaków)")
+        
+        return jsonify({
+            "status": "AUTO_CORRECTED",
+            "corrected_text": corrected_text,
+            "added_keywords": [kw["keyword"] for kw in under_keywords],
+            "removed_keywords": [kw["keyword"] for kw in over_keywords],
+            "keyword_report": {
+                "under": under_keywords,
+                "over": over_keywords
+            },
+            "correction_summary": f"Dodano {len(under_keywords)} fraz, usunięto nadmiar {len(over_keywords)} fraz"
+        }), 200
+        
+    except Exception as e:
+        print(f"[AUTO_CORRECT] ❌ Błąd Gemini: {e}")
+        return jsonify({
+            "status": "ERROR",
+            "error": str(e),
+            "keyword_report": {
+                "under": under_keywords,
+                "over": over_keywords
+            }
+        }), 500
+
+# ================================================================
 # 🧠 UNIFIED PRE-VALIDATION (SEO + SEMANTICS + STYLE)
 # ================================================================
 @project_routes.post("/api/project/<project_id>/preview_all_checks")
