@@ -75,10 +75,15 @@ def assess_readability(text: str) -> Dict[str, float]:
     try:
         score = textstat.flesch_reading_ease(text)
         grade = textstat.flesch_kincaid_grade(text)
-        return {"readability_score": score, "grade_level": grade}
+        smog = textstat.smog_index(text)
+        return {
+            "readability_score": score, 
+            "grade_level": grade,
+            "smog": smog
+        }
     except Exception as e:
         print(f"[SEO_OPT] ⚠️ Readability error: {e}")
-        return {"readability_score": 0, "grade_level": 0}
+        return {"readability_score": 0, "grade_level": 0, "smog": 0}
 
 # ================================================================
 # 🧩 Funkcja: optymalizacja semantyczna przez Gemini
@@ -114,7 +119,7 @@ def validate_batch_keywords(text: str, required_keywords: List[str]) -> Dict[str
     text_lower = text.lower()
     results = {}
     for kw in required_keywords:
-        results[kw] = len(re.findall(rf"\\b{re.escape(kw.lower())}\\b", text_lower))
+        results[kw] = len(re.findall(rf"\b{re.escape(kw.lower())}\b", text_lower))
     return results
 
 # ================================================================
@@ -131,7 +136,7 @@ def optimize_text(text: str) -> Dict[str, any]:
     optimized_text = text
     try:
         # Dodaj przecinki, popraw kapitalizację (prosta heurystyka)
-        optimized_text = re.sub(r"\\s+", " ", optimized_text).strip()
+        optimized_text = re.sub(r"\s+", " ", optimized_text).strip()
         optimized_text = optimized_text[0].upper() + optimized_text[1:]
     except Exception as e:
         print(f"[SEO_OPT] ⚠️ Text cleanup failed: {e}")
@@ -140,6 +145,7 @@ def optimize_text(text: str) -> Dict[str, any]:
         "optimized_text": optimized_text,
         "keywords_found": keywords,
         "readability_score": readability.get("readability_score", 0),
+        "smog": readability.get("smog", 0),
     }
 
 # ================================================================
@@ -227,38 +233,99 @@ def detect_paragraph_rhythm(text: str) -> str:
     return "Zbalansowany"
 
 # ================================================================
+# 🧩 Funkcja: analiza gęstości słów kluczowych
+# ================================================================
+def calculate_keyword_density(text: str, keywords_state: dict) -> float:
+    """
+    Oblicza gęstość słów kluczowych w tekście.
+    Zwraca procent (0-100).
+    """
+    if not text or not keywords_state:
+        return 0.0
+    
+    text_lower = text.lower()
+    total_words = len(text.split())
+    
+    if total_words == 0:
+        return 0.0
+    
+    keyword_count = 0
+    for rid, meta in keywords_state.items():
+        keyword = meta.get("keyword", "").lower()
+        if keyword:
+            keyword_count += len(re.findall(rf"\b{re.escape(keyword)}\b", text_lower))
+    
+    density = (keyword_count / total_words) * 100
+    return round(density, 2)
+
+# ================================================================
 # 🧩 Backward Compatibility Layer — unified_prevalidation()
 # ================================================================
-def unified_prevalidation(text: str, project_id: str = None) -> dict:
+def unified_prevalidation(text: str, keywords_state: dict = None) -> dict:
     """
-    Zastępcza implementacja unified_prevalidation — zgodna z v18.x API.
+    POPRAWIONA implementacja unified_prevalidation — zgodna z v19.x API.
     Wykonuje wstępną walidację i optymalizację batcha SEO przed analizą w Firestore.
+    
+    Args:
+        text: Tekst do walidacji
+        keywords_state: Słownik ze słowami kluczowymi (opcjonalny dla backward compatibility)
+    
+    Returns:
+        Dict z wynikami walidacji
     """
     try:
+        # Podstawowa optymalizacja tekstu
         result = optimize_text(text)
+        
         # Wywołujemy funkcję rytmu
         rhythm = detect_paragraph_rhythm(text)
         
+        # Ocena czytelności
+        readability = assess_readability(text)
+        
+        # Obliczenie gęstości słów kluczowych (jeśli podano)
+        density = 0.0
+        if keywords_state:
+            density = calculate_keyword_density(text, keywords_state)
+        
+        # Sprawdzenie ostrzeżeń
+        warnings = []
+        if "Warning" in rhythm or "🚨" in rhythm:
+            warnings.append(rhythm)
+        
+        # Ostrzeżenie o zbyt wysokiej gęstości
+        if density > 5.0:
+            warnings.append(f"⚠️ Zbyt wysoka gęstość słów kluczowych: {density}%")
+        
+        # Mock semantic scores (dla backward compatibility)
+        semantic_score = 0.85
+        transition_score = 0.80
+        
         return {
             "status": "success",
-            "semantic_score": 0.85, # Mock value for backward compat
-            "transition_score": 0.80, # Mock value
-            "density": 0.02, # Mock value
+            "semantic_score": semantic_score,
+            "transition_score": transition_score,
+            "density": density,
+            "smog": readability.get("smog", 0),
+            "readability": readability.get("readability_score", 0),
             "optimized_text": result.get("optimized_text", text),
-            "warnings": [] if "Warning" not in rhythm else [rhythm],
+            "warnings": warnings,
             "meta": {
-                "readability_score": result.get("readability_score"),
+                "readability_score": readability.get("readability_score"),
+                "grade_level": readability.get("grade_level"),
                 "keywords_found": result.get("keywords_found", []),
                 "paragraph_rhythm": rhythm,
-                "project_id": project_id,
             },
         }
     except Exception as e:
+        print(f"[SEO_OPT] ❌ unified_prevalidation error: {e}")
         return {
             "status": "error",
             "semantic_score": 0,
             "transition_score": 0,
             "density": 0,
+            "smog": 0,
+            "readability": 0,
             "error": str(e),
             "warnings": [str(e)],
             "optimized_text": text,
