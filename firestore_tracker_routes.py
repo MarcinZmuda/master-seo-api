@@ -117,11 +117,13 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
             meta["status"] = "LOCKED"
         keywords_state[rid] = meta
 
+    # 🔹 POPRAWKA: Teraz przekazujemy keywords_state zamiast project_id
     precheck = unified_prevalidation(batch_text, keywords_state)
     warnings = precheck.get("warnings", [])
     semantic_score = precheck.get("semantic_score", 1.0)
     density = precheck.get("density", 0.0)
     smog = precheck.get("smog", 0.0)
+    readability = precheck.get("readability", 0.0)
     burstiness = calculate_burstiness(batch_text)
 
     struct_check = validate_structure(batch_text)
@@ -142,7 +144,8 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         "language_audit": {
             "semantic_score": semantic_score,
             "density": density,
-            "smog": smog
+            "smog": smog,
+            "readability": readability
         },
         "warnings": warnings,
         "validation_error": warning_text,
@@ -158,12 +161,14 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
     except Exception as e:
         print(f"[FIRESTORE] ⚠️ Błąd zapisu: {e}")
 
+    # 🔹 POPRAWKA: Dodajemy meta do zwracanego dict
     return {
         "status": status,
         "semantic_score": semantic_score,
         "density": density,
         "burstiness": burstiness,
         "warnings": warnings,
+        "meta": precheck.get("meta", {}),  # ✅ Dodane meta z paragraph_rhythm
         "status_code": 200
     }
 
