@@ -5,7 +5,7 @@
 Tryb interaktywny:
 1️⃣ Po zakończeniu artykułu system wysyła tekst do Gemini i tworzy raport.
 2️⃣ Wynik raportu zwracany jest użytkownikowi (bez korekty).
-3️⃣ Backend pyta: „Czy chcesz wprowadzić poprawki?”
+3️⃣ Backend pyta: „Czy chcesz wprowadzić poprawki?"
 4️⃣ Jeśli użytkownik potwierdzi — drugi endpoint generuje poprawioną wersję.
 """
 
@@ -56,17 +56,19 @@ def perform_final_review(project_id):
         return jsonify({"error": "Empty article text"}), 400
 
     model = genai.GenerativeModel("gemini-1.5-pro")
+    
+    # ✅ POPRAWKA: Usunięto [:15000] - teraz Gemini analizuje CAŁY artykuł
     review_prompt = (
         "Podaj w punktach szczegółową ocenę przesłanego artykułu pod kątem:\n"
         "1. merytorycznym (zgodność faktów, aktualność, błędy logiczne),\n"
         "2. redakcyjnym (struktura, powtórzenia, styl),\n"
         "3. językowym (poprawność gramatyczna, płynność),\n"
         "a także zaproponuj konkretne poprawki dla każdego problemu.\n\n"
-        "Artykuł:\n---\n" + full_article[:15000]
+        "Artykuł:\n---\n" + full_article  # ⭐ BEZ LIMITU!
     )
 
     try:
-        print(f"[REVIEW] 🔍 Analiza artykułu projektu {project_id}...")
+        print(f"[REVIEW] 🔍 Analiza CAŁEGO artykułu projektu {project_id} ({len(full_article)} znaków)...")
         review_response = model.generate_content(review_prompt)
         review_text = review_response.text.strip()
     except Exception as e:
@@ -81,7 +83,8 @@ def perform_final_review(project_id):
                 "corrected_text": None,
                 "created_at": firestore.SERVER_TIMESTAMP,
                 "model": "gemini-1.5-pro",
-                "status": "REVIEW_READY"
+                "status": "REVIEW_READY",
+                "article_length": len(full_article)  # ⭐ DODANO tracking długości
             }
         })
         print(f"[REVIEW] ✅ Raport zapisany w Firestore (bez korekty) → {project_id}")
@@ -92,6 +95,7 @@ def perform_final_review(project_id):
         "status": "REVIEW_READY",
         "project_id": project_id,
         "review": review_text,
+        "article_length": len(full_article),  # ⭐ DODANO info o długości
         "next_action": "Czy chcesz wprowadzić poprawki automatycznie? (POST /api/project/<id>/apply_final_corrections)"
     }), 200
 
