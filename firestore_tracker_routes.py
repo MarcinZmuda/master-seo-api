@@ -215,11 +215,15 @@ def approve_batch(project_id):
         try:
             print(f"[TRACKER] 🧠 Final batch detected → uruchamiam Gemini review dla {project_id}")
             model = genai.GenerativeModel("gemini-1.5-pro")
-            full_article = "\n\n".join([b.get("text", "") for b in project_data.get("batches", [])])[:15000]
+            # ✅ POPRAWKA: Usunięto [:15000] - teraz analizuje CAŁY artykuł
+            full_article = "\n\n".join([b.get("text", "") for b in project_data.get("batches", [])])
+            print(f"[TRACKER] 🔍 Analiza CAŁEGO artykułu ({len(full_article)} znaków)...")
             review_prompt = (
                 "Podaj w punktach szczegółową ocenę przesłanego artykułu pod kątem:\n"
-                "1. merytorycznym,\n2. redakcyjnym,\n3. językowym.\n"
-                "Dla każdego punktu zaproponuj, jak to poprawić.\n\n"
+                "1. merytorycznym (zgodność faktów, aktualność, błędy logiczne),\n"
+                "2. redakcyjnym (struktura, powtórzenia, styl),\n"
+                "3. językowym (poprawność gramatyczna, płynność),\n"
+                "a także zaproponuj konkretne poprawki dla każdego problemu.\n\n"
                 f"---\n{full_article}"
             )
             review_response = model.generate_content(review_prompt)
@@ -229,10 +233,12 @@ def approve_batch(project_id):
                     "review_text": review_text,
                     "created_at": firestore.SERVER_TIMESTAMP,
                     "model": "gemini-1.5-pro",
-                    "status": "REVIEW_READY"
+                    "status": "REVIEW_READY",
+                    "article_length": len(full_article)  # ⭐ DODANO tracking długości
                 }
             })
             result["final_review"] = review_text
+            result["article_length"] = len(full_article)  # ⭐ DODANO info o długości
             result["next_action"] = "Czy chcesz wprowadzić poprawki automatycznie? (POST /api/project/<id>/apply_final_corrections)"
             result["final_review_status"] = "READY"
             print(f"[TRACKER] ✅ Raport Gemini zapisany w Firestore → {project_id}")
