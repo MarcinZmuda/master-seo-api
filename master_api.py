@@ -36,13 +36,27 @@ app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024  # 32 MB
 CORS(app)
 
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-VERSION = "v19.5-s1-proxy"
+VERSION = "v19.5-s1-proxy-fixed"
 
 # ================================================================
 # 🔗 N-gram API Configuration (for S1 proxy)
 # ================================================================
-NGRAM_API_URL = os.getenv("NGRAM_API_URL", "https://ngram-api.onrender.com")
-print(f"[MASTER] 🔗 N-gram API URL: {NGRAM_API_URL}")
+# ✅ POPRAWKA: Obsługa zarówno base URL jak i full endpoint URL
+NGRAM_API_URL = os.getenv("NGRAM_API_URL", "https://gpt-ngram-api.onrender.com")
+
+# Sprawdź czy URL już zawiera endpoint
+if "/api/ngram_entity_analysis" in NGRAM_API_URL:
+    # URL już ma endpoint - użyj go bezpośrednio
+    NGRAM_BASE_URL = NGRAM_API_URL.replace("/api/ngram_entity_analysis", "")
+    NGRAM_ANALYSIS_ENDPOINT = NGRAM_API_URL
+    print(f"[MASTER] 🔗 N-gram API URL (full endpoint detected): {NGRAM_ANALYSIS_ENDPOINT}")
+else:
+    # URL to tylko base - dodaj endpoint
+    NGRAM_BASE_URL = NGRAM_API_URL
+    NGRAM_ANALYSIS_ENDPOINT = f"{NGRAM_API_URL}/api/ngram_entity_analysis"
+    print(f"[MASTER] 🔗 N-gram API URL (base URL): {NGRAM_BASE_URL}")
+
+print(f"[MASTER] 🎯 S1 Analysis endpoint: {NGRAM_ANALYSIS_ENDPOINT}")
 
 # ================================================================
 # 📦 Import blueprintów (po inicjalizacji Firestore)
@@ -70,12 +84,12 @@ def s1_analysis_proxy():
     """
     data = request.get_json(force=True)
     
-    print(f"[S1_PROXY] 📡 Forwarding S1 analysis to {NGRAM_API_URL}")
+    print(f"[S1_PROXY] 📡 Forwarding S1 analysis to {NGRAM_ANALYSIS_ENDPOINT}")
     
     try:
-        # Przekierowanie do N-gram API
+        # ✅ POPRAWKA: Używamy NGRAM_ANALYSIS_ENDPOINT (pełny URL)
         response = requests.post(
-            f"{NGRAM_API_URL}/api/ngram_entity_analysis",
+            NGRAM_ANALYSIS_ENDPOINT,  # ⭐ Nie dodajemy już /api/ngram_entity_analysis
             json=data,
             timeout=90,  # S1 analysis może trwać długo
             headers={'Content-Type': 'application/json'}
@@ -101,10 +115,10 @@ def s1_analysis_proxy():
         }), 504
         
     except requests.exceptions.ConnectionError:
-        print(f"[S1_PROXY] ❌ Connection error to {NGRAM_API_URL}")
+        print(f"[S1_PROXY] ❌ Connection error to {NGRAM_ANALYSIS_ENDPOINT}")
         return jsonify({
             "error": "Cannot connect to N-gram API",
-            "ngram_api_url": NGRAM_API_URL,
+            "ngram_api_url": NGRAM_ANALYSIS_ENDPOINT,
             "message": "Check if N-gram API service is running"
         }), 503
         
@@ -122,8 +136,9 @@ def synthesize_topics_proxy():
     data = request.get_json(force=True)
     
     try:
+        # ✅ POPRAWKA: Używamy NGRAM_BASE_URL
         response = requests.post(
-            f"{NGRAM_API_URL}/api/synthesize_topics",
+            f"{NGRAM_BASE_URL}/api/synthesize_topics",
             json=data,
             timeout=30
         )
@@ -138,8 +153,9 @@ def compliance_report_proxy():
     data = request.get_json(force=True)
     
     try:
+        # ✅ POPRAWKA: Używamy NGRAM_BASE_URL
         response = requests.post(
-            f"{NGRAM_API_URL}/api/generate_compliance_report",
+            f"{NGRAM_BASE_URL}/api/generate_compliance_report",
             json=data,
             timeout=30
         )
@@ -152,27 +168,29 @@ def compliance_report_proxy():
 def s1_health_check():
     """Sprawdza czy N-gram API service jest dostępny."""
     try:
-        response = requests.get(f"{NGRAM_API_URL}/health", timeout=5)
+        # ✅ POPRAWKA: Używamy NGRAM_BASE_URL
+        response = requests.get(f"{NGRAM_BASE_URL}/health", timeout=5)
         if response.status_code == 200:
             ngram_status = response.json()
             return jsonify({
                 "status": "ok",
                 "ngram_api_status": ngram_status,
-                "ngram_api_url": NGRAM_API_URL,
+                "ngram_base_url": NGRAM_BASE_URL,
+                "ngram_analysis_endpoint": NGRAM_ANALYSIS_ENDPOINT,
                 "proxy_enabled": True
             }), 200
         else:
             return jsonify({
                 "status": "degraded",
                 "ngram_api_status": "error",
-                "ngram_api_url": NGRAM_API_URL,
+                "ngram_base_url": NGRAM_BASE_URL,
                 "proxy_enabled": True
             }), 200
     except Exception as e:
         return jsonify({
             "status": "unavailable",
             "error": str(e),
-            "ngram_api_url": NGRAM_API_URL,
+            "ngram_base_url": NGRAM_BASE_URL,
             "proxy_enabled": True
         }), 503
 
@@ -254,7 +272,8 @@ def health():
         ],
         "debug_mode": DEBUG_MODE,
         "firebase_connected": True,
-        "ngram_api_url": NGRAM_API_URL,
+        "ngram_base_url": NGRAM_BASE_URL,
+        "ngram_analysis_endpoint": NGRAM_ANALYSIS_ENDPOINT,
         "s1_proxy_enabled": True
     }), 200
 
@@ -271,12 +290,13 @@ def version_info():
             "firestore_tracker_routes": "v19.5",
             "seo_optimizer": "v19.5-safe-gemini",
             "final_review_routes": "v19.5-gemini",
-            "s1_proxy": "v19.5 (to N-gram API)"
+            "s1_proxy": "v19.5 (to N-gram API) - FIXED"
         },
         "environment": {
             "debug_mode": DEBUG_MODE,
             "firebase_connected": True,
-            "ngram_api_url": NGRAM_API_URL
+            "ngram_base_url": NGRAM_BASE_URL,
+            "ngram_analysis_endpoint": NGRAM_ANALYSIS_ENDPOINT
         }
     }), 200
 
@@ -320,5 +340,5 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", 8080))
     print(f"\n🚀 Starting Master SEO API {VERSION} on port {port}")
     print(f"🔧 Debug mode: {DEBUG_MODE}")
-    print(f"🔗 S1 Proxy enabled → {NGRAM_API_URL}\n")
+    print(f"🔗 S1 Proxy enabled → {NGRAM_ANALYSIS_ENDPOINT}\n")
     app.run(host="0.0.0.0", port=port, debug=DEBUG_MODE)
