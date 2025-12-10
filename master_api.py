@@ -272,4 +272,110 @@ def master_debug(project_id):
         "last_update": batches[-1]["timestamp"].isoformat() if batches else None,
         "lsi_keywords": data.get("lsi_enrichment", {}).get("count", 0),
         "has_final_review": "final_review" in data,
-        "
+        "semantic_enabled": SEMANTIC_ENABLED  # ⭐ NOWE
+    }), 200
+
+# ================================================================
+# 🚨 ERROR HANDLERS (Globalne)
+# ================================================================
+@app.errorhandler(413)
+def request_entity_too_large(error):
+    return jsonify({"error": "Request Entity Too Large", "message": "Payload przekracza 32MB"}), 413
+
+@app.errorhandler(500)
+def internal_server_error(error):
+    return jsonify({"error": "Internal Server Error", "message": str(error)}), 500
+
+# ================================================================
+# 🏥 HEALTHCHECK
+# ================================================================
+@app.get("/health")
+def health():
+    return jsonify({
+        "status": "ok",
+        "message": "Master SEO API działa",
+        "version": VERSION,
+        "timestamp": datetime.utcnow().isoformat(),
+        "modules": [
+            "project_routes",
+            "firestore_tracker_routes",
+            "final_review_routes",
+            "seo_optimizer",
+            "s1_proxy (to N-gram API)"
+        ],
+        "debug_mode": DEBUG_MODE,
+        "firebase_connected": True,
+        "ngram_base_url": NGRAM_BASE_URL,
+        "ngram_analysis_endpoint": NGRAM_ANALYSIS_ENDPOINT,
+        "s1_proxy_enabled": True,
+        "semantic_enabled": SEMANTIC_ENABLED  # ⭐ NOWE
+    }), 200
+
+# ================================================================
+# 🔎 VERSION CHECK
+# ================================================================
+@app.get("/api/version")
+def version_info():
+    return jsonify({
+        "engine": "Brajen Semantic Engine",
+        "api_version": VERSION,
+        "components": {
+            "project_routes": "v19.6-semantic",
+            "firestore_tracker_routes": "v19.6-semantic",
+            "seo_optimizer": "v19.6-semantic",
+            "final_review_routes": "v19.5-gemini",
+            "s1_proxy": "v19.5 (to N-gram API) - FIXED"
+        },
+        "environment": {
+            "debug_mode": DEBUG_MODE,
+            "firebase_connected": True,
+            "ngram_base_url": NGRAM_BASE_URL,
+            "ngram_analysis_endpoint": NGRAM_ANALYSIS_ENDPOINT,
+            "semantic_enabled": SEMANTIC_ENABLED  # ⭐ NOWE
+        }
+    }), 200
+
+# ================================================================
+# 🧩 MANUAL CHECK ENDPOINT (test unified_prevalidation)
+# ================================================================
+@app.post("/api/manual_check")
+def manual_check():
+    data = request.get_json()
+    if not data or "text" not in data:
+        return jsonify({"error": "Missing text"}), 400
+
+    dummy_keywords = data.get("keywords_state", {})
+    result = unified_prevalidation(data["text"], dummy_keywords)
+
+    return jsonify({
+        "status": "CHECK_OK",
+        "semantic_score": result["semantic_score"],
+        "density": result["density"],
+        "smog": result["smog"],
+        "readability": result["readability"],
+        "warnings": result["warnings"],
+        "semantic_coverage": result.get("semantic_coverage", {})  # ⭐ NOWE
+    }), 200
+
+# ================================================================
+# 🧩 AUTO FINAL REVIEW TRIGGER (po eksporcie)
+# ================================================================
+@app.post("/api/auto_final_review/<project_id>")
+def auto_final_review(project_id):
+    from final_review_routes import perform_final_review
+    try:
+        response = perform_final_review(project_id)
+        return response
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# ================================================================
+# 🏃 Local Run
+# ================================================================
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 8080))
+    print(f"\n🚀 Starting Master SEO API {VERSION} on port {port}")
+    print(f"🔧 Debug mode: {DEBUG_MODE}")
+    print(f"🔗 S1 Proxy enabled → {NGRAM_ANALYSIS_ENDPOINT}")
+    print(f"🧠 Semantic analysis: {'ENABLED ✅' if SEMANTIC_ENABLED else 'DISABLED ⚠️'}\n")
+    app.run(host="0.0.0.0", port=port, debug=DEBUG_MODE)
