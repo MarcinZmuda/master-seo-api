@@ -49,12 +49,19 @@ def create_project():
         doc = nlp(term)
         search_lemma = " ".join(t.lemma_.lower() for t in doc if t.is_alpha)
         row_id = str(uuid.uuid4())
+        
+        # ⭐ NOWE: Calculate optimal_target
+        target_min = item.get("min", 1)
+        target_max = item.get("max", 5)
+        optimal_target = target_min + 1  # ⭐ min + 1
+        
         firestore_keywords[row_id] = {
             "keyword": term,
             "search_term_exact": term.lower(),
             "search_lemma": search_lemma,
-            "target_min": item.get("min", 1),
-            "target_max": item.get("max", 5),
+            "target_min": target_min,
+            "target_max": target_max,
+            "optimal_target": optimal_target,  # ⭐ NOWE
             "actual_uses": 0,
             "status": "UNDER",
             "type": item.get("type", "BASIC").upper()
@@ -69,7 +76,7 @@ def create_project():
         "created_at": firestore.SERVER_TIMESTAMP,
         "batches": [],
         "total_batches": 0,
-        "version": "v18.0",
+        "version": "v19.6-semantic",
         "manual_mode": True
     }
     doc_ref.set(project_data)
@@ -341,6 +348,7 @@ def preview_all_checks(project_id):
         "transition_score": report["transition_score"],
         "density": report["density"],
         "warnings": report["warnings"],
+        "semantic_coverage": report.get("semantic_coverage", {}),  # ⭐ NOWE
         "summary": f"Semantic: {report['semantic_score']:.2f}, "
                    f"Transition: {report['transition_score']:.2f}, "
                    f"Density: {report['density']:.2f}, "
@@ -384,5 +392,112 @@ def export_project_data(project_id):
         "topic": data.get("topic"),
         "article_html": html_ready,
         "batch_count": len(batches),
-        "version": "v18.0"
+        "version": "v19.6-semantic"
     }), 200
+
+# ================================================================
+# 🧠 GEMINI S1 H2 SUGGESTIONS (Dodatkowa analiza struktury)
+# ================================================================
+@project_routes.post("/api/project/s1_h2_suggestions")
+def s1_h2_suggestions():
+    """
+    Gemini-powered H2 structure suggestions na podstawie SERP analysis.
+    Endpoint używany przez S1 jako dodatkowa optymalizacja.
+    """
+    if not GEMINI_API_KEY:
+        return jsonify({
+            "error": "Gemini API not configured",
+            "suggestions": []
+        }), 500
+    
+    data = request.get_json()
+    topic = data.get("topic", "")
+    serp_h2_patterns = data.get("serp_h2_patterns", [])  # Z N-gram API
+    target_keywords = data.get("target_keywords", [])
+    
+    if not topic:
+        return jsonify({"error": "Missing topic"}), 400
+    
+    try:
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        
+        # Przygotuj kontekst z SERP
+        serp_context = "\n".join([
+            f"  {i+1}. {pattern}"
+            for i, pattern in enumerate(serp_h2_patterns[:10])
+        ]) if serp_h2_patterns else "Brak danych SERP"
+        
+        keywords_context = ", ".join(target_keywords[:15])
+        
+        prompt = f"""
+Jesteś ekspertem SEO. Przeanalizuj TOP 10 struktury H2 z SERP i zaproponuj OPTYMALNĄ strukturę H2.
+
+TEMAT: {topic}
+
+SŁOWA KLUCZOWE DO UWZGLĘDNIENIA:
+{keywords_context}
+
+NAJCZĘSTSZE STRUKTURY H2 U KONKURENCJI:
+{serp_context}
+
+ZADANIE:
+1. Zaproponuj 5-8 nagłówków H2 w optymalnej kolejności
+2. Dla każdego H2 podaj:
+   - Tytuł (bez numeru, bez "H2:")
+   - Dlaczego ten H2 jest ważny (1 zdanie)
+   - Polecana liczba słów (zakres)
+
+WYMAGANIA:
+- NIE kopiuj dokładnie konkurencji - znajdź LEPSZY kąt
+- Uwzględnij słowa kluczowe naturalnie
+- Logiczna kolejność (od ogólnego do szczegółowego)
+- Unikaj: "Wstęp", "Podsumowanie", "Wprowadzenie"
+
+Zwróć TYLKO JSON:
+{{
+  "h2_suggestions": [
+    {{
+      "title": "Tytuł H2",
+      "why": "Dlaczego ważne",
+      "word_count": "300-500"
+    }}
+  ],
+  "strategy_notes": "Krótka strategia (2-3 zdania)"
+}}
+"""
+        
+        print(f"[S1_H2] 🧠 Gemini analysis for: {topic}")
+        response = model.generate_content(prompt)
+        result_text = response.text.strip()
+        
+        # Wyczyść markdown
+        result_text = re.sub(r'^```json\n?', '', result_text)
+        result_text = re.sub(r'\n?```$', '', result_text)
+        
+        # Parse JSON
+        try:
+            suggestions = json.loads(result_text)
+        except json.JSONDecodeError:
+            # Fallback jeśli nie JSON
+            suggestions = {
+                "h2_suggestions": [],
+                "strategy_notes": result_text[:500],
+                "raw_response": result_text
+            }
+        
+        print(f"[S1_H2] ✅ Generated {len(suggestions.get('h2_suggestions', []))} H2 suggestions")
+        
+        return jsonify({
+            "status": "SUCCESS",
+            "topic": topic,
+            "suggestions": suggestions,
+            "gemini_powered": True
+        }), 200
+        
+    except Exception as e:
+        print(f"[S1_H2] ❌ Error: {e}")
+        return jsonify({
+            "error": str(e),
+            "suggestions": [],
+            "fallback_mode": True
+        }), 500
