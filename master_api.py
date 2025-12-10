@@ -7,12 +7,12 @@ from firebase_admin import credentials, initialize_app, firestore
 from datetime import datetime
 
 # ================================================================
-# 🔥 Firestore Initialization — kompatybilne z Render
+# 🔥 Firestore Initialization – kompatybilne z Render
 # ================================================================
 FIREBASE_CREDS_JSON = os.getenv("FIREBASE_CREDS_JSON")
 if not FIREBASE_CREDS_JSON:
     raise RuntimeError(
-        "❌ Brak zmiennej środowiskowej FIREBASE_CREDS_JSON — "
+        "❌ Brak zmiennej środowiskowej FIREBASE_CREDS_JSON – "
         "wgraj JSON z Service Account jako string do ENV."
     )
 
@@ -36,12 +36,22 @@ app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024  # 32 MB
 CORS(app)
 
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-VERSION = "v19.5-s1-proxy-fixed"
+VERSION = "v19.6-semantic"
+
+# ================================================================
+# 🧠 Check if semantic analysis is available
+# ================================================================
+try:
+    from sentence_transformers import SentenceTransformer
+    SEMANTIC_ENABLED = True
+    print("[MASTER] ✅ Semantic analysis available")
+except ImportError:
+    SEMANTIC_ENABLED = False
+    print("[MASTER] ⚠️ Semantic analysis NOT available (sentence-transformers not installed)")
 
 # ================================================================
 # 🔗 N-gram API Configuration (for S1 proxy)
 # ================================================================
-# ✅ POPRAWKA: Obsługa zarówno base URL jak i full endpoint URL
 NGRAM_API_URL = os.getenv("NGRAM_API_URL", "https://gpt-ngram-api.onrender.com")
 
 # Sprawdź czy URL już zawiera endpoint
@@ -87,17 +97,39 @@ def s1_analysis_proxy():
     print(f"[S1_PROXY] 📡 Forwarding S1 analysis to {NGRAM_ANALYSIS_ENDPOINT}")
     
     try:
-        # ✅ POPRAWKA: Używamy NGRAM_ANALYSIS_ENDPOINT (pełny URL)
         response = requests.post(
-            NGRAM_ANALYSIS_ENDPOINT,  # ⭐ Nie dodajemy już /api/ngram_entity_analysis
+            NGRAM_ANALYSIS_ENDPOINT,
             json=data,
-            timeout=90,  # S1 analysis może trwać długo
+            timeout=90,
             headers={'Content-Type': 'application/json'}
         )
         
         if response.status_code == 200:
             result = response.json()
             print(f"[S1_PROXY] ✅ S1 analysis completed successfully")
+            
+            # ⭐ NOWE: Dodaj semantic analysis do S1 wyniku
+            if SEMANTIC_ENABLED:
+                try:
+                    from seo_optimizer import semantic_keyword_coverage
+                    
+                    # Jeśli S1 zwrócił jakieś keywords
+                    if "keywords" in result:
+                        # Przykładowy tekst z SERP (pierwszych 5000 znaków)
+                        sample_text = result.get("serp_content", "")[:5000]
+                        
+                        # Dummy keywords_state dla semantic analysis
+                        dummy_kw_state = {
+                            str(i): {"keyword": kw, "actual_uses": 0}
+                            for i, kw in enumerate(result.get("keywords", []))
+                        }
+                        
+                        semantic_cov = semantic_keyword_coverage(sample_text, dummy_kw_state)
+                        result["semantic_analysis"] = semantic_cov
+                        print(f"[S1_PROXY] ✅ Added semantic analysis to S1 result")
+                except Exception as e:
+                    print(f"[S1_PROXY] ⚠️ Semantic analysis failed: {e}")
+            
             return jsonify(result), 200
         else:
             print(f"[S1_PROXY] ❌ N-gram API error: {response.status_code}")
@@ -136,7 +168,6 @@ def synthesize_topics_proxy():
     data = request.get_json(force=True)
     
     try:
-        # ✅ POPRAWKA: Używamy NGRAM_BASE_URL
         response = requests.post(
             f"{NGRAM_BASE_URL}/api/synthesize_topics",
             json=data,
@@ -153,7 +184,6 @@ def compliance_report_proxy():
     data = request.get_json(force=True)
     
     try:
-        # ✅ POPRAWKA: Używamy NGRAM_BASE_URL
         response = requests.post(
             f"{NGRAM_BASE_URL}/api/generate_compliance_report",
             json=data,
@@ -168,7 +198,6 @@ def compliance_report_proxy():
 def s1_health_check():
     """Sprawdza czy N-gram API service jest dostępny."""
     try:
-        # ✅ POPRAWKA: Używamy NGRAM_BASE_URL
         response = requests.get(f"{NGRAM_BASE_URL}/health", timeout=5)
         if response.status_code == 200:
             ngram_status = response.json()
@@ -177,21 +206,24 @@ def s1_health_check():
                 "ngram_api_status": ngram_status,
                 "ngram_base_url": NGRAM_BASE_URL,
                 "ngram_analysis_endpoint": NGRAM_ANALYSIS_ENDPOINT,
-                "proxy_enabled": True
+                "proxy_enabled": True,
+                "semantic_enabled": SEMANTIC_ENABLED  # ⭐ NOWE
             }), 200
         else:
             return jsonify({
                 "status": "degraded",
                 "ngram_api_status": "error",
                 "ngram_base_url": NGRAM_BASE_URL,
-                "proxy_enabled": True
+                "proxy_enabled": True,
+                "semantic_enabled": SEMANTIC_ENABLED  # ⭐ NOWE
             }), 200
     except Exception as e:
         return jsonify({
             "status": "unavailable",
             "error": str(e),
             "ngram_base_url": NGRAM_BASE_URL,
-            "proxy_enabled": True
+            "proxy_enabled": True,
+            "semantic_enabled": SEMANTIC_ENABLED  # ⭐ NOWE
         }), 503
 
 # ================================================================
@@ -240,105 +272,4 @@ def master_debug(project_id):
         "last_update": batches[-1]["timestamp"].isoformat() if batches else None,
         "lsi_keywords": data.get("lsi_enrichment", {}).get("count", 0),
         "has_final_review": "final_review" in data,
-    }), 200
-
-# ================================================================
-# 🚨 ERROR HANDLERS (Globalne)
-# ================================================================
-@app.errorhandler(413)
-def request_entity_too_large(error):
-    return jsonify({"error": "Request Entity Too Large", "message": "Payload przekracza 32MB"}), 413
-
-@app.errorhandler(500)
-def internal_server_error(error):
-    return jsonify({"error": "Internal Server Error", "message": str(error)}), 500
-
-# ================================================================
-# 🔍 HEALTHCHECK
-# ================================================================
-@app.get("/health")
-def health():
-    return jsonify({
-        "status": "ok",
-        "message": "Master SEO API działa",
-        "version": VERSION,
-        "timestamp": datetime.utcnow().isoformat(),
-        "modules": [
-            "project_routes",
-            "firestore_tracker_routes",
-            "final_review_routes",
-            "seo_optimizer",
-            "s1_proxy (to N-gram API)"
-        ],
-        "debug_mode": DEBUG_MODE,
-        "firebase_connected": True,
-        "ngram_base_url": NGRAM_BASE_URL,
-        "ngram_analysis_endpoint": NGRAM_ANALYSIS_ENDPOINT,
-        "s1_proxy_enabled": True
-    }), 200
-
-# ================================================================
-# 🔎 VERSION CHECK
-# ================================================================
-@app.get("/api/version")
-def version_info():
-    return jsonify({
-        "engine": "Brajen Semantic Engine",
-        "api_version": VERSION,
-        "components": {
-            "project_routes": "v19.5",
-            "firestore_tracker_routes": "v19.5",
-            "seo_optimizer": "v19.5-safe-gemini",
-            "final_review_routes": "v19.5-gemini",
-            "s1_proxy": "v19.5 (to N-gram API) - FIXED"
-        },
-        "environment": {
-            "debug_mode": DEBUG_MODE,
-            "firebase_connected": True,
-            "ngram_base_url": NGRAM_BASE_URL,
-            "ngram_analysis_endpoint": NGRAM_ANALYSIS_ENDPOINT
-        }
-    }), 200
-
-# ================================================================
-# 🧩 MANUAL CHECK ENDPOINT (test unified_prevalidation)
-# ================================================================
-@app.post("/api/manual_check")
-def manual_check():
-    data = request.get_json()
-    if not data or "text" not in data:
-        return jsonify({"error": "Missing text"}), 400
-
-    dummy_keywords = data.get("keywords_state", {})
-    result = unified_prevalidation(data["text"], dummy_keywords)
-
-    return jsonify({
-        "status": "CHECK_OK",
-        "semantic_score": result["semantic_score"],
-        "density": result["density"],
-        "smog": result["smog"],
-        "readability": result["readability"],
-        "warnings": result["warnings"]
-    }), 200
-
-# ================================================================
-# 🧩 AUTO FINAL REVIEW TRIGGER (po eksporcie)
-# ================================================================
-@app.post("/api/auto_final_review/<project_id>")
-def auto_final_review(project_id):
-    from final_review_routes import perform_final_review
-    try:
-        response = perform_final_review(project_id)
-        return response
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# ================================================================
-# 🏃 Local Run
-# ================================================================
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8080))
-    print(f"\n🚀 Starting Master SEO API {VERSION} on port {port}")
-    print(f"🔧 Debug mode: {DEBUG_MODE}")
-    print(f"🔗 S1 Proxy enabled → {NGRAM_ANALYSIS_ENDPOINT}\n")
-    app.run(host="0.0.0.0", port=port, debug=DEBUG_MODE)
+        "
