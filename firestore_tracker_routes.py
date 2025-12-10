@@ -2,6 +2,8 @@
 SEO Content Tracker Routes - v19.6 Brajen Semantic Engine
 + Interactive Final Review (Gemini)
 + Optimal Target (min + 1)
++ HARD BLOCK for keywords exceeding target_max
++ remaining_max in response
 """
 
 from flask import Blueprint, request, jsonify
@@ -91,7 +93,7 @@ def calculate_burstiness(text):
     return round((math.sqrt(variance) / mean) * 10, 2) if mean else 0.0
 
 # ============================================================================
-# 3. FIRESTORE PROCESSOR
+# 3. FIRESTORE PROCESSOR (⭐ UPDATED WITH HARD BLOCK + remaining_max)
 # ============================================================================
 def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=False):
     db = firestore.client()
@@ -104,21 +106,56 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
     keywords_state = project_data.get("keywords_state", {})
     doc_nlp = nlp(batch_text)
 
-    # ⭐ NOWA LOGIKA: optimal_target = min + 1
+    # ⭐ STEP 1: COUNT keywords in batch WITHOUT updating cumulative yet
+    batch_counts = {}
     for rid, meta in keywords_state.items():
         count = count_robust(doc_nlp, meta)
-        meta["actual_uses"] = meta.get("actual_uses", 0) + count
+        batch_counts[rid] = count
+
+    # ⭐ STEP 2: CHECK if any keyword would EXCEED target_max (HARD BLOCK)
+    blocked_keywords = []
+    for rid, batch_count in batch_counts.items():
+        meta = keywords_state[rid]
+        current = meta.get("actual_uses", 0)
+        target_max = meta.get("target_max", 999)
+        new_total = current + batch_count
+        
+        if new_total > target_max:
+            blocked_keywords.append({
+                "keyword": meta.get("keyword"),
+                "current": current,
+                "batch_uses": batch_count,
+                "would_be": new_total,
+                "target_max": target_max,
+                "exceeded_by": new_total - target_max
+            })
+    
+    # ⭐ STEP 3: If ANY keyword exceeded → BLOCK entire batch (unless forced)
+    if blocked_keywords and not forced:
+        return {
+            "error": "KEYWORDS_EXCEEDED_MAX",
+            "status": "BLOCKED",
+            "blocked_keywords": blocked_keywords,
+            "message": f"❌ {len(blocked_keywords)} keyword(s) would exceed target_max. Use synonyms or set forced=true.",
+            "hint": "Użyj synonimów dla zablokowanych fraz lub wyślij z forced=true",
+            "status_code": 400
+        }
+
+    # ⭐ STEP 4: All checks passed → UPDATE cumulative counts
+    for rid, batch_count in batch_counts.items():
+        meta = keywords_state[rid]
+        meta["actual_uses"] = meta.get("actual_uses", 0) + batch_count
         
         min_t = meta.get("target_min", 0)
         max_t = meta.get("target_max", 999)
-        optimal_t = meta.get("optimal_target", min_t + 1)  # ⭐ NOWE
+        optimal_t = meta.get("optimal_target", min_t + 1)
         actual = meta["actual_uses"]
         
-        # ⭐ NOWA LOGIKA STATUS z OPTIMAL
+        # ⭐ STATUS CALCULATION with OPTIMAL
         if actual < min_t:
             meta["status"] = "UNDER"
         elif actual == optimal_t:
-            meta["status"] = "OPTIMAL"  # ⭐ NOWY STATUS
+            meta["status"] = "OPTIMAL"
         elif min_t <= actual <= max_t:
             meta["status"] = "OK"
         elif actual > max_t:
@@ -126,9 +163,12 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         else:
             meta["status"] = "LOCKED"
         
+        # ⭐ CALCULATE remaining_max for next batch
+        meta["remaining_max"] = max(0, max_t - actual)
+        
         keywords_state[rid] = meta
 
-    # 🔹 Przekazujemy keywords_state zamiast project_id
+    # 🔹 Przekazujemy keywords_state do unified_prevalidation
     precheck = unified_prevalidation(batch_text, keywords_state)
     warnings = precheck.get("warnings", [])
     semantic_score = precheck.get("semantic_score", 1.0)
@@ -165,12 +205,28 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
 
     project_data.setdefault("batches", []).append(batch_entry)
     project_data["keywords_state"] = keywords_state
+    
     try:
         doc_ref.set(project_data)
     except InvalidArgument:
         doc_ref.set({k: v for k, v in project_data.items() if v is not None})
     except Exception as e:
         print(f"[FIRESTORE] ⚠️ Błąd zapisu: {e}")
+
+    # ⭐ PREPARE keyword_targets for response (with remaining_max!)
+    keyword_targets = []
+    for rid, meta in keywords_state.items():
+        keyword_targets.append({
+            "keyword": meta.get("keyword"),
+            "current": meta.get("actual_uses", 0),
+            "target_min": meta.get("target_min", 0),
+            "target_max": meta.get("target_max", 999),
+            "optimal_target": meta.get("optimal_target", 0),
+            "remaining_max": meta.get("remaining_max", 0),  # ⭐ CRITICAL FOR GPT!
+            "remaining_to_optimal": max(0, meta.get("optimal_target", 0) - meta.get("actual_uses", 0)),
+            "status": meta.get("status"),
+            "type": meta.get("type")
+        })
 
     # 🔹 Dodajemy meta do zwracanego dict
     return {
@@ -179,8 +235,9 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         "density": density,
         "burstiness": burstiness,
         "warnings": warnings,
+        "keyword_targets": keyword_targets,  # ⭐ WITH remaining_max!
         "meta": precheck.get("meta", {}),
-        "semantic_coverage": precheck.get("semantic_coverage", {}),  # ⭐ NOWE
+        "semantic_coverage": precheck.get("semantic_coverage", {}),
         "status_code": 200
     }
 
@@ -193,6 +250,11 @@ def preview_batch(project_id):
     text = data.get("batch_text", "")
     forced = data.get("forced", False)
     result = process_batch_in_firestore(project_id, text, forced=forced)
+    
+    # ⭐ If blocked, return 400 with details
+    if result.get("status") == "BLOCKED":
+        return jsonify(result), 400
+    
     result["mode"] = "PREVIEW_ONLY"
     return jsonify(result), 200
 
@@ -210,6 +272,11 @@ def approve_batch(project_id):
 
     # Zapisz batch
     result = process_batch_in_firestore(project_id, text, meta_trace, forced)
+    
+    # ⭐ If blocked, return 400
+    if result.get("status") == "BLOCKED":
+        return jsonify(result), 400
+    
     result["mode"] = "APPROVE"
 
     # 🔹 Sprawdź, czy to ostatni batch
@@ -220,29 +287,13 @@ def approve_batch(project_id):
         return jsonify(result), 200
 
     project_data = doc.to_dict()
-    keywords_state = project_data.get("keywords_state", {})
     total_planned = len(project_data.get("batches_plan", []))
     total_current = len(project_data.get("batches", []))
-
-    # ⭐ NOWE: Dodaj info o optimal targets do response
-    result["keyword_targets"] = [
-        {
-            "keyword": meta.get("keyword"),
-            "current": meta.get("actual_uses", 0),
-            "target_min": meta.get("target_min", 0),
-            "optimal_target": meta.get("optimal_target", meta.get("target_min", 0) + 1),  # ⭐
-            "target_max": meta.get("target_max", 999),
-            "status": meta.get("status"),
-            "remaining_to_optimal": max(0, meta.get("optimal_target", 0) - meta.get("actual_uses", 0))  # ⭐
-        }
-        for rid, meta in keywords_state.items()
-    ]
 
     if total_planned and total_current >= total_planned and GEMINI_API_KEY:
         try:
             print(f"[TRACKER] 🧠 Final batch detected → uruchamiam Gemini review dla {project_id}")
             model = genai.GenerativeModel("gemini-1.5-pro")
-            # ✅ POPRAWKA: Usunięto [:15000] - teraz analizuje CAŁY artykuł
             full_article = "\n\n".join([b.get("text", "") for b in project_data.get("batches", [])])
             print(f"[TRACKER] 🔍 Analiza CAŁEGO artykułu ({len(full_article)} znaków)...")
             review_prompt = (
@@ -291,7 +342,10 @@ def debug_keywords(project_id):
             "keyword": meta.get("keyword"),
             "type": meta.get("type"),
             "actual_uses": meta.get("actual_uses", 0),
-            "optimal_target": meta.get("optimal_target", 0),  # ⭐ NOWE
+            "target_min": meta.get("target_min", 0),
+            "target_max": meta.get("target_max", 999),
+            "optimal_target": meta.get("optimal_target", 0),
+            "remaining_max": meta.get("remaining_max", 0),  # ⭐ ADDED
             "status": meta.get("status"),
             "target": f"{meta.get('target_min')}-{meta.get('target_max')}"
         })
