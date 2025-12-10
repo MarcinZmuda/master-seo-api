@@ -1,9 +1,6 @@
 """
-SEO Content Tracker Routes - v19.6 Brajen Semantic Engine
+SEO Content Tracker Routes - v19.5 Brajen Semantic Engine
 + Interactive Final Review (Gemini)
-+ Optimal Target (min + 1)
-+ HARD BLOCK for keywords exceeding target_max
-+ remaining_max in response
 """
 
 from flask import Blueprint, request, jsonify
@@ -35,12 +32,48 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
     print("[TRACKER] ✅ Gemini API aktywny (Final Review Mode)")
 else:
-    print("[TRACKER] ⚠️ Brak GEMINI_API_KEY – Final Review nieaktywny")
+    print("[TRACKER] ⚠️ Brak GEMINI_API_KEY — Final Review nieaktywny")
 
 # ============================================================================
-# 1. ROBUST COUNTING
+# 1. SIMPLE LEMMA COUNTING (for BASIC keywords - exact lemma match only)
+# ============================================================================
+def count_lemma_only(text_lemmas, keyword_lemmas):
+    """
+    Proste zliczanie lematów - szuka dokładnej sekwencji lematów frazy w tekście.
+    Używane dla BASIC keywords.
+    
+    Args:
+        text_lemmas: lista lematów z tekstu batcha
+        keyword_lemmas: lista lematów frazy kluczowej
+    
+    Returns:
+        int: liczba wystąpień frazy
+    """
+    if not text_lemmas or not keyword_lemmas:
+        return 0
+    
+    kw_len = len(keyword_lemmas)
+    text_len = len(text_lemmas)
+    
+    if kw_len > text_len:
+        return 0
+    
+    count = 0
+    # Przesuwamy okno po tekście i szukamy dokładnych dopasowań sekwencji lematów
+    for i in range(text_len - kw_len + 1):
+        if text_lemmas[i:i + kw_len] == keyword_lemmas:
+            count += 1
+    
+    return count
+
+
+# ============================================================================
+# 2. ROBUST COUNTING (for EXTENDED keywords - keeps fuzzy matching)
 # ============================================================================
 def count_robust(doc, keyword_meta):
+    """
+    Zaawansowane zliczanie z fuzzy matching - używane dla EXTENDED keywords.
+    """
     if not doc:
         return 0
     kw_exact = keyword_meta.get("keyword", "").lower().strip()
@@ -75,7 +108,7 @@ def count_robust(doc, keyword_meta):
 # ============================================================================
 def validate_structure(text):
     if "##" in text or "###" in text:
-        return {"valid": False, "error": "❌ Markdown (##) zabroniony – użyj <h2>."}
+        return {"valid": False, "error": "❌ Markdown (##) zabroniony — użyj <h2>."}
     banned = ["wstęp", "podsumowanie", "wprowadzenie", "zakończenie", "wnioski", "konkluzja"]
     for h2 in re.findall(r'<h2[^>]*>(.*?)</h2>', text, re.IGNORECASE | re.DOTALL):
         if any(b in h2.lower() for b in banned):
@@ -93,7 +126,7 @@ def calculate_burstiness(text):
     return round((math.sqrt(variance) / mean) * 10, 2) if mean else 0.0
 
 # ============================================================================
-# 3. FIRESTORE PROCESSOR (⭐ UPDATED WITH HARD BLOCK + remaining_max)
+# 3. FIRESTORE PROCESSOR (v19.7 - Simple Lemma Count for BASIC + HARD BLOCK)
 # ============================================================================
 def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=False):
     db = firestore.client()
@@ -104,18 +137,47 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
 
     project_data = doc.to_dict()
     keywords_state = project_data.get("keywords_state", {})
-    doc_nlp = nlp(batch_text)
-
-    # ⭐ STEP 1: COUNT keywords in batch WITHOUT updating cumulative yet
+    
+    # ⭐ KROK 1: Przygotuj lematy tekstu (raz dla całego batcha)
+    # Usuń tagi HTML przed lematyzacją
+    clean_text = re.sub(r"<[^>]+>", " ", batch_text)
+    clean_text = re.sub(r"\s+", " ", clean_text).lower()
+    doc_nlp = nlp(clean_text)
+    text_lemmas = [t.lemma_.lower() for t in doc_nlp if t.is_alpha]
+    
+    # ⭐ KROK 2: Policz wystąpienia w batchu BEZ aktualizacji stanu
     batch_counts = {}
     for rid, meta in keywords_state.items():
-        count = count_robust(doc_nlp, meta)
+        keyword = meta.get("keyword", "").lower().strip()
+        kw_type = meta.get("type", "BASIC").upper()
+        
+        if not keyword:
+            batch_counts[rid] = 0
+            continue
+        
+        # Lematyzuj frazę kluczową
+        kw_doc = nlp(keyword)
+        keyword_lemmas = [t.lemma_.lower() for t in kw_doc if t.is_alpha]
+        
+        if kw_type == "BASIC":
+            # ⭐ BASIC: Proste zliczanie lematów (dokładne dopasowanie sekwencji)
+            count = count_lemma_only(text_lemmas, keyword_lemmas)
+        else:
+            # EXTENDED: Używa starej metody (fuzzy matching)
+            count = count_robust(doc_nlp, meta)
+        
         batch_counts[rid] = count
-
-    # ⭐ STEP 2: CHECK if any keyword would EXCEED target_max (HARD BLOCK)
+    
+    # ⭐ KROK 3: Sprawdź czy BASIC keywords nie przekroczą target_max (HARD BLOCK)
     blocked_keywords = []
     for rid, batch_count in batch_counts.items():
         meta = keywords_state[rid]
+        kw_type = meta.get("type", "BASIC").upper()
+        
+        # HARD BLOCK tylko dla BASIC!
+        if kw_type != "BASIC":
+            continue
+            
         current = meta.get("actual_uses", 0)
         target_max = meta.get("target_max", 999)
         new_total = current + batch_count
@@ -130,45 +192,46 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
                 "exceeded_by": new_total - target_max
             })
     
-    # ⭐ STEP 3: If ANY keyword exceeded → BLOCK entire batch (unless forced)
+    # ⭐ KROK 4: Jeśli BASIC przekracza → BLOCK (chyba że forced)
     if blocked_keywords and not forced:
         return {
             "error": "KEYWORDS_EXCEEDED_MAX",
             "status": "BLOCKED",
             "blocked_keywords": blocked_keywords,
-            "message": f"❌ {len(blocked_keywords)} keyword(s) would exceed target_max. Use synonyms or set forced=true.",
+            "message": f"❌ {len(blocked_keywords)} BASIC keyword(s) would exceed target_max. Use synonyms!",
             "hint": "Użyj synonimów dla zablokowanych fraz lub wyślij z forced=true",
             "status_code": 400
         }
-
-    # ⭐ STEP 4: All checks passed → UPDATE cumulative counts
+    
+    # ⭐ KROK 5: Aktualizuj stan keywords
     for rid, batch_count in batch_counts.items():
         meta = keywords_state[rid]
+        kw_type = meta.get("type", "BASIC").upper()
+        
         meta["actual_uses"] = meta.get("actual_uses", 0) + batch_count
         
         min_t = meta.get("target_min", 0)
         max_t = meta.get("target_max", 999)
-        optimal_t = meta.get("optimal_target", max_t)  # ⭐ TARGET = MAX!
         actual = meta["actual_uses"]
         
-        # ⭐ STATUS CALCULATION with OPTIMAL
+        # Status calculation
         if actual < min_t:
             meta["status"] = "UNDER"
-        elif actual == optimal_t:
+        elif actual == max_t:
             meta["status"] = "OPTIMAL"
-        elif min_t <= actual <= max_t:
+        elif min_t <= actual < max_t:
             meta["status"] = "OK"
         elif actual > max_t:
             meta["status"] = "OVER"
-        else:
-            meta["status"] = "LOCKED"
         
-        # ⭐ CALCULATE remaining_max for next batch
-        meta["remaining_max"] = max(0, max_t - actual)
+        # ⭐ remaining_max - tylko dla BASIC
+        if kw_type == "BASIC":
+            meta["remaining_max"] = max(0, max_t - actual)
+            meta["optimal_target"] = max_t
         
         keywords_state[rid] = meta
 
-    # 🔹 Przekazujemy keywords_state do unified_prevalidation
+    # 🔹 Prewalidacja
     precheck = unified_prevalidation(batch_text, keywords_state)
     warnings = precheck.get("warnings", [])
     semantic_score = precheck.get("semantic_score", 1.0)
@@ -205,7 +268,6 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
 
     project_data.setdefault("batches", []).append(batch_entry)
     project_data["keywords_state"] = keywords_state
-    
     try:
         doc_ref.set(project_data)
     except InvalidArgument:
@@ -213,36 +275,42 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
     except Exception as e:
         print(f"[FIRESTORE] ⚠️ Błąd zapisu: {e}")
 
-    # ⭐ PREPARE keyword_targets for response (with remaining_max!)
+    # ⭐ KROK 6: Przygotuj keyword_targets dla response (z remaining_max dla BASIC!)
     keyword_targets = []
     for rid, meta in keywords_state.items():
-        keyword_targets.append({
+        kw_type = meta.get("type", "BASIC").upper()
+        
+        target_info = {
             "keyword": meta.get("keyword"),
             "current": meta.get("actual_uses", 0),
             "target_min": meta.get("target_min", 0),
             "target_max": meta.get("target_max", 999),
-            "optimal_target": meta.get("optimal_target", 0),
-            "remaining_max": meta.get("remaining_max", 0),  # ⭐ CRITICAL FOR GPT!
-            "remaining_to_optimal": max(0, meta.get("optimal_target", 0) - meta.get("actual_uses", 0)),
             "status": meta.get("status"),
-            "type": meta.get("type")
-        })
+            "type": kw_type,
+            "batch_count": batch_counts.get(rid, 0)  # ⭐ Ile było w tym batchu
+        }
+        
+        # ⭐ remaining_max tylko dla BASIC
+        if kw_type == "BASIC":
+            target_info["optimal_target"] = meta.get("optimal_target", meta.get("target_max", 999))
+            target_info["remaining_max"] = meta.get("remaining_max", 0)
+            target_info["remaining_to_optimal"] = max(0, target_info["optimal_target"] - target_info["current"])
+        
+        keyword_targets.append(target_info)
 
-    # 🔹 Dodajemy meta do zwracanego dict
     return {
         "status": status,
         "semantic_score": semantic_score,
         "density": density,
         "burstiness": burstiness,
         "warnings": warnings,
-        "keyword_targets": keyword_targets,  # ⭐ WITH remaining_max!
+        "keyword_targets": keyword_targets,  # ⭐ CRITICAL FOR GPT!
         "meta": precheck.get("meta", {}),
-        "semantic_coverage": precheck.get("semantic_coverage", {}),
         "status_code": 200
     }
 
 # ============================================================================
-# 4. ROUTES – PREVIEW, APPROVE, DEBUG
+# 4. ROUTES — PREVIEW, APPROVE, DEBUG
 # ============================================================================
 @tracker_routes.post("/api/project/<project_id>/preview_batch")
 def preview_batch(project_id):
@@ -251,7 +319,7 @@ def preview_batch(project_id):
     forced = data.get("forced", False)
     result = process_batch_in_firestore(project_id, text, forced=forced)
     
-    # ⭐ If blocked, return 400 with details
+    # ⭐ Jeśli BLOCKED, zwróć 400
     if result.get("status") == "BLOCKED":
         return jsonify(result), 400
     
@@ -273,7 +341,7 @@ def approve_batch(project_id):
     # Zapisz batch
     result = process_batch_in_firestore(project_id, text, meta_trace, forced)
     
-    # ⭐ If blocked, return 400
+    # ⭐ Jeśli BLOCKED, zwróć 400
     if result.get("status") == "BLOCKED":
         return jsonify(result), 400
     
@@ -294,6 +362,7 @@ def approve_batch(project_id):
         try:
             print(f"[TRACKER] 🧠 Final batch detected → uruchamiam Gemini review dla {project_id}")
             model = genai.GenerativeModel("gemini-1.5-pro")
+            # ✅ POPRAWKA: Usunięto [:15000] - teraz analizuje CAŁY artykuł
             full_article = "\n\n".join([b.get("text", "") for b in project_data.get("batches", [])])
             print(f"[TRACKER] 🔍 Analiza CAŁEGO artykułu ({len(full_article)} znaków)...")
             review_prompt = (
@@ -312,11 +381,11 @@ def approve_batch(project_id):
                     "created_at": firestore.SERVER_TIMESTAMP,
                     "model": "gemini-1.5-pro",
                     "status": "REVIEW_READY",
-                    "article_length": len(full_article)
+                    "article_length": len(full_article)  # ⭐ DODANO tracking długości
                 }
             })
             result["final_review"] = review_text
-            result["article_length"] = len(full_article)
+            result["article_length"] = len(full_article)  # ⭐ DODANO info o długości
             result["next_action"] = "Czy chcesz wprowadzić poprawki automatycznie? (POST /api/project/<id>/apply_final_corrections)"
             result["final_review_status"] = "READY"
             print(f"[TRACKER] ✅ Raport Gemini zapisany w Firestore → {project_id}")
@@ -338,17 +407,24 @@ def debug_keywords(project_id):
     batches = data.get("batches", [])
     stats = []
     for rid, meta in keywords.items():
-        stats.append({
+        kw_type = meta.get("type", "BASIC").upper()
+        stat_entry = {
             "keyword": meta.get("keyword"),
-            "type": meta.get("type"),
+            "type": kw_type,
             "actual_uses": meta.get("actual_uses", 0),
             "target_min": meta.get("target_min", 0),
             "target_max": meta.get("target_max", 999),
-            "optimal_target": meta.get("optimal_target", 0),
-            "remaining_max": meta.get("remaining_max", 0),  # ⭐ ADDED
             "status": meta.get("status"),
             "target": f"{meta.get('target_min')}-{meta.get('target_max')}"
-        })
+        }
+        
+        # ⭐ remaining_max tylko dla BASIC
+        if kw_type == "BASIC":
+            stat_entry["optimal_target"] = meta.get("optimal_target", meta.get("target_max", 999))
+            stat_entry["remaining_max"] = meta.get("remaining_max", max(0, meta.get("target_max", 999) - meta.get("actual_uses", 0)))
+        
+        stats.append(stat_entry)
+        
     return jsonify({
         "project_id": project_id,
         "keywords": stats,
