@@ -361,7 +361,7 @@ def approve_batch(project_id):
     if total_planned and total_current >= total_planned and GEMINI_API_KEY:
         try:
             print(f"[TRACKER] 🧠 Final batch detected → uruchamiam Gemini review dla {project_id}")
-            model = genai.GenerativeModel("gemini-1.5-pro")
+            model = genai.GenerativeModel("gemini-2.0-flash-exp")
             # ✅ POPRAWKA: Usunięto [:15000] - teraz analizuje CAŁY artykuł
             full_article = "\n\n".join([b.get("text", "") for b in project_data.get("batches", [])])
             print(f"[TRACKER] 🔍 Analiza CAŁEGO artykułu ({len(full_article)} znaków)...")
@@ -379,7 +379,7 @@ def approve_batch(project_id):
                 "final_review": {
                     "review_text": review_text,
                     "created_at": firestore.SERVER_TIMESTAMP,
-                    "model": "gemini-1.5-pro",
+                    "model": "gemini-2.0-flash-exp",
                     "status": "REVIEW_READY",
                     "article_length": len(full_article)  # ⭐ DODANO tracking długości
                 }
