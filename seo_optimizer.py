@@ -16,7 +16,21 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
     print("[SEO_OPT] ✅ Gemini API Key configured")
 else:
-    print("[SEO_OPT] ⚠️ GEMINI_API_KEY not set — generative features disabled")
+    print("[SEO_OPT] ⚠️ GEMINI_API_KEY not set – generative features disabled")
+
+# ================================================================
+# 🧠 SEMANTIC EMBEDDINGS - Dodatkowa analiza
+# ================================================================
+try:
+    from sentence_transformers import SentenceTransformer
+    from sklearn.metrics.pairwise import cosine_similarity
+    
+    semantic_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
+    print("[SEO_OPT] ✅ Sentence Transformers loaded (Semantic Analysis)")
+    SEMANTIC_ENABLED = True
+except ImportError:
+    print("[SEO_OPT] ⚠️ Sentence Transformers not installed - semantic analysis disabled")
+    SEMANTIC_ENABLED = False
 
 # ================================================================
 # 🧠 Ładowanie modelu spaCy (Polish)
@@ -26,7 +40,7 @@ try:
     print("[SEO_OPT] ✅ Załadowano model pl_core_news_md (Light Edition)")
 except OSError:
     from spacy.cli import download
-    print("[SEO_OPT] ⚠️ Model pl_core_news_md nieznaleziony — próba pobrania...")
+    print("[SEO_OPT] ⚠️ Model pl_core_news_md nieznaleziony – próba pobrania...")
     download("pl_core_news_md")
     nlp = spacy.load("pl_core_news_md")
     print("[SEO_OPT] ✅ Model pobrany i załadowany")
@@ -91,7 +105,7 @@ def assess_readability(text: str) -> Dict[str, float]:
 def generate_semantic_outline(topic: str, keywords: List[str]) -> str:
     """Tworzy szkic SEO na podstawie tematu i słów kluczowych."""
     if not GEMINI_API_KEY:
-        return "Brak API KEY — tryb offline."
+        return "Brak API KEY – tryb offline."
 
     try:
         model = genai.GenerativeModel("gemini-1.5-flash")
@@ -259,11 +273,63 @@ def calculate_keyword_density(text: str, keywords_state: dict) -> float:
     return round(density, 2)
 
 # ================================================================
-# 🧩 Backward Compatibility Layer — unified_prevalidation()
+# 🧩 Funkcja: Semantic Keyword Coverage (obok n-gramów)
+# ================================================================
+def semantic_keyword_coverage(text: str, keywords_state: dict) -> dict:
+    """
+    Analizuje pokrycie słów kluczowych semantycznie (obok count_robust).
+    Zwraca dict z semantic similarity scores dla każdego keyword.
+    """
+    if not SEMANTIC_ENABLED or not keywords_state:
+        return {"semantic_enabled": False, "coverage": {}}
+    
+    try:
+        # Embedding całego tekstu
+        text_embedding = semantic_model.encode(text)
+        
+        coverage = {}
+        for rid, meta in keywords_state.items():
+            keyword = meta.get("keyword", "")
+            if not keyword:
+                continue
+            
+            # Embedding słowa kluczowego
+            keyword_embedding = semantic_model.encode(keyword)
+            
+            # Cosine similarity
+            similarity = cosine_similarity(
+                [text_embedding],
+                [keyword_embedding]
+            )[0][0]
+            
+            coverage[keyword] = {
+                "semantic_similarity": round(float(similarity), 3),
+                "status": "COVERED" if similarity > 0.60 else "WEAK",
+                "actual_uses": meta.get("actual_uses", 0),
+                "type": meta.get("type", "BASIC")
+            }
+        
+        return {
+            "semantic_enabled": True,
+            "coverage": coverage,
+            "avg_similarity": round(
+                sum(c["semantic_similarity"] for c in coverage.values()) / len(coverage),
+                3
+            ) if coverage else 0.0
+        }
+        
+    except Exception as e:
+        print(f"[SEO_OPT] ⚠️ Semantic coverage error: {e}")
+        return {"semantic_enabled": False, "error": str(e), "coverage": {}}
+
+# ================================================================
+# 🧩 Backward Compatibility Layer – unified_prevalidation()
 # ================================================================
 def unified_prevalidation(text: str, keywords_state: dict = None) -> dict:
     """
-    POPRAWIONA implementacja unified_prevalidation — zgodna z v19.x API.
+    POPRAWIONA implementacja unified_prevalidation – zgodna z v19.x API.
+    + NOWE: Semantic keyword coverage analysis
+    
     Wykonuje wstępną walidację i optymalizację batcha SEO przed analizą w Firestore.
     
     Args:
@@ -288,6 +354,11 @@ def unified_prevalidation(text: str, keywords_state: dict = None) -> dict:
         if keywords_state:
             density = calculate_keyword_density(text, keywords_state)
         
+        # ⭐ NOWE: Semantic coverage analysis
+        semantic_coverage = {}
+        if keywords_state and SEMANTIC_ENABLED:
+            semantic_coverage = semantic_keyword_coverage(text, keywords_state)
+        
         # Sprawdzenie ostrzeżeń
         warnings = []
         if "Warning" in rhythm or "🚨" in rhythm:
@@ -310,6 +381,7 @@ def unified_prevalidation(text: str, keywords_state: dict = None) -> dict:
             "readability": readability.get("readability_score", 0),
             "optimized_text": result.get("optimized_text", text),
             "warnings": warnings,
+            "semantic_coverage": semantic_coverage,  # ⭐ NOWE
             "meta": {
                 "readability_score": readability.get("readability_score"),
                 "grade_level": readability.get("grade_level"),
@@ -329,4 +401,5 @@ def unified_prevalidation(text: str, keywords_state: dict = None) -> dict:
             "error": str(e),
             "warnings": [str(e)],
             "optimized_text": text,
+            "semantic_coverage": {"semantic_enabled": False}  # ⭐ NOWE
         }
