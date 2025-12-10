@@ -1,5 +1,5 @@
 # ================================================================
-# 🧠 final_review_routes.py — Expert Review & Interactive Correction (v19.6)
+# 🧠 final_review_routes.py — Expert Review & Interactive Correction (v19.5)
 # ================================================================
 """
 Tryb interaktywny:
@@ -23,10 +23,10 @@ if not GEMINI_API_KEY:
     print("[REVIEW] ⚠️ Brak klucza GEMINI_API_KEY — moduł nieaktywny")
 else:
     genai.configure(api_key=GEMINI_API_KEY)
-    print("[REVIEW] ✅ Gemini 1.5 Pro aktywny dla final review")
+    print("[REVIEW] ✅ Gemini 1.5 Flash aktywny dla final review")
 
 # ------------------------------------------------------------
-# 🔧 Inicjalizacja Blueprint — CRITICAL: musi się nazywać final_review_routes
+# 🔧 Inicjalizacja Blueprint
 # ------------------------------------------------------------
 final_review_routes = Blueprint("final_review_routes", __name__)
 
@@ -55,7 +55,7 @@ def perform_final_review(project_id):
     if not full_article:
         return jsonify({"error": "Empty article text"}), 400
 
-    model = genai.GenerativeModel("gemini-1.5-pro")
+    model = genai.GenerativeModel("gemini-1.5-flash")
     
     # ✅ POPRAWKA: Usunięto [:15000] - teraz Gemini analizuje CAŁY artykuł
     review_prompt = (
@@ -82,7 +82,7 @@ def perform_final_review(project_id):
                 "review_text": review_text,
                 "corrected_text": None,
                 "created_at": firestore.SERVER_TIMESTAMP,
-                "model": "gemini-1.5-pro",
+                "model": "gemini-1.5-flash",
                 "status": "REVIEW_READY",
                 "article_length": len(full_article)  # ⭐ DODANO tracking długości
             }
@@ -126,7 +126,7 @@ def apply_final_corrections(project_id):
     if not review_text or not full_article:
         return jsonify({"error": "Invalid review or article"}), 400
 
-    model = genai.GenerativeModel("gemini-1.5-pro")
+    model = genai.GenerativeModel("gemini-1.5-flash")
     correction_prompt = (
         "Na podstawie poniższego raportu wprowadź poprawki do artykułu, "
         "zachowując sens, styl i strukturę (H2/H3).\n\n"
