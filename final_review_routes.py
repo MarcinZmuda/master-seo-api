@@ -23,7 +23,7 @@ if not GEMINI_API_KEY:
     print("[REVIEW] ⚠️ Brak klucza GEMINI_API_KEY — moduł nieaktywny")
 else:
     genai.configure(api_key=GEMINI_API_KEY)
-    print("[REVIEW] ✅ Gemini 1.5 Flash aktywny dla final review")
+    print("[REVIEW] ✅ Gemini 2.0 Flash Exp aktywny dla final review")
 
 # ------------------------------------------------------------
 # 🔧 Inicjalizacja Blueprint
