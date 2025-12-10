@@ -1,6 +1,7 @@
 """
-SEO Content Tracker Routes - v19.5 Brajen Semantic Engine
+SEO Content Tracker Routes - v19.6 Brajen Semantic Engine
 + Interactive Final Review (Gemini)
++ Optimal Target (min + 1)
 """
 
 from flask import Blueprint, request, jsonify
@@ -32,7 +33,7 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
     print("[TRACKER] ✅ Gemini API aktywny (Final Review Mode)")
 else:
-    print("[TRACKER] ⚠️ Brak GEMINI_API_KEY — Final Review nieaktywny")
+    print("[TRACKER] ⚠️ Brak GEMINI_API_KEY – Final Review nieaktywny")
 
 # ============================================================================
 # 1. ROBUST COUNTING
@@ -72,7 +73,7 @@ def count_robust(doc, keyword_meta):
 # ============================================================================
 def validate_structure(text):
     if "##" in text or "###" in text:
-        return {"valid": False, "error": "❌ Markdown (##) zabroniony — użyj <h2>."}
+        return {"valid": False, "error": "❌ Markdown (##) zabroniony – użyj <h2>."}
     banned = ["wstęp", "podsumowanie", "wprowadzenie", "zakończenie", "wnioski", "konkluzja"]
     for h2 in re.findall(r'<h2[^>]*>(.*?)</h2>', text, re.IGNORECASE | re.DOTALL):
         if any(b in h2.lower() for b in banned):
@@ -103,21 +104,31 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
     keywords_state = project_data.get("keywords_state", {})
     doc_nlp = nlp(batch_text)
 
+    # ⭐ NOWA LOGIKA: optimal_target = min + 1
     for rid, meta in keywords_state.items():
         count = count_robust(doc_nlp, meta)
         meta["actual_uses"] = meta.get("actual_uses", 0) + count
-        min_t, max_t = meta.get("target_min", 0), meta.get("target_max", 999)
-        if meta["actual_uses"] < min_t:
+        
+        min_t = meta.get("target_min", 0)
+        max_t = meta.get("target_max", 999)
+        optimal_t = meta.get("optimal_target", min_t + 1)  # ⭐ NOWE
+        actual = meta["actual_uses"]
+        
+        # ⭐ NOWA LOGIKA STATUS z OPTIMAL
+        if actual < min_t:
             meta["status"] = "UNDER"
-        elif min_t <= meta["actual_uses"] <= max_t:
+        elif actual == optimal_t:
+            meta["status"] = "OPTIMAL"  # ⭐ NOWY STATUS
+        elif min_t <= actual <= max_t:
             meta["status"] = "OK"
-        elif meta["actual_uses"] > max_t:
+        elif actual > max_t:
             meta["status"] = "OVER"
         else:
             meta["status"] = "LOCKED"
+        
         keywords_state[rid] = meta
 
-    # 🔹 POPRAWKA: Teraz przekazujemy keywords_state zamiast project_id
+    # 🔹 Przekazujemy keywords_state zamiast project_id
     precheck = unified_prevalidation(batch_text, keywords_state)
     warnings = precheck.get("warnings", [])
     semantic_score = precheck.get("semantic_score", 1.0)
@@ -161,19 +172,20 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
     except Exception as e:
         print(f"[FIRESTORE] ⚠️ Błąd zapisu: {e}")
 
-    # 🔹 POPRAWKA: Dodajemy meta do zwracanego dict
+    # 🔹 Dodajemy meta do zwracanego dict
     return {
         "status": status,
         "semantic_score": semantic_score,
         "density": density,
         "burstiness": burstiness,
         "warnings": warnings,
-        "meta": precheck.get("meta", {}),  # ✅ Dodane meta z paragraph_rhythm
+        "meta": precheck.get("meta", {}),
+        "semantic_coverage": precheck.get("semantic_coverage", {}),  # ⭐ NOWE
         "status_code": 200
     }
 
 # ============================================================================
-# 4. ROUTES — PREVIEW, APPROVE, DEBUG
+# 4. ROUTES – PREVIEW, APPROVE, DEBUG
 # ============================================================================
 @tracker_routes.post("/api/project/<project_id>/preview_batch")
 def preview_batch(project_id):
@@ -208,8 +220,23 @@ def approve_batch(project_id):
         return jsonify(result), 200
 
     project_data = doc.to_dict()
+    keywords_state = project_data.get("keywords_state", {})
     total_planned = len(project_data.get("batches_plan", []))
     total_current = len(project_data.get("batches", []))
+
+    # ⭐ NOWE: Dodaj info o optimal targets do response
+    result["keyword_targets"] = [
+        {
+            "keyword": meta.get("keyword"),
+            "current": meta.get("actual_uses", 0),
+            "target_min": meta.get("target_min", 0),
+            "optimal_target": meta.get("optimal_target", meta.get("target_min", 0) + 1),  # ⭐
+            "target_max": meta.get("target_max", 999),
+            "status": meta.get("status"),
+            "remaining_to_optimal": max(0, meta.get("optimal_target", 0) - meta.get("actual_uses", 0))  # ⭐
+        }
+        for rid, meta in keywords_state.items()
+    ]
 
     if total_planned and total_current >= total_planned and GEMINI_API_KEY:
         try:
@@ -234,11 +261,11 @@ def approve_batch(project_id):
                     "created_at": firestore.SERVER_TIMESTAMP,
                     "model": "gemini-1.5-pro",
                     "status": "REVIEW_READY",
-                    "article_length": len(full_article)  # ⭐ DODANO tracking długości
+                    "article_length": len(full_article)
                 }
             })
             result["final_review"] = review_text
-            result["article_length"] = len(full_article)  # ⭐ DODANO info o długości
+            result["article_length"] = len(full_article)
             result["next_action"] = "Czy chcesz wprowadzić poprawki automatycznie? (POST /api/project/<id>/apply_final_corrections)"
             result["final_review_status"] = "READY"
             print(f"[TRACKER] ✅ Raport Gemini zapisany w Firestore → {project_id}")
@@ -264,6 +291,7 @@ def debug_keywords(project_id):
             "keyword": meta.get("keyword"),
             "type": meta.get("type"),
             "actual_uses": meta.get("actual_uses", 0),
+            "optimal_target": meta.get("optimal_target", 0),  # ⭐ NOWE
             "status": meta.get("status"),
             "target": f"{meta.get('target_min')}-{meta.get('target_max')}"
         })
