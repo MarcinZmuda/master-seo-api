@@ -148,7 +148,7 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         
         min_t = meta.get("target_min", 0)
         max_t = meta.get("target_max", 999)
-        optimal_t = meta.get("optimal_target", min_t + 1)
+        optimal_t = meta.get("optimal_target", max_t)  # ⭐ TARGET = MAX!
         actual = meta["actual_uses"]
         
         # ⭐ STATUS CALCULATION with OPTIMAL
