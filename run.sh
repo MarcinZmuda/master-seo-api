@@ -1,13 +1,15 @@
 #!/bin/bash
-# ================================================================
-# 🚀 Brajen Semantic Engine v19.6-LIGHT — Run Script (Safe for 2 GB)
-# ================================================================
+# ===============================================
+# 🚀 run.sh — Render/Container bootstrap (v20)
+# ===============================================
+set -euo pipefail
 
-echo "🔥 Starting Brajen Semantic Engine (Master SEO API v19.6-LIGHT)"
-echo "📅 $(date)"
-echo "🐍 Python version: $(python3 --version)"
+echo "==============================================="
+echo "🚀 SEO Master API starting..."
+echo "🐍 Python: $(python --version)"
 echo "📦 Environment: ${ENV:-production}"
 echo "🌍 Port: ${PORT:-8080}"
+echo "==============================================="
 
 # --- Activate virtual environment if present ---
 if [ -d "venv" ]; then
@@ -22,17 +24,22 @@ if [ -f "requirements.txt" ]; then
 fi
 
 # --- Ensure only lightweight spaCy model is present ---
-python -m spacy validate | grep -q "pl_core_news_md" || {
-  echo "⚙️ Installing lightweight SpaCy model: pl_core_news_md"
-  python -m spacy download pl_core_news_md
-}
+python - <<'EOF'
+import spacy
+import sys
+try:
+    spacy.load("pl_core_news_sm")
+    print("✅ SpaCy model pl_core_news_sm is available")
+except Exception:
+    print("⚙️ Installing lightweight SpaCy model: pl_core_news_sm")
+    import subprocess
+    subprocess.check_call([sys.executable, "-m", "spacy", "download", "pl_core_news_sm"])
+EOF
 
-# --- Force uninstall heavy model if exists ---
-pip uninstall -y pl-core-news-lg || true
-
-# --- Check Firestore credentials ---
+# --- Check Firestore credentials (required) ---
 if [ -z "$FIREBASE_CREDS_JSON" ]; then
-  echo "⚠️ FIREBASE_CREDS_JSON not set (running in no-Firebase mode)"
+  echo "❌ FIREBASE_CREDS_JSON not set — Firebase is required"
+  exit 1
 else
   echo "✅ FIREBASE_CREDS_JSON environment variable detected"
 fi
@@ -42,9 +49,10 @@ echo "🔍 Running healthcheck..."
 python - <<'EOF'
 from master_api import app
 try:
-    print("✅ Master SEO API initialized successfully.")
+    print("✅ Master API import OK")
 except Exception as e:
-    print("❌ Healthcheck failed:", e)
+    print("❌ Master API import failed:", e)
+    raise
 EOF
 
 # --- Start app ---
