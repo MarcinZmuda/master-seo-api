@@ -359,9 +359,17 @@ def approve_batch(project_id):
     total_current = len(project_data.get("batches", []))
 
     if total_planned and total_current >= total_planned and GEMINI_API_KEY:
+        # Jeśli final review już istnieje i nie wymuszono, nie generujemy ponownie.
+        existing_fr = project_data.get("final_review") if isinstance(project_data, dict) else None
+        if existing_fr and not forced:
+            result["final_review"] = existing_fr.get("review_text") if isinstance(existing_fr, dict) else existing_fr
+            result["final_review_status"] = existing_fr.get("status") if isinstance(existing_fr, dict) else "REVIEW_READY"
+            result["next_action"] = "Final review już istnieje. Jeśli chcesz przeliczyć, wyślij approve_batch z forced=true."
+            return jsonify(result), 200
         try:
             print(f"[TRACKER] 🧠 Final batch detected → uruchamiam Gemini review dla {project_id}")
-            model = genai.GenerativeModel("gemini-2.0-flash-exp")
+            model_name = os.getenv("FINAL_REVIEW_MODEL", "gemini-2.0-flash-exp")
+            model = genai.GenerativeModel(model_name)
             # ✅ POPRAWKA: Usunięto [:15000] - teraz analizuje CAŁY artykuł
             full_article = "\n\n".join([b.get("text", "") for b in project_data.get("batches", [])])
             print(f"[TRACKER] 🔍 Analiza CAŁEGO artykułu ({len(full_article)} znaków)...")
@@ -379,7 +387,7 @@ def approve_batch(project_id):
                 "final_review": {
                     "review_text": review_text,
                     "created_at": firestore.SERVER_TIMESTAMP,
-                    "model": "gemini-2.0-flash-exp",
+                    "model": model_name,
                     "status": "REVIEW_READY",
                     "article_length": len(full_article)  # ⭐ DODANO tracking długości
                 }
