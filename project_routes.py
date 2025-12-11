@@ -33,34 +33,84 @@ project_routes = Blueprint("project_routes", __name__)
 # ================================================================
 @project_routes.post("/api/project/create")
 def create_project():
+    """
+    Tworzy nowy projekt SEO w Firestore.
+    
+    Akceptuje DWA formaty danych (dla kompatybilności z Custom GPT i n8n):
+    
+    Format 1 (Custom GPT):
+    {
+        "topic": "rozwód z orzeczeniem o winie",
+        "h2_structure": ["H2 1", "H2 2"],
+        "keywords_list": [
+            {"term": "rozwód", "min": 5, "max": 10, "type": "BASIC"}
+        ]
+    }
+    
+    Format 2 (n8n workflow):
+    {
+        "main_keyword": "rozwód z orzeczeniem o winie",
+        "keywords": [
+            {"keyword": "rozwód", "target_min": 5, "target_max": 10, "type": "BASIC"}
+        ],
+        "target_length": 3000
+    }
+    """
     data = request.get_json()
-    if not data or "topic" not in data:
-        return jsonify({"error": "Required field: topic"}), 400
-
-    topic = data["topic"].strip()
+    if not data:
+        return jsonify({"error": "No JSON data provided"}), 400
+    
+    # ⭐ ELASTYCZNE PARSOWANIE - obsługuje oba formaty
+    
+    # Topic / Main Keyword
+    topic = data.get("topic") or data.get("main_keyword", "").strip()
+    if not topic:
+        return jsonify({"error": "Required field: topic or main_keyword"}), 400
+    
+    # H2 Structure (opcjonalne)
     h2_structure = data.get("h2_structure", [])
-    raw_keywords = data.get("keywords_list", [])
+    
+    # Keywords - obsługa obu formatów
+    raw_keywords = data.get("keywords_list") or data.get("keywords", [])
+    
+    # Target length (opcjonalne)
+    target_length = data.get("target_length", 3000)
+    
+    # Source (dla debugowania)
+    source = data.get("source", "unknown")
 
     firestore_keywords = {}
     for item in raw_keywords:
-        term = item.get("term", "").strip()
+        # ⭐ Obsługa obu nazw pól
+        term = item.get("term") or item.get("keyword", "")
+        term = term.strip() if term else ""
+        
         if not term:
             continue
+        
+        # Lematyzacja
         doc = nlp(term)
         search_lemma = " ".join(t.lemma_.lower() for t in doc if t.is_alpha)
-        row_id = str(uuid.uuid4())
-        target_max = item.get("max", 5)
+        
+        # ⭐ Obsługa obu nazw dla min/max
+        min_val = item.get("min") or item.get("target_min", 1)
+        max_val = item.get("max") or item.get("target_max", 5)
+        
+        # ID - użyj istniejącego lub wygeneruj nowy
+        row_id = item.get("id") or str(uuid.uuid4())
+        
         firestore_keywords[row_id] = {
             "keyword": term,
             "search_term_exact": term.lower(),
             "search_lemma": search_lemma,
-            "target_min": item.get("min", 1),
-            "target_max": target_max,
-            "optimal_target": target_max,  # ⭐ TARGET = MAX!
-            "remaining_max": target_max,   # ⭐ Initially = max (nothing used yet)
+            "target_min": min_val,
+            "target_max": max_val,
             "actual_uses": 0,
             "status": "UNDER",
-            "type": item.get("type", "BASIC").upper()
+            "type": item.get("type", "BASIC").upper(),
+            # ⭐ Dla BASIC keywords - tracking remaining_max
+            "remaining_max": max_val,
+            "optimal_target": max_val
         }
 
     db = firestore.client()
@@ -71,18 +121,26 @@ def create_project():
         "keywords_state": firestore_keywords,
         "created_at": firestore.SERVER_TIMESTAMP,
         "batches": [],
+        "batches_plan": [],  # ⭐ Dla tracking postępu
         "total_batches": 0,
-        "version": "v18.0",
-        "manual_mode": True
+        "target_length": target_length,
+        "source": source,
+        "version": "v19.6",
+        "manual_mode": False if source == "n8n-brajen-workflow" else True
     }
     doc_ref.set(project_data)
+    
+    print(f"[PROJECT] ✅ Created project {doc_ref.id}: {topic} ({len(firestore_keywords)} keywords)")
 
     return jsonify({
         "status": "CREATED",
         "project_id": doc_ref.id,
         "topic": topic,
-        "keywords": len(firestore_keywords),
-        "h2_sections": len(h2_structure)
+        "keywords_count": len(firestore_keywords),
+        "keywords": len(firestore_keywords),  # Alias dla kompatybilności
+        "h2_sections": len(h2_structure),
+        "target_length": target_length,
+        "source": source
     }), 201
 
 # ================================================================
@@ -176,7 +234,7 @@ def manual_correct_batch(project_id):
 @project_routes.post("/api/project/<project_id>/auto_correct")
 def auto_correct_batch(project_id):
     """
-    Automatyczna korekta batcha używając Gemini 1.5 Flash:
+    Automatyczna korekta batcha używając Gemini 2.0 Flash:
     - Analizuje które frazy są UNDER lub OVER
     - Generuje poprawioną wersję tekstu
     - Zachowuje strukturę HTML i ton
@@ -247,7 +305,7 @@ def auto_correct_batch(project_id):
         }), 500
     
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model = genai.GenerativeModel("gemini-2.0-flash-exp")
         
         # Przygotuj instrukcje korekty
         correction_instructions = []
@@ -387,5 +445,45 @@ def export_project_data(project_id):
         "topic": data.get("topic"),
         "article_html": html_ready,
         "batch_count": len(batches),
-        "version": "v18.0"
+        "version": "v19.6"
+    }), 200
+
+# ================================================================
+# 📊 GET PROJECT STATUS (dla n8n i Custom GPT)
+# ================================================================
+@project_routes.get("/api/project/<project_id>/status")
+def get_project_status(project_id):
+    """
+    Zwraca aktualny status projektu - keywords_state, batche, postęp.
+    """
+    db = firestore.client()
+    doc = db.collection("seo_projects").document(project_id).get()
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+    
+    data = doc.to_dict()
+    keywords_state = data.get("keywords_state", {})
+    batches = data.get("batches", [])
+    
+    # Podsumowanie keywords
+    keyword_summary = []
+    for rid, meta in keywords_state.items():
+        keyword_summary.append({
+            "keyword": meta.get("keyword"),
+            "type": meta.get("type", "BASIC"),
+            "actual": meta.get("actual_uses", 0),
+            "target_min": meta.get("target_min", 0),
+            "target_max": meta.get("target_max", 999),
+            "status": meta.get("status"),
+            "remaining_max": meta.get("remaining_max", 0)
+        })
+    
+    return jsonify({
+        "project_id": project_id,
+        "topic": data.get("topic"),
+        "total_batches": len(batches),
+        "keywords_count": len(keywords_state),
+        "keywords": keyword_summary,
+        "source": data.get("source", "unknown"),
+        "has_final_review": "final_review" in data
     }), 200
