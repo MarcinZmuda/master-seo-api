@@ -49,7 +49,7 @@ ENV PYTHONUNBUFFERED=1
 ENV FIREBASE_CREDS_JSON=""
 ENV DEBUG_MODE=false
 ENV GEMINI_API_KEY=""
-ENV FINAL_REVIEW_MODEL="gemini-1.5-flash"
+ENV FINAL_REVIEW_MODEL="gemini-1.5-pro-latest"
 
 
 # --- Non-root user ---
