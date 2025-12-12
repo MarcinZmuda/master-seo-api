@@ -110,29 +110,31 @@ def perform_final_review(project_id):
 
         # 🧠 Nowy prompt redaktorsko-SEO (pełny)
         review_prompt = f"""
-Rola: Jesteś doświadczonym redaktorem naczelnym serwisu o tematyce wnętrzarskiej (branża materace/meble) oraz ekspertem SEO.
+# 🧠 Nowy prompt redaktorsko-SEO (pełny) - WERSJA CZYSTA (BEZ NIEWIDZIALNYCH ZNAKÓW)
+        review_prompt = f"""
+Rola: Jesteś doświadczonym redaktorem naczelnym serwisu o tematyce artykułu i specjalistą w tej dziedziniwe. Jesteś również ekspertem SEO.
 
 Zadanie: Przeprowadź szczegółowy audyt poniższego artykułu napisanego w języku polskim.
 
 Oceń tekst w następujących obszarach:
 
-1️⃣ SEO i Słowa kluczowe:
+1. SEO i Słowa kluczowe:
 - Czy frazy są użyte naturalnie?
 - Czy nagłówki (H1, H2, H3) są zoptymalizowane i przyciągają uwagę?
 - Czy występuje keyword stuffing (nadmierne nasycenie frazami)?
 - Oceń rozmieszczenie słów kluczowych i spójność semantyczną (LSI).
 
-2️⃣ Struktura i Logika:
+2. Struktura i Logika:
 - Czy tekst ma logiczny przepływ (User Journey)?
 - Czy w treści występują powtórzenia lub fragmenty, które można połączyć?
 - Czy podział na akapity i sekcje jest czytelny i intuicyjny?
 
-3️⃣ Wartość merytoryczna:
+3. Wartość merytoryczna:
 - Czy tekst wyczerpuje temat (Topical Authority)?
 - Czy zawiera wszystkie kluczowe aspekty, których szuka użytkownik w Google?
 - Czy są błędy merytoryczne, logiczne lub braki informacyjne?
 
-4️⃣ Styl i Język:
+4. Styl i Język:
 - Czy ton jest odpowiedni dla poradnika wnętrzarskiego (profesjonalny, przystępny, ekspercki)?
 - Czy zdania są naturalne i rytmiczne?
 - Wskaż błędy stylistyczne, niepotrzebne powtórzenia i tzw. „lanie wody”.
@@ -142,9 +144,6 @@ Wynik:
 - Zaproponuj nową, ulepszoną strukturę nagłówków (H2, H3).
 - Wypunktuj konkretne rzeczy do poprawy.
 - Oceń szansę artykułu na wysokie pozycje w Google (1–10).
-
-Dodatkowe zadanie:
-{keywords_note}
 
 Tekst do analizy:
 {full_article}
