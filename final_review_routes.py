@@ -2,18 +2,6 @@
 # 🧠 final_review_routes.py — Expert Review & Interactive Correction (v19.6)
 # ================================================================
 """
-Tryb interaktywny:
-1️⃣ Po zakończeniu artykułu system wysyła tekst do Gemini i tworzy raport.
-2️⃣ Wynik raportu zwracany jest użytkownikowi (bez korekty).
-3️⃣ Backend pyta: „Czy chcesz wprowadzić poprawki?"
-4️⃣ Jeśli użytkownik potwierdzi — drugi endpoint generuje poprawioną wersję.
-
-Ustalenia (surgical patch, bez refaktorów pobocznych):
-- Nie dublujemy generatorów final review: jeżeli final_review już istnieje w Firestore,
-  endpoint /final_review zwraca istniejący raport (chyba że wymusisz regenerację).
-- Model do review i korekt jest sterowany env: FINAL_REVIEW_MODEL (fallback: gemini-2.0-flash-exp).
-"""
-
 import os
 from flask import Blueprint, jsonify, request
 from firebase_admin import firestore
@@ -30,7 +18,7 @@ if GEMINI_API_KEY:
 else:
     print("[REVIEW] ⚠️ Brak GEMINI_API_KEY — Final Review nieaktywny")
 
-FINAL_REVIEW_MODEL = os.getenv("FINAL_REVIEW_MODEL", "gemini-1.5-pro")
+FINAL_REVIEW_MODEL = os.getenv("FINAL_REVIEW_MODEL", "gemini-1.5-flash")
 
 # ------------------------------------------------------------
 # 🔧 Inicjalizacja Blueprint
