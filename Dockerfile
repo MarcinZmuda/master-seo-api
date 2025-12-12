@@ -50,6 +50,13 @@ ENV FIREBASE_CREDS_JSON=""
 ENV DEBUG_MODE=false
 ENV GEMINI_API_KEY=""
 
+# ================================================================
+# ⚙️ Gemini Model Configuration (Final Review Engine)
+# ================================================================
+# Używamy stabilnej wersji Gemini 1.5 Pro (duże limity kontekstu: 2M tokenów)
+ENV FINAL_REVIEW_MODEL="gemini-1.5-pro"
+
+
 # --- Non-root user ---
 RUN adduser --disabled-password --gecos '' brajenuser && chown -R brajenuser /app
 USER brajenuser
