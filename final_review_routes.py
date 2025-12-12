@@ -1,7 +1,3 @@
-# ================================================================
-# 🧠 final_review_routes.py — Expert Review & Interactive Correction (v19.6)
-# ================================================================
-"""
 import os
 from flask import Blueprint, jsonify, request
 from firebase_admin import firestore
@@ -40,6 +36,7 @@ def _join_full_article(batches: list) -> str:
 @final_review_routes.post("/api/project/<project_id>/final_review")
 def perform_final_review(project_id):
     """Tworzy końcowy raport Gemini i pyta, czy zastosować poprawki."""
+    
     if not GEMINI_API_KEY:
         return jsonify({"error": "Gemini API key not configured"}), 500
 
@@ -83,36 +80,13 @@ def perform_final_review(project_id):
             "note": "Zwrócono istniejący final_review z Firestore. Aby przeliczyć, użyj ?force=true lub {force:true}."
         }), 200
 
-    # 🔍 Pobierz listę fraz z Firestore (analiza brakujących słów)
-    missing_keywords = []
-    try:
-        keywords = data.get("keywords", [])
-        for kw in keywords:
-            if isinstance(kw, dict):
-                actual = kw.get("actual_uses", 0)
-                remaining = kw.get("remaining_max", 0)
-                status = kw.get("status", "")
-                if (status == "UNDER" or actual == 0) and remaining > 0:
-                    word = kw.get("keyword", "").strip()
-                    if word:
-                        missing_keywords.append(word)
-    except Exception as e:
-        print(f"[REVIEW] ⚠️ Nie udało się pobrać listy słów kluczowych: {e}")
-
-    if missing_keywords:
-        keywords_note = "Brakujące frazy kluczowe do wplecenia:\n" + ", ".join(missing_keywords)
-    else:
-        keywords_note = "Brak brakujących fraz kluczowych — wszystkie zostały wykorzystane."
-
     try:
         print(f"[REVIEW] 🔍 Analiza CAŁEGO artykułu projektu {project_id} ({len(full_article)} znaków)...")
         model = genai.GenerativeModel(FINAL_REVIEW_MODEL)
 
-        # 🧠 Nowy prompt redaktorsko-SEO (pełny)
+        # 🧠 Nowy prompt redaktorsko-SEO (pełny) - WERSJA CZYSTA (BEZ EMOJI)
         review_prompt = f"""
-# 🧠 Nowy prompt redaktorsko-SEO (pełny) - WERSJA CZYSTA (BEZ NIEWIDZIALNYCH ZNAKÓW)
-        review_prompt = f"""
-Rola: Jesteś doświadczonym redaktorem naczelnym serwisu o tematyce artykułu i specjalistą w tej dziedziniwe. Jesteś również ekspertem SEO.
+Rola: Jesteś doświadczonym redaktorem naczelnym serwisu o tematyce wnętrzarskiej (branża materace/meble) oraz ekspertem SEO.
 
 Zadanie: Przeprowadź szczegółowy audyt poniższego artykułu napisanego w języku polskim.
 
@@ -204,7 +178,13 @@ def apply_final_corrections(project_id):
 
     data = doc.to_dict() or {}
     final_review = data.get("final_review", {})
-    review_text = final_review.get("review_text") if isinstance(final_review, dict) else None
+    
+    # Obsługa przypadku, gdy final_review jest słownikiem lub stringiem (stare rekordy)
+    if isinstance(final_review, dict):
+        review_text = final_review.get("review_text")
+    else:
+        review_text = final_review
+
     batches = data.get("batches", [])
     full_article = _join_full_article(batches)
 
@@ -221,7 +201,7 @@ def apply_final_corrections(project_id):
             "Na podstawie poniższego raportu popraw artykuł.\n"
             "Wprowadź poprawki merytoryczne, redakcyjne i językowe.\n"
             "Zachowaj strukturę oraz sens, ale usuń błędy i popraw płynność.\n\n"
-            "RAPORT:\n---\n" + review_text + "\n\n"
+            "RAPORT:\n---\n" + str(review_text) + "\n\n"
             "ARTYKUŁ:\n---\n" + full_article
         )
 
