@@ -30,7 +30,7 @@ if GEMINI_API_KEY:
 else:
     print("[REVIEW] ⚠️ Brak GEMINI_API_KEY — Final Review nieaktywny")
 
-FINAL_REVIEW_MODEL = os.getenv("FINAL_REVIEW_MODEL", "gemini-2.0-flash-exp")
+FINAL_REVIEW_MODEL = os.getenv("FINAL_REVIEW_MODEL", "gemini-1.5-pro")
 
 # ------------------------------------------------------------
 # 🔧 Inicjalizacja Blueprint
@@ -95,20 +95,79 @@ def perform_final_review(project_id):
             "note": "Zwrócono istniejący final_review z Firestore. Aby przeliczyć, użyj ?force=true lub {force:true}."
         }), 200
 
+    # 🔍 Pobierz listę fraz z Firestore (analiza brakujących słów)
+    missing_keywords = []
+    try:
+        keywords = data.get("keywords", [])
+        for kw in keywords:
+            if isinstance(kw, dict):
+                actual = kw.get("actual_uses", 0)
+                remaining = kw.get("remaining_max", 0)
+                status = kw.get("status", "")
+                if (status == "UNDER" or actual == 0) and remaining > 0:
+                    word = kw.get("keyword", "").strip()
+                    if word:
+                        missing_keywords.append(word)
+    except Exception as e:
+        print(f"[REVIEW] ⚠️ Nie udało się pobrać listy słów kluczowych: {e}")
+
+    if missing_keywords:
+        keywords_note = "Brakujące frazy kluczowe do wplecenia:\n" + ", ".join(missing_keywords)
+    else:
+        keywords_note = "Brak brakujących fraz kluczowych — wszystkie zostały wykorzystane."
+
     try:
         print(f"[REVIEW] 🔍 Analiza CAŁEGO artykułu projektu {project_id} ({len(full_article)} znaków)...")
         model = genai.GenerativeModel(FINAL_REVIEW_MODEL)
 
-        review_prompt = (
-            "Podaj w punktach szczegółową ocenę przesłanego artykułu pod kątem:\n"
-            "1. merytorycznym (zgodność faktów, aktualność, błędy logiczne),\n"
-            "2. redakcyjnym (struktura, powtórzenia, styl),\n"
-            "3. językowym (poprawność gramatyczna, płynność),\n"
-            "a także zaproponuj konkretne poprawki dla każdego problemu.\n\n"
-            f"---\n{full_article}"
+        # 🧠 Nowy prompt redaktorsko-SEO (pełny)
+        review_prompt = f"""
+Rola: Jesteś doświadczonym redaktorem naczelnym serwisu o tematyce wnętrzarskiej (branża materace/meble) oraz ekspertem SEO.
+
+Zadanie: Przeprowadź szczegółowy audyt poniższego artykułu napisanego w języku polskim.
+
+Oceń tekst w następujących obszarach:
+
+1️⃣ SEO i Słowa kluczowe:
+- Czy frazy są użyte naturalnie?
+- Czy nagłówki (H1, H2, H3) są zoptymalizowane i przyciągają uwagę?
+- Czy występuje keyword stuffing (nadmierne nasycenie frazami)?
+- Oceń rozmieszczenie słów kluczowych i spójność semantyczną (LSI).
+
+2️⃣ Struktura i Logika:
+- Czy tekst ma logiczny przepływ (User Journey)?
+- Czy w treści występują powtórzenia lub fragmenty, które można połączyć?
+- Czy podział na akapity i sekcje jest czytelny i intuicyjny?
+
+3️⃣ Wartość merytoryczna:
+- Czy tekst wyczerpuje temat (Topical Authority)?
+- Czy zawiera wszystkie kluczowe aspekty, których szuka użytkownik w Google?
+- Czy są błędy merytoryczne, logiczne lub braki informacyjne?
+
+4️⃣ Styl i Język:
+- Czy ton jest odpowiedni dla poradnika wnętrzarskiego (profesjonalny, przystępny, ekspercki)?
+- Czy zdania są naturalne i rytmiczne?
+- Wskaż błędy stylistyczne, niepotrzebne powtórzenia i tzw. „lanie wody”.
+
+Wynik:
+- Przedstaw krótkie podsumowanie mocnych i słabych stron tekstu.
+- Zaproponuj nową, ulepszoną strukturę nagłówków (H2, H3).
+- Wypunktuj konkretne rzeczy do poprawy.
+- Oceń szansę artykułu na wysokie pozycje w Google (1–10).
+
+Dodatkowe zadanie:
+{keywords_note}
+
+Tekst do analizy:
+{full_article}
+"""
+
+        review_response = model.generate_content(
+            review_prompt,
+            generation_config={"temperature": 0.35, "max_output_tokens": 8192},
+            safety_settings=[{"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"}]
         )
 
-        review_response = model.generate_content(review_prompt)
         review_text = (review_response.text or "").strip()
         if not review_text:
             return jsonify({"error": "Empty review from Gemini"}), 502
@@ -179,7 +238,12 @@ def apply_final_corrections(project_id):
             "ARTYKUŁ:\n---\n" + full_article
         )
 
-        correction_response = model.generate_content(correction_prompt)
+        correction_response = model.generate_content(
+            correction_prompt,
+            generation_config={"temperature": 0.35, "max_output_tokens": 8192},
+            safety_settings=[{"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"}]
+        )
+
         corrected_text = (correction_response.text or "").strip()
         if not corrected_text:
             return jsonify({"error": "Empty correction from Gemini"}), 502
