@@ -28,6 +28,116 @@ except OSError:
 
 project_routes = Blueprint("project_routes", __name__)
 
+
+# ================================================================
+# 🧠 H2 SUGGESTIONS (Gemini-powered)
+# ================================================================
+@project_routes.post("/api/project/s1_h2_suggestions")
+def generate_h2_suggestions():
+    """
+    Generuje sugestie H2 używając Gemini na podstawie:
+    - topic/main_keyword
+    - wzorców H2 z konkurencji (serp_h2_patterns)
+    - target keywords
+    
+    Zwraca listę 6-8 optymalnych H2.
+    """
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No JSON data provided"}), 400
+    
+    topic = data.get("topic") or data.get("main_keyword", "")
+    if not topic:
+        return jsonify({"error": "Required: topic or main_keyword"}), 400
+    
+    serp_h2_patterns = data.get("serp_h2_patterns", [])
+    target_keywords = data.get("target_keywords", [])
+    target_count = data.get("target_count", 6)
+    
+    # Jeśli brak Gemini API - zwróć podstawowe sugestie
+    if not GEMINI_API_KEY:
+        fallback_suggestions = [
+            f"Czym jest {topic}?",
+            f"Jak działa {topic}?",
+            f"Korzyści z {topic}",
+            f"Kiedy warto skorzystać z {topic}?",
+            f"Ile kosztuje {topic}?",
+            f"Najczęstsze pytania o {topic}"
+        ]
+        return jsonify({
+            "status": "FALLBACK",
+            "suggestions": fallback_suggestions[:target_count],
+            "message": "Gemini unavailable - basic suggestions generated",
+            "model": "fallback"
+        }), 200
+    
+    try:
+        model = genai.GenerativeModel("gemini-2.0-flash-exp")
+        
+        # Przygotuj kontekst z konkurencji
+        competitor_context = ""
+        if serp_h2_patterns:
+            competitor_context = f"""
+WZORCE H2 Z KONKURENCJI (TOP 10 SERP):
+{chr(10).join(f"- {h2}" for h2 in serp_h2_patterns[:20])}
+"""
+        
+        keywords_context = ""
+        if target_keywords:
+            keywords_context = f"""
+FRAZY KLUCZOWE DO WPLECENIA W H2:
+{', '.join(target_keywords[:10])}
+"""
+        
+        prompt = f"""
+Wygeneruj {target_count} optymalnych nagłówków H2 dla artykułu SEO o temacie: "{topic}"
+
+{competitor_context}
+{keywords_context}
+
+ZASADY:
+1. Każdy H2 powinien mieć 6-12 słów
+2. Minimum 50% H2 powinno być w formie pytania (Jak...?, Dlaczego...?, Kiedy...?, Co...?)
+3. Maksimum 30% H2 może zawierać główne słowo kluczowe
+4. NIE używaj ogólnikowych tytułów jak: "Wstęp", "Podsumowanie", "Zakończenie", "FAQ"
+5. H2 powinny tworzyć logiczną strukturę artykułu
+6. Uwzględnij intencję wyszukiwania (informacyjna/transakcyjna)
+7. Wpleć naturalnie frazy kluczowe gdzie to możliwe
+
+FORMAT ODPOWIEDZI:
+Zwróć TYLKO listę H2, każdy w nowej linii, bez numeracji ani punktorów.
+"""
+        
+        print(f"[H2_SUGGESTIONS] Generating {target_count} H2 for: {topic}")
+        response = model.generate_content(prompt)
+        
+        # Parsuj odpowiedź
+        raw_suggestions = response.text.strip().split('\n')
+        suggestions = [
+            h2.strip().lstrip('•-–—0123456789.). ')
+            for h2 in raw_suggestions 
+            if h2.strip() and len(h2.strip()) > 5
+        ][:target_count]
+        
+        print(f"[H2_SUGGESTIONS] ✅ Generated {len(suggestions)} H2 suggestions")
+        
+        return jsonify({
+            "status": "OK",
+            "suggestions": suggestions,
+            "topic": topic,
+            "model": "gemini-2.0-flash-exp",
+            "count": len(suggestions)
+        }), 200
+        
+    except Exception as e:
+        print(f"[H2_SUGGESTIONS] ❌ Error: {e}")
+        return jsonify({
+            "status": "ERROR",
+            "error": str(e),
+            "suggestions": []
+        }), 500
+
+
 # ================================================================
 # 🧱 H2 CUSTOM LIST + BASIC/EXTENDED + PROJECT INIT
 # ================================================================
@@ -125,7 +235,7 @@ def create_project():
         "total_batches": 0,
         "target_length": target_length,
         "source": source,
-        "version": "v19.6",
+        "version": "v22.0",
         "manual_mode": False if source == "n8n-brajen-workflow" else True
     }
     doc_ref.set(project_data)
@@ -142,6 +252,7 @@ def create_project():
         "target_length": target_length,
         "source": source
     }), 201
+
 
 # ================================================================
 # ✏️ ADD BATCH + MANUAL CORRECTION MODE
@@ -166,6 +277,7 @@ def add_batch_to_project(project_id):
     result["paragraph_rhythm"] = rhythm
 
     return jsonify(result), 200
+
 
 # ================================================================
 # 🔍 MANUAL CORRECTION ENDPOINT
@@ -227,6 +339,7 @@ def manual_correct_batch(project_id):
         "summary": summary,
         "forced": forced
     }), 200
+
 
 # ================================================================
 # 🆕 AUTO-CORRECT ENDPOINT (S6)
@@ -377,6 +490,7 @@ Zwróć TYLKO poprawiony tekst HTML, bez żadnych komentarzy.
             }
         }), 500
 
+
 # ================================================================
 # 🧠 UNIFIED PRE-VALIDATION (SEO + SEMANTICS + STYLE)
 # ================================================================
@@ -408,6 +522,7 @@ def preview_all_checks(project_id):
                    f"Warnings: {len(report['warnings'])}"
     }), 200
 
+
 # ================================================================
 # 🆕 FORCE APPROVE (ZAPIS MIMO BŁĘDÓW)
 # ================================================================
@@ -422,6 +537,7 @@ def force_approve_batch(project_id):
 
     print("[FORCE APPROVE] User requested forced save.")
     return manual_correct_batch(project_id)
+
 
 # ================================================================
 # 📦 EXPORT (Late HTML Injection)
@@ -445,8 +561,9 @@ def export_project_data(project_id):
         "topic": data.get("topic"),
         "article_html": html_ready,
         "batch_count": len(batches),
-        "version": "v19.6"
+        "version": "v22.0"
     }), 200
+
 
 # ================================================================
 # 📊 GET PROJECT STATUS (dla n8n i Custom GPT)
