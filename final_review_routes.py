@@ -15,7 +15,7 @@ if GEMINI_API_KEY:
 else:
     print("[REVIEW] ⚠️ Brak GEMINI_API_KEY — Final Review nieaktywny")
 
-FINAL_REVIEW_MODEL = os.getenv("FINAL_REVIEW_MODEL", "gemini-1.5-pro-latest")
+FINAL_REVIEW_MODEL = os.getenv("FINAL_REVIEW_MODEL", "gemini-2.0-flash-exp")
 
 # ------------------------------------------------------------
 # 🔧 Inicjalizacja Blueprint
