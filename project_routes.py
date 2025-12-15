@@ -74,7 +74,7 @@ def generate_h2_suggestions():
         }), 200
     
     try:
-        model = genai.GenerativeModel("gemini-2.0-flash-exp")
+        model = genai.GenerativeModel("gemini-2.0-flash")
         
         # Przygotuj kontekst z konkurencji
         competitor_context = ""
@@ -130,7 +130,7 @@ Zwróć TYLKO listę {target_count} H2, każdy w nowej linii, bez numeracji ani 
             "status": "OK",
             "suggestions": suggestions,
             "topic": topic,
-            "model": "gemini-2.0-flash-exp",
+            "model": "gemini-2.0-flash",
             "count": len(suggestions)
         }), 200
         
@@ -423,7 +423,7 @@ def auto_correct_batch(project_id):
         }), 500
     
     try:
-        model = genai.GenerativeModel("gemini-2.0-flash-exp")
+        model = genai.GenerativeModel("gemini-2.0-flash")
         
         # Przygotuj instrukcje korekty
         correction_instructions = []
