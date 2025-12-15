@@ -888,11 +888,30 @@ def export_project_data(project_id):
     data = doc.to_dict()
     batches = data.get("batches", [])
     full_text = "\n\n".join(b.get("text", "") for b in batches)
+    
+    # ⭐ NOWE: Konwersja h2:/h3: na HTML
+    def convert_markers_to_html(text):
+        lines = text.split('\n')
+        result = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.lower().startswith('h2:'):
+                title = stripped[3:].strip()
+                result.append(f'<h2>{title}</h2>')
+            elif stripped.lower().startswith('h3:'):
+                title = stripped[3:].strip()
+                result.append(f'<h3>{title}</h3>')
+            else:
+                result.append(line)
+        return '\n'.join(result)
+    
+    article_html = convert_markers_to_html(full_text)
 
     return jsonify({
         "status": "EXPORT_READY",
         "topic": data.get("topic"),
-        "article_text": full_text,  # ⭐ Czysty tekst, nie HTML
+        "article_text": full_text,  # Oryginalny tekst z markerami
+        "article_html": article_html,  # ⭐ Skonwertowany na HTML
         "batch_count": len(batches),
         "version": "v22.1"
     }), 200
