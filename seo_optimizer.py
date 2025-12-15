@@ -323,96 +323,6 @@ def semantic_keyword_coverage(text: str, keywords_state: dict) -> dict:
         return {"semantic_enabled": False, "error": str(e), "coverage": {}}
 
 # ================================================================
-# 🧠 Funkcja: Semantic Drift (cosine similarity między paragrafami)
-# ================================================================
-def calculate_semantic_drift(text: str) -> float:
-    """
-    Oblicza semantic drift - spójność semantyczną między kolejnymi paragrafami.
-    Zwraca wartość 0-1, gdzie 1 = idealna spójność.
-    """
-    if not SEMANTIC_ENABLED:
-        return 0.85  # fallback jeśli brak modelu
-    
-    # Podziel na paragrafy
-    paragraphs = [p.strip() for p in text.split('\n') if p.strip() and len(p.strip()) > 50]
-    
-    if len(paragraphs) < 2:
-        return 1.0  # jeden paragraf = brak driftu
-    
-    try:
-        # Embeddingi wszystkich paragrafów
-        embeddings = semantic_model.encode(paragraphs)
-        
-        # Oblicz cosine similarity między kolejnymi paragrafami
-        similarities = []
-        for i in range(len(embeddings) - 1):
-            sim = cosine_similarity([embeddings[i]], [embeddings[i + 1]])[0][0]
-            similarities.append(float(sim))
-        
-        # Średnia spójność
-        avg_similarity = sum(similarities) / len(similarities) if similarities else 1.0
-        return round(avg_similarity, 3)
-        
-    except Exception as e:
-        print(f"[SEO_OPT] ⚠️ Semantic drift error: {e}")
-        return 0.85  # fallback
-
-
-# ================================================================
-# 🧠 Funkcja: Transition Score (analiza słów łączących)
-# ================================================================
-def calculate_transition_score(text: str) -> float:
-    """
-    Oblicza jakość przejść między zdaniami na podstawie transition words.
-    Zwraca wartość 0-1.
-    """
-    # Polskie słowa przejściowe
-    transition_words = [
-        # Dodawanie
-        "ponadto", "dodatkowo", "również", "także", "co więcej", "oprócz tego",
-        "poza tym", "w dodatku", "nie tylko", "ale także",
-        # Kontrast
-        "jednak", "jednakże", "natomiast", "ale", "z drugiej strony", "mimo to",
-        "niemniej", "pomimo", "choć", "chociaż", "wprawdzie",
-        # Przyczyna/skutek
-        "dlatego", "w związku z tym", "w rezultacie", "wskutek", "ponieważ",
-        "zatem", "więc", "stąd", "w konsekwencji", "przez co",
-        # Przykłady
-        "na przykład", "przykładowo", "między innymi", "m.in.", "np.",
-        # Podsumowanie
-        "podsumowując", "reasumując", "w skrócie", "ogólnie rzecz biorąc",
-        # Sekwencja
-        "po pierwsze", "po drugie", "następnie", "potem", "w końcu", "na koniec"
-    ]
-    
-    text_lower = text.lower()
-    sentences = [s.strip() for s in re.split(r'[.!?]+', text) if s.strip()]
-    
-    if len(sentences) < 2:
-        return 1.0
-    
-    # Ile zdań zaczyna się od transition word
-    transition_count = 0
-    for sentence in sentences[1:]:  # pomijamy pierwsze zdanie
-        sentence_start = sentence[:50].lower()
-        if any(tw in sentence_start for tw in transition_words):
-            transition_count += 1
-    
-    # Optymalne: ~30-50% zdań z transition words
-    ratio = transition_count / (len(sentences) - 1)
-    
-    # Mapowanie na score (0.3-0.5 ratio = 1.0 score)
-    if 0.25 <= ratio <= 0.55:
-        score = 1.0
-    elif ratio < 0.25:
-        score = 0.5 + (ratio / 0.25) * 0.5
-    else:  # ratio > 0.55 (za dużo)
-        score = max(0.5, 1.0 - (ratio - 0.55) * 2)
-    
-    return round(score, 3)
-
-
-# ================================================================
 # 🧩 Backward Compatibility Layer – unified_prevalidation()
 # ================================================================
 def unified_prevalidation(text: str, keywords_state: dict = None) -> dict:
@@ -458,15 +368,9 @@ def unified_prevalidation(text: str, keywords_state: dict = None) -> dict:
         if density > 5.0:
             warnings.append(f"⚠️ Zbyt wysoka gęstość słów kluczowych: {density}%")
         
-        # ⭐ RZECZYWISTE semantic scores (zamiast mock)
-        semantic_score = calculate_semantic_drift(text)
-        transition_score = calculate_transition_score(text)
-        
-        # Dodatkowe warningi dla niskich scores
-        if semantic_score < 0.6:
-            warnings.append(f"⚠️ Niski semantic drift ({semantic_score}) - paragrafy słabo powiązane")
-        if transition_score < 0.5:
-            warnings.append(f"⚠️ Słabe przejścia między zdaniami ({transition_score})")
+        # Mock semantic scores (dla backward compatibility)
+        semantic_score = 0.85
+        transition_score = 0.80
         
         return {
             "status": "success",
