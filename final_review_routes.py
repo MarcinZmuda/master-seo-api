@@ -2,7 +2,6 @@ import os
 from flask import Blueprint, jsonify, request
 from firebase_admin import firestore
 import google.generativeai as genai
-from google.generativeai.types import HarmCategory, HarmBlockThreshold
 
 # ------------------------------------------------------------
 # 🔧 Konfiguracja Gemini
@@ -127,12 +126,7 @@ Tekst do analizy:
         review_response = model.generate_content(
             review_prompt,
             generation_config={"temperature": 0.35, "max_output_tokens": 8192},
-            safety_settings={
-                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-            }
+            safety_settings=[{"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"}]
         )
 
         review_text = (review_response.text or "").strip()
@@ -214,12 +208,7 @@ def apply_final_corrections(project_id):
         correction_response = model.generate_content(
             correction_prompt,
             generation_config={"temperature": 0.35, "max_output_tokens": 8192},
-            safety_settings={
-                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-            }
+            safety_settings=[{"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"}]
         )
 
         corrected_text = (correction_response.text or "").strip()
