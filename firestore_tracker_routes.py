@@ -309,13 +309,12 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         
         batch_counts[rid] = count
     
-    # ⭐ KROK 3: Sprawdź czy BASIC keywords nie przekroczą target_max (HARD BLOCK)
-    blocked_keywords = []
+    # ⭐ KROK 3: Sprawdź czy BASIC keywords przekroczą target_max (WARNING, nie BLOCK)
+    exceeded_keywords = []
     for rid, batch_count in batch_counts.items():
         meta = keywords_state[rid]
         kw_type = meta.get("type", "BASIC").upper()
         
-        # HARD BLOCK tylko dla BASIC!
         if kw_type != "BASIC":
             continue
             
@@ -324,7 +323,7 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         new_total = current + batch_count
         
         if new_total > target_max:
-            blocked_keywords.append({
+            exceeded_keywords.append({
                 "keyword": meta.get("keyword"),
                 "current": current,
                 "batch_uses": batch_count,
@@ -333,16 +332,14 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
                 "exceeded_by": new_total - target_max
             })
     
-    # ⭐ KROK 4: Jeśli BASIC przekracza → BLOCK (chyba że forced)
-    if blocked_keywords and not forced:
-        return {
-            "error": "KEYWORDS_EXCEEDED_MAX",
-            "status": "BLOCKED",
-            "blocked_keywords": blocked_keywords,
-            "message": f"❌ {len(blocked_keywords)} BASIC keyword(s) would exceed target_max. Use synonyms!",
-            "hint": "Użyj synonimów dla zablokowanych fraz lub wyślij z forced=true",
-            "status_code": 400
-        }
+    # ⭐ KROK 4: Exceeded keywords → WARNING (nie BLOCK!)
+    # Batch przechodzi, ale z ostrzeżeniem
+    exceeded_warnings = []
+    if exceeded_keywords:
+        for ek in exceeded_keywords:
+            exceeded_warnings.append(
+                f"⚠️ EXCEEDED: '{ek['keyword']}' będzie {ek['would_be']}x (max {ek['target_max']}x) - przekroczenie o {ek['exceeded_by']}x"
+            )
     
     # ⭐ KROK 5: Aktualizuj stan keywords
     for rid, batch_count in batch_counts.items():
@@ -380,6 +377,9 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
     density = precheck.get("density", 0.0)
     smog = precheck.get("smog", 0.0)
     readability = precheck.get("readability", 0.0)
+    
+    # ⭐ NOWE: Dodaj exceeded_warnings (zamiast BLOCK)
+    warnings.extend(exceeded_warnings)
     
     # 🆕 v22.0: Oblicz metryki
     burstiness = calculate_burstiness(batch_text)
@@ -462,6 +462,7 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         "density": density,
         "burstiness": burstiness,
         "warnings": warnings,
+        "exceeded_keywords": exceeded_keywords,  # ⭐ NOWE: lista przekroczonych (WARNING nie BLOCK)
         "keyword_targets": keyword_targets,  # ⭐ CRITICAL FOR GPT!
         "metrics": {
             "burstiness": {
@@ -500,10 +501,7 @@ def preview_batch(project_id):
     forced = data.get("forced", False)
     result = process_batch_in_firestore(project_id, text, forced=forced)
     
-    # ⭐ Jeśli BLOCKED, zwróć 400
-    if result.get("status") == "BLOCKED":
-        return jsonify(result), 400
-    
+    # ⭐ v22.1: Nie blokujemy - exceeded keywords to tylko WARNING
     result["mode"] = "PREVIEW_ONLY"
     return jsonify(result), 200
 
@@ -522,10 +520,7 @@ def approve_batch(project_id):
     # Zapisz batch
     result = process_batch_in_firestore(project_id, text, meta_trace, forced)
     
-    # ⭐ Jeśli BLOCKED, zwróć 400
-    if result.get("status") == "BLOCKED":
-        return jsonify(result), 400
-    
+    # ⭐ v22.1: Nie blokujemy - exceeded keywords to tylko WARNING
     result["mode"] = "APPROVE"
 
     # 🔹 Sprawdź, czy to ostatni batch
