@@ -684,14 +684,11 @@ def manual_correct_batch(project_id):
 def auto_correct_batch(project_id):
     """
     Automatyczna korekta batcha używając Gemini.
+    Jeśli nie podano tekstu, pobiera ostatni batch z projektu.
     """
-    data = request.get_json()
-    if not data:
-        return jsonify({"error": "No JSON data provided"}), 400
+    data = request.get_json() or {}
 
     batch_text = data.get("text") or data.get("batch_text") or data.get("corrected_text")
-    if not batch_text:
-        return jsonify({"error": "Field 'text' or 'batch_text' is required"}), 400
     
     db = firestore.client()
     doc = db.collection("seo_projects").document(project_id).get()
@@ -699,6 +696,17 @@ def auto_correct_batch(project_id):
         return jsonify({"error": "Project not found"}), 404
 
     project_data = doc.to_dict()
+    
+    # ⭐ NOWE: Jeśli brak tekstu, pobierz ostatni batch
+    if not batch_text:
+        batches = project_data.get("batches", [])
+        if batches:
+            batch_text = batches[-1].get("text", "")
+            print(f"[AUTO_CORRECT] 📥 Pobrano ostatni batch z Firestore ({len(batch_text)} znaków)")
+        
+    if not batch_text:
+        return jsonify({"error": "No text provided and no batches in project"}), 400
+    
     keywords_state = project_data.get("keywords_state", {})
     
     under_keywords = []
