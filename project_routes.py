@@ -2,6 +2,7 @@ import uuid
 import re
 import os
 import json
+import math
 import spacy
 from flask import Blueprint, request, jsonify
 from firebase_admin import firestore
@@ -173,6 +174,11 @@ def create_project():
     raw_keywords = data.get("keywords_list") or data.get("keywords", [])
     target_length = data.get("target_length", 3000)
     source = data.get("source", "unknown")
+    
+    # ⭐ NOWE: Liczba planowanych batchów (domyślnie = liczba H2 / 2, min 2, max 6)
+    total_planned_batches = data.get("total_planned_batches")
+    if not total_planned_batches:
+        total_planned_batches = max(2, min(6, math.ceil(len(h2_structure) / 2))) if h2_structure else 4
 
     firestore_keywords = {}
     for item in raw_keywords:
@@ -215,6 +221,7 @@ def create_project():
         "batches": [],
         "batches_plan": [],
         "total_batches": 0,
+        "total_planned_batches": total_planned_batches,  # ⭐ NOWE
         "target_length": target_length,
         "source": source,
         "version": "v22.1",
@@ -224,7 +231,7 @@ def create_project():
     }
     doc_ref.set(project_data)
     
-    print(f"[PROJECT] ✅ Created project {doc_ref.id}: {topic} ({len(firestore_keywords)} keywords)")
+    print(f"[PROJECT] ✅ Created project {doc_ref.id}: {topic} ({len(firestore_keywords)} keywords, {total_planned_batches} planned batches)")
 
     return jsonify({
         "status": "CREATED",
@@ -233,6 +240,7 @@ def create_project():
         "keywords_count": len(firestore_keywords),
         "keywords": len(firestore_keywords),
         "h2_sections": len(h2_structure),
+        "total_planned_batches": total_planned_batches,  # ⭐ NOWE
         "target_length": target_length,
         "source": source
     }), 201
@@ -310,16 +318,17 @@ def get_project_status(project_id):
 
 
 # ================================================================
-# 📋 PRE-BATCH INFO - info przed pisaniem batcha
+# 📋 PRE-BATCH INFO - PEŁNA OPTYMALIZACJA TARGET=MAX
 # ================================================================
 @project_routes.get("/api/project/<project_id>/pre_batch_info")
 def get_pre_batch_info(project_id):
     """
-    Zwraca WSZYSTKIE informacje potrzebne PRZED napisaniem batcha:
-    - Które frazy są LOCKED/NEAR_LIMIT/UNDER
-    - Co było w poprzednich batchach (żeby nie powielać)
-    - Które H2 już napisane, które zostały
-    - Ostatnie zdania dla płynnego przejścia
+    Zwraca PEŁNY PLAN przed napisaniem batcha:
+    - Rozkład fraz w batchach (A)
+    - Priorytetyzacja UNDER (B)
+    - Automatyczne balansowanie (C)
+    - Smart display_limit (D)
+    - Max per batch (E) - zapobiega przeoptymalizacji
     """
     db = firestore.client()
     doc = db.collection("seo_projects").document(project_id).get()
@@ -330,15 +339,21 @@ def get_pre_batch_info(project_id):
     keywords_state = data.get("keywords_state", {})
     batches = data.get("batches", [])
     h2_structure = data.get("h2_structure", [])
+    total_planned_batches = data.get("total_planned_batches", 4)  # Domyślnie 4
+    
+    current_batch_num = len(batches) + 1
+    remaining_batches = max(1, total_planned_batches - len(batches))
     
     # ================================================================
-    # 📊 ANALIZA FRAZ
+    # 📊 ANALIZA FRAZ Z PEŁNYM PLANEM
     # ================================================================
-    locked = []
-    near_limit = []
-    under = []
-    safe = []
-    exceeded = []
+    keyword_plan = []
+    critical_keywords = []  # UNDER + ostatni batch
+    high_priority = []      # UNDER
+    normal_keywords = []    # OK, można użyć
+    low_priority = []       # Już >= min
+    locked_keywords = []    # = max, nie używaj
+    exceeded_keywords = []  # > max
     
     for rid, meta in keywords_state.items():
         keyword = meta.get("keyword")
@@ -346,44 +361,91 @@ def get_pre_batch_info(project_id):
         actual = meta.get("actual_uses", 0)
         target_min = meta.get("target_min", 0)
         target_max = meta.get("target_max", 999)
-        remaining = max(0, target_max - actual)
-        display_limit = target_min + 1
+        
+        remaining_to_max = max(0, target_max - actual)
+        remaining_to_min = max(0, target_min - actual)
+        
+        # ⭐ SMART CALCULATIONS
+        # Max per batch = równomierny rozkład (zapobiega stuffing)
+        max_per_batch = max(1, math.ceil(target_max / total_planned_batches))
+        
+        # Suggested = ile użyć w tym batchu dla równomiernego rozkładu
+        if remaining_to_max > 0 and remaining_batches > 0:
+            suggested = min(
+                math.ceil(remaining_to_max / remaining_batches),
+                max_per_batch
+            )
+        else:
+            suggested = 0
+        
+        # Jeśli UNDER - zwiększ suggested żeby nadrobić
+        if remaining_to_min > 0:
+            min_needed_per_batch = math.ceil(remaining_to_min / remaining_batches)
+            suggested = max(suggested, min_needed_per_batch)
+            # Ale nie więcej niż max_per_batch
+            suggested = min(suggested, max_per_batch + 1)  # +1 dla UNDER
+        
+        # ⭐ PRIORYTET
+        if actual > target_max:
+            priority = "EXCEEDED"
+            reason = f"❌ Już {actual}x (max {target_max}x) - NIE UŻYWAJ!"
+            suggested = 0
+        elif remaining_to_max == 0:
+            priority = "LOCKED"
+            reason = f"🔒 Osiągnięto max {target_max}x - użyj SYNONIMÓW"
+            suggested = 0
+        elif remaining_to_min > 0 and remaining_batches == 1:
+            priority = "CRITICAL"
+            reason = f"🔴 OSTATNI BATCH! Potrzeba {remaining_to_min}x do min!"
+            suggested = remaining_to_min
+        elif remaining_to_min > 0:
+            priority = "HIGH"
+            reason = f"🟠 UNDER - brakuje {remaining_to_min}x (cel: {target_min}x)"
+        elif actual >= target_min and remaining_to_max > 0:
+            priority = "NORMAL"
+            reason = f"🟢 OK ({actual}/{target_min}-{target_max}) - sugerowane {suggested}x"
+        else:
+            priority = "LOW"
+            reason = f"⚪ Wystarczy ({actual}x >= min {target_min}x)"
+            suggested = 0
         
         kw_info = {
             "keyword": keyword,
             "type": kw_type,
+            "priority": priority,
             "actual": actual,
             "target_min": target_min,
             "target_max": target_max,
-            "display_limit": display_limit,
-            "remaining_max": remaining
+            "remaining_to_min": remaining_to_min,
+            "remaining_to_max": remaining_to_max,
+            "max_per_batch": max_per_batch,
+            "suggested": suggested,
+            "reason": reason
         }
         
-        if actual > target_max:
-            kw_info["status"] = "EXCEEDED"
-            kw_info["action"] = f"❌ EXCEEDED: '{keyword}' ma {actual}x (max {target_max}x) - NIE UŻYWAJ!"
-            exceeded.append(kw_info)
-        elif remaining == 0:
-            kw_info["status"] = "LOCKED"
-            kw_info["action"] = f"🔒 LOCKED: '{keyword}' osiągnęło limit {target_max}x - użyj SYNONIMÓW!"
-            locked.append(kw_info)
-        elif remaining <= 3:
-            kw_info["status"] = "NEAR_LIMIT"
-            kw_info["action"] = f"⚠️ NEAR_LIMIT: '{keyword}' - zostało tylko {remaining}x"
-            near_limit.append(kw_info)
-        elif actual < target_min:
-            kw_info["status"] = "UNDER"
-            kw_info["needed"] = target_min - actual
-            kw_info["action"] = f"📝 UNDER: '{keyword}' - potrzeba jeszcze {target_min - actual}x"
-            under.append(kw_info)
+        keyword_plan.append(kw_info)
+        
+        # Kategoryzuj
+        if priority == "EXCEEDED":
+            exceeded_keywords.append(kw_info)
+        elif priority == "LOCKED":
+            locked_keywords.append(kw_info)
+        elif priority == "CRITICAL":
+            critical_keywords.append(kw_info)
+        elif priority == "HIGH":
+            high_priority.append(kw_info)
+        elif priority == "NORMAL":
+            normal_keywords.append(kw_info)
         else:
-            kw_info["status"] = "SAFE"
-            safe.append(kw_info)
+            low_priority.append(kw_info)
+    
+    # Sortuj keyword_plan po priorytecie
+    priority_order = {"CRITICAL": 0, "HIGH": 1, "NORMAL": 2, "LOW": 3, "LOCKED": 4, "EXCEEDED": 5}
+    keyword_plan.sort(key=lambda x: priority_order.get(x["priority"], 99))
     
     # ================================================================
     # 📝 ANALIZA POPRZEDNICH BATCHÓW
     # ================================================================
-    previous_batches_summary = []
     used_h2 = []
     used_h3 = []
     all_topics_covered = []
@@ -392,30 +454,13 @@ def get_pre_batch_info(project_id):
     for i, batch in enumerate(batches):
         batch_text = batch.get("text", "")
         
-        # Wyciągnij H2 i H3 z batcha
         h2_in_batch = re.findall(r'<h2[^>]*>(.*?)</h2>', batch_text, re.IGNORECASE | re.DOTALL)
         h3_in_batch = re.findall(r'<h3[^>]*>(.*?)</h3>', batch_text, re.IGNORECASE | re.DOTALL)
         
         used_h2.extend([h.strip() for h in h2_in_batch])
         used_h3.extend([h.strip() for h in h3_in_batch])
-        
-        # Krótkie streszczenie batcha (pierwsze 200 znaków bez tagów)
-        clean_text = re.sub(r'<[^>]+>', '', batch_text)
-        summary = clean_text[:200].strip() + "..." if len(clean_text) > 200 else clean_text.strip()
-        
-        # Główne tematy (wyciągnij z H2/H3)
-        topics = h2_in_batch + h3_in_batch
-        all_topics_covered.extend(topics)
-        
-        previous_batches_summary.append({
-            "batch_number": i + 1,
-            "h2_covered": h2_in_batch,
-            "h3_covered": h3_in_batch,
-            "summary": summary,
-            "word_count": len(clean_text.split())
-        })
+        all_topics_covered.extend(h2_in_batch + h3_in_batch)
     
-    # Ostatnie 2 zdania ostatniego batcha (dla płynnego przejścia)
     if batches:
         last_batch_text = batches[-1].get("text", "")
         clean_last = re.sub(r'<[^>]+>', '', last_batch_text)
@@ -426,105 +471,121 @@ def get_pre_batch_info(project_id):
         elif sentences:
             last_sentences = sentences[-1] + "."
     
-    # Które H2 jeszcze do napisania
     remaining_h2 = [h2 for h2 in h2_structure if h2 not in used_h2]
     
     # ================================================================
     # 📝 GENERUJ PROMPT DLA GPT
     # ================================================================
     prompt_sections = []
-    
-    # Info o numerze batcha
-    prompt_sections.append(f"📋 BATCH #{len(batches) + 1}")
+    prompt_sections.append(f"📋 BATCH #{current_batch_num} z {total_planned_batches} (zostało: {remaining_batches})")
     prompt_sections.append("")
     
-    # Frazy
-    if exceeded:
-        prompt_sections.append("❌ EXCEEDED (NIE UŻYWAJ!):")
-        for kw in exceeded:
-            prompt_sections.append(f"  • {kw['keyword']}: {kw['actual']}x (max {kw['target_max']}x)")
+    # CRITICAL
+    if critical_keywords:
+        prompt_sections.append("🔴 CRITICAL (MUSISZ użyć - ostatni batch!):")
+        for kw in critical_keywords:
+            prompt_sections.append(f"  • {kw['keyword']}: UŻYJ {kw['suggested']}x!")
     
-    if locked:
-        prompt_sections.append("\n🔒 LOCKED (użyj SYNONIMÓW):")
-        for kw in locked:
+    # EXCEEDED
+    if exceeded_keywords:
+        prompt_sections.append("\n❌ EXCEEDED (NIE UŻYWAJ!):")
+        for kw in exceeded_keywords:
             prompt_sections.append(f"  • {kw['keyword']}")
     
-    if near_limit:
-        prompt_sections.append("\n⚠️ NEAR_LIMIT (max 1x w tym batchu):")
-        for kw in near_limit:
-            prompt_sections.append(f"  • {kw['keyword']}: zostało {kw['remaining_max']}x")
+    # LOCKED
+    if locked_keywords:
+        prompt_sections.append("\n🔒 LOCKED (użyj SYNONIMÓW):")
+        for kw in locked_keywords:
+            prompt_sections.append(f"  • {kw['keyword']}")
     
-    if under:
-        prompt_sections.append("\n📝 UNDER (wpleć w batch):")
-        for kw in under:
-            prompt_sections.append(f"  • {kw['keyword']}: potrzeba {kw['needed']}x")
+    # HIGH (UNDER)
+    if high_priority:
+        prompt_sections.append("\n🟠 PRIORYTET (UNDER - wpleć!):")
+        for kw in high_priority:
+            prompt_sections.append(f"  • {kw['keyword']}: użyj {kw['suggested']}x (brakuje {kw['remaining_to_min']}x)")
     
-    # Co już było
+    # NORMAL
+    if normal_keywords:
+        prompt_sections.append("\n🟢 NORMALNE (sugerowane użycie):")
+        for kw in normal_keywords[:5]:  # Max 5
+            prompt_sections.append(f"  • {kw['keyword']}: max {kw['max_per_batch']}x (sugerowane: {kw['suggested']}x)")
+    
+    # LOW
+    if low_priority:
+        prompt_sections.append("\n⚪ OPCJONALNE (już OK):")
+        for kw in low_priority[:3]:  # Max 3
+            prompt_sections.append(f"  • {kw['keyword']}")
+    
+    # Poprzednie tematy
     if all_topics_covered:
-        prompt_sections.append("\n\n📖 JUŻ NAPISANE (nie powielaj!):")
-        for topic in all_topics_covered[:10]:  # Max 10
+        prompt_sections.append("\n\n📖 NIE POWIELAJ:")
+        for topic in all_topics_covered[:8]:
             prompt_sections.append(f"  • {topic}")
     
     # Ostatnie zdania
     if last_sentences:
-        prompt_sections.append(f"\n\n🔗 OSTATNIE ZDANIA (dla płynnego przejścia):")
-        prompt_sections.append(f"  \"{last_sentences}\"")
+        prompt_sections.append(f"\n\n🔗 KONTYNUUJ OD:")
+        prompt_sections.append(f"  \"{last_sentences[:150]}...\"" if len(last_sentences) > 150 else f"  \"{last_sentences}\"")
     
-    # Co teraz pisać
+    # H2 do napisania
     if remaining_h2:
-        prompt_sections.append(f"\n\n✏️ DO NAPISANIA W TYM BATCHU:")
-        for h2 in remaining_h2[:3]:  # Sugeruj max 3 H2
+        prompt_sections.append(f"\n\n✏️ H2 DO NAPISANIA:")
+        for h2 in remaining_h2[:3]:
             prompt_sections.append(f"  • {h2}")
     
-    gpt_prompt = "\n".join(prompt_sections) if prompt_sections else "✅ Wszystkie frazy w normie - możesz pisać!"
+    gpt_prompt = "\n".join(prompt_sections)
     
+    # ================================================================
+    # 📊 PODSUMOWANIE
+    # ================================================================
     return jsonify({
         "project_id": project_id,
         "topic": data.get("topic"),
-        "batch_number": len(batches) + 1,
-        "total_batches_written": len(batches),
+        "batch_number": current_batch_num,
+        "total_planned_batches": total_planned_batches,
+        "remaining_batches": remaining_batches,
         
-        # ⭐ STRUKTURA ARTYKUŁU
+        # ⭐ PEŁNY PLAN FRAZ (posortowany po priorytecie)
+        "keyword_plan": keyword_plan,
+        
+        # Kategoryzowane
+        "critical_keywords": critical_keywords,
+        "high_priority_keywords": high_priority,
+        "normal_keywords": normal_keywords,
+        "low_priority_keywords": low_priority,
+        "locked_keywords": locked_keywords,
+        "exceeded_keywords": exceeded_keywords,
+        
+        # Struktura
         "h2_structure": h2_structure,
         "h2_already_written": used_h2,
         "h2_remaining": remaining_h2,
-        "h3_already_written": used_h3,
-        
-        # ⭐ POPRZEDNIE BATCHE (żeby nie powielać)
-        "previous_batches": previous_batches_summary,
         "topics_already_covered": all_topics_covered,
         "last_sentences": last_sentences,
         
-        # ⭐ FRAZY
-        "exceeded_keywords": exceeded,
-        "locked_keywords": locked,
-        "near_limit_keywords": near_limit,
-        "under_keywords": under,
-        "safe_keywords": safe,
-        
         # Podsumowanie
         "summary": {
-            "exceeded_count": len(exceeded),
-            "locked_count": len(locked),
-            "near_limit_count": len(near_limit),
-            "under_count": len(under),
-            "safe_count": len(safe),
-            "total_keywords": len(keywords_state),
+            "critical_count": len(critical_keywords),
+            "high_priority_count": len(high_priority),
+            "normal_count": len(normal_keywords),
+            "low_count": len(low_priority),
+            "locked_count": len(locked_keywords),
+            "exceeded_count": len(exceeded_keywords),
             "h2_written": len(used_h2),
             "h2_remaining": len(remaining_h2)
         },
         
-        # ⭐ GOTOWY PROMPT DLA GPT
+        # ⭐ GOTOWY PROMPT
         "gpt_prompt": gpt_prompt,
         
         "instructions": {
-            "exceeded": "NIE UŻYWAJ tych fraz - już przekroczone!",
-            "locked": "Użyj SYNONIMÓW zamiast dokładnej frazy",
-            "near_limit": "Max 1× w tym batchu",
-            "under": "Wpleć te frazy w batch",
-            "continuity": "Zacznij od nawiązania do ostatnich zdań poprzedniego batcha",
-            "no_repeat": "Nie powielaj tematów z 'topics_already_covered'",
-            "format": "Czysty tekst. Tylko <h2> i <h3> jako tagi."
+            "critical": "MUSISZ użyć tych fraz - ostatnia szansa!",
+            "high": "Priorytet - wpleć w batch",
+            "normal": "Użyj sugerowaną ilość (max_per_batch)",
+            "low": "Opcjonalne - już wystarczy",
+            "locked": "NIE UŻYWAJ - użyj synonimów",
+            "exceeded": "BŁĄD - za dużo użyć!",
+            "max_per_batch": "Nie przekraczaj max_per_batch żeby uniknąć stuffingu"
         }
     }), 200
 
