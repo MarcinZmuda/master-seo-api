@@ -36,7 +36,7 @@ app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024  # 32 MB
 CORS(app)
 
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-VERSION = "v19.6-semantic"
+VERSION = "v22.1-semantic"
 
 # ================================================================
 # 🧠 Check if semantic analysis is available
@@ -383,11 +383,11 @@ def version_info():
         "engine": "Brajen Semantic Engine",
         "api_version": VERSION,
         "components": {
-            "project_routes": "v19.6-semantic",
-            "firestore_tracker_routes": "v19.6-semantic",
-            "seo_optimizer": "v19.6-semantic",
-            "final_review_routes": "v19.5-gemini",
-            "s1_proxy": "v19.5 (to N-gram API) - FIXED"
+            "project_routes": "v22.1-semantic",
+            "firestore_tracker_routes": "v22.1-semantic",
+            "seo_optimizer": "v22.1-semantic",
+            "final_review_routes": "v22.1-gemini-2.5",
+            "s1_proxy": "v22.1 (to N-gram API)"
         },
         "environment": {
             "debug_mode": DEBUG_MODE,
