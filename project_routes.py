@@ -40,7 +40,8 @@ def generate_h2_suggestions():
     - wzorców H2 z konkurencji (serp_h2_patterns)
     - target keywords
     
-    Zwraca listę 6-8 optymalnych H2.
+    Zwraca listę maksymalnie 6 H2 (hard limit zgodny z seo_rules.json).
+    Wstęp (intro) NIE jest H2 - to osobny element bez nagłówka.
     """
     data = request.get_json()
     if not data:
@@ -52,7 +53,8 @@ def generate_h2_suggestions():
     
     serp_h2_patterns = data.get("serp_h2_patterns", [])
     target_keywords = data.get("target_keywords", [])
-    target_count = data.get("target_count", 6)
+    # ⭐ HARD LIMIT: max 6 H2 (zgodnie z seo_rules.json → h2_headers.max_count)
+    target_count = min(data.get("target_count", 6), 6)
     
     # Jeśli brak Gemini API - zwróć podstawowe sugestie
     if not GEMINI_API_KEY:
@@ -90,22 +92,25 @@ FRAZY KLUCZOWE DO WPLECENIA W H2:
 """
         
         prompt = f"""
-Wygeneruj {target_count} optymalnych nagłówków H2 dla artykułu SEO o temacie: "{topic}"
+Wygeneruj DOKŁADNIE {target_count} nagłówków H2 dla artykułu SEO o temacie: "{topic}"
+
+WAŻNE: Artykuł będzie miał WSTĘP (bez nagłówka H2) + {target_count} sekcji H2.
 
 {competitor_context}
 {keywords_context}
 
 ZASADY:
-1. Każdy H2 powinien mieć 6-12 słów
-2. Minimum 50% H2 powinno być w formie pytania (Jak...?, Dlaczego...?, Kiedy...?, Co...?)
-3. Maksimum 30% H2 może zawierać główne słowo kluczowe
-4. NIE używaj ogólnikowych tytułów jak: "Wstęp", "Podsumowanie", "Zakończenie", "FAQ"
-5. H2 powinny tworzyć logiczną strukturę artykułu
-6. Uwzględnij intencję wyszukiwania (informacyjna/transakcyjna)
-7. Wpleć naturalnie frazy kluczowe gdzie to możliwe
+1. Wygeneruj DOKŁADNIE {target_count} H2 (nie więcej, nie mniej)
+2. Każdy H2 powinien mieć 6-12 słów
+3. Minimum 50% H2 powinno być w formie pytania (Jak...?, Dlaczego...?, Kiedy...?, Co...?)
+4. Maksimum 30% H2 może zawierać główne słowo kluczowe
+5. NIE używaj ogólnikowych tytułów jak: "Wstęp", "Podsumowanie", "Zakończenie", "FAQ"
+6. H2 powinny tworzyć logiczną strukturę artykułu
+7. Uwzględnij intencję wyszukiwania (informacyjna/transakcyjna)
+8. Wpleć naturalnie frazy kluczowe gdzie to możliwe
 
 FORMAT ODPOWIEDZI:
-Zwróć TYLKO listę H2, każdy w nowej linii, bez numeracji ani punktorów.
+Zwróć TYLKO listę {target_count} H2, każdy w nowej linii, bez numeracji ani punktorów.
 """
         
         print(f"[H2_SUGGESTIONS] Generating {target_count} H2 for: {topic}")
