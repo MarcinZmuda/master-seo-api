@@ -22,7 +22,7 @@ textstat==0.7.4
 beautifulsoup4==4.12.3
 
 # --- AI / GENERATIVE (Google Gemini + Embeddings) ---
-google-generativeai==0.5.2
+google-generativeai==0.8.3
 
 # --- SEMANTIC EMBEDDINGS (⭐ FIXED VERSIONS) ---
 torch==2.1.2
