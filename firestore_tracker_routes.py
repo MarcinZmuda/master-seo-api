@@ -549,7 +549,7 @@ def approve_batch(project_id):
             return jsonify(result), 200
         try:
             print(f"[TRACKER] 🧠 Final batch detected → uruchamiam Gemini review dla {project_id}")
-            model_name = os.getenv("FINAL_REVIEW_MODEL", "gemini-2.0-flash-exp")
+            model_name = os.getenv("FINAL_REVIEW_MODEL", "gemini-2.5-flash")
             model = genai.GenerativeModel(model_name)
             # ✅ POPRAWKA: Usunięto [:15000] - teraz analizuje CAŁY artykuł
             full_article = "\n\n".join([b.get("text", "") for b in project_data.get("batches", [])])
