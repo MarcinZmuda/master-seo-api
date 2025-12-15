@@ -1,6 +1,9 @@
 """
-SEO Content Tracker Routes - v19.5 Brajen Semantic Engine
+SEO Content Tracker Routes - v22.0 Brajen Semantic Engine
 + Interactive Final Review (Gemini)
++ Burstiness validation (3.2-3.8)
++ Transition words validation (25-50%)
++ Metrics object in response
 """
 
 from flask import Blueprint, request, jsonify
@@ -103,8 +106,9 @@ def count_robust(doc, keyword_meta):
     total_hits = max(exact_hits, lemma_exact_hits + lemma_fuzzy_hits + stem_hits + fuzzy_stem_hits)
     return total_hits
 
+
 # ============================================================================
-# 2. VALIDATIONS
+# 3. VALIDATIONS
 # ============================================================================
 def validate_structure(text):
     if "##" in text or "###" in text:
@@ -115,7 +119,14 @@ def validate_structure(text):
             return {"valid": False, "error": f"❌ Niedozwolony nagłówek: '{h2.strip()}'"}
     return {"valid": True}
 
+
 def calculate_burstiness(text):
+    """
+    Oblicza burstiness - zróżnicowanie długości zdań.
+    Target: 3.2-3.8 (optymalnie 3.5)
+    
+    v22.0: Zmieniona skala z 0-10 na 0-5 dla lepszego dopasowania do targetów.
+    """
     sentences = re.split(r'[.!?]+', text)
     sentences = [s.strip() for s in sentences if s.strip()]
     if len(sentences) < 3:
@@ -123,10 +134,140 @@ def calculate_burstiness(text):
     lengths = [len(s.split()) for s in sentences]
     mean = sum(lengths) / len(lengths)
     variance = sum((x - mean) ** 2 for x in lengths) / len(lengths)
-    return round((math.sqrt(variance) / mean) * 10, 2) if mean else 0.0
+    
+    if not mean:
+        return 0.0
+    
+    # Normalizacja do skali gdzie 3.5 to optimum
+    raw_score = math.sqrt(variance) / mean
+    # Mapowanie na skalę 0-5 (zamiast 0-10)
+    normalized = raw_score * 5
+    return round(normalized, 2)
+
 
 # ============================================================================
-# 3. FIRESTORE PROCESSOR (v19.7 - Simple Lemma Count for BASIC + HARD BLOCK)
+# 🆕 v22.0: TRANSITION WORDS VALIDATION
+# ============================================================================
+TRANSITION_WORDS_PL = [
+    # Dodawanie
+    "również", "także", "ponadto", "dodatkowo", "co więcej",
+    "oprócz tego", "poza tym", "w dodatku", "nie tylko", "ale także",
+    # Kontrast
+    "jednak", "jednakże", "natomiast", "ale", "z drugiej strony",
+    "mimo to", "niemniej", "pomimo", "choć", "chociaż", "wprawdzie",
+    # Przyczyna/skutek
+    "dlatego", "w związku z tym", "w rezultacie", "wskutek", "ponieważ",
+    "zatem", "więc", "stąd", "w konsekwencji", "przez co",
+    # Przykłady
+    "na przykład", "przykładowo", "między innymi", "m.in.", "np.",
+    # Podsumowanie
+    "podsumowując", "reasumując", "w skrócie", "ogólnie rzecz biorąc",
+    # Sekwencja
+    "po pierwsze", "po drugie", "następnie", "potem", "w końcu", "na koniec",
+    # Question hooks
+    "efekt?", "rezultat?", "co się dzieje?", "i co dalej?", "co to oznacza?",
+    "dlaczego?", "jak to działa?", "mechanizm?", "przyczyna?"
+]
+
+BANNED_SECTION_OPENERS = [
+    "dlatego", "ponadto", "dodatkowo", "w związku z tym", "tym samym", "warto", "należy"
+]
+
+
+def calculate_transition_score(text: str) -> dict:
+    """
+    Oblicza jakość przejść między zdaniami.
+    Zwraca dict z ratio i warnings.
+    Target: 25-50% zdań z transition words
+    """
+    text_lower = text.lower()
+    sentences = [s.strip() for s in re.split(r'[.!?]+', text) if s.strip()]
+    
+    if len(sentences) < 2:
+        return {"ratio": 1.0, "count": 0, "total": len(sentences), "warnings": []}
+    
+    transition_count = 0
+    warnings = []
+    
+    for i, sentence in enumerate(sentences):
+        sentence_lower = sentence.lower()[:100]  # Sprawdzamy początek
+        
+        # Sprawdź czy zawiera transition word
+        has_transition = any(tw in sentence_lower for tw in TRANSITION_WORDS_PL)
+        if has_transition:
+            transition_count += 1
+    
+    ratio = transition_count / len(sentences) if sentences else 0
+    
+    # Walidacja ratio
+    if ratio < 0.20:
+        warnings.append(f"⚠️ Za mało transition words: {ratio:.0%} (min 25%)")
+    elif ratio > 0.55:
+        warnings.append(f"⚠️ Za dużo transition words: {ratio:.0%} (max 50%)")
+    
+    return {
+        "ratio": round(ratio, 3),
+        "count": transition_count,
+        "total": len(sentences),
+        "warnings": warnings
+    }
+
+
+def check_banned_openers(text: str) -> list:
+    """
+    Sprawdza czy sekcje zaczynają się od zakazanych słów.
+    Zwraca listę warnings.
+    """
+    warnings = []
+    
+    # Znajdź pierwsze zdania po <h2> i <h3>
+    # Pattern: <h2>...</h2> następnie <p>pierwsze zdanie
+    h2_pattern = re.compile(r'</h2>\s*<p>([^.!?]+[.!?])', re.IGNORECASE)
+    h3_pattern = re.compile(r'</h3>\s*<p>([^.!?]+[.!?])', re.IGNORECASE)
+    
+    for match in h2_pattern.findall(text):
+        first_word = match.strip().split()[0].lower() if match.strip() else ""
+        for banned in BANNED_SECTION_OPENERS:
+            if first_word == banned or match.strip().lower().startswith(banned):
+                warnings.append(f"⚠️ Sekcja H2 zaczyna się od '{banned}' - przenieś dalej w akapicie")
+                break
+    
+    for match in h3_pattern.findall(text):
+        first_word = match.strip().split()[0].lower() if match.strip() else ""
+        for banned in BANNED_SECTION_OPENERS:
+            if first_word == banned or match.strip().lower().startswith(banned):
+                warnings.append(f"⚠️ Sekcja H3 zaczyna się od '{banned}' - przenieś dalej w akapicie")
+                break
+    
+    return warnings
+
+
+def validate_metrics(burstiness: float, transition_data: dict, density: float) -> list:
+    """
+    Waliduje wszystkie metryki i zwraca listę warnings.
+    """
+    warnings = []
+    
+    # Burstiness validation (target: 3.2-3.8)
+    if burstiness < 3.2:
+        warnings.append(f"⚠️ Burstiness za niski: {burstiness} (min 3.2) - dodaj więcej zróżnicowania w długości zdań")
+    elif burstiness > 3.8:
+        warnings.append(f"⚠️ Burstiness za wysoki: {burstiness} (max 3.8) - wyrównaj długości zdań")
+    
+    # Density validation (target: max 1.5% per keyword, 3% total)
+    if density > 3.0:
+        warnings.append(f"⚠️ Keyword density za wysoka: {density}% (max 3.0%)")
+    elif density > 2.5:
+        warnings.append(f"⚡ Keyword density blisko limitu: {density}% (warning at 2.5%)")
+    
+    # Transition warnings już są w transition_data
+    warnings.extend(transition_data.get("warnings", []))
+    
+    return warnings
+
+
+# ============================================================================
+# 4. FIRESTORE PROCESSOR (v22.0 - with metrics validation)
 # ============================================================================
 def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=False):
     db = firestore.client()
@@ -231,14 +372,24 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         
         keywords_state[rid] = meta
 
-    # 🔹 Prewalidacja
+    # 🔹 Prewalidacja z unified_prevalidation
     precheck = unified_prevalidation(batch_text, keywords_state)
     warnings = precheck.get("warnings", [])
     semantic_score = precheck.get("semantic_score", 1.0)
+    transition_score = precheck.get("transition_score", 0.8)
     density = precheck.get("density", 0.0)
     smog = precheck.get("smog", 0.0)
     readability = precheck.get("readability", 0.0)
+    
+    # 🆕 v22.0: Oblicz metryki
     burstiness = calculate_burstiness(batch_text)
+    transition_data = calculate_transition_score(batch_text)
+    banned_opener_warnings = check_banned_openers(batch_text)
+    
+    # 🆕 v22.0: Walidacja metryk
+    metrics_warnings = validate_metrics(burstiness, transition_data, density)
+    warnings.extend(metrics_warnings)
+    warnings.extend(banned_opener_warnings)
 
     struct_check = validate_structure(batch_text)
     valid_struct = struct_check["valid"]
@@ -255,11 +406,15 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         "meta_trace": meta_trace or {},
         "timestamp": datetime.datetime.now(datetime.timezone.utc),
         "burstiness": burstiness,
+        "transition_ratio": transition_data.get("ratio", 0),
         "language_audit": {
             "semantic_score": semantic_score,
+            "transition_score": transition_score,
+            "transition_ratio": transition_data.get("ratio", 0),
             "density": density,
             "smog": smog,
-            "readability": readability
+            "readability": readability,
+            "burstiness": burstiness
         },
         "warnings": warnings,
         "validation_error": warning_text,
@@ -298,19 +453,45 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         
         keyword_targets.append(target_info)
 
+    # 🆕 v22.0: Metrics object w response
     return {
         "status": status,
         "semantic_score": semantic_score,
+        "transition_score": transition_score,
+        "transition_ratio": transition_data.get("ratio", 0),
         "density": density,
         "burstiness": burstiness,
         "warnings": warnings,
         "keyword_targets": keyword_targets,  # ⭐ CRITICAL FOR GPT!
+        "metrics": {
+            "burstiness": {
+                "value": burstiness,
+                "target": "3.2-3.8",
+                "status": "OK" if 3.2 <= burstiness <= 3.8 else "WARN"
+            },
+            "transition_ratio": {
+                "value": transition_data.get("ratio", 0),
+                "target": "0.25-0.50",
+                "status": "OK" if 0.20 <= transition_data.get("ratio", 0) <= 0.55 else "WARN"
+            },
+            "density": {
+                "value": density,
+                "target": "<3.0%",
+                "status": "OK" if density <= 3.0 else "WARN"
+            },
+            "semantic_score": {
+                "value": semantic_score,
+                "target": ">0.6",
+                "status": "OK" if semantic_score >= 0.6 else "WARN"
+            }
+        },
         "meta": precheck.get("meta", {}),
         "status_code": 200
     }
 
+
 # ============================================================================
-# 4. ROUTES — PREVIEW, APPROVE, DEBUG
+# 5. ROUTES — PREVIEW, APPROVE, DEBUG
 # ============================================================================
 @tracker_routes.post("/api/project/<project_id>/preview_batch")
 def preview_batch(project_id):
@@ -432,10 +613,21 @@ def debug_keywords(project_id):
             stat_entry["remaining_max"] = meta.get("remaining_max", max(0, meta.get("target_max", 999) - meta.get("actual_uses", 0)))
         
         stats.append(stat_entry)
+    
+    # 🆕 v22.0: Dodaj średnie metryki z batchy
+    avg_burstiness = 0
+    avg_transition = 0
+    if batches:
+        burst_values = [b.get("burstiness", 0) for b in batches if b.get("burstiness")]
+        trans_values = [b.get("transition_ratio", 0) for b in batches if b.get("transition_ratio")]
+        avg_burstiness = round(sum(burst_values) / len(burst_values), 2) if burst_values else 0
+        avg_transition = round(sum(trans_values) / len(trans_values), 3) if trans_values else 0
         
     return jsonify({
         "project_id": project_id,
         "keywords": stats,
         "batches": len(batches),
-        "last_burst": batches[-1].get("burstiness") if batches else None
+        "last_burst": batches[-1].get("burstiness") if batches else None,
+        "avg_burstiness": avg_burstiness,
+        "avg_transition_ratio": avg_transition
     }), 200
