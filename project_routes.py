@@ -571,6 +571,19 @@ def export_project_data(project_id):
 
 
 # ================================================================
+# 🔄 ALIAS: auto_correct_keywords (kompatybilność z OpenAPI schema)
+# ================================================================
+@project_routes.post("/api/project/<project_id>/auto_correct_keywords")
+def auto_correct_keywords_alias(project_id):
+    """
+    Alias dla auto_correct - kompatybilność z OpenAPI schema.
+    Endpoint w schema: /api/project/{id}/auto_correct_keywords
+    Endpoint oryginalny: /api/project/{id}/auto_correct
+    """
+    return auto_correct_batch(project_id)
+
+
+# ================================================================
 # 📊 GET PROJECT STATUS (dla n8n i Custom GPT)
 # ================================================================
 @project_routes.get("/api/project/<project_id>/status")
