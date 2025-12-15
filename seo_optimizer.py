@@ -108,7 +108,7 @@ def generate_semantic_outline(topic: str, keywords: List[str]) -> str:
         return "Brak API KEY – tryb offline."
 
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model = genai.GenerativeModel("gemini-2.5-flash")
         prompt = f"""
         Przygotuj logiczny szkic nagłówków H2/H3 dla artykułu SEO o temacie:
         "{topic}".
@@ -171,7 +171,7 @@ def ai_validate_text(text: str, topic: str = "") -> Dict[str, any]:
         return {"status": "skipped", "reason": "Brak klucza Gemini"}
 
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        model = genai.GenerativeModel("gemini-2.5-flash")
         prompt = f"""
         Oceń, czy poniższy tekst dobrze pokrywa temat "{topic}".
         Zwróć ocenę od 0 do 100 i listę brakujących elementów.
