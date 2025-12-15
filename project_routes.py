@@ -16,7 +16,7 @@ if GEMINI_API_KEY:
 else:
     print("[WARNING] ⚠️ GEMINI_API_KEY not set - LSI enrichment fallback mode")
 
-# spaCy model - POPRAWKA: Używamy wersji MD (Medium) zgodnej z Dockerfile
+# spaCy model
 try:
     nlp = spacy.load("pl_core_news_md")
     print("[INIT] ✅ spaCy pl_core_news_md loaded")
@@ -27,6 +27,9 @@ except OSError:
     nlp = spacy.load("pl_core_news_md")
 
 project_routes = Blueprint("project_routes", __name__)
+
+# ⭐ GEMINI MODEL - centralnie zdefiniowany
+GEMINI_MODEL = "gemini-2.5-flash"
 
 
 # ================================================================
@@ -42,6 +45,9 @@ def generate_h2_suggestions():
     
     Zwraca listę maksymalnie 6 H2 (hard limit zgodny z seo_rules.json).
     Wstęp (intro) NIE jest H2 - to osobny element bez nagłówka.
+    
+    ⚠️ WAŻNE: To są tylko PROPOZYCJE. User musi podać SWOJE H2,
+    które zostaną połączone z propozycjami w finalną strukturę.
     """
     data = request.get_json()
     if not data:
@@ -53,7 +59,6 @@ def generate_h2_suggestions():
     
     serp_h2_patterns = data.get("serp_h2_patterns", [])
     target_keywords = data.get("target_keywords", [])
-    # ⭐ HARD LIMIT: max 6 H2 (zgodnie z seo_rules.json → h2_headers.max_count)
     target_count = min(data.get("target_count", 6), 6)
     
     # Jeśli brak Gemini API - zwróć podstawowe sugestie
@@ -70,13 +75,13 @@ def generate_h2_suggestions():
             "status": "FALLBACK",
             "suggestions": fallback_suggestions[:target_count],
             "message": "Gemini unavailable - basic suggestions generated",
-            "model": "fallback"
+            "model": "fallback",
+            "action_required": "USER_H2_INPUT_NEEDED"
         }), 200
     
     try:
-        model = genai.GenerativeModel("gemini-2.5-flash")
+        model = genai.GenerativeModel(GEMINI_MODEL)
         
-        # Przygotuj kontekst z konkurencji
         competitor_context = ""
         if serp_h2_patterns:
             competitor_context = f"""
@@ -116,7 +121,6 @@ Zwróć TYLKO listę {target_count} H2, każdy w nowej linii, bez numeracji ani 
         print(f"[H2_SUGGESTIONS] Generating {target_count} H2 for: {topic}")
         response = model.generate_content(prompt)
         
-        # Parsuj odpowiedź
         raw_suggestions = response.text.strip().split('\n')
         suggestions = [
             h2.strip().lstrip('•-–—0123456789.). ')
@@ -130,8 +134,10 @@ Zwróć TYLKO listę {target_count} H2, każdy w nowej linii, bez numeracji ani 
             "status": "OK",
             "suggestions": suggestions,
             "topic": topic,
-            "model": "gemini-2.5-flash",
-            "count": len(suggestions)
+            "model": GEMINI_MODEL,
+            "count": len(suggestions),
+            "action_required": "USER_H2_INPUT_NEEDED",
+            "message": "To są PROPOZYCJE. Teraz podaj SWOJE H2, które chcesz wpleść, a system połączy je w finalną strukturę."
         }), 200
         
     except Exception as e:
@@ -144,74 +150,44 @@ Zwróć TYLKO listę {target_count} H2, każdy w nowej linii, bez numeracji ani 
 
 
 # ================================================================
-# 🧱 H2 CUSTOM LIST + BASIC/EXTENDED + PROJECT INIT
+# 🧱 PROJECT CREATE
 # ================================================================
 @project_routes.post("/api/project/create")
 def create_project():
     """
     Tworzy nowy projekt SEO w Firestore.
     
-    Akceptuje DWA formaty danych (dla kompatybilności z Custom GPT i n8n):
-    
-    Format 1 (Custom GPT):
-    {
-        "topic": "rozwód z orzeczeniem o winie",
-        "h2_structure": ["H2 1", "H2 2"],
-        "keywords_list": [
-            {"term": "rozwód", "min": 5, "max": 10, "type": "BASIC"}
-        ]
-    }
-    
-    Format 2 (n8n workflow):
-    {
-        "main_keyword": "rozwód z orzeczeniem o winie",
-        "keywords": [
-            {"keyword": "rozwód", "target_min": 5, "target_max": 10, "type": "BASIC"}
-        ],
-        "target_length": 3000
-    }
+    ⭐ NOWA LOGIKA LIMITÓW:
+    - GPT widzi: target_min + 1 (ostrzegawczy limit)
+    - Backend liczy do: target_max (rzeczywisty limit)
     """
     data = request.get_json()
     if not data:
         return jsonify({"error": "No JSON data provided"}), 400
     
-    # ⭐ ELASTYCZNE PARSOWANIE - obsługuje oba formaty
-    
-    # Topic / Main Keyword
     topic = data.get("topic") or data.get("main_keyword", "").strip()
     if not topic:
         return jsonify({"error": "Required field: topic or main_keyword"}), 400
     
-    # H2 Structure (opcjonalne)
     h2_structure = data.get("h2_structure", [])
-    
-    # Keywords - obsługa obu formatów
     raw_keywords = data.get("keywords_list") or data.get("keywords", [])
-    
-    # Target length (opcjonalne)
     target_length = data.get("target_length", 3000)
-    
-    # Source (dla debugowania)
     source = data.get("source", "unknown")
 
     firestore_keywords = {}
     for item in raw_keywords:
-        # ⭐ Obsługa obu nazw pól
         term = item.get("term") or item.get("keyword", "")
         term = term.strip() if term else ""
         
         if not term:
             continue
         
-        # Lematyzacja
         doc = nlp(term)
         search_lemma = " ".join(t.lemma_.lower() for t in doc if t.is_alpha)
         
-        # ⭐ Obsługa obu nazw dla min/max
         min_val = item.get("min") or item.get("target_min", 1)
         max_val = item.get("max") or item.get("target_max", 5)
         
-        # ID - użyj istniejącego lub wygeneruj nowy
         row_id = item.get("id") or str(uuid.uuid4())
         
         firestore_keywords[row_id] = {
@@ -220,10 +196,11 @@ def create_project():
             "search_lemma": search_lemma,
             "target_min": min_val,
             "target_max": max_val,
+            # ⭐ NOWE: display_limit to co widzi GPT (min+1)
+            "display_limit": min_val + 1,
             "actual_uses": 0,
             "status": "UNDER",
             "type": item.get("type", "BASIC").upper(),
-            # ⭐ Dla BASIC keywords - tracking remaining_max
             "remaining_max": max_val,
             "optimal_target": max_val
         }
@@ -236,12 +213,14 @@ def create_project():
         "keywords_state": firestore_keywords,
         "created_at": firestore.SERVER_TIMESTAMP,
         "batches": [],
-        "batches_plan": [],  # ⭐ Dla tracking postępu
+        "batches_plan": [],
         "total_batches": 0,
         "target_length": target_length,
         "source": source,
-        "version": "v22.0",
-        "manual_mode": False if source == "n8n-brajen-workflow" else True
+        "version": "v22.1",
+        "manual_mode": False if source == "n8n-brajen-workflow" else True,
+        # ⭐ NOWE: format output
+        "output_format": "clean_text_with_headers"
     }
     doc_ref.set(project_data)
     
@@ -252,7 +231,7 @@ def create_project():
         "project_id": doc_ref.id,
         "topic": topic,
         "keywords_count": len(firestore_keywords),
-        "keywords": len(firestore_keywords),  # Alias dla kompatybilności
+        "keywords": len(firestore_keywords),
         "h2_sections": len(h2_structure),
         "target_length": target_length,
         "source": source
@@ -260,7 +239,147 @@ def create_project():
 
 
 # ================================================================
-# ✏️ ADD BATCH + MANUAL CORRECTION MODE
+# 📊 GET PROJECT STATUS - z info o LOCKED frazach
+# ================================================================
+@project_routes.get("/api/project/<project_id>/status")
+def get_project_status(project_id):
+    """
+    Zwraca aktualny status projektu z informacją o LOCKED frazach.
+    
+    ⭐ NOWE:
+    - locked_keywords: lista fraz które osiągnęły limit
+    - display_limits: limity które widzi GPT (min+1)
+    """
+    db = firestore.client()
+    doc = db.collection("seo_projects").document(project_id).get()
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+    
+    data = doc.to_dict()
+    keywords_state = data.get("keywords_state", {})
+    batches = data.get("batches", [])
+    
+    keyword_summary = []
+    locked_keywords = []
+    near_limit_keywords = []
+    
+    for rid, meta in keywords_state.items():
+        actual = meta.get("actual_uses", 0)
+        target_min = meta.get("target_min", 0)
+        target_max = meta.get("target_max", 999)
+        remaining = max(0, target_max - actual)
+        display_limit = target_min + 1  # Co widzi GPT
+        
+        kw_info = {
+            "keyword": meta.get("keyword"),
+            "type": meta.get("type", "BASIC"),
+            "actual": actual,
+            "display_limit": display_limit,  # ⭐ GPT widzi to
+            "target_max": target_max,  # Backend limit
+            "status": meta.get("status"),
+            "remaining_max": remaining
+        }
+        keyword_summary.append(kw_info)
+        
+        # ⭐ Zbierz LOCKED frazy
+        if remaining == 0:
+            locked_keywords.append({
+                "keyword": meta.get("keyword"),
+                "message": f"🔒 LOCKED: '{meta.get('keyword')}' osiągnęło limit {target_max}x. Użyj SYNONIMÓW!"
+            })
+        elif remaining <= 3:
+            near_limit_keywords.append({
+                "keyword": meta.get("keyword"),
+                "remaining": remaining,
+                "message": f"⚠️ NEAR LIMIT: '{meta.get('keyword')}' - zostało tylko {remaining}x"
+            })
+    
+    return jsonify({
+        "project_id": project_id,
+        "topic": data.get("topic"),
+        "total_batches": len(batches),
+        "keywords_count": len(keywords_state),
+        "keywords": keyword_summary,
+        # ⭐ NOWE - wyraźne info o blokadach
+        "locked_keywords": locked_keywords,
+        "near_limit_keywords": near_limit_keywords,
+        "warnings_before_batch": locked_keywords + near_limit_keywords,
+        "source": data.get("source", "unknown"),
+        "has_final_review": "final_review" in data
+    }), 200
+
+
+# ================================================================
+# 📋 PRE-BATCH INFO - info przed pisaniem batcha
+# ================================================================
+@project_routes.get("/api/project/<project_id>/pre_batch_info")
+def get_pre_batch_info(project_id):
+    """
+    Zwraca informacje potrzebne PRZED napisaniem batcha:
+    - Które frazy są LOCKED (użyj synonimów)
+    - Które frazy są NEAR_LIMIT
+    - Ile zostało do napisania
+    """
+    db = firestore.client()
+    doc = db.collection("seo_projects").document(project_id).get()
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+    
+    data = doc.to_dict()
+    keywords_state = data.get("keywords_state", {})
+    
+    locked = []
+    near_limit = []
+    safe = []
+    
+    for rid, meta in keywords_state.items():
+        keyword = meta.get("keyword")
+        kw_type = meta.get("type", "BASIC")
+        actual = meta.get("actual_uses", 0)
+        target_max = meta.get("target_max", 999)
+        remaining = max(0, target_max - actual)
+        display_limit = meta.get("target_min", 0) + 1
+        
+        kw_info = {
+            "keyword": keyword,
+            "type": kw_type,
+            "actual": actual,
+            "display_limit": display_limit,
+            "remaining_max": remaining
+        }
+        
+        if remaining == 0:
+            kw_info["status"] = "LOCKED"
+            kw_info["action"] = f"🔒 NIE UŻYWAJ '{keyword}' - użyj synonimów!"
+            locked.append(kw_info)
+        elif remaining <= 3:
+            kw_info["status"] = "NEAR_LIMIT"
+            kw_info["action"] = f"⚠️ Ostrożnie z '{keyword}' - zostało {remaining}x"
+            near_limit.append(kw_info)
+        else:
+            kw_info["status"] = "SAFE"
+            safe.append(kw_info)
+    
+    return jsonify({
+        "project_id": project_id,
+        "locked_keywords": locked,
+        "near_limit_keywords": near_limit,
+        "safe_keywords": safe,
+        "summary": {
+            "locked_count": len(locked),
+            "near_limit_count": len(near_limit),
+            "safe_count": len(safe)
+        },
+        "instructions": {
+            "locked": "Dla LOCKED fraz użyj SYNONIMÓW - NIE używaj dokładnej frazy!",
+            "near_limit": "Dla NEAR_LIMIT fraz - użyj max 1x w tym batchu",
+            "format": "Pisz czystym tekstem. Tylko <h2> i <h3> jako tagi, reszta bez HTML."
+        }
+    }), 200
+
+
+# ================================================================
+# ✏️ ADD BATCH
 # ================================================================
 @project_routes.post("/api/project/<project_id>/add_batch")
 def add_batch_to_project(project_id):
@@ -268,20 +387,15 @@ def add_batch_to_project(project_id):
     if not data:
         return jsonify({"error": "No JSON data provided"}), 400
 
-    # ⭐ Obsługa wielu nazw pól
     batch_text = data.get("text") or data.get("batch_text")
     if not batch_text:
         return jsonify({"error": "Field 'text' or 'batch_text' is required"}), 400
 
     meta_trace = data.get("meta_trace", {})
 
-    # 🔍 Wstępna analiza używa process_batch_in_firestore, które wewnętrznie wywołuje unified_prevalidation
     result = process_batch_in_firestore(project_id, batch_text, meta_trace)
     
-    # Wyciągamy rytm jeśli istnieje w wyniku
     rhythm = result.get("meta", {}).get("paragraph_rhythm", "Unknown")
-    print(f"[DEBUG] Paragraph rhythm: {rhythm}")
-    
     result["batch_text_snippet"] = batch_text[:50] + "..."
     result["paragraph_rhythm"] = rhythm
 
@@ -297,7 +411,6 @@ def manual_correct_batch(project_id):
     if not data:
         return jsonify({"error": "No JSON data provided"}), 400
 
-    # ⭐ Obsługa wielu nazw pól
     corrected_text = data.get("text") or data.get("batch_text") or data.get("corrected_text")
     if not corrected_text:
         return jsonify({"error": "Field 'text' or 'batch_text' is required"}), 400
@@ -305,7 +418,6 @@ def manual_correct_batch(project_id):
     meta_trace = data.get("meta_trace", {})
     forced = data.get("forced", False)
 
-    # Wykonaj prewalidację wszystkiego
     db = firestore.client()
     doc = db.collection("seo_projects").document(project_id).get()
     if not doc.exists:
@@ -325,7 +437,6 @@ def manual_correct_batch(project_id):
     if forced:
         print("[FORCED APPROVAL] Saving corrected batch despite warnings.")
 
-    # Zapis do Firestore
     batch_data = {
         "id": str(uuid.uuid4()),
         "text": corrected_text,
@@ -355,21 +466,17 @@ def manual_correct_batch(project_id):
 
 
 # ================================================================
-# 🆕 AUTO-CORRECT ENDPOINT (S6)
+# 🆕 AUTO-CORRECT ENDPOINT
 # ================================================================
 @project_routes.post("/api/project/<project_id>/auto_correct")
 def auto_correct_batch(project_id):
     """
-    Automatyczna korekta batcha używając Gemini 2.5 Flash:
-    - Analizuje które frazy są UNDER lub OVER
-    - Generuje poprawioną wersję tekstu
-    - Zachowuje strukturę HTML i ton
+    Automatyczna korekta batcha używając Gemini.
     """
     data = request.get_json()
     if not data:
         return jsonify({"error": "No JSON data provided"}), 400
 
-    # ⭐ Obsługa wielu nazw pól dla kompatybilności z różnymi wersjami OpenAPI
     batch_text = data.get("text") or data.get("batch_text") or data.get("corrected_text")
     if not batch_text:
         return jsonify({"error": "Field 'text' or 'batch_text' is required"}), 400
@@ -382,7 +489,6 @@ def auto_correct_batch(project_id):
     project_data = doc.to_dict()
     keywords_state = project_data.get("keywords_state", {})
     
-    # 🔍 Sprawdź które frazy są UNDER lub OVER
     under_keywords = []
     over_keywords = []
     
@@ -410,33 +516,24 @@ def auto_correct_batch(project_id):
                 "target_max": max_target
             })
     
-    # Jeśli nie ma czego korygować
     if not under_keywords and not over_keywords:
         return jsonify({
             "status": "NO_CORRECTIONS_NEEDED",
             "message": "All keywords within target ranges",
             "corrected_text": batch_text,
-            "keyword_report": {
-                "under": [],
-                "over": []
-            }
+            "keyword_report": {"under": [], "over": []}
         }), 200
     
-    # 🤖 Użyj Gemini do inteligentnej korekty
     if not GEMINI_API_KEY:
         return jsonify({
             "status": "ERROR",
-            "error": "Gemini API key not configured - cannot perform auto-correction",
-            "keyword_report": {
-                "under": under_keywords,
-                "over": over_keywords
-            }
+            "error": "Gemini API key not configured",
+            "keyword_report": {"under": under_keywords, "over": over_keywords}
         }), 500
     
     try:
-        model = genai.GenerativeModel("gemini-2.5-flash")
+        model = genai.GenerativeModel(GEMINI_MODEL)
         
-        # Przygotuj instrukcje korekty
         correction_instructions = []
         
         if under_keywords:
@@ -459,26 +556,27 @@ Popraw poniższy tekst SEO według instrukcji:
 {chr(10).join(correction_instructions)}
 
 ZASADY:
-1. Zachowaj WSZYSTKIE tagi HTML (<h2>, <h3>, <p>)
-2. NIE zmieniaj struktury ani tonu tekstu
+1. Zachowaj nagłówki <h2> i <h3>
+2. Reszta tekstu ma być CZYSTYM TEKSTEM (bez <p>, bez <strong>, bez list)
 3. Dodawaj frazy naturalnie w kontekście
 4. Usuwaj frazy poprzez parafrazy lub synonimy
 5. Zachowaj profesjonalny, formalny styl
+6. Ta sama fraza BASIC nie może występować częściej niż 1x na 3 zdania
 
 TEKST DO POPRAWY:
 ---
 {batch_text[:10000]}
 ---
 
-Zwróć TYLKO poprawiony tekst HTML, bez żadnych komentarzy.
+Zwróć TYLKO poprawiony tekst, bez żadnych komentarzy.
 """
         
         print(f"[AUTO_CORRECT] Wysyłam do Gemini: {len(under_keywords)} UNDER, {len(over_keywords)} OVER")
         response = model.generate_content(correction_prompt)
         corrected_text = response.text.strip()
         
-        # Usuń ewentualne markdown wrapper
-        corrected_text = re.sub(r'^```html\n?', '', corrected_text)
+        # Usuń ewentualne markdown/html wrappery
+        corrected_text = re.sub(r'^```(?:html)?\n?', '', corrected_text)
         corrected_text = re.sub(r'\n?```$', '', corrected_text)
         
         print(f"[AUTO_CORRECT] ✅ Gemini zwrócił poprawiony tekst ({len(corrected_text)} znaków)")
@@ -488,10 +586,7 @@ Zwróć TYLKO poprawiony tekst HTML, bez żadnych komentarzy.
             "corrected_text": corrected_text,
             "added_keywords": [kw["keyword"] for kw in under_keywords],
             "removed_keywords": [kw["keyword"] for kw in over_keywords],
-            "keyword_report": {
-                "under": under_keywords,
-                "over": over_keywords
-            },
+            "keyword_report": {"under": under_keywords, "over": over_keywords},
             "correction_summary": f"Dodano {len(under_keywords)} fraz, usunięto nadmiar {len(over_keywords)} fraz"
         }), 200
         
@@ -500,15 +595,12 @@ Zwróć TYLKO poprawiony tekst HTML, bez żadnych komentarzy.
         return jsonify({
             "status": "ERROR",
             "error": str(e),
-            "keyword_report": {
-                "under": under_keywords,
-                "over": over_keywords
-            }
+            "keyword_report": {"under": under_keywords, "over": over_keywords}
         }), 500
 
 
 # ================================================================
-# 🧠 UNIFIED PRE-VALIDATION (SEO + SEMANTICS + STYLE)
+# 🧠 UNIFIED PRE-VALIDATION
 # ================================================================
 @project_routes.post("/api/project/<project_id>/preview_all_checks")
 def preview_all_checks(project_id):
@@ -516,7 +608,6 @@ def preview_all_checks(project_id):
     if not data:
         return jsonify({"error": "No JSON data provided"}), 400
 
-    # ⭐ Obsługa wielu nazw pól
     text = data.get("text") or data.get("batch_text")
     if not text:
         return jsonify({"error": "Field 'text' or 'batch_text' is required"}), 400
@@ -545,7 +636,7 @@ def preview_all_checks(project_id):
 
 
 # ================================================================
-# 🆕 FORCE APPROVE (ZAPIS MIMO BŁĘDÓW)
+# 🆕 FORCE APPROVE
 # ================================================================
 @project_routes.post("/api/project/<project_id>/force_approve_batch")
 def force_approve_batch(project_id):
@@ -553,7 +644,6 @@ def force_approve_batch(project_id):
     if not data:
         return jsonify({"error": "No JSON data provided"}), 400
 
-    # ⭐ Obsługa wielu nazw pól
     batch_text = data.get("text") or data.get("batch_text")
     if not batch_text:
         return jsonify({"error": "Field 'text' or 'batch_text' is required"}), 400
@@ -565,7 +655,7 @@ def force_approve_batch(project_id):
 
 
 # ================================================================
-# 📦 EXPORT (Late HTML Injection)
+# 📦 EXPORT
 # ================================================================
 @project_routes.get("/api/project/<project_id>/export")
 def export_project_data(project_id):
@@ -579,66 +669,19 @@ def export_project_data(project_id):
     batches = data.get("batches", [])
     full_text = "\n\n".join(b.get("text", "") for b in batches)
 
-    html_ready = f"<article><p>{full_text.replace(chr(10)*2, '</p><p>')}</p></article>"
-
     return jsonify({
         "status": "EXPORT_READY",
         "topic": data.get("topic"),
-        "article_html": html_ready,
+        "article_text": full_text,  # ⭐ Czysty tekst, nie HTML
         "batch_count": len(batches),
-        "version": "v22.0"
+        "version": "v22.1"
     }), 200
 
 
 # ================================================================
-# 🔄 ALIAS: auto_correct_keywords (kompatybilność z OpenAPI schema)
+# 🔄 ALIAS: auto_correct_keywords
 # ================================================================
 @project_routes.post("/api/project/<project_id>/auto_correct_keywords")
 def auto_correct_keywords_alias(project_id):
-    """
-    Alias dla auto_correct - kompatybilność z OpenAPI schema.
-    Endpoint w schema: /api/project/{id}/auto_correct_keywords
-    Endpoint oryginalny: /api/project/{id}/auto_correct
-    """
+    """Alias dla auto_correct - kompatybilność z OpenAPI schema."""
     return auto_correct_batch(project_id)
-
-
-# ================================================================
-# 📊 GET PROJECT STATUS (dla n8n i Custom GPT)
-# ================================================================
-@project_routes.get("/api/project/<project_id>/status")
-def get_project_status(project_id):
-    """
-    Zwraca aktualny status projektu - keywords_state, batche, postęp.
-    """
-    db = firestore.client()
-    doc = db.collection("seo_projects").document(project_id).get()
-    if not doc.exists:
-        return jsonify({"error": "Project not found"}), 404
-    
-    data = doc.to_dict()
-    keywords_state = data.get("keywords_state", {})
-    batches = data.get("batches", [])
-    
-    # Podsumowanie keywords
-    keyword_summary = []
-    for rid, meta in keywords_state.items():
-        keyword_summary.append({
-            "keyword": meta.get("keyword"),
-            "type": meta.get("type", "BASIC"),
-            "actual": meta.get("actual_uses", 0),
-            "target_min": meta.get("target_min", 0),
-            "target_max": meta.get("target_max", 999),
-            "status": meta.get("status"),
-            "remaining_max": meta.get("remaining_max", 0)
-        })
-    
-    return jsonify({
-        "project_id": project_id,
-        "topic": data.get("topic"),
-        "total_batches": len(batches),
-        "keywords_count": len(keywords_state),
-        "keywords": keyword_summary,
-        "source": data.get("source", "unknown"),
-        "has_final_review": "final_review" in data
-    }), 200
