@@ -74,7 +74,7 @@ def generate_h2_suggestions():
         }), 200
     
     try:
-        model = genai.GenerativeModel("gemini-2.0-flash")
+        model = genai.GenerativeModel("gemini-2.5-flash")
         
         # Przygotuj kontekst z konkurencji
         competitor_context = ""
@@ -130,7 +130,7 @@ Zwróć TYLKO listę {target_count} H2, każdy w nowej linii, bez numeracji ani 
             "status": "OK",
             "suggestions": suggestions,
             "topic": topic,
-            "model": "gemini-2.0-flash",
+            "model": "gemini-2.5-flash",
             "count": len(suggestions)
         }), 200
         
@@ -265,10 +265,14 @@ def create_project():
 @project_routes.post("/api/project/<project_id>/add_batch")
 def add_batch_to_project(project_id):
     data = request.get_json()
-    if not data or "text" not in data:
-        return jsonify({"error": "Field 'text' is required"}), 400
+    if not data:
+        return jsonify({"error": "No JSON data provided"}), 400
 
-    batch_text = data["text"]
+    # ⭐ Obsługa wielu nazw pól
+    batch_text = data.get("text") or data.get("batch_text")
+    if not batch_text:
+        return jsonify({"error": "Field 'text' or 'batch_text' is required"}), 400
+
     meta_trace = data.get("meta_trace", {})
 
     # 🔍 Wstępna analiza używa process_batch_in_firestore, które wewnętrznie wywołuje unified_prevalidation
@@ -290,10 +294,14 @@ def add_batch_to_project(project_id):
 @project_routes.post("/api/project/<project_id>/manual_correct")
 def manual_correct_batch(project_id):
     data = request.get_json()
-    if not data or "text" not in data:
-        return jsonify({"error": "Field 'text' is required"}), 400
+    if not data:
+        return jsonify({"error": "No JSON data provided"}), 400
 
-    corrected_text = data["text"]
+    # ⭐ Obsługa wielu nazw pól
+    corrected_text = data.get("text") or data.get("batch_text") or data.get("corrected_text")
+    if not corrected_text:
+        return jsonify({"error": "Field 'text' or 'batch_text' is required"}), 400
+
     meta_trace = data.get("meta_trace", {})
     forced = data.get("forced", False)
 
@@ -352,16 +360,19 @@ def manual_correct_batch(project_id):
 @project_routes.post("/api/project/<project_id>/auto_correct")
 def auto_correct_batch(project_id):
     """
-    Automatyczna korekta batcha używając Gemini 2.0 Flash:
+    Automatyczna korekta batcha używając Gemini 2.5 Flash:
     - Analizuje które frazy są UNDER lub OVER
     - Generuje poprawioną wersję tekstu
     - Zachowuje strukturę HTML i ton
     """
     data = request.get_json()
-    if not data or "text" not in data:
-        return jsonify({"error": "Field 'text' is required"}), 400
+    if not data:
+        return jsonify({"error": "No JSON data provided"}), 400
 
-    batch_text = data["text"]
+    # ⭐ Obsługa wielu nazw pól dla kompatybilności z różnymi wersjami OpenAPI
+    batch_text = data.get("text") or data.get("batch_text") or data.get("corrected_text")
+    if not batch_text:
+        return jsonify({"error": "Field 'text' or 'batch_text' is required"}), 400
     
     db = firestore.client()
     doc = db.collection("seo_projects").document(project_id).get()
@@ -423,7 +434,7 @@ def auto_correct_batch(project_id):
         }), 500
     
     try:
-        model = genai.GenerativeModel("gemini-2.0-flash")
+        model = genai.GenerativeModel("gemini-2.5-flash")
         
         # Przygotuj instrukcje korekty
         correction_instructions = []
@@ -502,8 +513,13 @@ Zwróć TYLKO poprawiony tekst HTML, bez żadnych komentarzy.
 @project_routes.post("/api/project/<project_id>/preview_all_checks")
 def preview_all_checks(project_id):
     data = request.get_json()
-    if not data or "text" not in data:
-        return jsonify({"error": "Field 'text' is required"}), 400
+    if not data:
+        return jsonify({"error": "No JSON data provided"}), 400
+
+    # ⭐ Obsługa wielu nazw pól
+    text = data.get("text") or data.get("batch_text")
+    if not text:
+        return jsonify({"error": "Field 'text' or 'batch_text' is required"}), 400
 
     db = firestore.client()
     doc = db.collection("seo_projects").document(project_id).get()
@@ -513,7 +529,7 @@ def preview_all_checks(project_id):
     project_data = doc.to_dict()
     keywords_state = project_data.get("keywords_state", {})
 
-    report = unified_prevalidation(data["text"], keywords_state)
+    report = unified_prevalidation(text, keywords_state)
 
     return jsonify({
         "status": "CHECKED",
@@ -534,10 +550,14 @@ def preview_all_checks(project_id):
 @project_routes.post("/api/project/<project_id>/force_approve_batch")
 def force_approve_batch(project_id):
     data = request.get_json()
-    if not data or "text" not in data:
-        return jsonify({"error": "Field 'text' is required"}), 400
+    if not data:
+        return jsonify({"error": "No JSON data provided"}), 400
 
-    batch_text = data["text"]
+    # ⭐ Obsługa wielu nazw pól
+    batch_text = data.get("text") or data.get("batch_text")
+    if not batch_text:
+        return jsonify({"error": "Field 'text' or 'batch_text' is required"}), 400
+
     meta_trace = data.get("meta_trace", {})
 
     print("[FORCE APPROVE] User requested forced save.")
