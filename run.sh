@@ -27,13 +27,13 @@ fi
 python - <<'EOF'
 import spacy
 import sys
+import subprocess
 try:
-    spacy.load("pl_core_news_sm")
-    print("✅ SpaCy model pl_core_news_sm is available")
+    spacy.load("pl_core_news_md")
+    print("✅ SpaCy model pl_core_news_md is available")
 except Exception:
-    print("⚙️ Installing lightweight SpaCy model: pl_core_news_sm")
-    import subprocess
-    subprocess.check_call([sys.executable, "-m", "spacy", "download", "pl_core_news_sm"])
+    print("⚙️ Installing SpaCy model: pl_core_news_md")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "https://github.com/explosion/spacy-models/releases/download/pl_core_news_md-3.7.0/pl_core_news_md-3.7.0-py3-none-any.whl"])
 EOF
 
 # --- Check Firestore credentials (required) ---
