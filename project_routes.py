@@ -590,6 +590,16 @@ def get_pre_batch_info(project_id):
         for h2 in remaining_h2[:3]:
             prompt_sections.append(f"  • {h2}")
     
+    # ⭐ v22.1: STYLE REMINDER (zapobiega State Drift)
+    prompt_sections.append("\n\n" + "="*40)
+    prompt_sections.append("📝 STYL (PRZYPOMNIJ SOBIE!):")
+    prompt_sections.append("  • Format: h2: Tytuł / h3: Tytuł (bez HTML!)")
+    prompt_sections.append("  • Zdania: 14-18 słów średnio, max 25")
+    prompt_sections.append("  • ZAKAZANE na początku sekcji: 'Dlatego', 'Ponadto', 'Warto zauważyć'")
+    prompt_sections.append("  • Ton: ekspert doradzający przyjacielowi")
+    prompt_sections.append("  • Akapity: 2-4 zdania, bez ścian tekstu")
+    prompt_sections.append("="*40)
+    
     gpt_prompt = "\n".join(prompt_sections)
     
     # ================================================================
