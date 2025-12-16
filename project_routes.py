@@ -344,6 +344,11 @@ def get_pre_batch_info(project_id):
     current_batch_num = len(batches) + 1
     remaining_batches = max(1, total_planned_batches - len(batches))
     
+    # ⭐ v22.1: PROGRESS TRACKING (dla dynamicznych limitów)
+    progress = current_batch_num / total_planned_batches  # 0.2, 0.4, 0.6, 0.8, 1.0
+    is_late_stage = progress > 0.6  # Ostatnie 40% artykułu
+    is_mid_stage = progress > 0.4   # Środek artykułu
+    
     # ================================================================
     # 📊 ANALIZA FRAZ Z PEŁNYM PLANEM
     # ================================================================
@@ -365,11 +370,33 @@ def get_pre_batch_info(project_id):
         remaining_to_max = max(0, target_max - actual)
         remaining_to_min = max(0, target_min - actual)
         
-        # ⭐ SMART CALCULATIONS
-        # Max per batch = równomierny rozkład (zapobiega stuffing)
-        max_per_batch = max(1, math.ceil(target_max / total_planned_batches))
+        # ================================================================
+        # ⭐ ZMIANA 1: DYNAMICZNY LIMIT NA BATCH (malejący z postępem)
+        # ================================================================
+        base_max_per_batch = max(1, math.ceil(target_max / total_planned_batches))
         
-        # Suggested = ile użyć w tym batchu dla równomiernego rozkładu
+        if is_late_stage:  # Ostatnie 40% artykułu → max 1x
+            max_per_batch = 1
+        elif is_mid_stage:  # Środek → zmniejsz o 1
+            max_per_batch = max(1, base_max_per_batch - 1)
+        else:  # Początek → normalnie
+            max_per_batch = base_max_per_batch
+        
+        # ================================================================
+        # ⭐ ZMIANA 2: GLOBALNE TEMPO (Pacing) - czy ahead of schedule?
+        # ================================================================
+        expected_uses = math.floor(target_max * progress)
+        is_ahead_of_schedule = actual >= expected_uses and actual >= target_min
+        
+        # ================================================================
+        # ⭐ ZMIANA 3: TWARDY LIMIT 70% przed ostatnim batchem
+        # ================================================================
+        soft_cap = math.floor(target_max * 0.7)
+        is_near_soft_cap = actual >= soft_cap and current_batch_num < total_planned_batches
+        
+        # ================================================================
+        # SUGGESTED CALCULATION (z uwzględnieniem nowych reguł)
+        # ================================================================
         if remaining_to_max > 0 and remaining_batches > 0:
             suggested = min(
                 math.ceil(remaining_to_max / remaining_batches),
@@ -382,10 +409,15 @@ def get_pre_batch_info(project_id):
         if remaining_to_min > 0:
             min_needed_per_batch = math.ceil(remaining_to_min / remaining_batches)
             suggested = max(suggested, min_needed_per_batch)
-            # Ale nie więcej niż max_per_batch
             suggested = min(suggested, max_per_batch + 1)  # +1 dla UNDER
         
-        # ⭐ PRIORYTET
+        # ⭐ Redukcja suggested jeśli ahead of schedule lub near soft cap
+        if is_ahead_of_schedule and remaining_to_min <= 0:
+            suggested = 0  # Nie sugeruj więcej - jesteśmy "do przodu"
+        
+        # ================================================================
+        # ⭐ PRIORYTET (z nowymi regułami)
+        # ================================================================
         if actual > target_max:
             priority = "EXCEEDED"
             reason = f"❌ Już {actual}x (max {target_max}x) - NIE UŻYWAJ!"
@@ -394,6 +426,11 @@ def get_pre_batch_info(project_id):
             priority = "LOCKED"
             reason = f"🔒 Osiągnięto max {target_max}x - użyj SYNONIMÓW"
             suggested = 0
+        elif is_near_soft_cap:
+            # ⭐ ZMIANA 3: Soft lock przy 70%
+            priority = "LOCKED"
+            reason = f"🔒 SOFT CAP: {actual}x/{target_max}x (70% przed końcem) - zostaw na później"
+            suggested = 0
         elif remaining_to_min > 0 and remaining_batches == 1:
             priority = "CRITICAL"
             reason = f"🔴 OSTATNI BATCH! Potrzeba {remaining_to_min}x do min!"
@@ -401,6 +438,11 @@ def get_pre_batch_info(project_id):
         elif remaining_to_min > 0:
             priority = "HIGH"
             reason = f"🟠 UNDER - brakuje {remaining_to_min}x (cel: {target_min}x)"
+        elif is_ahead_of_schedule:
+            # ⭐ ZMIANA 2: Ahead of schedule → LOW priority
+            priority = "LOW"
+            reason = f"⚪ AHEAD: {actual}x (oczekiwano {expected_uses}x) - odpuść"
+            suggested = 0
         elif actual >= target_min and remaining_to_max > 0:
             priority = "NORMAL"
             reason = f"🟢 OK ({actual}/{target_min}-{target_max}) - sugerowane {suggested}x"
@@ -420,7 +462,15 @@ def get_pre_batch_info(project_id):
             "remaining_to_max": remaining_to_max,
             "max_per_batch": max_per_batch,
             "suggested": suggested,
-            "reason": reason
+            "reason": reason,
+            # ⭐ NOWE: debug info
+            "pacing": {
+                "progress": round(progress, 2),
+                "expected_uses": expected_uses,
+                "is_ahead": is_ahead_of_schedule,
+                "soft_cap": soft_cap,
+                "is_near_soft_cap": is_near_soft_cap
+            }
         }
         
         keyword_plan.append(kw_info)
