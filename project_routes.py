@@ -29,8 +29,8 @@ except OSError:
 
 project_routes = Blueprint("project_routes", __name__)
 
-# ⭐ GEMINI MODEL - centralnie zdefiniowany
-GEMINI_MODEL = "gemini-2.5-flash"
+# ⭐ GEMINI MODEL - centralnie zdefiniowany (z możliwością override przez env)
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 
 # ================================================================
@@ -443,6 +443,13 @@ def get_pre_batch_info(project_id):
     priority_order = {"CRITICAL": 0, "HIGH": 1, "NORMAL": 2, "LOW": 3, "LOCKED": 4, "EXCEEDED": 5}
     keyword_plan.sort(key=lambda x: priority_order.get(x["priority"], 99))
     
+    # ⭐ ANTI-STUFFING FILTER (v22.1)
+    # GPT widząc 15 fraz NORMAL próbuje upchnąć wszystkie = keyword stuffing
+    # Sortujemy NORMAL malejąco po zapotrzebowaniu (ile brakuje do max)
+    normal_keywords.sort(key=lambda x: (x['target_max'] - x['actual']), reverse=True)
+    # Wybieramy max 3 najważniejsze frazy NORMAL na ten batch
+    selected_normal_keywords = normal_keywords[:3]
+    
     # ================================================================
     # 📝 ANALIZA POPRZEDNICH BATCHÓW
     # ================================================================
@@ -504,11 +511,11 @@ def get_pre_batch_info(project_id):
         for kw in high_priority:
             prompt_sections.append(f"  • {kw['keyword']}: użyj {kw['suggested']}x (brakuje {kw['remaining_to_min']}x)")
     
-    # NORMAL
-    if normal_keywords:
-        prompt_sections.append("\n🟢 NORMALNE (sugerowane użycie):")
-        for kw in normal_keywords[:5]:  # Max 5
-            prompt_sections.append(f"  • {kw['keyword']}: max {kw['max_per_batch']}x (sugerowane: {kw['suggested']}x)")
+    # NORMAL (Anti-Stuffing: pokazujemy tylko wybrane 3)
+    if selected_normal_keywords:
+        prompt_sections.append("\n🟢 NORMALNE (Opcjonalne - wpleć tylko jeśli pasuje):")
+        for kw in selected_normal_keywords:
+            prompt_sections.append(f"  • {kw['keyword']}: max {kw['max_per_batch']}x (nie wpychaj na siłę)")
     
     # LOW
     if low_priority:
