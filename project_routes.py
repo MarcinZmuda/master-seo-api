@@ -375,23 +375,26 @@ def get_pre_batch_info(project_id):
         # ================================================================
         base_max_per_batch = max(1, math.ceil(target_max / total_planned_batches))
         
-        if is_late_stage:  # Ostatnie 40% artykułu → max 1x
+        # v22.1.1: Łagodniejsze limity - tylko late stage (80%+) ma limit 1
+        if progress > 0.8:  # Ostatnie 20% artykułu → max 1x
             max_per_batch = 1
-        elif is_mid_stage:  # Środek → zmniejsz o 1
+        elif is_late_stage:  # 60-80% → zmniejsz o 1
             max_per_batch = max(1, base_max_per_batch - 1)
-        else:  # Początek → normalnie
+        else:  # Początek i środek → normalnie
             max_per_batch = base_max_per_batch
         
         # ================================================================
         # ⭐ ZMIANA 2: GLOBALNE TEMPO (Pacing) - czy ahead of schedule?
+        # v22.1.1: Tylko jeśli ZNACZNIE ahead (actual > expected + 2)
         # ================================================================
         expected_uses = math.floor(target_max * progress)
-        is_ahead_of_schedule = actual >= expected_uses and actual >= target_min
+        is_ahead_of_schedule = actual >= expected_uses + 2 and actual >= target_min
         
         # ================================================================
-        # ⭐ ZMIANA 3: TWARDY LIMIT 70% przed ostatnim batchem
+        # ⭐ ZMIANA 3: SOFT CAP 85% (było 70%) przed ostatnim batchem
+        # v22.1.1: Wyższy próg żeby nie blokować za wcześnie
         # ================================================================
-        soft_cap = math.floor(target_max * 0.7)
+        soft_cap = math.floor(target_max * 0.85)
         is_near_soft_cap = actual >= soft_cap and current_batch_num < total_planned_batches
         
         # ================================================================
@@ -405,15 +408,15 @@ def get_pre_batch_info(project_id):
         else:
             suggested = 0
         
-        # Jeśli UNDER - zwiększ suggested żeby nadrobić
+        # ⭐ v22.1.1: PRIORYTET DLA UNDER - zawsze sugeruj min 1 jeśli nie osiągnięto minimum!
         if remaining_to_min > 0:
             min_needed_per_batch = math.ceil(remaining_to_min / remaining_batches)
-            suggested = max(suggested, min_needed_per_batch)
-            suggested = min(suggested, max_per_batch + 1)  # +1 dla UNDER
+            suggested = max(suggested, min_needed_per_batch, 1)  # Zawsze min 1 dla UNDER
+            suggested = min(suggested, max_per_batch + 2)  # +2 dla UNDER (więcej elastyczności)
         
-        # ⭐ Redukcja suggested jeśli ahead of schedule lub near soft cap
+        # ⭐ Redukcja suggested TYLKO jeśli ahead of schedule I już mamy minimum
         if is_ahead_of_schedule and remaining_to_min <= 0:
-            suggested = 0  # Nie sugeruj więcej - jesteśmy "do przodu"
+            suggested = max(0, suggested - 1)  # Tylko zmniejsz, nie zeruj całkiem
         
         # ================================================================
         # ⭐ PRIORYTET (z nowymi regułami)
@@ -426,10 +429,10 @@ def get_pre_batch_info(project_id):
             priority = "LOCKED"
             reason = f"🔒 Osiągnięto max {target_max}x - użyj SYNONIMÓW"
             suggested = 0
-        elif is_near_soft_cap:
-            # ⭐ ZMIANA 3: Soft lock przy 70%
-            priority = "LOCKED"
-            reason = f"🔒 SOFT CAP: {actual}x/{target_max}x (70% przed końcem) - zostaw na później"
+        elif is_near_soft_cap and remaining_to_min <= 0:
+            # ⭐ v22.1.1: Soft lock TYLKO jeśli już mamy minimum!
+            priority = "LOW"
+            reason = f"⚪ SOFT CAP: {actual}x/{target_max}x (85%) - zostaw na później"
             suggested = 0
         elif remaining_to_min > 0 and remaining_batches == 1:
             priority = "CRITICAL"
@@ -437,12 +440,11 @@ def get_pre_batch_info(project_id):
             suggested = remaining_to_min
         elif remaining_to_min > 0:
             priority = "HIGH"
-            reason = f"🟠 UNDER - brakuje {remaining_to_min}x (cel: {target_min}x)"
+            reason = f"🟠 UNDER - brakuje {remaining_to_min}x (cel: {target_min}x) - UŻYJ!"
         elif is_ahead_of_schedule:
-            # ⭐ ZMIANA 2: Ahead of schedule → LOW priority
             priority = "LOW"
-            reason = f"⚪ AHEAD: {actual}x (oczekiwano {expected_uses}x) - odpuść"
-            suggested = 0
+            reason = f"⚪ AHEAD: {actual}x (oczekiwano {expected_uses}x) - opcjonalne"
+            suggested = max(0, suggested)
         elif actual >= target_min and remaining_to_max > 0:
             priority = "NORMAL"
             reason = f"🟢 OK ({actual}/{target_min}-{target_max}) - sugerowane {suggested}x"
@@ -507,12 +509,17 @@ def get_pre_batch_info(project_id):
     used_h3 = []
     all_topics_covered = []
     last_sentences = ""
+    previous_batch_summary = ""  # ⭐ NOWE: Podsumowanie poprzedniego batcha
     
     for i, batch in enumerate(batches):
         batch_text = batch.get("text", "")
         
+        # Szukamy zarówno HTML tagów jak i markerów h2:/h3:
         h2_in_batch = re.findall(r'<h2[^>]*>(.*?)</h2>', batch_text, re.IGNORECASE | re.DOTALL)
+        h2_in_batch += re.findall(r'^h2:\s*(.+)$', batch_text, re.MULTILINE | re.IGNORECASE)
+        
         h3_in_batch = re.findall(r'<h3[^>]*>(.*?)</h3>', batch_text, re.IGNORECASE | re.DOTALL)
+        h3_in_batch += re.findall(r'^h3:\s*(.+)$', batch_text, re.MULTILINE | re.IGNORECASE)
         
         used_h2.extend([h.strip() for h in h2_in_batch])
         used_h3.extend([h.strip() for h in h3_in_batch])
@@ -521,12 +528,43 @@ def get_pre_batch_info(project_id):
     if batches:
         last_batch_text = batches[-1].get("text", "")
         clean_last = re.sub(r'<[^>]+>', '', last_batch_text)
+        # Usuń też markery h2:/h3:
+        clean_last = re.sub(r'^h[23]:\s*.+$', '', clean_last, flags=re.MULTILINE)
+        clean_last = re.sub(r'\n+', '\n', clean_last).strip()
+        
         sentences = re.split(r'[.!?]+', clean_last)
-        sentences = [s.strip() for s in sentences if s.strip()]
+        sentences = [s.strip() for s in sentences if s.strip() and len(s.strip()) > 20]
+        
         if len(sentences) >= 2:
             last_sentences = ". ".join(sentences[-2:]) + "."
         elif sentences:
             last_sentences = sentences[-1] + "."
+        
+        # ⭐ NOWE: Buduj podsumowanie poprzedniego batcha
+        last_h2 = []
+        last_h3 = []
+        last_h2 += re.findall(r'<h2[^>]*>(.*?)</h2>', last_batch_text, re.IGNORECASE)
+        last_h2 += re.findall(r'^h2:\s*(.+)$', last_batch_text, re.MULTILINE | re.IGNORECASE)
+        last_h3 += re.findall(r'<h3[^>]*>(.*?)</h3>', last_batch_text, re.IGNORECASE)
+        last_h3 += re.findall(r'^h3:\s*(.+)$', last_batch_text, re.MULTILINE | re.IGNORECASE)
+        
+        # Wyciągnij kluczowe punkty (pierwsze zdanie każdego akapitu)
+        paragraphs = [p.strip() for p in clean_last.split('\n\n') if p.strip() and len(p.strip()) > 50]
+        key_points = []
+        for p in paragraphs[:4]:  # Max 4 akapity
+            first_sentence = re.split(r'[.!?]', p)[0].strip()
+            if first_sentence and len(first_sentence) > 20:
+                key_points.append(first_sentence[:100] + "..." if len(first_sentence) > 100 else first_sentence)
+        
+        if last_h2 or last_h3 or key_points:
+            summary_parts = []
+            if last_h2:
+                summary_parts.append(f"H2: {', '.join([h.strip() for h in last_h2])}")
+            if last_h3:
+                summary_parts.append(f"H3: {', '.join([h.strip() for h in last_h3])}")
+            if key_points:
+                summary_parts.append(f"Kluczowe punkty: {'; '.join(key_points[:3])}")
+            previous_batch_summary = " | ".join(summary_parts)
     
     remaining_h2 = [h2 for h2 in h2_structure if h2 not in used_h2]
     
@@ -536,6 +574,12 @@ def get_pre_batch_info(project_id):
     prompt_sections = []
     prompt_sections.append(f"📋 BATCH #{current_batch_num} z {total_planned_batches} (zostało: {remaining_batches})")
     prompt_sections.append("")
+    
+    # ⭐ NOWE: Podsumowanie poprzedniego batcha
+    if previous_batch_summary and current_batch_num > 1:
+        prompt_sections.append("📖 POPRZEDNI BATCH (NIE POWTARZAJ!):")
+        prompt_sections.append(f"  {previous_batch_summary}")
+        prompt_sections.append("")
     
     # CRITICAL
     if critical_keywords:
@@ -590,7 +634,7 @@ def get_pre_batch_info(project_id):
         for h2 in remaining_h2[:3]:
             prompt_sections.append(f"  • {h2}")
     
-    # ⭐ v22.1: STYLE REMINDER (zapobiega State Drift)
+    # ⭐ v22.1.1: STYLE REMINDER (rozszerzony)
     prompt_sections.append("\n\n" + "="*40)
     prompt_sections.append("📝 STYL (PRZYPOMNIJ SOBIE!):")
     prompt_sections.append("  • Format: h2: Tytuł / h3: Tytuł (bez HTML!)")
@@ -598,6 +642,17 @@ def get_pre_batch_info(project_id):
     prompt_sections.append("  • ZAKAZANE na początku sekcji: 'Dlatego', 'Ponadto', 'Warto zauważyć'")
     prompt_sections.append("  • Ton: ekspert doradzający przyjacielowi")
     prompt_sections.append("  • Akapity: 2-4 zdania, bez ścian tekstu")
+    prompt_sections.append("")
+    prompt_sections.append("📍 H3 PLACEMENT:")
+    prompt_sections.append("  • H3 NIGDY na początku sekcji H2!")
+    prompt_sections.append("  • Najpierw 2-3 akapity wprowadzające pod H2")
+    prompt_sections.append("  • Potem H3 w ŚRODKU sekcji (po 150-200 słowach)")
+    prompt_sections.append("  • Kolejne 2-3 akapity po H3")
+    prompt_sections.append("")
+    prompt_sections.append("🔄 ANTY-POWTÓRZENIA:")
+    prompt_sections.append("  • NIE powtarzaj informacji z poprzednich sekcji!")
+    prompt_sections.append("  • Każda sekcja = NOWY aspekt tematu")
+    prompt_sections.append("  • Sprawdź 'NIE POWIELAJ' powyżej")
     prompt_sections.append("="*40)
     
     gpt_prompt = "\n".join(prompt_sections)
