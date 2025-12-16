@@ -1,5 +1,5 @@
 # ================================================================
-# 🧠 Brajen Semantic Engine v19.6-LIGHT — Dockerfile (2 GB RAM Safe)
+# 🧠 Brajen Semantic Engine v22.1 — Dockerfile
 # ================================================================
 
 FROM python:3.11-slim
@@ -22,35 +22,16 @@ COPY requirements.txt .
 RUN pip install --upgrade pip setuptools wheel
 RUN pip install --no-cache-dir -r requirements.txt
 
-# ================================================================
-# 🧩 Install Polish SpaCy model (MD - Medium) directly via URL
-# ================================================================
-# Używamy bezpośredniego linku do .whl, aby uniknąć błędów 404 przy spacy download
-RUN pip install --no-cache-dir https://github.com/explosion/spacy-models/releases/download/pl_core_news_md-3.7.0/pl_core_news_md-3.7.0-py3-none-any.whl && \
-    python -m spacy validate
-
-# --- Optional test (NLP sanity check) ---
-RUN python - <<'PYCODE'
-import spacy
-try:
-    nlp = spacy.load("pl_core_news_md")
-    print("✅ SpaCy Polish model (MD) loaded successfully.")
-except Exception as e:
-    print(f"❌ Failed to load model: {e}")
-    exit(1)
-PYCODE
+# --- Validate SpaCy Model ---
+RUN python -m spacy validate
 
 # --- Copy project files ---
 COPY . .
 
-# --- Environment ---
+# --- Environment Defaults ---
 ENV PORT=8080
 ENV PYTHONUNBUFFERED=1
-ENV FIREBASE_CREDS_JSON=""
-ENV DEBUG_MODE=false
-ENV GEMINI_API_KEY=""
 ENV FINAL_REVIEW_MODEL="gemini-2.5-flash"
-
 
 # --- Non-root user ---
 RUN adduser --disabled-password --gecos '' brajenuser && chown -R brajenuser /app
@@ -61,6 +42,6 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD curl -f http://localhost:$PORT/health || exit 1
 
 # ================================================================
-# 🚀 Run app (1 worker, low RAM mode)
+# 🚀 Run app (1 worker, threaded for concurrency)
 # ================================================================
-CMD exec gunicorn --bind 0.0.0.0:$PORT --workers 1 --threads 2 master_api:app
+CMD exec gunicorn --bind 0.0.0.0:$PORT --workers 1 --threads 4 master_api:app
