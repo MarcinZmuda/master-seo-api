@@ -29,8 +29,8 @@ except OSError:
 
 project_routes = Blueprint("project_routes", __name__)
 
-# ⭐ GEMINI MODEL - centralnie zdefiniowany (z możliwością override przez env)
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+# ⭐ GEMINI MODEL - centralnie zdefiniowany
+GEMINI_MODEL = "gemini-2.5-flash"
 
 
 # ================================================================
@@ -344,11 +344,6 @@ def get_pre_batch_info(project_id):
     current_batch_num = len(batches) + 1
     remaining_batches = max(1, total_planned_batches - len(batches))
     
-    # ⭐ v22.1: PROGRESS TRACKING (dla dynamicznych limitów)
-    progress = current_batch_num / total_planned_batches  # 0.2, 0.4, 0.6, 0.8, 1.0
-    is_late_stage = progress > 0.6  # Ostatnie 40% artykułu
-    is_mid_stage = progress > 0.4   # Środek artykułu
-    
     # ================================================================
     # 📊 ANALIZA FRAZ Z PEŁNYM PLANEM
     # ================================================================
@@ -370,36 +365,11 @@ def get_pre_batch_info(project_id):
         remaining_to_max = max(0, target_max - actual)
         remaining_to_min = max(0, target_min - actual)
         
-        # ================================================================
-        # ⭐ ZMIANA 1: DYNAMICZNY LIMIT NA BATCH (malejący z postępem)
-        # ================================================================
-        base_max_per_batch = max(1, math.ceil(target_max / total_planned_batches))
+        # ⭐ SMART CALCULATIONS
+        # Max per batch = równomierny rozkład (zapobiega stuffing)
+        max_per_batch = max(1, math.ceil(target_max / total_planned_batches))
         
-        # v22.1.1: Łagodniejsze limity - tylko late stage (80%+) ma limit 1
-        if progress > 0.8:  # Ostatnie 20% artykułu → max 1x
-            max_per_batch = 1
-        elif is_late_stage:  # 60-80% → zmniejsz o 1
-            max_per_batch = max(1, base_max_per_batch - 1)
-        else:  # Początek i środek → normalnie
-            max_per_batch = base_max_per_batch
-        
-        # ================================================================
-        # ⭐ ZMIANA 2: GLOBALNE TEMPO (Pacing) - czy ahead of schedule?
-        # v22.1.1: Tylko jeśli ZNACZNIE ahead (actual > expected + 2)
-        # ================================================================
-        expected_uses = math.floor(target_max * progress)
-        is_ahead_of_schedule = actual >= expected_uses + 2 and actual >= target_min
-        
-        # ================================================================
-        # ⭐ ZMIANA 3: SOFT CAP 85% (było 70%) przed ostatnim batchem
-        # v22.1.1: Wyższy próg żeby nie blokować za wcześnie
-        # ================================================================
-        soft_cap = math.floor(target_max * 0.85)
-        is_near_soft_cap = actual >= soft_cap and current_batch_num < total_planned_batches
-        
-        # ================================================================
-        # SUGGESTED CALCULATION (z uwzględnieniem nowych reguł)
-        # ================================================================
+        # Suggested = ile użyć w tym batchu dla równomiernego rozkładu
         if remaining_to_max > 0 and remaining_batches > 0:
             suggested = min(
                 math.ceil(remaining_to_max / remaining_batches),
@@ -408,19 +378,14 @@ def get_pre_batch_info(project_id):
         else:
             suggested = 0
         
-        # ⭐ v22.1.1: PRIORYTET DLA UNDER - zawsze sugeruj min 1 jeśli nie osiągnięto minimum!
+        # Jeśli UNDER - zwiększ suggested żeby nadrobić
         if remaining_to_min > 0:
             min_needed_per_batch = math.ceil(remaining_to_min / remaining_batches)
-            suggested = max(suggested, min_needed_per_batch, 1)  # Zawsze min 1 dla UNDER
-            suggested = min(suggested, max_per_batch + 2)  # +2 dla UNDER (więcej elastyczności)
+            suggested = max(suggested, min_needed_per_batch)
+            # Ale nie więcej niż max_per_batch
+            suggested = min(suggested, max_per_batch + 1)  # +1 dla UNDER
         
-        # ⭐ Redukcja suggested TYLKO jeśli ahead of schedule I już mamy minimum
-        if is_ahead_of_schedule and remaining_to_min <= 0:
-            suggested = max(0, suggested - 1)  # Tylko zmniejsz, nie zeruj całkiem
-        
-        # ================================================================
-        # ⭐ PRIORYTET (z nowymi regułami)
-        # ================================================================
+        # ⭐ PRIORYTET
         if actual > target_max:
             priority = "EXCEEDED"
             reason = f"❌ Już {actual}x (max {target_max}x) - NIE UŻYWAJ!"
@@ -429,22 +394,13 @@ def get_pre_batch_info(project_id):
             priority = "LOCKED"
             reason = f"🔒 Osiągnięto max {target_max}x - użyj SYNONIMÓW"
             suggested = 0
-        elif is_near_soft_cap and remaining_to_min <= 0:
-            # ⭐ v22.1.1: Soft lock TYLKO jeśli już mamy minimum!
-            priority = "LOW"
-            reason = f"⚪ SOFT CAP: {actual}x/{target_max}x (85%) - zostaw na później"
-            suggested = 0
         elif remaining_to_min > 0 and remaining_batches == 1:
             priority = "CRITICAL"
             reason = f"🔴 OSTATNI BATCH! Potrzeba {remaining_to_min}x do min!"
             suggested = remaining_to_min
         elif remaining_to_min > 0:
             priority = "HIGH"
-            reason = f"🟠 UNDER - brakuje {remaining_to_min}x (cel: {target_min}x) - UŻYJ!"
-        elif is_ahead_of_schedule:
-            priority = "LOW"
-            reason = f"⚪ AHEAD: {actual}x (oczekiwano {expected_uses}x) - opcjonalne"
-            suggested = max(0, suggested)
+            reason = f"🟠 UNDER - brakuje {remaining_to_min}x (cel: {target_min}x)"
         elif actual >= target_min and remaining_to_max > 0:
             priority = "NORMAL"
             reason = f"🟢 OK ({actual}/{target_min}-{target_max}) - sugerowane {suggested}x"
@@ -464,15 +420,7 @@ def get_pre_batch_info(project_id):
             "remaining_to_max": remaining_to_max,
             "max_per_batch": max_per_batch,
             "suggested": suggested,
-            "reason": reason,
-            # ⭐ NOWE: debug info
-            "pacing": {
-                "progress": round(progress, 2),
-                "expected_uses": expected_uses,
-                "is_ahead": is_ahead_of_schedule,
-                "soft_cap": soft_cap,
-                "is_near_soft_cap": is_near_soft_cap
-            }
+            "reason": reason
         }
         
         keyword_plan.append(kw_info)
@@ -495,13 +443,6 @@ def get_pre_batch_info(project_id):
     priority_order = {"CRITICAL": 0, "HIGH": 1, "NORMAL": 2, "LOW": 3, "LOCKED": 4, "EXCEEDED": 5}
     keyword_plan.sort(key=lambda x: priority_order.get(x["priority"], 99))
     
-    # ⭐ ANTI-STUFFING FILTER (v22.1)
-    # GPT widząc 15 fraz NORMAL próbuje upchnąć wszystkie = keyword stuffing
-    # Sortujemy NORMAL malejąco po zapotrzebowaniu (ile brakuje do max)
-    normal_keywords.sort(key=lambda x: (x['target_max'] - x['actual']), reverse=True)
-    # Wybieramy max 3 najważniejsze frazy NORMAL na ten batch
-    selected_normal_keywords = normal_keywords[:3]
-    
     # ================================================================
     # 📝 ANALIZA POPRZEDNICH BATCHÓW
     # ================================================================
@@ -509,7 +450,7 @@ def get_pre_batch_info(project_id):
     used_h3 = []
     all_topics_covered = []
     last_sentences = ""
-    previous_batch_summary = ""  # ⭐ NOWE: Podsumowanie poprzedniego batcha
+    previous_batch_summary = ""  # ⭐ v22.2: Podsumowanie poprzedniego batcha
     
     for i, batch in enumerate(batches):
         batch_text = batch.get("text", "")
@@ -534,13 +475,12 @@ def get_pre_batch_info(project_id):
         
         sentences = re.split(r'[.!?]+', clean_last)
         sentences = [s.strip() for s in sentences if s.strip() and len(s.strip()) > 20]
-        
         if len(sentences) >= 2:
             last_sentences = ". ".join(sentences[-2:]) + "."
         elif sentences:
             last_sentences = sentences[-1] + "."
         
-        # ⭐ NOWE: Buduj podsumowanie poprzedniego batcha
+        # ⭐ v22.2: Buduj podsumowanie poprzedniego batcha
         last_h2 = []
         last_h3 = []
         last_h2 += re.findall(r'<h2[^>]*>(.*?)</h2>', last_batch_text, re.IGNORECASE)
@@ -563,7 +503,7 @@ def get_pre_batch_info(project_id):
             if last_h3:
                 summary_parts.append(f"H3: {', '.join([h.strip() for h in last_h3])}")
             if key_points:
-                summary_parts.append(f"Kluczowe punkty: {'; '.join(key_points[:3])}")
+                summary_parts.append(f"Tematy: {'; '.join(key_points[:3])}")
             previous_batch_summary = " | ".join(summary_parts)
     
     remaining_h2 = [h2 for h2 in h2_structure if h2 not in used_h2]
@@ -575,7 +515,7 @@ def get_pre_batch_info(project_id):
     prompt_sections.append(f"📋 BATCH #{current_batch_num} z {total_planned_batches} (zostało: {remaining_batches})")
     prompt_sections.append("")
     
-    # ⭐ NOWE: Podsumowanie poprzedniego batcha
+    # ⭐ v22.2: Podsumowanie poprzedniego batcha
     if previous_batch_summary and current_batch_num > 1:
         prompt_sections.append("📖 POPRZEDNI BATCH (NIE POWTARZAJ!):")
         prompt_sections.append(f"  {previous_batch_summary}")
@@ -605,11 +545,11 @@ def get_pre_batch_info(project_id):
         for kw in high_priority:
             prompt_sections.append(f"  • {kw['keyword']}: użyj {kw['suggested']}x (brakuje {kw['remaining_to_min']}x)")
     
-    # NORMAL (Anti-Stuffing: pokazujemy tylko wybrane 3)
-    if selected_normal_keywords:
-        prompt_sections.append("\n🟢 NORMALNE (Opcjonalne - wpleć tylko jeśli pasuje):")
-        for kw in selected_normal_keywords:
-            prompt_sections.append(f"  • {kw['keyword']}: max {kw['max_per_batch']}x (nie wpychaj na siłę)")
+    # NORMAL
+    if normal_keywords:
+        prompt_sections.append("\n🟢 NORMALNE (sugerowane użycie):")
+        for kw in normal_keywords[:5]:  # Max 5
+            prompt_sections.append(f"  • {kw['keyword']}: max {kw['max_per_batch']}x (sugerowane: {kw['suggested']}x)")
     
     # LOW
     if low_priority:
@@ -628,31 +568,26 @@ def get_pre_batch_info(project_id):
         prompt_sections.append(f"\n\n🔗 KONTYNUUJ OD:")
         prompt_sections.append(f"  \"{last_sentences[:150]}...\"" if len(last_sentences) > 150 else f"  \"{last_sentences}\"")
     
-    # H2 do napisania
+    # H2 do napisania z typem LONG/SHORT i długością
     if remaining_h2:
-        prompt_sections.append(f"\n\n✏️ H2 DO NAPISANIA:")
-        for h2 in remaining_h2[:3]:
+        prompt_sections.append(f"\n\n✏️ H2 DO NAPISANIA W TYM BATCHU:")
+        for idx, h2 in enumerate(remaining_h2[:3]):
+            # Pattern: LONG na pozycjach nieparzystych (0, 2, 4), SHORT na parzystych (1, 3)
+            h2_index = h2_structure.index(h2) if h2 in h2_structure else idx
+            is_long = (h2_index % 2 == 0)  # 0, 2, 4 = LONG; 1, 3 = SHORT
+            section_type = "LONG" if is_long else "SHORT"
+            word_range = "500-600 słów, może mieć H3" if is_long else "300-450 słów, brak H3"
             prompt_sections.append(f"  • {h2}")
+            prompt_sections.append(f"    [{section_type}: {word_range}]")
     
-    # ⭐ v22.1.1: STYLE REMINDER (rozszerzony)
+    # ⭐ v22.2: STYLE REMINDER (bez H3 placement, z listą)
     prompt_sections.append("\n\n" + "="*40)
-    prompt_sections.append("📝 STYL (PRZYPOMNIJ SOBIE!):")
+    prompt_sections.append("📝 STYL:")
     prompt_sections.append("  • Format: h2: Tytuł / h3: Tytuł (bez HTML!)")
     prompt_sections.append("  • Zdania: 14-18 słów średnio, max 25")
-    prompt_sections.append("  • ZAKAZANE na początku sekcji: 'Dlatego', 'Ponadto', 'Warto zauważyć'")
+    prompt_sections.append("  • ZAKAZANE na początku: 'Dlatego', 'Ponadto', 'Warto zauważyć'")
     prompt_sections.append("  • Ton: ekspert doradzający przyjacielowi")
-    prompt_sections.append("  • Akapity: 2-4 zdania, bez ścian tekstu")
-    prompt_sections.append("")
-    prompt_sections.append("📍 H3 PLACEMENT:")
-    prompt_sections.append("  • H3 NIGDY na początku sekcji H2!")
-    prompt_sections.append("  • Najpierw 2-3 akapity wprowadzające pod H2")
-    prompt_sections.append("  • Potem H3 w ŚRODKU sekcji (po 150-200 słowach)")
-    prompt_sections.append("  • Kolejne 2-3 akapity po H3")
-    prompt_sections.append("")
-    prompt_sections.append("🔄 ANTY-POWTÓRZENIA:")
-    prompt_sections.append("  • NIE powtarzaj informacji z poprzednich sekcji!")
-    prompt_sections.append("  • Każda sekcja = NOWY aspekt tematu")
-    prompt_sections.append("  • Sprawdź 'NIE POWIELAJ' powyżej")
+    prompt_sections.append("  • JEDNA lista wypunktowana na cały artykuł (3-7 pkt)")
     prompt_sections.append("="*40)
     
     gpt_prompt = "\n".join(prompt_sections)
