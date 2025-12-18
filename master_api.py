@@ -75,6 +75,7 @@ from project_routes import project_routes
 from firestore_tracker_routes import tracker_routes
 from seo_optimizer import unified_prevalidation
 from final_review_routes import final_review_routes
+from paa_routes import paa_routes  # ⭐ NOWE
 
 # ================================================================
 # 🔗 Rejestracja blueprintów
@@ -82,6 +83,7 @@ from final_review_routes import final_review_routes
 app.register_blueprint(project_routes)
 app.register_blueprint(tracker_routes)
 app.register_blueprint(final_review_routes)
+app.register_blueprint(paa_routes)  # ⭐ NOWE
 
 # ================================================================
 # 🔗 S1 PROXY ENDPOINTS (przekierowanie do N-gram API)
