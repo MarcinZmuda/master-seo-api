@@ -1,0 +1,116 @@
+{
+  "version": "22.2",
+  "name": "paa_writing_rules",
+  "description": "Zasady pisania sekcji PAA (People Also Ask) dla Custom GPT",
+  
+  "workflow": {
+    "step_1": "GET /api/project/{id}/paa/analyze - pobierz niewykorzystane dane",
+    "step_2": "Napisz 3 pytania PAA według zasad poniżej",
+    "step_3": "POST /api/project/{id}/paa/save - zapisz sekcję"
+  },
+  
+  "paa_goal": "Maksymalizacja szansy na pojawienie się w sekcji People Also Ask w Google",
+  
+  "question_rules": {
+    "count": 3,
+    "length": "5-10 słów",
+    "starters": ["Jak", "Czy", "Co", "Dlaczego", "Kiedy", "Ile", "Jaki", "Jaka", "Jakie", "Który", "Która", "Które"],
+    "must_contain": "główne słowo kluczowe lub jego wariant",
+    "style": "naturalne, jak wpisane w Google przez użytkownika",
+    "avoid": ["zbyt ogólne pytania", "pytania bez konkretnej odpowiedzi", "pytania retoryczne"]
+  },
+  
+  "answer_rules": {
+    "total_length": "80-120 słów",
+    "structure": {
+      "sentence_1": "BEZPOŚREDNIA ODPOWIEDŹ na pytanie (nie zaczynaj od 'Tak' lub 'Nie')",
+      "sentence_2_3": "Rozwinięcie z konkretami: liczby, fakty, przykłady",
+      "sentence_4": "Praktyczna rada LUB zastrzeżenie (opcjonalne)"
+    },
+    "first_sentence": {
+      "length": "15-25 słów",
+      "rule": "Musi odpowiadać na pytanie samodzielnie (zrozumiałe bez kontekstu)",
+      "example_bad": "Tak, to zależy od wielu czynników.",
+      "example_good": "Materac piankowy wytrzymuje średnio 7-10 lat przy regularnym użytkowaniu i odpowiedniej pielęgnacji."
+    },
+    "keywords": "użyj 1-2 fraz kluczowych naturalnie w odpowiedzi",
+    "avoid": [
+      "powtarzanie treści z głównego artykułu",
+      "ogólnikowe odpowiedzi bez konkretów",
+      "zbyt długie wprowadzenia",
+      "zakazane frazy AI (warto zauważyć, w dzisiejszych czasach, itp.)"
+    ]
+  },
+  
+  "priority_for_questions": {
+    "1_highest": "extended_keywords - frazy EXTENDED które nie zostały użyte",
+    "2_high": "serp_paa - pytania z Google PAA które nie zostały omówione",
+    "3_medium": "unused_h2 - tematy H2 które nie weszły do artykułu",
+    "4_low": "basic_keywords - frazy BASIC które nie zostały użyte"
+  },
+  
+  "featured_snippet_optimization": {
+    "format": "Odpowiedź musi być samodzielna i kompletna",
+    "length": "Optymalne 40-60 słów dla pierwszego zdania (Featured Snippet)",
+    "structure": "Definicja/fakt → Rozwinięcie → Praktyka",
+    "avoid_phrases": [
+      "W tym artykule",
+      "Poniżej przedstawiamy",
+      "Jak już wspomnieliśmy",
+      "Warto zauważyć"
+    ]
+  },
+  
+  "example_good_paa": {
+    "question": "Jak wybrać twardość materaca?",
+    "answer": "Twardość materaca dobiera się według wagi ciała i pozycji snu. Osoby do 60 kg powinny wybierać materace H1-H2, od 60-90 kg materace H2-H3, a powyżej 90 kg materace H3-H4. Śpiący na boku potrzebują miękkszego materaca niż śpiący na plecach. Przy bólach kręgosłupa warto skonsultować wybór z fizjoterapeutą.",
+    "keywords_used": ["twardość materaca", "pozycja snu"],
+    "word_count": 58
+  },
+  
+  "example_bad_paa": {
+    "question": "Co warto wiedzieć o materacach?",
+    "answer": "Warto zauważyć, że materace są bardzo ważnym elementem sypialni. W dzisiejszych czasach mamy do wyboru wiele opcji. Istotne jest, aby dobrze się zastanowić przed zakupem. Podsumowując, wybór materaca to indywidualna kwestia.",
+    "problems": [
+      "Pytanie zbyt ogólne",
+      "Odpowiedź nie daje konkretów",
+      "Używa zakazanych fraz AI",
+      "Nie odpowiada bezpośrednio na pytanie"
+    ]
+  },
+  
+  "save_format": {
+    "endpoint": "POST /api/project/{id}/paa/save",
+    "body": {
+      "questions": [
+        {
+          "question": "Pytanie 1?",
+          "answer": "Odpowiedź 80-120 słów...",
+          "keywords_used": ["fraza1", "fraza2"]
+        },
+        {
+          "question": "Pytanie 2?",
+          "answer": "...",
+          "keywords_used": ["..."]
+        },
+        {
+          "question": "Pytanie 3?",
+          "answer": "...",
+          "keywords_used": ["..."]
+        }
+      ]
+    }
+  },
+  
+  "validation_checklist": {
+    "before_saving": [
+      "Czy każde pytanie zaczyna się od Jak/Czy/Co/Dlaczego/Kiedy/Ile?",
+      "Czy pytania mają 5-10 słów?",
+      "Czy pierwsze zdanie odpowiedzi jest samodzielne i bezpośrednie?",
+      "Czy odpowiedzi mają 80-120 słów?",
+      "Czy użyto fraz kluczowych z unused_data?",
+      "Czy odpowiedzi NIE powtarzają treści głównego artykułu?",
+      "Czy nie ma zakazanych fraz AI?"
+    ]
+  }
+}
