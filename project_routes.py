@@ -355,6 +355,10 @@ def get_pre_batch_info(project_id):
     locked_keywords = []    # = max, nie używaj
     exceeded_keywords = []  # > max
     
+    # ⭐ v22.3: Osobne listy dla EXTENDED
+    extended_unused = []    # EXTENDED które nie zostały użyte
+    extended_underused = [] # EXTENDED które są UNDER
+    
     for rid, meta in keywords_state.items():
         keyword = meta.get("keyword")
         kw_type = meta.get("type", "BASIC")
@@ -385,8 +389,18 @@ def get_pre_batch_info(project_id):
             # Ale nie więcej niż max_per_batch
             suggested = min(suggested, max_per_batch + 1)  # +1 dla UNDER
         
-        # ⭐ PRIORYTET
-        if actual > target_max:
+        # ⭐ v22.3: EXTENDED które nie zostały użyte = WYŻSZY PRIORYTET
+        if kw_type == "EXTENDED" and actual == 0:
+            priority = "HIGH"
+            reason = f"🟠 EXTENDED NIEUŻYTE - wpleć naturalnie!"
+            suggested = max(1, suggested)
+            extended_unused.append(keyword)
+        elif kw_type == "EXTENDED" and remaining_to_min > 0:
+            priority = "HIGH"
+            reason = f"🟠 EXTENDED UNDER - brakuje {remaining_to_min}x"
+            extended_underused.append(keyword)
+        # ⭐ PRIORYTET (reszta logiki)
+        elif actual > target_max:
             priority = "EXCEEDED"
             reason = f"❌ Już {actual}x (max {target_max}x) - NIE UŻYWAJ!"
             suggested = 0
@@ -527,6 +541,12 @@ def get_pre_batch_info(project_id):
         for kw in critical_keywords:
             prompt_sections.append(f"  • {kw['keyword']}: UŻYJ {kw['suggested']}x!")
     
+    # ⭐ v22.3: EXTENDED NIEUŻYTE - WYSOKI PRIORYTET!
+    if extended_unused:
+        prompt_sections.append("\n🟣 EXTENDED NIEUŻYTE (wpleć w tym batchu!):")
+        for kw in extended_unused[:8]:  # Max 8 extended
+            prompt_sections.append(f"  • {kw}")
+    
     # EXCEEDED
     if exceeded_keywords:
         prompt_sections.append("\n❌ EXCEEDED (NIE UŻYWAJ!):")
@@ -613,6 +633,10 @@ def get_pre_batch_info(project_id):
         "locked_keywords": locked_keywords,
         "exceeded_keywords": exceeded_keywords,
         
+        # ⭐ v22.3: EXTENDED tracking
+        "extended_unused": extended_unused,
+        "extended_underused": extended_underused,
+        
         # Struktura
         "h2_structure": h2_structure,
         "h2_already_written": used_h2,
@@ -628,6 +652,8 @@ def get_pre_batch_info(project_id):
             "low_count": len(low_priority),
             "locked_count": len(locked_keywords),
             "exceeded_count": len(exceeded_keywords),
+            "extended_unused_count": len(extended_unused),
+            "extended_underused_count": len(extended_underused),
             "h2_written": len(used_h2),
             "h2_remaining": len(remaining_h2)
         },
