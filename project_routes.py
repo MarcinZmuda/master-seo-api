@@ -224,7 +224,7 @@ def create_project():
         "total_planned_batches": total_planned_batches,  # ⭐ NOWE
         "target_length": target_length,
         "source": source,
-        "version": "v22.1",
+        "version": "v22.3",
         "manual_mode": False if source == "n8n-brajen-workflow" else True,
         # ⭐ NOWE: format output
         "output_format": "clean_text_with_headers"
@@ -714,10 +714,16 @@ def manual_correct_batch(project_id):
         "language_audit": {
             "semantic_score": precheck["semantic_score"],
             "transition_score": precheck["transition_score"],
-            "density": precheck["density"]
+            "density": precheck["density"],
+            "burstiness": precheck.get("burstiness", 0),
+            "flesch": precheck.get("readability", {}).get("flesch", 0)
         },
+        "burstiness": precheck.get("burstiness", 0),
+        "density": precheck["density"],
+        "transition_ratio": precheck["transition_score"],
         "warnings": precheck["warnings"],
-        "corrected": True
+        "corrected": True,
+        "timestamp": firestore.SERVER_TIMESTAMP
     }
 
     doc_ref = db.collection("seo_projects").document(project_id)
@@ -858,13 +864,43 @@ Zwróć TYLKO poprawiony tekst, bez żadnych komentarzy.
         
         print(f"[AUTO_CORRECT] ✅ Gemini zwrócił poprawiony tekst ({len(corrected_text)} znaków)")
         
+        # ⭐ FIX v22.3: Automatycznie zapisz poprawiony tekst do ostatniego batcha!
+        batches = project_data.get("batches", [])
+        auto_saved = False
+        new_metrics = {}
+        
+        if batches:
+            # Aktualizuj ostatni batch z poprawionym tekstem
+            batches[-1]["text"] = corrected_text
+            batches[-1]["auto_corrected"] = True
+            
+            # Przelicz metryki na NOWYM tekście
+            new_metrics = unified_prevalidation(corrected_text, keywords_state)
+            batches[-1]["burstiness"] = new_metrics.get("burstiness", 0)
+            batches[-1]["density"] = new_metrics.get("density", 0)
+            batches[-1]["transition_ratio"] = new_metrics.get("transition_ratio", 0)
+            batches[-1]["language_audit"] = new_metrics
+            
+            # Zapisz do Firestore
+            doc_ref = db.collection("seo_projects").document(project_id)
+            doc_ref.update({"batches": batches})
+            auto_saved = True
+            
+            print(f"[AUTO_CORRECT] ✅ Zapisano poprawiony tekst do batcha #{len(batches)}")
+        
         return jsonify({
             "status": "AUTO_CORRECTED",
             "corrected_text": corrected_text,
             "added_keywords": [kw["keyword"] for kw in under_keywords],
             "removed_keywords": [kw["keyword"] for kw in over_keywords],
             "keyword_report": {"under": under_keywords, "over": over_keywords},
-            "correction_summary": f"Dodano {len(under_keywords)} fraz, usunięto nadmiar {len(over_keywords)} fraz"
+            "correction_summary": f"Dodano {len(under_keywords)} fraz, usunięto nadmiar {len(over_keywords)} fraz",
+            "auto_saved": auto_saved,
+            "new_metrics": {
+                "burstiness": new_metrics.get("burstiness", 0),
+                "density": new_metrics.get("density", 0),
+                "transition_ratio": new_metrics.get("transition_ratio", 0)
+            } if new_metrics else {}
         }), 200
         
     except Exception as e:
@@ -981,3 +1017,105 @@ def export_project_data(project_id):
 def auto_correct_keywords_alias(project_id):
     """Alias dla auto_correct - kompatybilność z OpenAPI schema."""
     return auto_correct_batch(project_id)
+
+
+# ================================================================
+# 🔄 RECALCULATE METRICS - FIX dla burstiness = 0
+# ================================================================
+@project_routes.post("/api/project/<project_id>/recalculate_metrics")
+def recalculate_metrics(project_id):
+    """
+    Przelicza metryki (burstiness, density) dla wszystkich batchy.
+    Użyj gdy metryki pokazują 0.0 mimo poprawionego tekstu.
+    """
+    db = firestore.client()
+    doc_ref = db.collection("seo_projects").document(project_id)
+    doc = doc_ref.get()
+    
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+    
+    data = doc.to_dict()
+    batches = data.get("batches", [])
+    keywords_state = data.get("keywords_state", {})
+    
+    if not batches:
+        return jsonify({"error": "No batches to recalculate"}), 400
+    
+    updated_batches = []
+    for i, batch in enumerate(batches):
+        text = batch.get("text", "")
+        if text:
+            metrics = unified_prevalidation(text, keywords_state)
+            batch["burstiness"] = metrics.get("burstiness", 0)
+            batch["density"] = metrics.get("density", 0)
+            batch["transition_ratio"] = metrics.get("transition_ratio", 0)
+            batch["flesch"] = metrics.get("readability", {}).get("flesch", 0)
+            batch["language_audit"] = metrics
+            batch["metrics_recalculated"] = True
+        updated_batches.append(batch)
+    
+    doc_ref.update({"batches": updated_batches})
+    
+    return jsonify({
+        "status": "METRICS_RECALCULATED",
+        "batches_updated": len(updated_batches),
+        "summary": [
+            {
+                "batch": i+1,
+                "burstiness": b.get("burstiness", 0),
+                "density": b.get("density", 0),
+                "flesch": b.get("flesch", 0)
+            }
+            for i, b in enumerate(updated_batches)
+        ]
+    }), 200
+
+
+# ================================================================
+# 📊 DEBUG KEYWORDS - diagnostyka fraz
+# ================================================================
+@project_routes.get("/api/debug/<project_id>")
+def debug_keywords(project_id):
+    """Pełna diagnostyka projektu: frazy, metryki, ostrzeżenia."""
+    db = firestore.client()
+    doc = db.collection("seo_projects").document(project_id).get()
+    
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+    
+    data = doc.to_dict()
+    keywords_state = data.get("keywords_state", {})
+    batches = data.get("batches", [])
+    
+    keywords_summary = []
+    for rid, meta in keywords_state.items():
+        keywords_summary.append({
+            "keyword": meta.get("keyword"),
+            "type": meta.get("type", "BASIC"),
+            "actual": meta.get("actual_uses", 0),
+            "target_min": meta.get("target_min", 0),
+            "target_max": meta.get("target_max", 999),
+            "status": meta.get("status", "UNKNOWN")
+        })
+    
+    # Średnie metryki
+    avg_burstiness = 0
+    avg_density = 0
+    if batches:
+        burstiness_vals = [b.get("burstiness", 0) for b in batches if b.get("burstiness")]
+        density_vals = [b.get("density", 0) for b in batches if b.get("density")]
+        avg_burstiness = sum(burstiness_vals) / len(burstiness_vals) if burstiness_vals else 0
+        avg_density = sum(density_vals) / len(density_vals) if density_vals else 0
+    
+    return jsonify({
+        "project_id": project_id,
+        "topic": data.get("topic"),
+        "total_batches": len(batches),
+        "keywords_count": len(keywords_state),
+        "keywords": keywords_summary,
+        "avg_burstiness": round(avg_burstiness, 2),
+        "avg_density": round(avg_density, 2),
+        "has_final_review": "final_review" in data,
+        "version": "v22.3"
+    }), 200
