@@ -711,14 +711,11 @@ def get_pre_batch_info(project_id):
         prompt_sections.append(f"❌ NIE UŻYWAJ: {', '.join(blocked_names)}")
         prompt_sections.append("")
     
-    # H2 do napisania
+    # H2 do napisania - BEZ sztywnych długości
     if remaining_h2:
         prompt_sections.append("✏️ H2 DO NAPISANIA:")
         for h2 in remaining_h2[:3]:
-            h2_index = h2_structure.index(h2) if h2 in h2_structure else 0
-            is_long = (h2_index % 2 == 0)
-            word_range = "500-600 słów" if is_long else "300-450 słów"
-            prompt_sections.append(f"  • {h2} [{word_range}]")
+            prompt_sections.append(f"  • {h2}")
         prompt_sections.append("")
     
     # Poprzednie tematy - skrócone
@@ -731,9 +728,14 @@ def get_pre_batch_info(project_id):
         prompt_sections.append(f"🔗 KONTYNUUJ OD: \"{last_sentences[:80]}...\"")
         prompt_sections.append("")
     
-    # ZASADY - krótkie
+    # ZASADY - v22.5: różnorodność struktury
     prompt_sections.append("="*50)
-    prompt_sections.append("📝 ZASADY: H3 min 80 słów | Max 1 lista | Format: h2: / h3:")
+    prompt_sections.append("📝 STYL NATURALNY:")
+    prompt_sections.append("  • Sekcje H2: różna długość (200-600 słów)")
+    prompt_sections.append("  • Akapity: różna długość (40-150 słów)")
+    prompt_sections.append("  • H3: tylko gdy NAPRAWDĘ potrzebne (max 2-3 na artykuł)")
+    prompt_sections.append("  • Max 1 lista wypunktowana")
+    prompt_sections.append("  • Format: h2: / h3:")
     prompt_sections.append("="*50)
     
     gpt_prompt = "\n".join(prompt_sections)
@@ -1056,13 +1058,29 @@ def auto_correct_batch(project_id):
 
     project_data = doc.to_dict()
     
+    # ⭐ v22.5: Lepsze pobieranie tekstu
     if not batch_text:
         batches = project_data.get("batches", [])
         if batches:
-            batch_text = batches[-1].get("text", "")
+            # Szukaj ostatniego batcha z tekstem
+            for batch in reversed(batches):
+                if batch.get("text"):
+                    batch_text = batch.get("text")
+                    break
+    
+    # Jeśli nadal brak - scal wszystkie batche
+    if not batch_text:
+        batches = project_data.get("batches", [])
+        all_texts = [b.get("text", "") for b in batches if b.get("text")]
+        if all_texts:
+            batch_text = "\n\n".join(all_texts)
     
     if not batch_text:
-        return jsonify({"error": "No text provided"}), 400
+        return jsonify({
+            "error": "No text provided",
+            "hint": "Brak zapisanych batchy w projekcie lub wszystkie są puste",
+            "batches_count": len(project_data.get("batches", []))
+        }), 400
     
     keywords_state = project_data.get("keywords_state", {})
     
