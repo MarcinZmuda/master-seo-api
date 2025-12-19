@@ -34,21 +34,43 @@ GEMINI_MODEL = "gemini-2.5-flash"
 
 
 # ================================================================
-# 🧠 H2 SUGGESTIONS (Gemini-powered)
+# ⭐ v22.4: SYNONYM DETECTION dla frazy głównej
+# ================================================================
+def detect_main_keyword_synonyms(main_keyword: str) -> list:
+    """
+    Używa Gemini do znalezienia synonimów frazy głównej.
+    """
+    if not GEMINI_API_KEY:
+        return []
+    
+    try:
+        model = genai.GenerativeModel(GEMINI_MODEL)
+        prompt = f"""
+Podaj 2-4 SYNONIMY lub WARIANTY dla frazy: "{main_keyword}"
+
+ZASADY:
+- Tylko frazy które znaczą TO SAMO
+- Mogą być używane zamiennie w tekście SEO
+- Format: jeden synonim na linię, bez numeracji
+
+Odpowiedź (tylko synonimy):
+"""
+        response = model.generate_content(prompt)
+        synonyms = [s.strip() for s in response.text.strip().split('\n') if s.strip() and len(s.strip()) > 2]
+        return synonyms[:4]
+    except Exception as e:
+        print(f"[SYNONYM] ❌ Error: {e}")
+        return []
+
+
+# ================================================================
+# 🧠 H2 SUGGESTIONS (Gemini-powered) - v22.4: z wymuszeniem fraz
 # ================================================================
 @project_routes.post("/api/project/s1_h2_suggestions")
 def generate_h2_suggestions():
     """
-    Generuje sugestie H2 używając Gemini na podstawie:
-    - topic/main_keyword
-    - wzorców H2 z konkurencji (serp_h2_patterns)
-    - target keywords
-    
-    Zwraca listę maksymalnie 6 H2 (hard limit zgodny z seo_rules.json).
-    Wstęp (intro) NIE jest H2 - to osobny element bez nagłówka.
-    
-    ⚠️ WAŻNE: To są tylko PROPOZYCJE. User musi podać SWOJE H2,
-    które zostaną połączone z propozycjami w finalną strukturę.
+    Generuje sugestie H2 używając Gemini.
+    ⭐ v22.4: H2 MUSZĄ zawierać frazę główną w min. 40%
     """
     data = request.get_json()
     if not data:
@@ -76,8 +98,7 @@ def generate_h2_suggestions():
             "status": "FALLBACK",
             "suggestions": fallback_suggestions[:target_count],
             "message": "Gemini unavailable - basic suggestions generated",
-            "model": "fallback",
-            "action_required": "USER_H2_INPUT_NEEDED"
+            "model": "fallback"
         }), 200
     
     try:
@@ -97,26 +118,29 @@ FRAZY KLUCZOWE DO WPLECENIA W H2:
 {', '.join(target_keywords[:10])}
 """
         
+        # ⭐ v22.4: NOWY PROMPT z wymuszeniem frazy głównej w H2
         prompt = f"""
 Wygeneruj DOKŁADNIE {target_count} nagłówków H2 dla artykułu SEO o temacie: "{topic}"
-
-WAŻNE: Artykuł będzie miał WSTĘP (bez nagłówka H2) + {target_count} sekcji H2.
 
 {competitor_context}
 {keywords_context}
 
-ZASADY:
-1. Wygeneruj DOKŁADNIE {target_count} H2 (nie więcej, nie mniej)
-2. Każdy H2 powinien mieć 6-12 słów
-3. Minimum 50% H2 powinno być w formie pytania (Jak...?, Dlaczego...?, Kiedy...?, Co...?)
-4. Maksimum 30% H2 może zawierać główne słowo kluczowe
-5. NIE używaj ogólnikowych tytułów jak: "Wstęp", "Podsumowanie", "Zakończenie", "FAQ"
-6. H2 powinny tworzyć logiczną strukturę artykułu
-7. Uwzględnij intencję wyszukiwania (informacyjna/transakcyjna)
-8. Wpleć naturalnie frazy kluczowe gdzie to możliwe
+⭐ KRYTYCZNE ZASADY:
+1. Minimum {max(2, target_count // 2)} z {target_count} H2 MUSI zawierać frazę "{topic}" lub jej wariant!
+2. NIE UŻYWAJ ogólników: "dokument", "wniosek", "sprawa", "proces"
+3. UŻYWAJ konkretnej frazy głównej: "{topic}"
+4. Każdy H2 powinien mieć 6-12 słów
+5. Minimum 50% H2 w formie pytania (Jak...?, Ile...?, Gdzie...?)
+6. NIE używaj: "Wstęp", "Podsumowanie", "Zakończenie", "FAQ"
 
-FORMAT ODPOWIEDZI:
-Zwróć TYLKO listę {target_count} H2, każdy w nowej linii, bez numeracji ani punktorów.
+PRZYKŁAD DLA "pozew o rozwód":
+✅ "Jak napisać pozew o rozwód krok po kroku?"
+✅ "Jakie dokumenty dołączyć do pozwu o rozwód?"
+✅ "Ile kosztuje pozew o rozwód w 2025 roku?"
+❌ "Jak przygotować dokumenty?" (brak frazy głównej!)
+❌ "Najważniejsze elementy wniosku" (ogólnik!)
+
+FORMAT: Zwróć TYLKO listę {target_count} H2, każdy w nowej linii.
 """
         
         print(f"[H2_SUGGESTIONS] Generating {target_count} H2 for: {topic}")
@@ -129,7 +153,12 @@ Zwróć TYLKO listę {target_count} H2, każdy w nowej linii, bez numeracji ani 
             if h2.strip() and len(h2.strip()) > 5
         ][:target_count]
         
-        print(f"[H2_SUGGESTIONS] ✅ Generated {len(suggestions)} H2 suggestions")
+        # ⭐ v22.4: Walidacja - ile H2 zawiera frazę główną
+        topic_lower = topic.lower()
+        h2_with_main = sum(1 for h2 in suggestions if topic_lower in h2.lower())
+        coverage = h2_with_main / len(suggestions) if suggestions else 0
+        
+        print(f"[H2_SUGGESTIONS] ✅ Generated {len(suggestions)} H2, {h2_with_main} contain main keyword ({coverage:.0%})")
         
         return jsonify({
             "status": "OK",
@@ -137,30 +166,32 @@ Zwróć TYLKO listę {target_count} H2, każdy w nowej linii, bez numeracji ani 
             "topic": topic,
             "model": GEMINI_MODEL,
             "count": len(suggestions),
-            "action_required": "USER_H2_INPUT_NEEDED",
-            "message": "To są PROPOZYCJE. Teraz podaj SWOJE H2, które chcesz wpleść, a system połączy je w finalną strukturę."
+            "main_keyword_coverage": {
+                "h2_with_main_keyword": h2_with_main,
+                "total_h2": len(suggestions),
+                "coverage_percent": round(coverage * 100, 1),
+                "valid": coverage >= 0.4
+            },
+            "action_required": "USER_H2_INPUT_NEEDED"
         }), 200
         
     except Exception as e:
         print(f"[H2_SUGGESTIONS] ❌ Error: {e}")
-        return jsonify({
-            "status": "ERROR",
-            "error": str(e),
-            "suggestions": []
-        }), 500
+        return jsonify({"status": "ERROR", "error": str(e), "suggestions": []}), 500
 
 
 # ================================================================
-# 🧱 PROJECT CREATE
+# 🧱 PROJECT CREATE - v22.4: z MAIN_KEYWORD i synonimami
 # ================================================================
 @project_routes.post("/api/project/create")
 def create_project():
     """
     Tworzy nowy projekt SEO w Firestore.
     
-    ⭐ NOWA LOGIKA LIMITÓW:
-    - GPT widzi: target_min + 1 (ostrzegawczy limit)
-    - Backend liczy do: target_max (rzeczywisty limit)
+    ⭐ v22.4 NOWE:
+    - is_main_keyword flag
+    - main_keyword_synonyms 
+    - Wyższe minimum dla frazy głównej
     """
     data = request.get_json()
     if not data:
@@ -175,12 +206,17 @@ def create_project():
     target_length = data.get("target_length", 3000)
     source = data.get("source", "unknown")
     
-    # ⭐ NOWE: Liczba planowanych batchów (domyślnie = liczba H2 / 2, min 2, max 6)
     total_planned_batches = data.get("total_planned_batches")
     if not total_planned_batches:
         total_planned_batches = max(2, min(6, math.ceil(len(h2_structure) / 2))) if h2_structure else 4
 
+    # ⭐ v22.4: Wykryj synonimy frazy głównej
+    main_keyword_synonyms = detect_main_keyword_synonyms(topic)
+    print(f"[PROJECT] 🔍 Main keyword synonyms for '{topic}': {main_keyword_synonyms}")
+
     firestore_keywords = {}
+    main_keyword_found = False
+    
     for item in raw_keywords:
         term = item.get("term") or item.get("keyword", "")
         term = term.strip() if term else ""
@@ -196,37 +232,75 @@ def create_project():
         
         row_id = item.get("id") or str(uuid.uuid4())
         
+        # ⭐ v22.4: Sprawdź czy to fraza główna
+        is_main = term.lower() == topic.lower()
+        if is_main:
+            main_keyword_found = True
+            # Wyższe minimum dla frazy głównej: ~1x na 350 słów
+            min_val = max(min_val, max(6, target_length // 350))
+            max_val = max(max_val, target_length // 150)
+        
+        # ⭐ v22.4: Sprawdź czy to synonim frazy głównej
+        is_synonym_of_main = term.lower() in [s.lower() for s in main_keyword_synonyms]
+        
         firestore_keywords[row_id] = {
             "keyword": term,
             "search_term_exact": term.lower(),
             "search_lemma": search_lemma,
             "target_min": min_val,
             "target_max": max_val,
-            # ⭐ NOWE: display_limit to co widzi GPT (min+1)
             "display_limit": min_val + 1,
             "actual_uses": 0,
             "status": "UNDER",
-            "type": item.get("type", "BASIC").upper(),
+            "type": "MAIN" if is_main else item.get("type", "BASIC").upper(),
+            "is_main_keyword": is_main,
+            "is_synonym_of_main": is_synonym_of_main,
             "remaining_max": max_val,
             "optimal_target": max_val
         }
+    
+    # ⭐ v22.4: Jeśli fraza główna nie była w liście - dodaj ją
+    if not main_keyword_found:
+        main_min = max(6, target_length // 350)
+        main_max = target_length // 150
+        
+        doc = nlp(topic)
+        search_lemma = " ".join(t.lemma_.lower() for t in doc if t.is_alpha)
+        
+        firestore_keywords["main_keyword_auto"] = {
+            "keyword": topic,
+            "search_term_exact": topic.lower(),
+            "search_lemma": search_lemma,
+            "target_min": main_min,
+            "target_max": main_max,
+            "display_limit": main_min + 1,
+            "actual_uses": 0,
+            "status": "UNDER",
+            "type": "MAIN",
+            "is_main_keyword": True,
+            "is_synonym_of_main": False,
+            "remaining_max": main_max,
+            "optimal_target": main_max
+        }
+        print(f"[PROJECT] ⭐ Auto-added main keyword '{topic}' with min={main_min}, max={main_max}")
 
     db = firestore.client()
     doc_ref = db.collection("seo_projects").document()
     project_data = {
         "topic": topic,
+        "main_keyword": topic,
+        "main_keyword_synonyms": main_keyword_synonyms,
         "h2_structure": h2_structure,
         "keywords_state": firestore_keywords,
         "created_at": firestore.SERVER_TIMESTAMP,
         "batches": [],
         "batches_plan": [],
         "total_batches": 0,
-        "total_planned_batches": total_planned_batches,  # ⭐ NOWE
+        "total_planned_batches": total_planned_batches,
         "target_length": target_length,
         "source": source,
-        "version": "v22.3",
+        "version": "v22.4",
         "manual_mode": False if source == "n8n-brajen-workflow" else True,
-        # ⭐ NOWE: format output
         "output_format": "clean_text_with_headers"
     }
     doc_ref.set(project_data)
@@ -237,26 +311,24 @@ def create_project():
         "status": "CREATED",
         "project_id": doc_ref.id,
         "topic": topic,
+        "main_keyword": topic,
+        "main_keyword_synonyms": main_keyword_synonyms,
         "keywords_count": len(firestore_keywords),
-        "keywords": len(firestore_keywords),
         "h2_sections": len(h2_structure),
-        "total_planned_batches": total_planned_batches,  # ⭐ NOWE
+        "total_planned_batches": total_planned_batches,
         "target_length": target_length,
         "source": source
     }), 201
 
 
 # ================================================================
-# 📊 GET PROJECT STATUS - z info o LOCKED frazach
+# 📊 GET PROJECT STATUS - v22.4: z info o MAIN vs SYNONYMS
 # ================================================================
 @project_routes.get("/api/project/<project_id>/status")
 def get_project_status(project_id):
     """
-    Zwraca aktualny status projektu z informacją o LOCKED frazach.
-    
-    ⭐ NOWE:
-    - locked_keywords: lista fraz które osiągnęły limit
-    - display_limits: limity które widzi GPT (min+1)
+    Zwraca aktualny status projektu.
+    ⭐ v22.4: Dodaje proporcje main keyword vs synonyms
     """
     db = firestore.client()
     doc = db.collection("seo_projects").document(project_id).get()
@@ -266,41 +338,65 @@ def get_project_status(project_id):
     data = doc.to_dict()
     keywords_state = data.get("keywords_state", {})
     batches = data.get("batches", [])
+    main_keyword = data.get("main_keyword", data.get("topic", ""))
     
     keyword_summary = []
     locked_keywords = []
     near_limit_keywords = []
+    
+    # ⭐ v22.4: Track main vs synonyms
+    main_keyword_uses = 0
+    synonym_uses = 0
     
     for rid, meta in keywords_state.items():
         actual = meta.get("actual_uses", 0)
         target_min = meta.get("target_min", 0)
         target_max = meta.get("target_max", 999)
         remaining = max(0, target_max - actual)
-        display_limit = target_min + 1  # Co widzi GPT
         
         kw_info = {
             "keyword": meta.get("keyword"),
             "type": meta.get("type", "BASIC"),
             "actual": actual,
-            "display_limit": display_limit,  # ⭐ GPT widzi to
-            "target_max": target_max,  # Backend limit
+            "target_min": target_min,
+            "target_max": target_max,
             "status": meta.get("status"),
-            "remaining_max": remaining
+            "remaining_max": remaining,
+            "is_main_keyword": meta.get("is_main_keyword", False),
+            "is_synonym_of_main": meta.get("is_synonym_of_main", False)
         }
         keyword_summary.append(kw_info)
         
-        # ⭐ Zbierz LOCKED frazy
+        # ⭐ v22.4: Sumuj użycia main vs synonyms
+        if meta.get("is_main_keyword"):
+            main_keyword_uses = actual
+        elif meta.get("is_synonym_of_main"):
+            synonym_uses += actual
+        
         if remaining == 0:
             locked_keywords.append({
                 "keyword": meta.get("keyword"),
-                "message": f"🔒 LOCKED: '{meta.get('keyword')}' osiągnęło limit {target_max}x. Użyj SYNONIMÓW!"
+                "message": f"🔒 LOCKED: '{meta.get('keyword')}' osiągnęło limit {target_max}x"
             })
         elif remaining <= 3:
             near_limit_keywords.append({
                 "keyword": meta.get("keyword"),
-                "remaining": remaining,
-                "message": f"⚠️ NEAR LIMIT: '{meta.get('keyword')}' - zostało tylko {remaining}x"
+                "remaining": remaining
             })
+    
+    # ⭐ v22.4: Oblicz proporcję
+    total_main_and_synonyms = main_keyword_uses + synonym_uses
+    main_ratio = main_keyword_uses / total_main_and_synonyms if total_main_and_synonyms > 0 else 0
+    
+    main_vs_synonym_status = {
+        "main_keyword": main_keyword,
+        "main_uses": main_keyword_uses,
+        "synonym_uses": synonym_uses,
+        "total": total_main_and_synonyms,
+        "main_ratio": round(main_ratio, 2),
+        "valid": main_ratio >= 0.5,  # Main powinno być >= 50%
+        "warning": None if main_ratio >= 0.5 else f"⚠️ Fraza główna ma tylko {main_ratio:.0%} użyć. Zamień synonimy na '{main_keyword}'!"
+    }
     
     return jsonify({
         "project_id": project_id,
@@ -308,27 +404,24 @@ def get_project_status(project_id):
         "total_batches": len(batches),
         "keywords_count": len(keywords_state),
         "keywords": keyword_summary,
-        # ⭐ NOWE - wyraźne info o blokadach
         "locked_keywords": locked_keywords,
         "near_limit_keywords": near_limit_keywords,
-        "warnings_before_batch": locked_keywords + near_limit_keywords,
+        "main_vs_synonyms": main_vs_synonym_status,
         "source": data.get("source", "unknown"),
         "has_final_review": "final_review" in data
     }), 200
 
 
 # ================================================================
-# 📋 PRE-BATCH INFO - PEŁNA OPTYMALIZACJA TARGET=MAX
+# 📋 PRE-BATCH INFO - v22.4: z n-gramami i proporcjami
 # ================================================================
 @project_routes.get("/api/project/<project_id>/pre_batch_info")
 def get_pre_batch_info(project_id):
     """
-    Zwraca PEŁNY PLAN przed napisaniem batcha:
-    - Rozkład fraz w batchach (A)
-    - Priorytetyzacja UNDER (B)
-    - Automatyczne balansowanie (C)
-    - Smart display_limit (D)
-    - Max per batch (E) - zapobiega przeoptymalizacji
+    ⭐ v22.4: Dodaje:
+    - N-gramy do wplecenia w batch
+    - Proporcje main vs synonyms
+    - Ostrzeżenie o nadużywaniu synonimów
     """
     db = firestore.client()
     doc = db.collection("seo_projects").document(project_id).get()
@@ -339,25 +432,54 @@ def get_pre_batch_info(project_id):
     keywords_state = data.get("keywords_state", {})
     batches = data.get("batches", [])
     h2_structure = data.get("h2_structure", [])
-    total_planned_batches = data.get("total_planned_batches", 4)  # Domyślnie 4
+    total_planned_batches = data.get("total_planned_batches", 4)
+    main_keyword = data.get("main_keyword", data.get("topic", ""))
+    main_keyword_synonyms = data.get("main_keyword_synonyms", [])
+    s1_data = data.get("s1_data", {})
     
     current_batch_num = len(batches) + 1
     remaining_batches = max(1, total_planned_batches - len(batches))
     
     # ================================================================
+    # ⭐ v22.4: ANALIZA MAIN vs SYNONYMS
+    # ================================================================
+    main_keyword_uses = 0
+    synonym_uses = 0
+    main_keyword_meta = None
+    
+    for rid, meta in keywords_state.items():
+        if meta.get("is_main_keyword"):
+            main_keyword_uses = meta.get("actual_uses", 0)
+            main_keyword_meta = meta
+        elif meta.get("is_synonym_of_main"):
+            synonym_uses += meta.get("actual_uses", 0)
+    
+    total_main_and_synonyms = main_keyword_uses + synonym_uses
+    main_ratio = main_keyword_uses / total_main_and_synonyms if total_main_and_synonyms > 0 else 1.0
+    
+    # ================================================================
+    # ⭐ v22.4: N-GRAMY DO WPLECIENIA W TYM BATCHU
+    # ================================================================
+    ngrams = s1_data.get("ngrams", [])
+    top_ngrams = [n.get("ngram", "") for n in ngrams if n.get("weight", 0) > 0.4][:15]
+    
+    # Podziel n-gramy na batche
+    ngrams_per_batch = max(3, len(top_ngrams) // total_planned_batches)
+    start_idx = (current_batch_num - 1) * ngrams_per_batch
+    end_idx = min(start_idx + ngrams_per_batch + 2, len(top_ngrams))
+    batch_ngrams = top_ngrams[start_idx:end_idx]
+    
+    # ================================================================
     # 📊 ANALIZA FRAZ Z PEŁNYM PLANEM
     # ================================================================
     keyword_plan = []
-    critical_keywords = []  # UNDER + ostatni batch
-    high_priority = []      # UNDER
-    normal_keywords = []    # OK, można użyć
-    low_priority = []       # Już >= min
-    locked_keywords = []    # = max, nie używaj
-    exceeded_keywords = []  # > max
-    
-    # ⭐ v22.3: Osobne listy dla EXTENDED
-    extended_unused = []    # EXTENDED które nie zostały użyte
-    extended_underused = [] # EXTENDED które są UNDER
+    critical_keywords = []
+    high_priority = []
+    normal_keywords = []
+    low_priority = []
+    locked_keywords = []
+    exceeded_keywords = []
+    extended_unused = []
     
     for rid, meta in keywords_state.items():
         keyword = meta.get("keyword")
@@ -365,62 +487,64 @@ def get_pre_batch_info(project_id):
         actual = meta.get("actual_uses", 0)
         target_min = meta.get("target_min", 0)
         target_max = meta.get("target_max", 999)
+        is_main = meta.get("is_main_keyword", False)
+        is_synonym = meta.get("is_synonym_of_main", False)
         
         remaining_to_max = max(0, target_max - actual)
         remaining_to_min = max(0, target_min - actual)
         
-        # ⭐ SMART CALCULATIONS
-        # Max per batch = równomierny rozkład (zapobiega stuffing)
         max_per_batch = max(1, math.ceil(target_max / total_planned_batches))
         
-        # Suggested = ile użyć w tym batchu dla równomiernego rozkładu
         if remaining_to_max > 0 and remaining_batches > 0:
-            suggested = min(
-                math.ceil(remaining_to_max / remaining_batches),
-                max_per_batch
-            )
+            suggested = min(math.ceil(remaining_to_max / remaining_batches), max_per_batch)
         else:
             suggested = 0
         
-        # Jeśli UNDER - zwiększ suggested żeby nadrobić
         if remaining_to_min > 0:
             min_needed_per_batch = math.ceil(remaining_to_min / remaining_batches)
             suggested = max(suggested, min_needed_per_batch)
-            # Ale nie więcej niż max_per_batch
-            suggested = min(suggested, max_per_batch + 1)  # +1 dla UNDER
+            suggested = min(suggested, max_per_batch + 1)
         
-        # ⭐ v22.3: EXTENDED które nie zostały użyte = WYŻSZY PRIORYTET
-        if kw_type == "EXTENDED" and actual == 0:
+        # ⭐ v22.4: MAIN KEYWORD ma najwyższy priorytet
+        if is_main:
+            if remaining_to_min > 0:
+                priority = "CRITICAL"
+                reason = f"🔴 FRAZA GŁÓWNA! Potrzeba {remaining_to_min}x do min (cel: {target_min}x)"
+                suggested = max(suggested, math.ceil(remaining_to_min / remaining_batches))
+            else:
+                priority = "HIGH"
+                reason = f"🟠 FRAZA GŁÓWNA - używaj częściej niż synonimów!"
+        # ⭐ v22.4: Synonim - ostrzeżenie jeśli nadużywany
+        elif is_synonym and main_ratio < 0.5:
+            priority = "LOW"
+            reason = f"⚠️ SYNONIM - za dużo użyć! Używaj '{main_keyword}' zamiast tego"
+            suggested = 0
+        elif kw_type == "EXTENDED" and actual == 0:
             priority = "HIGH"
             reason = f"🟠 EXTENDED NIEUŻYTE - wpleć naturalnie!"
             suggested = max(1, suggested)
             extended_unused.append(keyword)
-        elif kw_type == "EXTENDED" and remaining_to_min > 0:
-            priority = "HIGH"
-            reason = f"🟠 EXTENDED UNDER - brakuje {remaining_to_min}x"
-            extended_underused.append(keyword)
-        # ⭐ PRIORYTET (reszta logiki)
         elif actual > target_max:
             priority = "EXCEEDED"
             reason = f"❌ Już {actual}x (max {target_max}x) - NIE UŻYWAJ!"
             suggested = 0
         elif remaining_to_max == 0:
             priority = "LOCKED"
-            reason = f"🔒 Osiągnięto max {target_max}x - użyj SYNONIMÓW"
+            reason = f"🔒 Osiągnięto max {target_max}x"
             suggested = 0
         elif remaining_to_min > 0 and remaining_batches == 1:
             priority = "CRITICAL"
-            reason = f"🔴 OSTATNI BATCH! Potrzeba {remaining_to_min}x do min!"
+            reason = f"🔴 OSTATNI BATCH! Potrzeba {remaining_to_min}x"
             suggested = remaining_to_min
         elif remaining_to_min > 0:
             priority = "HIGH"
-            reason = f"🟠 UNDER - brakuje {remaining_to_min}x (cel: {target_min}x)"
+            reason = f"🟠 UNDER - brakuje {remaining_to_min}x"
         elif actual >= target_min and remaining_to_max > 0:
             priority = "NORMAL"
-            reason = f"🟢 OK ({actual}/{target_min}-{target_max}) - sugerowane {suggested}x"
+            reason = f"🟢 OK ({actual}/{target_min}-{target_max})"
         else:
             priority = "LOW"
-            reason = f"⚪ Wystarczy ({actual}x >= min {target_min}x)"
+            reason = f"⚪ Wystarczy ({actual}x)"
             suggested = 0
         
         kw_info = {
@@ -434,12 +558,13 @@ def get_pre_batch_info(project_id):
             "remaining_to_max": remaining_to_max,
             "max_per_batch": max_per_batch,
             "suggested": suggested,
-            "reason": reason
+            "reason": reason,
+            "is_main_keyword": is_main,
+            "is_synonym_of_main": is_synonym
         }
         
         keyword_plan.append(kw_info)
         
-        # Kategoryzuj
         if priority == "EXCEEDED":
             exceeded_keywords.append(kw_info)
         elif priority == "LOCKED":
@@ -453,7 +578,6 @@ def get_pre_batch_info(project_id):
         else:
             low_priority.append(kw_info)
     
-    # Sortuj keyword_plan po priorytecie
     priority_order = {"CRITICAL": 0, "HIGH": 1, "NORMAL": 2, "LOW": 3, "LOCKED": 4, "EXCEEDED": 5}
     keyword_plan.sort(key=lambda x: priority_order.get(x["priority"], 99))
     
@@ -464,15 +588,11 @@ def get_pre_batch_info(project_id):
     used_h3 = []
     all_topics_covered = []
     last_sentences = ""
-    previous_batch_summary = ""  # ⭐ v22.2: Podsumowanie poprzedniego batcha
     
-    for i, batch in enumerate(batches):
+    for batch in batches:
         batch_text = batch.get("text", "")
-        
-        # Szukamy zarówno HTML tagów jak i markerów h2:/h3:
         h2_in_batch = re.findall(r'<h2[^>]*>(.*?)</h2>', batch_text, re.IGNORECASE | re.DOTALL)
         h2_in_batch += re.findall(r'^h2:\s*(.+)$', batch_text, re.MULTILINE | re.IGNORECASE)
-        
         h3_in_batch = re.findall(r'<h3[^>]*>(.*?)</h3>', batch_text, re.IGNORECASE | re.DOTALL)
         h3_in_batch += re.findall(r'^h3:\s*(.+)$', batch_text, re.MULTILINE | re.IGNORECASE)
         
@@ -483,68 +603,53 @@ def get_pre_batch_info(project_id):
     if batches:
         last_batch_text = batches[-1].get("text", "")
         clean_last = re.sub(r'<[^>]+>', '', last_batch_text)
-        # Usuń też markery h2:/h3:
         clean_last = re.sub(r'^h[23]:\s*.+$', '', clean_last, flags=re.MULTILINE)
-        clean_last = re.sub(r'\n+', '\n', clean_last).strip()
-        
         sentences = re.split(r'[.!?]+', clean_last)
         sentences = [s.strip() for s in sentences if s.strip() and len(s.strip()) > 20]
         if len(sentences) >= 2:
             last_sentences = ". ".join(sentences[-2:]) + "."
         elif sentences:
             last_sentences = sentences[-1] + "."
-        
-        # ⭐ v22.2: Buduj podsumowanie poprzedniego batcha
-        last_h2 = []
-        last_h3 = []
-        last_h2 += re.findall(r'<h2[^>]*>(.*?)</h2>', last_batch_text, re.IGNORECASE)
-        last_h2 += re.findall(r'^h2:\s*(.+)$', last_batch_text, re.MULTILINE | re.IGNORECASE)
-        last_h3 += re.findall(r'<h3[^>]*>(.*?)</h3>', last_batch_text, re.IGNORECASE)
-        last_h3 += re.findall(r'^h3:\s*(.+)$', last_batch_text, re.MULTILINE | re.IGNORECASE)
-        
-        # Wyciągnij kluczowe punkty (pierwsze zdanie każdego akapitu)
-        paragraphs = [p.strip() for p in clean_last.split('\n\n') if p.strip() and len(p.strip()) > 50]
-        key_points = []
-        for p in paragraphs[:4]:  # Max 4 akapity
-            first_sentence = re.split(r'[.!?]', p)[0].strip()
-            if first_sentence and len(first_sentence) > 20:
-                key_points.append(first_sentence[:100] + "..." if len(first_sentence) > 100 else first_sentence)
-        
-        if last_h2 or last_h3 or key_points:
-            summary_parts = []
-            if last_h2:
-                summary_parts.append(f"H2: {', '.join([h.strip() for h in last_h2])}")
-            if last_h3:
-                summary_parts.append(f"H3: {', '.join([h.strip() for h in last_h3])}")
-            if key_points:
-                summary_parts.append(f"Tematy: {'; '.join(key_points[:3])}")
-            previous_batch_summary = " | ".join(summary_parts)
     
     remaining_h2 = [h2 for h2 in h2_structure if h2 not in used_h2]
     
     # ================================================================
-    # 📝 GENERUJ PROMPT DLA GPT
+    # 📝 GENERUJ PROMPT DLA GPT - v22.4
     # ================================================================
     prompt_sections = []
-    prompt_sections.append(f"📋 BATCH #{current_batch_num} z {total_planned_batches} (zostało: {remaining_batches})")
+    prompt_sections.append(f"📋 BATCH #{current_batch_num} z {total_planned_batches}")
     prompt_sections.append("")
     
-    # ⭐ v22.2: Podsumowanie poprzedniego batcha
-    if previous_batch_summary and current_batch_num > 1:
-        prompt_sections.append("📖 POPRZEDNI BATCH (NIE POWTARZAJ!):")
-        prompt_sections.append(f"  {previous_batch_summary}")
+    # ⭐ v22.4: FRAZA GŁÓWNA - NAJWYŻSZY PRIORYTET
+    if main_keyword_meta:
+        main_suggested = max(2, math.ceil(main_keyword_meta.get("target_min", 6) / total_planned_batches))
+        prompt_sections.append("="*50)
+        prompt_sections.append(f"🔴 FRAZA GŁÓWNA (PRIORYTET #1!):")
+        prompt_sections.append(f"  • \"{main_keyword}\": użyj {main_suggested}-{main_suggested+2}x w tym batchu")
+        prompt_sections.append(f"  • NIE ZASTĘPUJ synonimami! Synonimy tylko 1-2x jako urozmaicenie")
+        if main_ratio < 0.5:
+            prompt_sections.append(f"  • ⚠️ UWAGA: Za dużo synonimów! Proporcja główna/synonimy: {main_ratio:.0%}")
+        prompt_sections.append("="*50)
         prompt_sections.append("")
     
-    # CRITICAL
-    if critical_keywords:
-        prompt_sections.append("🔴 CRITICAL (MUSISZ użyć - ostatni batch!):")
-        for kw in critical_keywords:
+    # ⭐ v22.4: N-GRAMY DO WPLECIENIA
+    if batch_ngrams:
+        prompt_sections.append("📝 N-GRAMY DO WPLECENIA (z analizy konkurencji):")
+        for ngram in batch_ngrams[:5]:
+            prompt_sections.append(f"  • \"{ngram}\" - użyj 1x naturalnie")
+        prompt_sections.append("")
+    
+    # CRITICAL (nie-main)
+    critical_non_main = [k for k in critical_keywords if not k.get("is_main_keyword")]
+    if critical_non_main:
+        prompt_sections.append("🔴 CRITICAL (MUSISZ użyć!):")
+        for kw in critical_non_main:
             prompt_sections.append(f"  • {kw['keyword']}: UŻYJ {kw['suggested']}x!")
     
-    # ⭐ v22.3: EXTENDED NIEUŻYTE - WYSOKI PRIORYTET!
+    # EXTENDED NIEUŻYTE
     if extended_unused:
-        prompt_sections.append("\n🟣 EXTENDED NIEUŻYTE (wpleć w tym batchu!):")
-        for kw in extended_unused[:8]:  # Max 8 extended
+        prompt_sections.append("\n🟣 EXTENDED NIEUŻYTE (wpleć!):")
+        for kw in extended_unused[:6]:
             prompt_sections.append(f"  • {kw}")
     
     # EXCEEDED
@@ -559,61 +664,62 @@ def get_pre_batch_info(project_id):
         for kw in locked_keywords:
             prompt_sections.append(f"  • {kw['keyword']}")
     
-    # HIGH (UNDER)
-    if high_priority:
-        prompt_sections.append("\n🟠 PRIORYTET (UNDER - wpleć!):")
-        for kw in high_priority:
-            prompt_sections.append(f"  • {kw['keyword']}: użyj {kw['suggested']}x (brakuje {kw['remaining_to_min']}x)")
+    # HIGH (non-main, non-extended)
+    high_other = [k for k in high_priority if not k.get("is_main_keyword") and k["keyword"] not in extended_unused]
+    if high_other:
+        prompt_sections.append("\n🟠 PRIORYTET:")
+        for kw in high_other[:5]:
+            prompt_sections.append(f"  • {kw['keyword']}: użyj {kw['suggested']}x")
     
     # NORMAL
     if normal_keywords:
-        prompt_sections.append("\n🟢 NORMALNE (sugerowane użycie):")
-        for kw in normal_keywords[:5]:  # Max 5
-            prompt_sections.append(f"  • {kw['keyword']}: max {kw['max_per_batch']}x (sugerowane: {kw['suggested']}x)")
+        prompt_sections.append("\n🟢 NORMALNE:")
+        for kw in normal_keywords[:4]:
+            prompt_sections.append(f"  • {kw['keyword']}: max {kw['max_per_batch']}x")
     
-    # LOW
-    if low_priority:
-        prompt_sections.append("\n⚪ OPCJONALNE (już OK):")
-        for kw in low_priority[:3]:  # Max 3
-            prompt_sections.append(f"  • {kw['keyword']}")
+    # ⭐ v22.4: SYNONIMY - ostrzeżenie
+    synonym_keywords = [k for k in low_priority if k.get("is_synonym_of_main")]
+    if synonym_keywords and main_ratio < 0.6:
+        prompt_sections.append("\n⚠️ SYNONIMY (używaj RZADKO!):")
+        for kw in synonym_keywords:
+            prompt_sections.append(f"  • {kw['keyword']} - max 1-2x, preferuj '{main_keyword}'")
     
-    # Poprzednie tematy
-    if all_topics_covered:
-        prompt_sections.append("\n\n📖 NIE POWIELAJ:")
-        for topic in all_topics_covered[:8]:
-            prompt_sections.append(f"  • {topic}")
-    
-    # Ostatnie zdania
-    if last_sentences:
-        prompt_sections.append(f"\n\n🔗 KONTYNUUJ OD:")
-        prompt_sections.append(f"  \"{last_sentences[:150]}...\"" if len(last_sentences) > 150 else f"  \"{last_sentences}\"")
-    
-    # H2 do napisania z typem LONG/SHORT i długością
+    # H2 do napisania
     if remaining_h2:
-        prompt_sections.append(f"\n\n✏️ H2 DO NAPISANIA W TYM BATCHU:")
-        for idx, h2 in enumerate(remaining_h2[:3]):
-            # Pattern: LONG na pozycjach nieparzystych (0, 2, 4), SHORT na parzystych (1, 3)
-            h2_index = h2_structure.index(h2) if h2 in h2_structure else idx
-            is_long = (h2_index % 2 == 0)  # 0, 2, 4 = LONG; 1, 3 = SHORT
+        prompt_sections.append(f"\n\n✏️ H2 DO NAPISANIA:")
+        for h2 in remaining_h2[:3]:
+            h2_index = h2_structure.index(h2) if h2 in h2_structure else 0
+            is_long = (h2_index % 2 == 0)
             section_type = "LONG" if is_long else "SHORT"
-            word_range = "500-600 słów, może mieć H3" if is_long else "300-450 słów, brak H3"
+            word_range = "500-600 słów, może mieć H3" if is_long else "300-450 słów"
             prompt_sections.append(f"  • {h2}")
             prompt_sections.append(f"    [{section_type}: {word_range}]")
     
-    # ⭐ v22.2: STYLE REMINDER (bez H3 placement, z listą)
-    prompt_sections.append("\n\n" + "="*40)
-    prompt_sections.append("📝 STYL:")
-    prompt_sections.append("  • Format: h2: Tytuł / h3: Tytuł (bez HTML!)")
-    prompt_sections.append("  • Zdania: 14-18 słów średnio, max 25")
-    prompt_sections.append("  • ZAKAZANE na początku: 'Dlatego', 'Ponadto', 'Warto zauważyć'")
-    prompt_sections.append("  • Ton: ekspert doradzający przyjacielowi")
-    prompt_sections.append("  • JEDNA lista wypunktowana na cały artykuł (3-7 pkt)")
-    prompt_sections.append("="*40)
+    # Poprzednie tematy
+    if all_topics_covered:
+        prompt_sections.append("\n📖 NIE POWIELAJ:")
+        for topic_item in all_topics_covered[:6]:
+            prompt_sections.append(f"  • {topic_item}")
+    
+    # Ostatnie zdania
+    if last_sentences:
+        prompt_sections.append(f"\n🔗 KONTYNUUJ OD:")
+        prompt_sections.append(f"  \"{last_sentences[:120]}...\"")
+    
+    # ⭐ v22.4: ZASADY STYLU - rozbudowane
+    prompt_sections.append("\n" + "="*50)
+    prompt_sections.append("📝 ZASADY KRYTYCZNE:")
+    prompt_sections.append("  • Fraza główna > synonimy (proporcja min 60%)")
+    prompt_sections.append("  • H3 minimum 80 słów!")
+    prompt_sections.append("  • MAX 1 lista wypunktowana na cały artykuł")
+    prompt_sections.append("  • N-gramy wplataj naturalnie")
+    prompt_sections.append("  • Format: h2: Tytuł / h3: Tytuł")
+    prompt_sections.append("="*50)
     
     gpt_prompt = "\n".join(prompt_sections)
     
     # ================================================================
-    # 📊 PODSUMOWANIE
+    # 📊 RESPONSE
     # ================================================================
     return jsonify({
         "project_id": project_id,
@@ -622,59 +728,56 @@ def get_pre_batch_info(project_id):
         "total_planned_batches": total_planned_batches,
         "remaining_batches": remaining_batches,
         
-        # ⭐ PEŁNY PLAN FRAZ (posortowany po priorytecie)
-        "keyword_plan": keyword_plan,
+        # v22.4: Main vs Synonyms
+        "main_keyword_status": {
+            "main_keyword": main_keyword,
+            "main_uses": main_keyword_uses,
+            "synonym_uses": synonym_uses,
+            "main_ratio": round(main_ratio, 2),
+            "valid": main_ratio >= 0.5,
+            "warning": None if main_ratio >= 0.5 else f"Za dużo synonimów! Używaj '{main_keyword}'"
+        },
         
-        # Kategoryzowane
+        # v22.4: N-gramy dla batcha
+        "batch_ngrams": batch_ngrams,
+        
+        "keyword_plan": keyword_plan,
         "critical_keywords": critical_keywords,
         "high_priority_keywords": high_priority,
         "normal_keywords": normal_keywords,
         "low_priority_keywords": low_priority,
         "locked_keywords": locked_keywords,
         "exceeded_keywords": exceeded_keywords,
-        
-        # ⭐ v22.3: EXTENDED tracking
         "extended_unused": extended_unused,
-        "extended_underused": extended_underused,
         
-        # Struktura
         "h2_structure": h2_structure,
         "h2_already_written": used_h2,
         "h2_remaining": remaining_h2,
         "topics_already_covered": all_topics_covered,
         "last_sentences": last_sentences,
         
-        # Podsumowanie
         "summary": {
             "critical_count": len(critical_keywords),
             "high_priority_count": len(high_priority),
             "normal_count": len(normal_keywords),
-            "low_count": len(low_priority),
-            "locked_count": len(locked_keywords),
-            "exceeded_count": len(exceeded_keywords),
             "extended_unused_count": len(extended_unused),
-            "extended_underused_count": len(extended_underused),
-            "h2_written": len(used_h2),
+            "locked_count": len(locked_keywords),
             "h2_remaining": len(remaining_h2)
         },
         
-        # ⭐ GOTOWY PROMPT
         "gpt_prompt": gpt_prompt,
         
         "instructions": {
-            "critical": "MUSISZ użyć tych fraz - ostatnia szansa!",
-            "high": "Priorytet - wpleć w batch",
-            "normal": "Użyj sugerowaną ilość (max_per_batch)",
-            "low": "Opcjonalne - już wystarczy",
-            "locked": "NIE UŻYWAJ - użyj synonimów",
-            "exceeded": "BŁĄD - za dużo użyć!",
-            "max_per_batch": "Nie przekraczaj max_per_batch żeby uniknąć stuffingu"
+            "main_keyword": f"Używaj '{main_keyword}' częściej niż synonimów!",
+            "ngrams": "Wpleć n-gramy z analizy konkurencji",
+            "h3_min_length": "Każda sekcja H3 musi mieć min. 80 słów",
+            "max_lists": "Max 1 lista wypunktowana na artykuł"
         }
     }), 200
 
 
 # ================================================================
-# ✏️ ADD BATCH
+# ✏️ ADD BATCH - bez zmian
 # ================================================================
 @project_routes.post("/api/project/<project_id>/add_batch")
 def add_batch_to_project(project_id):
@@ -690,28 +793,28 @@ def add_batch_to_project(project_id):
 
     result = process_batch_in_firestore(project_id, batch_text, meta_trace)
     
-    rhythm = result.get("meta", {}).get("paragraph_rhythm", "Unknown")
-    result["batch_text_snippet"] = batch_text[:50] + "..."
-    result["paragraph_rhythm"] = rhythm
-
     return jsonify(result), 200
 
 
 # ================================================================
-# 🔍 MANUAL CORRECTION ENDPOINT
+# 🔍 PREVIEW BATCH - v22.4: z walidacją list i H3
 # ================================================================
-@project_routes.post("/api/project/<project_id>/manual_correct")
-def manual_correct_batch(project_id):
+@project_routes.post("/api/project/<project_id>/preview_batch")
+def preview_batch(project_id):
+    """
+    ⭐ v22.4: Dodaje walidację:
+    - Liczba list wypunktowanych
+    - Długość sekcji H3
+    - Proporcja main vs synonyms
+    - Pokrycie n-gramów
+    """
     data = request.get_json()
     if not data:
         return jsonify({"error": "No JSON data provided"}), 400
 
-    corrected_text = data.get("text") or data.get("batch_text") or data.get("corrected_text")
-    if not corrected_text:
-        return jsonify({"error": "Field 'text' or 'batch_text' is required"}), 400
-
-    meta_trace = data.get("meta_trace", {})
-    forced = data.get("forced", False)
+    batch_text = data.get("text") or data.get("batch_text")
+    if not batch_text:
+        return jsonify({"error": "Field 'text' required"}), 400
 
     db = firestore.client()
     doc = db.collection("seo_projects").document(project_id).get()
@@ -720,81 +823,226 @@ def manual_correct_batch(project_id):
 
     project_data = doc.to_dict()
     keywords_state = project_data.get("keywords_state", {})
-    precheck = unified_prevalidation(corrected_text, keywords_state)
+    main_keyword = project_data.get("main_keyword", project_data.get("topic", ""))
+    s1_data = project_data.get("s1_data", {})
 
-    summary = (
-        f"Semantic drift: {precheck['semantic_score']:.2f}, "
-        f"Transition: {precheck['transition_score']:.2f}, "
-        f"Density: {precheck['density']:.2f}, "
-        f"Warnings: {len(precheck['warnings'])}"
-    )
-
-    if forced:
-        print("[FORCED APPROVAL] Saving corrected batch despite warnings.")
-
-    batch_data = {
-        "id": str(uuid.uuid4()),
-        "text": corrected_text,
-        "meta_trace": meta_trace,
-        "status": "FORCED" if forced else "APPROVED",
-        "language_audit": {
-            "semantic_score": precheck["semantic_score"],
-            "transition_score": precheck["transition_score"],
-            "density": precheck["density"],
-            "burstiness": precheck.get("burstiness", 0),
-            "flesch": precheck.get("readability", {}).get("flesch", 0)
-        },
-        "burstiness": precheck.get("burstiness", 0),
-        "density": precheck["density"],
-        "transition_ratio": precheck["transition_score"],
-        "warnings": precheck["warnings"],
-        "corrected": True,
-        "timestamp": firestore.SERVER_TIMESTAMP
-    }
-
-    doc_ref = db.collection("seo_projects").document(project_id)
-    doc_ref.update({
-        "batches": firestore.ArrayUnion([batch_data]),
-        "total_batches": firestore.Increment(1)
-    })
-
+    # Podstawowa prewalidacja
+    report = unified_prevalidation(batch_text, keywords_state)
+    
+    warnings = report.get("warnings", [])
+    errors = []
+    
+    # ⭐ v22.4: WALIDACJA LIST
+    list_count = count_bullet_lists(batch_text)
+    if list_count > 1:
+        warnings.append({
+            "type": "TOO_MANY_LISTS",
+            "count": list_count,
+            "max": 1,
+            "message": f"Za dużo list ({list_count}). Max 1 na artykuł!"
+        })
+    
+    # ⭐ v22.4: WALIDACJA H3
+    h3_validation = validate_h3_length(batch_text, min_words=80)
+    if h3_validation["issues"]:
+        for issue in h3_validation["issues"]:
+            warnings.append({
+                "type": "H3_TOO_SHORT",
+                "h3": issue["h3"],
+                "word_count": issue["word_count"],
+                "min": 80,
+                "message": f"H3 '{issue['h3']}' za krótkie ({issue['word_count']} słów, min 80)"
+            })
+    
+    # ⭐ v22.4: WALIDACJA MAIN vs SYNONYMS
+    main_synonym_check = check_main_vs_synonyms_in_text(batch_text, main_keyword, keywords_state)
+    if not main_synonym_check["valid"]:
+        warnings.append({
+            "type": "SYNONYM_OVERUSE",
+            "main_count": main_synonym_check["main_count"],
+            "synonym_total": main_synonym_check["synonym_total"],
+            "ratio": main_synonym_check["main_ratio"],
+            "message": main_synonym_check["warning"]
+        })
+    
+    # ⭐ v22.4: WALIDACJA N-GRAMÓW
+    ngrams = s1_data.get("ngrams", [])
+    top_ngrams = [n.get("ngram", "") for n in ngrams if n.get("weight", 0) > 0.5][:10]
+    ngram_check = check_ngram_coverage_in_text(batch_text, top_ngrams)
+    if ngram_check["coverage"] < 0.5:
+        warnings.append({
+            "type": "LOW_NGRAM_COVERAGE",
+            "coverage": ngram_check["coverage"],
+            "missing": ngram_check["missing"][:3],
+            "message": f"Niskie pokrycie n-gramów ({ngram_check['coverage']:.0%})"
+        })
+    
+    # Określ status
+    status = "OK"
+    if errors:
+        status = "ERROR"
+    elif len(warnings) > 2:
+        status = "WARN"
+    
     return jsonify({
-        "status": "CORRECTED_SAVED",
-        "project_id": project_id,
-        "summary": summary,
-        "forced": forced
+        "status": status,
+        "semantic_score": report.get("semantic_score", 0),
+        "density": report.get("density", 0),
+        "warnings": warnings,
+        "errors": errors,
+        "validations": {
+            "lists": {"count": list_count, "valid": list_count <= 1},
+            "h3_length": h3_validation,
+            "main_vs_synonyms": main_synonym_check,
+            "ngram_coverage": ngram_check
+        }
     }), 200
 
 
 # ================================================================
-# 🆕 AUTO-CORRECT ENDPOINT
+# 🔧 HELPER FUNCTIONS - v22.4
+# ================================================================
+def count_bullet_lists(text: str) -> int:
+    """Liczy bloki list wypunktowanych."""
+    lines = text.split('\n')
+    list_blocks = 0
+    in_list = False
+    
+    for line in lines:
+        is_bullet = bool(re.match(r'^\s*[-•*]\s+|^\s*\d+\.\s+', line.strip()))
+        
+        if is_bullet and not in_list:
+            list_blocks += 1
+            in_list = True
+        elif not is_bullet and line.strip():
+            in_list = False
+    
+    # HTML lists
+    html_lists = len(re.findall(r'<ul>|<ol>', text, re.IGNORECASE))
+    
+    return list_blocks + html_lists
+
+
+def validate_h3_length(text: str, min_words: int = 80) -> dict:
+    """Sprawdza czy sekcje H3 mają minimalną długość."""
+    h3_pattern = r'(?:^h3:\s*(.+)$|<h3[^>]*>([^<]+)</h3>)'
+    h3_matches = list(re.finditer(h3_pattern, text, re.MULTILINE | re.IGNORECASE))
+    
+    issues = []
+    sections = []
+    
+    for i, match in enumerate(h3_matches):
+        h3_title = (match.group(1) or match.group(2) or "").strip()
+        start = match.end()
+        end = len(text)
+        
+        next_header = re.search(r'^h[23]:|<h[23]', text[start:], re.MULTILINE | re.IGNORECASE)
+        if next_header:
+            end = start + next_header.start()
+        
+        section_text = text[start:end].strip()
+        section_text = re.sub(r'<[^>]+>', '', section_text)
+        word_count = len(section_text.split())
+        
+        sections.append({"h3": h3_title, "word_count": word_count})
+        
+        if word_count < min_words:
+            issues.append({
+                "h3": h3_title,
+                "word_count": word_count,
+                "min_required": min_words,
+                "deficit": min_words - word_count
+            })
+    
+    return {
+        "valid": len(issues) == 0,
+        "issues": issues,
+        "sections": sections,
+        "total_h3": len(h3_matches)
+    }
+
+
+def check_main_vs_synonyms_in_text(text: str, main_keyword: str, keywords_state: dict) -> dict:
+    """Sprawdza proporcję frazy głównej vs synonimy w tekście."""
+    text_lower = text.lower()
+    
+    main_count = len(re.findall(rf"\b{re.escape(main_keyword.lower())}\b", text_lower))
+    
+    synonym_counts = {}
+    synonym_total = 0
+    
+    for rid, meta in keywords_state.items():
+        if meta.get("is_synonym_of_main"):
+            keyword = meta.get("keyword", "").lower()
+            count = len(re.findall(rf"\b{re.escape(keyword)}\b", text_lower))
+            if count > 0:
+                synonym_counts[meta.get("keyword")] = count
+                synonym_total += count
+    
+    total = main_count + synonym_total
+    main_ratio = main_count / total if total > 0 else 1.0
+    
+    return {
+        "main_keyword": main_keyword,
+        "main_count": main_count,
+        "synonyms": synonym_counts,
+        "synonym_total": synonym_total,
+        "total": total,
+        "main_ratio": round(main_ratio, 2),
+        "valid": main_ratio >= 0.5,
+        "warning": f"Za dużo synonimów! '{main_keyword}' ma tylko {main_ratio:.0%}. Zamień synonimy." if main_ratio < 0.5 else None
+    }
+
+
+def check_ngram_coverage_in_text(text: str, required_ngrams: list) -> dict:
+    """Sprawdza pokrycie n-gramów w tekście."""
+    text_lower = text.lower()
+    used = []
+    missing = []
+    
+    for ngram in required_ngrams:
+        if ngram and ngram.lower() in text_lower:
+            used.append(ngram)
+        elif ngram:
+            missing.append(ngram)
+    
+    coverage = len(used) / len(required_ngrams) if required_ngrams else 1.0
+    
+    return {
+        "coverage": round(coverage, 2),
+        "used": used,
+        "missing": missing,
+        "valid": coverage >= 0.6
+    }
+
+
+# ================================================================
+# 🆕 AUTO-CORRECT ENDPOINT - v22.4
 # ================================================================
 @project_routes.post("/api/project/<project_id>/auto_correct")
 def auto_correct_batch(project_id):
     """
-    Automatyczna korekta batcha używając Gemini.
-    Jeśli nie podano tekstu, pobiera ostatni batch z projektu.
+    Automatyczna korekta batcha.
+    ⭐ v22.4: Auto-save do Firestore
     """
     data = request.get_json() or {}
-
-    batch_text = data.get("text") or data.get("batch_text") or data.get("corrected_text")
+    batch_text = data.get("text") or data.get("batch_text")
     
     db = firestore.client()
-    doc = db.collection("seo_projects").document(project_id).get()
+    doc_ref = db.collection("seo_projects").document(project_id)
+    doc = doc_ref.get()
     if not doc.exists:
         return jsonify({"error": "Project not found"}), 404
 
     project_data = doc.to_dict()
     
-    # ⭐ NOWE: Jeśli brak tekstu, pobierz ostatni batch
     if not batch_text:
         batches = project_data.get("batches", [])
         if batches:
             batch_text = batches[-1].get("text", "")
-            print(f"[AUTO_CORRECT] 📥 Pobrano ostatni batch z Firestore ({len(batch_text)} znaków)")
-        
+    
     if not batch_text:
-        return jsonify({"error": "No text provided and no batches in project"}), 400
+        return jsonify({"error": "No text provided"}), 400
     
     keywords_state = project_data.get("keywords_state", {})
     
@@ -806,13 +1054,11 @@ def auto_correct_batch(project_id):
         min_target = meta.get("target_min", 0)
         max_target = meta.get("target_max", 999)
         keyword = meta.get("keyword", "")
-        kw_type = meta.get("type", "BASIC")
         
         if actual < min_target:
             under_keywords.append({
                 "keyword": keyword,
                 "missing": min_target - actual,
-                "type": kw_type,
                 "current": actual,
                 "target_min": min_target
             })
@@ -820,7 +1066,6 @@ def auto_correct_batch(project_id):
             over_keywords.append({
                 "keyword": keyword,
                 "excess": actual - max_target,
-                "type": kw_type,
                 "current": actual,
                 "target_max": max_target
             })
@@ -828,169 +1073,69 @@ def auto_correct_batch(project_id):
     if not under_keywords and not over_keywords:
         return jsonify({
             "status": "NO_CORRECTIONS_NEEDED",
-            "message": "All keywords within target ranges",
-            "corrected_text": batch_text,
-            "keyword_report": {"under": [], "over": []}
+            "corrected_text": batch_text
         }), 200
     
     if not GEMINI_API_KEY:
-        return jsonify({
-            "status": "ERROR",
-            "error": "Gemini API key not configured",
-            "keyword_report": {"under": under_keywords, "over": over_keywords}
-        }), 500
+        return jsonify({"status": "ERROR", "error": "Gemini API not configured"}), 500
     
     try:
         model = genai.GenerativeModel(GEMINI_MODEL)
         
         correction_instructions = []
-        
         if under_keywords:
-            under_list = "\n".join([
-                f"  - '{kw['keyword']}': Dodaj {kw['missing']}× (obecnie {kw['current']}/{kw['target_min']})"
-                for kw in under_keywords
-            ])
-            correction_instructions.append(f"DODAJ te frazy naturalnie:\n{under_list}")
+            under_list = "\n".join([f"  - '{kw['keyword']}': Dodaj {kw['missing']}x" for kw in under_keywords[:10]])
+            correction_instructions.append(f"DODAJ te frazy:\n{under_list}")
         
         if over_keywords:
-            over_list = "\n".join([
-                f"  - '{kw['keyword']}': Usuń {kw['excess']}× (obecnie {kw['current']}, max {kw['target_max']})"
-                for kw in over_keywords
-            ])
-            correction_instructions.append(f"USUŃ nadmiar tych fraz:\n{over_list}")
+            over_list = "\n".join([f"  - '{kw['keyword']}': Usuń {kw['excess']}x" for kw in over_keywords[:5]])
+            correction_instructions.append(f"USUŃ nadmiar:\n{over_list}")
         
         correction_prompt = f"""
-Popraw poniższy tekst SEO według instrukcji:
+Popraw tekst SEO:
 
 {chr(10).join(correction_instructions)}
 
 ZASADY:
-1. Zachowaj nagłówki <h2> i <h3>
-2. Reszta tekstu ma być CZYSTYM TEKSTEM (bez <p>, bez <strong>, bez list)
-3. Dodawaj frazy naturalnie w kontekście
-4. Usuwaj frazy poprzez parafrazy lub synonimy
-5. Zachowaj profesjonalny, formalny styl
-6. Ta sama fraza BASIC nie może występować częściej niż 1x na 3 zdania
+1. Zachowaj h2: i h3:
+2. Dodawaj frazy naturalnie
+3. Zachowaj styl
 
-TEKST DO POPRAWY:
----
-{batch_text[:10000]}
----
+TEKST:
+{batch_text[:12000]}
 
-Zwróć TYLKO poprawiony tekst, bez żadnych komentarzy.
+Zwróć TYLKO poprawiony tekst.
 """
         
-        print(f"[AUTO_CORRECT] Wysyłam do Gemini: {len(under_keywords)} UNDER, {len(over_keywords)} OVER")
         response = model.generate_content(correction_prompt)
         corrected_text = response.text.strip()
-        
-        # Usuń ewentualne markdown/html wrappery
         corrected_text = re.sub(r'^```(?:html)?\n?', '', corrected_text)
         corrected_text = re.sub(r'\n?```$', '', corrected_text)
         
-        print(f"[AUTO_CORRECT] ✅ Gemini zwrócił poprawiony tekst ({len(corrected_text)} znaków)")
-        
-        # ⭐ FIX v22.3: Automatycznie zapisz poprawiony tekst do ostatniego batcha!
+        # ⭐ v22.4: Auto-save
         batches = project_data.get("batches", [])
         auto_saved = False
         new_metrics = {}
         
         if batches:
-            # Aktualizuj ostatni batch z poprawionym tekstem
             batches[-1]["text"] = corrected_text
             batches[-1]["auto_corrected"] = True
-            
-            # Przelicz metryki na NOWYM tekście
             new_metrics = unified_prevalidation(corrected_text, keywords_state)
             batches[-1]["burstiness"] = new_metrics.get("burstiness", 0)
             batches[-1]["density"] = new_metrics.get("density", 0)
-            batches[-1]["transition_ratio"] = new_metrics.get("transition_ratio", 0)
-            batches[-1]["language_audit"] = new_metrics
-            
-            # Zapisz do Firestore
-            doc_ref = db.collection("seo_projects").document(project_id)
             doc_ref.update({"batches": batches})
             auto_saved = True
-            
-            print(f"[AUTO_CORRECT] ✅ Zapisano poprawiony tekst do batcha #{len(batches)}")
         
         return jsonify({
             "status": "AUTO_CORRECTED",
             "corrected_text": corrected_text,
-            "added_keywords": [kw["keyword"] for kw in under_keywords],
-            "removed_keywords": [kw["keyword"] for kw in over_keywords],
-            "keyword_report": {"under": under_keywords, "over": over_keywords},
-            "correction_summary": f"Dodano {len(under_keywords)} fraz, usunięto nadmiar {len(over_keywords)} fraz",
             "auto_saved": auto_saved,
-            "new_metrics": {
-                "burstiness": new_metrics.get("burstiness", 0),
-                "density": new_metrics.get("density", 0),
-                "transition_ratio": new_metrics.get("transition_ratio", 0)
-            } if new_metrics else {}
+            "added_keywords": [kw["keyword"] for kw in under_keywords],
+            "removed_keywords": [kw["keyword"] for kw in over_keywords]
         }), 200
         
     except Exception as e:
-        print(f"[AUTO_CORRECT] ❌ Błąd Gemini: {e}")
-        return jsonify({
-            "status": "ERROR",
-            "error": str(e),
-            "keyword_report": {"under": under_keywords, "over": over_keywords}
-        }), 500
-
-
-# ================================================================
-# 🧠 UNIFIED PRE-VALIDATION
-# ================================================================
-@project_routes.post("/api/project/<project_id>/preview_all_checks")
-def preview_all_checks(project_id):
-    data = request.get_json()
-    if not data:
-        return jsonify({"error": "No JSON data provided"}), 400
-
-    text = data.get("text") or data.get("batch_text")
-    if not text:
-        return jsonify({"error": "Field 'text' or 'batch_text' is required"}), 400
-
-    db = firestore.client()
-    doc = db.collection("seo_projects").document(project_id).get()
-    if not doc.exists:
-        return jsonify({"error": "Project not found"}), 404
-
-    project_data = doc.to_dict()
-    keywords_state = project_data.get("keywords_state", {})
-
-    report = unified_prevalidation(text, keywords_state)
-
-    return jsonify({
-        "status": "CHECKED",
-        "semantic_score": report["semantic_score"],
-        "transition_score": report["transition_score"],
-        "density": report["density"],
-        "warnings": report["warnings"],
-        "summary": f"Semantic: {report['semantic_score']:.2f}, "
-                   f"Transition: {report['transition_score']:.2f}, "
-                   f"Density: {report['density']:.2f}, "
-                   f"Warnings: {len(report['warnings'])}"
-    }), 200
-
-
-# ================================================================
-# 🆕 FORCE APPROVE
-# ================================================================
-@project_routes.post("/api/project/<project_id>/force_approve_batch")
-def force_approve_batch(project_id):
-    data = request.get_json()
-    if not data:
-        return jsonify({"error": "No JSON data provided"}), 400
-
-    batch_text = data.get("text") or data.get("batch_text")
-    if not batch_text:
-        return jsonify({"error": "Field 'text' or 'batch_text' is required"}), 400
-
-    meta_trace = data.get("meta_trace", {})
-
-    print("[FORCE APPROVE] User requested forced save.")
-    return manual_correct_batch(project_id)
+        return jsonify({"status": "ERROR", "error": str(e)}), 500
 
 
 # ================================================================
@@ -999,8 +1144,7 @@ def force_approve_batch(project_id):
 @project_routes.get("/api/project/<project_id>/export")
 def export_project_data(project_id):
     db = firestore.client()
-    doc_ref = db.collection("seo_projects").document(project_id)
-    doc = doc_ref.get()
+    doc = db.collection("seo_projects").document(project_id).get()
     if not doc.exists:
         return jsonify({"error": "Not found"}), 404
 
@@ -1008,7 +1152,6 @@ def export_project_data(project_id):
     batches = data.get("batches", [])
     full_text = "\n\n".join(b.get("text", "") for b in batches)
     
-    # ⭐ NOWE: Konwersja h2:/h3: na HTML
     def convert_markers_to_html(text):
         lines = text.split('\n')
         result = []
@@ -1029,119 +1172,21 @@ def export_project_data(project_id):
     return jsonify({
         "status": "EXPORT_READY",
         "topic": data.get("topic"),
-        "article_text": full_text,  # Oryginalny tekst z markerami
-        "article_html": article_html,  # ⭐ Skonwertowany na HTML
+        "article_text": full_text,
+        "article_html": article_html,
         "batch_count": len(batches),
-        "version": "v22.1"
+        "version": "v22.4"
     }), 200
 
 
 # ================================================================
-# 🔄 ALIAS: auto_correct_keywords
+# 🔄 ALIASES
 # ================================================================
 @project_routes.post("/api/project/<project_id>/auto_correct_keywords")
 def auto_correct_keywords_alias(project_id):
-    """Alias dla auto_correct - kompatybilność z OpenAPI schema."""
     return auto_correct_batch(project_id)
 
 
-# ================================================================
-# 🔄 RECALCULATE METRICS - FIX dla burstiness = 0
-# ================================================================
-@project_routes.post("/api/project/<project_id>/recalculate_metrics")
-def recalculate_metrics(project_id):
-    """
-    Przelicza metryki (burstiness, density) dla wszystkich batchy.
-    Użyj gdy metryki pokazują 0.0 mimo poprawionego tekstu.
-    """
-    db = firestore.client()
-    doc_ref = db.collection("seo_projects").document(project_id)
-    doc = doc_ref.get()
-    
-    if not doc.exists:
-        return jsonify({"error": "Project not found"}), 404
-    
-    data = doc.to_dict()
-    batches = data.get("batches", [])
-    keywords_state = data.get("keywords_state", {})
-    
-    if not batches:
-        return jsonify({"error": "No batches to recalculate"}), 400
-    
-    updated_batches = []
-    for i, batch in enumerate(batches):
-        text = batch.get("text", "")
-        if text:
-            metrics = unified_prevalidation(text, keywords_state)
-            batch["burstiness"] = metrics.get("burstiness", 0)
-            batch["density"] = metrics.get("density", 0)
-            batch["transition_ratio"] = metrics.get("transition_ratio", 0)
-            batch["flesch"] = metrics.get("readability", {}).get("flesch", 0)
-            batch["language_audit"] = metrics
-            batch["metrics_recalculated"] = True
-        updated_batches.append(batch)
-    
-    doc_ref.update({"batches": updated_batches})
-    
-    return jsonify({
-        "status": "METRICS_RECALCULATED",
-        "batches_updated": len(updated_batches),
-        "summary": [
-            {
-                "batch": i+1,
-                "burstiness": b.get("burstiness", 0),
-                "density": b.get("density", 0),
-                "flesch": b.get("flesch", 0)
-            }
-            for i, b in enumerate(updated_batches)
-        ]
-    }), 200
-
-
-# ================================================================
-# 📊 DEBUG KEYWORDS - diagnostyka fraz
-# ================================================================
-@project_routes.get("/api/debug/<project_id>")
-def debug_keywords(project_id):
-    """Pełna diagnostyka projektu: frazy, metryki, ostrzeżenia."""
-    db = firestore.client()
-    doc = db.collection("seo_projects").document(project_id).get()
-    
-    if not doc.exists:
-        return jsonify({"error": "Project not found"}), 404
-    
-    data = doc.to_dict()
-    keywords_state = data.get("keywords_state", {})
-    batches = data.get("batches", [])
-    
-    keywords_summary = []
-    for rid, meta in keywords_state.items():
-        keywords_summary.append({
-            "keyword": meta.get("keyword"),
-            "type": meta.get("type", "BASIC"),
-            "actual": meta.get("actual_uses", 0),
-            "target_min": meta.get("target_min", 0),
-            "target_max": meta.get("target_max", 999),
-            "status": meta.get("status", "UNKNOWN")
-        })
-    
-    # Średnie metryki
-    avg_burstiness = 0
-    avg_density = 0
-    if batches:
-        burstiness_vals = [b.get("burstiness", 0) for b in batches if b.get("burstiness")]
-        density_vals = [b.get("density", 0) for b in batches if b.get("density")]
-        avg_burstiness = sum(burstiness_vals) / len(burstiness_vals) if burstiness_vals else 0
-        avg_density = sum(density_vals) / len(density_vals) if density_vals else 0
-    
-    return jsonify({
-        "project_id": project_id,
-        "topic": data.get("topic"),
-        "total_batches": len(batches),
-        "keywords_count": len(keywords_state),
-        "keywords": keywords_summary,
-        "avg_burstiness": round(avg_burstiness, 2),
-        "avg_density": round(avg_density, 2),
-        "has_final_review": "final_review" in data,
-        "version": "v22.3"
-    }), 200
+@project_routes.post("/api/project/<project_id>/preview_all_checks")
+def preview_all_checks(project_id):
+    return preview_batch(project_id)
