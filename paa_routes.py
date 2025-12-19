@@ -71,19 +71,24 @@ def analyze_for_paa(project_id):
             })
     
     # --------------------------------------------
-    # Znajdź NIEWYKORZYSTANE H2
+    # Znajdź UŻYTE H2 (tematy już omówione - do unikania w FAQ!)
     # --------------------------------------------
     full_article = "\n\n".join([b.get("text", "") for b in batches])
-    used_h2 = set()
+    used_h2 = []
     
     # Format h2:
     for match in re.findall(r'^h2:\s*(.+)$', full_article, re.MULTILINE | re.IGNORECASE):
-        used_h2.add(match.strip().lower())
+        used_h2.append(match.strip())
     # Format <h2>
     for match in re.findall(r'<h2[^>]*>([^<]+)</h2>', full_article, re.IGNORECASE):
-        used_h2.add(match.strip().lower())
+        used_h2.append(match.strip())
     
-    unused_h2 = [h2 for h2 in original_h2_list if h2.lower().strip() not in used_h2]
+    # Tematy do UNIKANIA w FAQ (już omówione w artykule)
+    topics_to_avoid = used_h2.copy()
+    
+    # Znajdź niewykorzystane H2 z oryginalnej listy
+    used_h2_lower = set([h.lower() for h in used_h2])
+    unused_h2 = [h2 for h2 in original_h2_list if h2.lower().strip() not in used_h2_lower]
     
     # --------------------------------------------
     # Znajdź niewykorzystane PAA z SERP
@@ -116,17 +121,26 @@ def analyze_for_paa(project_id):
             "serp_paa": unused_paa[:5]
         },
         
+        "avoid_in_faq": {
+            "topics_already_covered": topics_to_avoid,
+            "reason": "Te tematy są już omówione w artykule - FAQ musi odpowiadać na INNE pytania!"
+        },
+        
+        "original_serp_paa": serp_paa[:10],
+        
         "summary": {
             "extended_unused": len(unused_extended),
             "basic_unused": len(unused_basic),
             "h2_unused": len(unused_h2),
-            "serp_paa_available": len(unused_paa)
+            "serp_paa_available": len(unused_paa),
+            "topics_to_avoid": len(topics_to_avoid)
         },
         
         "instructions": {
             "goal": "Napisz sekcję PAA z 3 pytaniami",
-            "priority": "1. extended_keywords, 2. serp_paa, 3. unused_h2, 4. basic_keywords",
-            "question_format": "Zacznij od: Jak/Czy/Co/Dlaczego/Kiedy/Ile (5-10 słów)",
+            "critical_rule": "FAQ NIE MOŻE powtarzać tematów z artykułu! Sprawdź 'avoid_in_faq'.",
+            "priority": "1. serp_paa (prawdziwe pytania z Google!), 2. extended_keywords, 3. unused_h2",
+            "question_format": "Zacznij od: Jak/Czy/Co/Dlaczego/Kiedy/Ile/Czego (5-10 słów)",
             "answer_format": "80-120 słów, pierwsze zdanie = bezpośrednia odpowiedź",
             "save_endpoint": f"POST /api/project/{project_id}/paa/save"
         }
