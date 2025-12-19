@@ -1,332 +1,453 @@
+# ================================================================
+# 🔍 FINAL REVIEW ROUTES v22.4
+# ================================================================
+
 import os
-import json
 import re
-from flask import Blueprint, jsonify, request
+import json
+from flask import Blueprint, request, jsonify
 from firebase_admin import firestore
 import google.generativeai as genai
 
-# ------------------------------------------------------------
-# Konfiguracja
-# ------------------------------------------------------------
+final_review_routes = Blueprint("final_review_routes", __name__)
+
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
-FINAL_REVIEW_MODEL = os.getenv("FINAL_REVIEW_MODEL", "gemini-2.5-flash")
 
-final_review_routes = Blueprint("final_review_routes", __name__)
+GEMINI_MODEL = "gemini-2.5-flash"
 
-# ------------------------------------------------------------
-# Domyślne banned phrases
-# ------------------------------------------------------------
-DEFAULT_BANNED = {
-    "phrases": [
-        "warto zauważyć", "warto podkreślić", "warto wspomnieć", "warto dodać",
-        "w dzisiejszych czasach", "w obecnych czasach",
-        "podsumowując", "reasumując",
-        "nie da się ukryć", "nie ulega wątpliwości",
-        "należy pamiętać", "należy zauważyć",
-        "kluczowe znaczenie", "odgrywa kluczową rolę",
-        "jak wiadomo", "powszechnie wiadomo",
-        "oczywiste jest", "jasne jest"
-    ],
-    "openers": ["Dlatego", "Ponadto", "Dodatkowo", "Warto", "Należy"],
-    "typography": ["—", "–", "…"]
-}
 
-# ------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------
-def _get_banned(db):
-    try:
-        doc = db.collection("seo_config").document("banned_phrases").get()
-        if doc.exists:
-            return doc.to_dict()
-    except:
-        pass
-    return DEFAULT_BANNED
+# ================================================================
+# 1. MISSING KEYWORDS DETECTOR
+# ================================================================
+def detect_missing_keywords(text, keywords_state):
+    text_lower = text.lower()
+    
+    missing_basic = []
+    missing_extended = []
+    underused_basic = []
+    underused_extended = []
+    
+    for rid, meta in keywords_state.items():
+        keyword = meta.get("keyword", "")
+        if not keyword:
+            continue
+        
+        kw_type = meta.get("type", "BASIC").upper()
+        target_min = meta.get("target_min", 1)
+        
+        actual = len(re.findall(rf"\b{re.escape(keyword.lower())}\b", text_lower))
+        
+        info = {
+            "keyword": keyword,
+            "type": kw_type,
+            "actual": actual,
+            "target_min": target_min,
+            "missing": max(0, target_min - actual)
+        }
+        
+        if actual == 0:
+            if kw_type in ["BASIC", "MAIN"]:
+                missing_basic.append(info)
+            else:
+                missing_extended.append(info)
+        elif actual < target_min:
+            if kw_type in ["BASIC", "MAIN"]:
+                underused_basic.append(info)
+            else:
+                underused_extended.append(info)
+    
+    missing_basic.sort(key=lambda x: x["missing"], reverse=True)
+    
+    return {
+        "missing": {"basic": missing_basic, "extended": missing_extended},
+        "underused": {"basic": underused_basic, "extended": underused_extended},
+        "priority_to_add": {
+            "critical": missing_basic[:5],
+            "high": underused_basic[:5] + missing_extended[:5],
+            "medium": underused_extended[:5]
+        },
+        "needs_correction": len(missing_basic) > 0 or len(underused_basic) > 0
+    }
 
-def _join_article(batches):
-    return "\n\n".join([b.get("text", "") for b in (batches or [])]).strip()
 
-# ------------------------------------------------------------
-# FINAL REVIEW - Audyt redakcyjny
-# ------------------------------------------------------------
+# ================================================================
+# 2. MAIN vs SYNONYMS
+# ================================================================
+def check_main_vs_synonyms(text, main_keyword, keywords_state):
+    text_lower = text.lower()
+    
+    main_count = len(re.findall(rf"\b{re.escape(main_keyword.lower())}\b", text_lower))
+    
+    synonym_counts = {}
+    synonym_total = 0
+    
+    for rid, meta in keywords_state.items():
+        if meta.get("is_synonym_of_main"):
+            kw = meta.get("keyword", "").lower()
+            count = len(re.findall(rf"\b{re.escape(kw)}\b", text_lower))
+            if count > 0:
+                synonym_counts[meta.get("keyword")] = count
+                synonym_total += count
+    
+    total = main_count + synonym_total
+    main_ratio = main_count / total if total > 0 else 1.0
+    
+    overused = []
+    for syn, count in synonym_counts.items():
+        if count > main_count:
+            overused.append({
+                "synonym": syn,
+                "count": count,
+                "action": f"Zamień {count - main_count}x '{syn}' na '{main_keyword}'"
+            })
+    
+    return {
+        "main_keyword": main_keyword,
+        "main_count": main_count,
+        "synonym_total": synonym_total,
+        "main_ratio": round(main_ratio, 2),
+        "valid": main_ratio >= 0.5,
+        "overused_synonyms": overused,
+        "warning": f"'{main_keyword}' ma tylko {main_ratio:.0%} użyć!" if main_ratio < 0.5 else None
+    }
+
+
+# ================================================================
+# 3. H2 VALIDATION
+# ================================================================
+def validate_h2_keywords(text, main_keyword):
+    h2_pattern = r'(?:^h2:\s*(.+)$|<h2[^>]*>([^<]+)</h2>)'
+    h2_matches = re.findall(h2_pattern, text, re.MULTILINE | re.IGNORECASE)
+    h2_list = [(m[0] or m[1]).strip() for m in h2_matches if m[0] or m[1]]
+    
+    if not h2_list:
+        return {"valid": True, "h2_count": 0, "coverage": 0, "issues": []}
+    
+    main_lower = main_keyword.lower()
+    h2_with_main = sum(1 for h2 in h2_list if main_lower in h2.lower())
+    coverage = h2_with_main / len(h2_list)
+    
+    issues = [{"h2": h2, "suggestion": f"Dodaj '{main_keyword}'"} 
+              for h2 in h2_list if main_lower not in h2.lower()]
+    
+    return {
+        "valid": coverage >= 0.4,
+        "h2_count": len(h2_list),
+        "h2_with_main": h2_with_main,
+        "coverage": round(coverage, 2),
+        "issues": issues[:3]
+    }
+
+
+# ================================================================
+# 4. H3 LENGTH
+# ================================================================
+def validate_h3_length(text, min_words=80):
+    h3_pattern = r'(?:^h3:\s*(.+)$|<h3[^>]*>([^<]+)</h3>)'
+    h3_matches = list(re.finditer(h3_pattern, text, re.MULTILINE | re.IGNORECASE))
+    
+    issues = []
+    
+    for i, match in enumerate(h3_matches):
+        h3_title = (match.group(1) or match.group(2) or "").strip()
+        start = match.end()
+        end = len(text)
+        
+        next_h = re.search(r'^h[23]:|<h[23]', text[start:], re.MULTILINE | re.IGNORECASE)
+        if next_h:
+            end = start + next_h.start()
+        
+        section = re.sub(r'<[^>]+>', '', text[start:end]).strip()
+        words = len(section.split())
+        
+        if words < min_words:
+            issues.append({
+                "h3": h3_title,
+                "word_count": words,
+                "deficit": min_words - words
+            })
+    
+    return {"valid": len(issues) == 0, "issues": issues, "total_h3": len(h3_matches)}
+
+
+# ================================================================
+# 5. LIST COUNT
+# ================================================================
+def count_lists(text):
+    lines = text.split('\n')
+    list_blocks = 0
+    in_list = False
+    
+    for line in lines:
+        is_bullet = bool(re.match(r'^\s*[-•*]\s+|^\s*\d+\.\s+', line.strip()))
+        if is_bullet and not in_list:
+            list_blocks += 1
+            in_list = True
+        elif not is_bullet and line.strip():
+            in_list = False
+    
+    list_blocks += len(re.findall(r'<ul>|<ol>', text, re.IGNORECASE))
+    
+    return {
+        "count": list_blocks,
+        "valid": list_blocks <= 1,
+        "action": f"Zamień {list_blocks - 1} list na tekst" if list_blocks > 1 else None
+    }
+
+
+# ================================================================
+# 6. N-GRAM COVERAGE
+# ================================================================
+def check_ngrams(text, s1_data):
+    if not s1_data:
+        return {"coverage": 1.0, "missing": []}
+    
+    text_lower = text.lower()
+    ngrams = s1_data.get("ngrams", [])
+    top = [n.get("ngram", "") for n in ngrams if n.get("weight", 0) > 0.4][:15]
+    
+    used = [ng for ng in top if ng and ng.lower() in text_lower]
+    missing = [ng for ng in top if ng and ng.lower() not in text_lower]
+    
+    coverage = len(used) / len(top) if top else 1.0
+    
+    return {
+        "coverage": round(coverage, 2),
+        "used_count": len(used),
+        "missing": missing[:5],
+        "valid": coverage >= 0.6
+    }
+
+
+# ================================================================
+# MAIN ENDPOINT: performFinalReview
+# ================================================================
 @final_review_routes.post("/api/project/<project_id>/final_review")
 def perform_final_review(project_id):
-    if not GEMINI_API_KEY:
-        return jsonify({"error": "Gemini API not configured"}), 500
-
     db = firestore.client()
-    doc_ref = db.collection("seo_projects").document(project_id)
-    doc = doc_ref.get()
+    doc = db.collection("seo_projects").document(project_id).get()
+    
     if not doc.exists:
         return jsonify({"error": "Project not found"}), 404
-
-    data = doc.to_dict() or {}
+    
+    data = doc.to_dict()
     batches = data.get("batches", [])
-    full_article = _join_article(batches)
+    keywords_state = data.get("keywords_state", {})
+    s1_data = data.get("s1_data", {})
+    main_keyword = data.get("main_keyword", data.get("topic", ""))
     
-    if not full_article:
-        return jsonify({"error": "Empty article"}), 400
-
-    # Sprawdź czy już istnieje
-    force = request.args.get("force", "").lower() in ("1", "true")
-    body = request.get_json(silent=True) or {}
-    if body.get("force"):
-        force = True
-        
-    existing = data.get("final_review")
-    if existing and not force:
-        return jsonify({
-            "status": "REVIEW_READY",
-            "review": existing.get("review_data") if isinstance(existing, dict) else existing,
-            "note": "Użyj ?force=true aby ponowić"
-        }), 200
-
-    # Pobierz banned phrases
-    banned = _get_banned(db)
-    banned_phrases = banned.get("phrases", DEFAULT_BANNED["phrases"])
-    banned_typography = banned.get("typography", DEFAULT_BANNED["typography"])
+    full_text = "\n\n".join([b.get("text", "") for b in batches])
     
-    # Pre-scan
-    article_lower = full_article.lower()
-    found_phrases = [p for p in banned_phrases if p.lower() in article_lower]
-    found_typo = [c for c in banned_typography if c in full_article]
+    if not full_text.strip():
+        return jsonify({"error": "No content"}), 400
     
-    word_count = len(full_article.split())
-
-    # ============================================
-    # PROMPT - PROSTY I JASNY
-    # ============================================
-    prompt = f"""Jesteś korektorem i redaktorem. Sprawdź artykuł przed publikacją.
-
-## SPRAWDŹ:
-
-### A. BŁĘDY JĘZYKOWE
-1. Ortografia i literówki
-2. Interpunkcja (przecinki, kropki)
-3. Spójność czasów (czas teraźniejszy vs przeszły)
-4. Zbyt długie zdania (>30 słów)
-
-### B. POWTÓRZENIA
-5. Powtórzenia słów w sąsiednich zdaniach
-6. **Te same informacje w różnych sekcjach** - czy coś nie zostało powiedziane 2x?
-7. **Podobne zdania/akapity** - czy autor nie napisał tego samego innymi słowami?
-8. **Nakładające się tematy w H2** - czy sekcje się nie dublują?
-
-### C. SPÓJNOŚĆ ARTYKUŁU
-9. Czy artykuł płynie logicznie od sekcji do sekcji?
-10. Czy nie ma skoków tematycznych?
-11. Czy wnioski/podsumowania nie powtarzają wstępu?
-
-### D. FACT-CHECK (WAŻNE!)
-12. **Błędne fakty** - czy są twierdzenia niezgodne z prawdą?
-13. **Nieaktualne informacje** - czy dane/statystyki mogą być przestarzałe?
-14. **Niespójności logiczne** - czy autor nie zaprzecza sam sobie?
-15. **Wątpliwe twierdzenia** - czy coś brzmi nieprawdopodobnie i wymaga weryfikacji?
-16. **Brakujące zastrzeżenia** - czy przy radach medycznych/prawnych/finansowych są odpowiednie disclaimery?
-
-## USUŃ TE FRAZY (brzmią sztucznie):
-{', '.join(banned_phrases[:15])}
-
-## USUŃ TĘ TYPOGRAFIĘ:
-— → przecinek lub kropka
-– → myślnik zwykły lub "do"  
-… → kropka
-
-## PRE-SCAN (już wykryte):
-- Zakazane frazy: {', '.join(found_phrases) if found_phrases else 'brak'}
-- Zła typografia: {', '.join(found_typo) if found_typo else 'brak'}
-
-## ARTYKUŁ ({word_count} słów):
-{full_article}
-
-## ODPOWIEDZ W JSON:
-{{
-  "status": "OK|WYMAGA_POPRAWEK|WYMAGA_WERYFIKACJI",
-  "podsumowanie": "1-2 zdania ogólnej oceny",
-  
-  "bledy_jezykowe": [
-    {{"typ": "ortografia|interpunkcja|czas|zdanie_za_dlugie", "lokalizacja": "cytat 3-5 słów", "poprawka": "jak poprawić"}}
-  ],
-  
-  "powtorzenia": [
-    {{"typ": "slowo|informacja|sekcja", "gdzie": "H2: X i H2: Y", "co_sie_powtarza": "opis", "sugestia": "usuń z sekcji X lub połącz"}}
-  ],
-  
-  "spojnosc": {{
-    "ocena": "dobra|srednia|slaba",
-    "problemy": ["opis problemu jeśli są"]
-  }},
-  
-  "fact_check": {{
-    "status": "OK|WYMAGA_WERYFIKACJI|BLEDY",
-    "problemy": [
-      {{"twierdzenie": "cytat z artykułu", "problem": "dlaczego wątpliwe/błędne", "waznosc": "minor|major|krytyczny", "sugestia": "jak poprawić lub zweryfikować"}}
-    ]
-  }},
-  
-  "zakazane_frazy": {json.dumps(found_phrases)},
-  "zla_typografia": {json.dumps(found_typo)},
-  
-  "statystyki": {{
-    "bledy_jezykowe": 0,
-    "powtorzenia": 0,
-    "fact_check_problemy": 0,
-    "zakazane_frazy": {len(found_phrases)},
-    "typografia": {len(found_typo)}
-  }}
-}}"""
-
-    try:
-        model = genai.GenerativeModel(FINAL_REVIEW_MODEL)
-        response = model.generate_content(
-            prompt,
-            generation_config={"temperature": 0.1, "max_output_tokens": 2048}
-        )
-        
-        text = (response.text or "").strip()
-        text = re.sub(r'^```json?\n?', '', text)
-        text = re.sub(r'\n?```$', '', text)
-        
-        try:
-            review_data = json.loads(text)
-        except:
-            match = re.search(r'\{[\s\S]*\}', text)
-            review_data = json.loads(match.group()) if match else {"raw": text[:500]}
-            
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-    # Zapisz
+    # Analizy
+    missing_kw = detect_missing_keywords(full_text, keywords_state)
+    main_syn = check_main_vs_synonyms(full_text, main_keyword, keywords_state)
+    h2_val = validate_h2_keywords(full_text, main_keyword)
+    h3_val = validate_h3_length(full_text)
+    list_val = count_lists(full_text)
+    ngram_val = check_ngrams(full_text, s1_data)
+    
+    # Issues
+    all_issues = []
+    
+    if missing_kw["missing"]["basic"]:
+        all_issues.append({
+            "type": "MISSING_BASIC",
+            "severity": "ERROR",
+            "keywords": [k["keyword"] for k in missing_kw["missing"]["basic"][:5]]
+        })
+    
+    if not main_syn["valid"]:
+        all_issues.append({
+            "type": "SYNONYM_OVERUSE",
+            "severity": "ERROR",
+            "ratio": main_syn["main_ratio"],
+            "warning": main_syn["warning"]
+        })
+    
+    if not h2_val["valid"]:
+        all_issues.append({
+            "type": "H2_NO_KEYWORDS",
+            "severity": "WARNING",
+            "coverage": h2_val["coverage"]
+        })
+    
+    if not h3_val["valid"]:
+        all_issues.append({
+            "type": "H3_TOO_SHORT",
+            "severity": "WARNING",
+            "issues": h3_val["issues"]
+        })
+    
+    if not list_val["valid"]:
+        all_issues.append({
+            "type": "TOO_MANY_LISTS",
+            "severity": "WARNING",
+            "count": list_val["count"]
+        })
+    
+    if not ngram_val["valid"]:
+        all_issues.append({
+            "type": "LOW_NGRAM_COVERAGE",
+            "severity": "WARNING",
+            "coverage": ngram_val["coverage"]
+        })
+    
+    # Status
+    errors = sum(1 for i in all_issues if i.get("severity") == "ERROR")
+    warnings = sum(1 for i in all_issues if i.get("severity") == "WARNING")
+    
+    status = "WYMAGA_POPRAWEK" if errors > 0 else ("WARN" if warnings > 2 else "OK")
+    
+    # Recommendations
+    recommendations = []
+    
+    for ov in main_syn.get("overused_synonyms", [])[:2]:
+        recommendations.append(ov["action"])
+    
+    for kw in missing_kw["priority_to_add"]["critical"][:3]:
+        recommendations.append(f"DODAJ '{kw['keyword']}' min. {kw['target_min']}x")
+    
+    for issue in h3_val["issues"][:2]:
+        recommendations.append(f"Rozbuduj H3 '{issue['h3']}' o {issue['deficit']} słów")
+    
+    if list_val["action"]:
+        recommendations.append(list_val["action"])
+    
+    if ngram_val["missing"]:
+        recommendations.append(f"Wpleć: {', '.join(ngram_val['missing'][:3])}")
+    
+    # Score
+    score = 100
+    score -= len(missing_kw["missing"]["basic"]) * 5
+    score -= len(missing_kw["underused"]["basic"]) * 2
+    if main_syn["main_ratio"] < 0.5:
+        score -= 15
+    if h2_val["coverage"] < 0.4:
+        score -= 10
+    score -= len(h3_val["issues"]) * 3
+    if list_val["count"] > 1:
+        score -= (list_val["count"] - 1) * 5
+    if ngram_val["coverage"] < 0.6:
+        score -= 10
+    score = max(0, min(100, score))
+    
+    result = {
+        "status": status,
+        "project_id": project_id,
+        "word_count": len(full_text.split()),
+        "score": score,
+        "validations": {
+            "missing_keywords": missing_kw,
+            "main_vs_synonyms": main_syn,
+            "h2_keywords": h2_val,
+            "h3_length": h3_val,
+            "list_count": list_val,
+            "ngram_coverage": ngram_val
+        },
+        "all_issues": all_issues,
+        "recommendations": recommendations
+    }
+    
+    doc_ref = db.collection("seo_projects").document(project_id)
     doc_ref.update({
-        "final_review": {
-            "review_data": review_data,
-            "created_at": firestore.SERVER_TIMESTAMP,
-            "status": "REVIEW_READY"
-        }
+        "final_review": result,
+        "final_review_timestamp": firestore.SERVER_TIMESTAMP
     })
-
-    return jsonify({
-        "status": "REVIEW_READY",
-        "review": review_data,
-        "article_length": word_count
-    }), 200
+    
+    return jsonify(result), 200
 
 
-# ------------------------------------------------------------
-# APPLY CORRECTIONS - Korekta
-# ------------------------------------------------------------
-@final_review_routes.post("/api/project/<project_id>/apply_final_corrections")
+# ================================================================
+# ENDPOINT: applyFinalCorrections
+# ================================================================
+@final_review_routes.post("/api/project/<project_id>/apply_corrections")
 def apply_final_corrections(project_id):
-    if not GEMINI_API_KEY:
-        return jsonify({"error": "Gemini API not configured"}), 500
-
     db = firestore.client()
-    doc_ref = db.collection("seo_projects").document(project_id)
-    doc = doc_ref.get()
+    doc = db.collection("seo_projects").document(project_id).get()
+    
     if not doc.exists:
         return jsonify({"error": "Project not found"}), 404
-
-    data = doc.to_dict() or {}
-    review = data.get("final_review", {})
-    review_data = review.get("review_data", {}) if isinstance(review, dict) else {}
     
+    data = doc.to_dict()
     batches = data.get("batches", [])
-    full_article = _join_article(batches)
+    final_review = data.get("final_review", {})
+    main_keyword = data.get("main_keyword", data.get("topic", ""))
     
-    if not full_article:
-        return jsonify({"error": "Empty article"}), 400
-
-    errors = review_data.get("bledy_jezykowe", [])
-    repetitions = review_data.get("powtorzenia", [])
-    fact_issues = review_data.get("fact_check", {}).get("problemy", [])
-    banned_found = review_data.get("zakazane_frazy", [])
-    typo_found = review_data.get("zla_typografia", [])
-
-    # ============================================
-    # PROMPT KOREKTY
-    # ============================================
-    prompt = f"""Popraw artykuł. Wprowadź TYLKO te zmiany:
-
-## BŁĘDY JĘZYKOWE DO POPRAWIENIA:
-{json.dumps(errors, ensure_ascii=False, indent=2) if errors else 'Brak'}
-
-## POWTÓRZENIA DO USUNIĘCIA/POŁĄCZENIA:
-{json.dumps(repetitions, ensure_ascii=False, indent=2) if repetitions else 'Brak'}
-(usuń zduplikowane informacje - zostaw tylko w jednej sekcji)
-
-## PROBLEMY MERYTORYCZNE DO POPRAWIENIA:
-{json.dumps(fact_issues, ensure_ascii=False, indent=2) if fact_issues else 'Brak'}
-(popraw błędne fakty, usuń wątpliwe twierdzenia lub dodaj zastrzeżenia)
-
-## FRAZY DO USUNIĘCIA:
-{', '.join(banned_found) if banned_found else 'Brak'}
-(zamień na naturalne odpowiedniki lub usuń)
-
-## TYPOGRAFIA DO ZAMIANY:
-— → przecinek lub kropka
-– → zwykły myślnik
-… → kropka
-
-## ZASADY:
-- NIE zmieniaj struktury
-- NIE usuwaj treści
-- NIE dodawaj nowych zdań
-- Zachowaj nagłówki (h2:, h3:, <h2>, <h3>)
-
-## ARTYKUŁ:
-{full_article}
-
-Zwróć TYLKO poprawiony artykuł:"""
-
+    if not final_review:
+        return jsonify({"error": "Run final_review first"}), 400
+    
+    full_text = "\n\n".join([b.get("text", "") for b in batches])
+    
+    if not GEMINI_API_KEY:
+        return jsonify({"error": "Gemini not configured"}), 500
+    
+    recommendations = final_review.get("recommendations", [])
+    if not recommendations:
+        return jsonify({"status": "NO_CORRECTIONS_NEEDED"}), 200
+    
+    # Build corrections
+    corrections = recommendations[:10]
+    
+    keywords_to_add = []
+    missing_kw = final_review.get("validations", {}).get("missing_keywords", {})
+    for kw in missing_kw.get("priority_to_add", {}).get("critical", [])[:5]:
+        keywords_to_add.append({"keyword": kw["keyword"], "times": kw["target_min"]})
+    
     try:
-        model = genai.GenerativeModel(FINAL_REVIEW_MODEL)
-        response = model.generate_content(
-            prompt,
-            generation_config={"temperature": 0.1, "max_output_tokens": 8192}
-        )
+        model = genai.GenerativeModel(GEMINI_MODEL)
         
-        corrected = (response.text or "").strip()
-        corrected = re.sub(r'^```(?:markdown|text|html)?\n?', '', corrected)
+        kw_section = ""
+        if keywords_to_add:
+            kw_list = "\n".join([f"  - '{k['keyword']}': {k['times']}x" for k in keywords_to_add])
+            kw_section = f"FRAZY DO WPLECENIA:\n{kw_list}\n\n"
+        
+        prompt = f"""Popraw artykuł:
+
+{kw_section}INSTRUKCJE:
+{chr(10).join(f"- {c}" for c in corrections)}
+
+ZASADY:
+1. Zachowaj h2:/h3:
+2. Frazy wplataj naturalnie
+3. "{main_keyword}" częściej niż synonimy
+
+ARTYKUŁ:
+{full_text[:14000]}
+
+Zwróć TYLKO poprawiony artykuł."""
+        
+        response = model.generate_content(prompt)
+        corrected = response.text.strip()
+        corrected = re.sub(r'^```(?:html|markdown)?\n?', '', corrected)
         corrected = re.sub(r'\n?```$', '', corrected)
         
+        # Verify
+        verification = {}
+        for k in keywords_to_add[:5]:
+            kw = k["keyword"].lower()
+            before = len(re.findall(rf"\b{re.escape(kw)}\b", full_text.lower()))
+            after = len(re.findall(rf"\b{re.escape(kw)}\b", corrected.lower()))
+            verification[k["keyword"]] = {"before": before, "after": after, "added": after - before}
+        
+        doc_ref = db.collection("seo_projects").document(project_id)
+        doc_ref.update({
+            "corrected_article": corrected,
+            "corrections_applied": corrections,
+            "correction_timestamp": firestore.SERVER_TIMESTAMP
+        })
+        
+        return jsonify({
+            "status": "CORRECTED",
+            "corrections": corrections,
+            "verification": verification,
+            "word_count_before": len(full_text.split()),
+            "word_count_after": len(corrected.split())
+        }), 200
+        
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-    # Zapisz
-    doc_ref.update({
-        "final_review.corrected_text": corrected,
-        "final_review.status": "CORRECTED",
-        "final_review.updated_at": firestore.SERVER_TIMESTAMP
-    })
-
-    return jsonify({
-        "status": "CORRECTED",
-        "corrected_text": corrected,
-        "changes": {
-            "errors_fixed": len(errors),
-            "repetitions_fixed": len(repetitions),
-            "fact_issues_fixed": len(fact_issues),
-            "phrases_removed": len(banned_found),
-            "typography_fixed": len(typo_found)
-        }
-    }), 200
-
-
-# ------------------------------------------------------------
-# Config endpoints
-# ------------------------------------------------------------
-@final_review_routes.get("/api/config/banned_phrases")
-def get_banned():
-    db = firestore.client()
-    return jsonify(_get_banned(db)), 200
-
-@final_review_routes.post("/api/config/banned_phrases")
-def set_banned():
-    data = request.get_json()
-    if not data:
-        return jsonify({"error": "No data"}), 400
-    db = firestore.client()
-    db.collection("seo_config").document("banned_phrases").set(data, merge=True)
-    return jsonify({"status": "OK"}), 200
