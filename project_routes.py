@@ -493,58 +493,108 @@ def get_pre_batch_info(project_id):
         remaining_to_max = max(0, target_max - actual)
         remaining_to_min = max(0, target_min - actual)
         
-        max_per_batch = max(1, math.ceil(target_max / total_planned_batches))
+        # ================================================================
+        # ⭐ v22.5: NOWA KONSERWATYWNA LOGIKA SUGGESTED
+        # ================================================================
+        # Bazuje na target_max - im niższy max, tym mniej forsujemy
         
-        if remaining_to_max > 0 and remaining_batches > 0:
-            suggested = min(math.ceil(remaining_to_max / remaining_batches), max_per_batch)
+        if target_max <= 2:
+            # NISKOPRIORYTETOWE (max 1-2x w całym artykule)
+            # Użyj raz i zapomnij - nie forsuj w każdym batchu
+            max_per_batch = 1
+            if actual >= target_min:
+                suggested = 0  # Już mamy minimum, nie sugeruj więcej
+            else:
+                suggested = 1  # Potrzebujemy jeszcze 1
+        elif target_max <= 6:
+            # ŚREDNIE (max 3-6x w całym artykule)
+            # Max 1-2 na batch, nie więcej
+            max_per_batch = 2
+            if remaining_to_max > 0 and remaining_batches > 0:
+                suggested = min(2, max(1, remaining_to_min)) if remaining_to_min > 0 else 1
+            else:
+                suggested = 0
+        elif target_max <= 15:
+            # WYŻSZE (max 7-15x w całym artykule)
+            # Max 2-3 na batch
+            max_per_batch = 3
+            if remaining_to_max > 0 and remaining_batches > 0:
+                suggested = min(3, math.ceil(remaining_to_max / remaining_batches))
+            else:
+                suggested = 0
         else:
-            suggested = 0
+            # WYSOKIE (max 16+, np. "włos" 45x)
+            # Tu możemy więcej - max 5-8 na batch
+            max_per_batch = min(8, math.ceil(target_max / total_planned_batches))
+            if remaining_to_max > 0 and remaining_batches > 0:
+                suggested = min(max_per_batch, math.ceil(remaining_to_max / remaining_batches))
+            else:
+                suggested = 0
         
-        if remaining_to_min > 0:
-            min_needed_per_batch = math.ceil(remaining_to_min / remaining_batches)
-            suggested = max(suggested, min_needed_per_batch)
-            suggested = min(suggested, max_per_batch + 1)
+        # Jeśli nie osiągnęliśmy minimum - podnieś suggested
+        if remaining_to_min > 0 and remaining_batches > 0:
+            min_needed = math.ceil(remaining_to_min / remaining_batches)
+            suggested = max(suggested, min(min_needed, max_per_batch))
         
-        # ⭐ v22.4: MAIN KEYWORD ma najwyższy priorytet
+        # ================================================================
+        # PRIORYTET I REASON
+        # ================================================================
+        
+        # ⭐ MAIN KEYWORD - najwyższy priorytet
         if is_main:
             if remaining_to_min > 0:
                 priority = "CRITICAL"
-                reason = f"🔴 FRAZA GŁÓWNA! Potrzeba {remaining_to_min}x do min (cel: {target_min}x)"
+                reason = f"🔴 FRAZA GŁÓWNA! Potrzeba {remaining_to_min}x do min"
                 suggested = max(suggested, math.ceil(remaining_to_min / remaining_batches))
             else:
                 priority = "HIGH"
                 reason = f"🟠 FRAZA GŁÓWNA - używaj częściej niż synonimów!"
-        # ⭐ v22.4: Synonim - ostrzeżenie jeśli nadużywany
+        # ⭐ Synonim nadużywany
         elif is_synonym and main_ratio < 0.5:
             priority = "LOW"
-            reason = f"⚠️ SYNONIM - za dużo użyć! Używaj '{main_keyword}' zamiast tego"
+            reason = f"⚠️ SYNONIM - za dużo! Używaj '{main_keyword}'"
             suggested = 0
-        elif kw_type == "EXTENDED" and actual == 0:
-            priority = "HIGH"
-            reason = f"🟠 EXTENDED NIEUŻYTE - wpleć naturalnie!"
-            suggested = max(1, suggested)
-            extended_unused.append(keyword)
+        # EXCEEDED
         elif actual > target_max:
             priority = "EXCEEDED"
             reason = f"❌ Już {actual}x (max {target_max}x) - NIE UŻYWAJ!"
             suggested = 0
+        # LOCKED
         elif remaining_to_max == 0:
             priority = "LOCKED"
-            reason = f"🔒 Osiągnięto max {target_max}x"
+            reason = f"🔒 Max osiągnięty ({target_max}x)"
             suggested = 0
+        # CRITICAL - ostatni batch, brakuje do min
         elif remaining_to_min > 0 and remaining_batches == 1:
             priority = "CRITICAL"
             reason = f"🔴 OSTATNI BATCH! Potrzeba {remaining_to_min}x"
-            suggested = remaining_to_min
+            suggested = min(remaining_to_min, max_per_batch + 2)  # Pozwól na więcej w ostatnim
+        # HIGH - UNDER (brakuje do minimum)
         elif remaining_to_min > 0:
             priority = "HIGH"
             reason = f"🟠 UNDER - brakuje {remaining_to_min}x"
+        # EXTENDED nieużyte
+        elif kw_type == "EXTENDED" and actual == 0:
+            priority = "HIGH"
+            reason = f"🟠 EXTENDED - wpleć naturalnie"
+            suggested = 1
+            extended_unused.append(keyword)
+        # LOW - frazy z max 1-2, już użyte
+        elif target_max <= 2 and actual >= target_min:
+            priority = "LOW"
+            reason = f"⚪ Użyte ({actual}x) - opcjonalne"
+            suggested = 0
+        # NORMAL - OK, w zakresie
         elif actual >= target_min and remaining_to_max > 0:
             priority = "NORMAL"
             reason = f"🟢 OK ({actual}/{target_min}-{target_max})"
+            # Dla NORMAL z niskim max - nie sugeruj
+            if target_max <= 6:
+                suggested = 0
+        # LOW - pozostałe
         else:
             priority = "LOW"
-            reason = f"⚪ Wystarczy ({actual}x)"
+            reason = f"⚪ Opcjonalne ({actual}x)"
             suggested = 0
         
         kw_info = {
@@ -614,106 +664,76 @@ def get_pre_batch_info(project_id):
     remaining_h2 = [h2 for h2 in h2_structure if h2 not in used_h2]
     
     # ================================================================
-    # 📝 GENERUJ PROMPT DLA GPT - v22.4
+    # 📝 GENERUJ PROMPT DLA GPT - v22.5 UPROSZCZONY
     # ================================================================
     prompt_sections = []
     prompt_sections.append(f"📋 BATCH #{current_batch_num} z {total_planned_batches}")
     prompt_sections.append("")
     
-    # ⭐ v22.4: FRAZA GŁÓWNA - NAJWYŻSZY PRIORYTET
+    # ⭐ FRAZA GŁÓWNA
     if main_keyword_meta:
         main_suggested = max(2, math.ceil(main_keyword_meta.get("target_min", 6) / total_planned_batches))
         prompt_sections.append("="*50)
-        prompt_sections.append(f"🔴 FRAZA GŁÓWNA (PRIORYTET #1!):")
-        prompt_sections.append(f"  • \"{main_keyword}\": użyj {main_suggested}-{main_suggested+2}x w tym batchu")
-        prompt_sections.append(f"  • NIE ZASTĘPUJ synonimami! Synonimy tylko 1-2x jako urozmaicenie")
+        prompt_sections.append(f"🔴 FRAZA GŁÓWNA: \"{main_keyword}\"")
+        prompt_sections.append(f"  → użyj {main_suggested}-{main_suggested+1}x w tym batchu")
         if main_ratio < 0.5:
-            prompt_sections.append(f"  • ⚠️ UWAGA: Za dużo synonimów! Proporcja główna/synonimy: {main_ratio:.0%}")
+            prompt_sections.append(f"  ⚠️ Za dużo synonimów! ({main_ratio:.0%})")
         prompt_sections.append("="*50)
         prompt_sections.append("")
     
-    # ⭐ v22.4: N-GRAMY DO WPLECIENIA
-    if batch_ngrams:
-        prompt_sections.append("📝 N-GRAMY DO WPLECENIA (z analizy konkurencji):")
-        for ngram in batch_ngrams[:5]:
-            prompt_sections.append(f"  • \"{ngram}\" - użyj 1x naturalnie")
+    # CRITICAL (MUSISZ użyć) - tylko te z suggested > 0
+    critical_to_show = [k for k in critical_keywords if k.get("suggested", 0) > 0 and not k.get("is_main_keyword")]
+    if critical_to_show:
+        prompt_sections.append("🔴 MUSISZ UŻYĆ:")
+        for kw in critical_to_show[:5]:
+            prompt_sections.append(f"  • {kw['keyword']}: {kw['suggested']}x")
         prompt_sections.append("")
     
-    # CRITICAL (nie-main)
-    critical_non_main = [k for k in critical_keywords if not k.get("is_main_keyword")]
-    if critical_non_main:
-        prompt_sections.append("🔴 CRITICAL (MUSISZ użyć!):")
-        for kw in critical_non_main:
-            prompt_sections.append(f"  • {kw['keyword']}: UŻYJ {kw['suggested']}x!")
+    # HIGH PRIORITY - tylko te z suggested > 0
+    high_to_show = [k for k in high_priority if k.get("suggested", 0) > 0 and not k.get("is_main_keyword")]
+    if high_to_show:
+        prompt_sections.append("🟠 WPLEĆ (priorytet):")
+        for kw in high_to_show[:6]:
+            prompt_sections.append(f"  • {kw['keyword']}: {kw['suggested']}x")
+        prompt_sections.append("")
     
-    # EXTENDED NIEUŻYTE
-    if extended_unused:
-        prompt_sections.append("\n🟣 EXTENDED NIEUŻYTE (wpleć!):")
-        for kw in extended_unused[:6]:
-            prompt_sections.append(f"  • {kw}")
+    # N-GRAMY - max 3
+    if batch_ngrams:
+        prompt_sections.append("📝 N-GRAMY (wpleć naturalnie):")
+        for ngram in batch_ngrams[:3]:
+            prompt_sections.append(f"  • \"{ngram}\"")
+        prompt_sections.append("")
     
-    # EXCEEDED
-    if exceeded_keywords:
-        prompt_sections.append("\n❌ EXCEEDED (NIE UŻYWAJ!):")
-        for kw in exceeded_keywords:
-            prompt_sections.append(f"  • {kw['keyword']}")
-    
-    # LOCKED
-    if locked_keywords:
-        prompt_sections.append("\n🔒 LOCKED (użyj SYNONIMÓW):")
-        for kw in locked_keywords:
-            prompt_sections.append(f"  • {kw['keyword']}")
-    
-    # HIGH (non-main, non-extended)
-    high_other = [k for k in high_priority if not k.get("is_main_keyword") and k["keyword"] not in extended_unused]
-    if high_other:
-        prompt_sections.append("\n🟠 PRIORYTET:")
-        for kw in high_other[:5]:
-            prompt_sections.append(f"  • {kw['keyword']}: użyj {kw['suggested']}x")
-    
-    # NORMAL
-    if normal_keywords:
-        prompt_sections.append("\n🟢 NORMALNE:")
-        for kw in normal_keywords[:4]:
-            prompt_sections.append(f"  • {kw['keyword']}: max {kw['max_per_batch']}x")
-    
-    # ⭐ v22.4: SYNONIMY - ostrzeżenie
-    synonym_keywords = [k for k in low_priority if k.get("is_synonym_of_main")]
-    if synonym_keywords and main_ratio < 0.6:
-        prompt_sections.append("\n⚠️ SYNONIMY (używaj RZADKO!):")
-        for kw in synonym_keywords:
-            prompt_sections.append(f"  • {kw['keyword']} - max 1-2x, preferuj '{main_keyword}'")
+    # EXCEEDED + LOCKED - tylko ostrzeżenie
+    blocked = exceeded_keywords + locked_keywords
+    if blocked:
+        blocked_names = [k['keyword'] for k in blocked[:5]]
+        prompt_sections.append(f"❌ NIE UŻYWAJ: {', '.join(blocked_names)}")
+        prompt_sections.append("")
     
     # H2 do napisania
     if remaining_h2:
-        prompt_sections.append(f"\n\n✏️ H2 DO NAPISANIA:")
+        prompt_sections.append("✏️ H2 DO NAPISANIA:")
         for h2 in remaining_h2[:3]:
             h2_index = h2_structure.index(h2) if h2 in h2_structure else 0
             is_long = (h2_index % 2 == 0)
-            section_type = "LONG" if is_long else "SHORT"
-            word_range = "500-600 słów, może mieć H3" if is_long else "300-450 słów"
-            prompt_sections.append(f"  • {h2}")
-            prompt_sections.append(f"    [{section_type}: {word_range}]")
+            word_range = "500-600 słów" if is_long else "300-450 słów"
+            prompt_sections.append(f"  • {h2} [{word_range}]")
+        prompt_sections.append("")
     
-    # Poprzednie tematy
+    # Poprzednie tematy - skrócone
     if all_topics_covered:
-        prompt_sections.append("\n📖 NIE POWIELAJ:")
-        for topic_item in all_topics_covered[:6]:
-            prompt_sections.append(f"  • {topic_item}")
+        prompt_sections.append(f"📖 NIE POWIELAJ: {', '.join(all_topics_covered[:4])}")
+        prompt_sections.append("")
     
-    # Ostatnie zdania
+    # Kontynuacja
     if last_sentences:
-        prompt_sections.append(f"\n🔗 KONTYNUUJ OD:")
-        prompt_sections.append(f"  \"{last_sentences[:120]}...\"")
+        prompt_sections.append(f"🔗 KONTYNUUJ OD: \"{last_sentences[:80]}...\"")
+        prompt_sections.append("")
     
-    # ⭐ v22.4: ZASADY STYLU - rozbudowane
-    prompt_sections.append("\n" + "="*50)
-    prompt_sections.append("📝 ZASADY KRYTYCZNE:")
-    prompt_sections.append("  • Fraza główna > synonimy (proporcja min 60%)")
-    prompt_sections.append("  • H3 minimum 80 słów!")
-    prompt_sections.append("  • MAX 1 lista wypunktowana na cały artykuł")
-    prompt_sections.append("  • N-gramy wplataj naturalnie")
-    prompt_sections.append("  • Format: h2: Tytuł / h3: Tytuł")
+    # ZASADY - krótkie
+    prompt_sections.append("="*50)
+    prompt_sections.append("📝 ZASADY: H3 min 80 słów | Max 1 lista | Format: h2: / h3:")
     prompt_sections.append("="*50)
     
     gpt_prompt = "\n".join(prompt_sections)
