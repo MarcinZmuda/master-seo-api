@@ -612,6 +612,15 @@ def health_check():
     """Health check endpoint."""
     return jsonify({
         "status": "OK",
-        "version": "22.4",
+        "version": "22.5",
         "gemini_configured": bool(GEMINI_API_KEY)
     }), 200
+
+
+# ================================================================
+# ALIAS dla kompatybilności
+# ================================================================
+@final_review_routes.post("/api/project/<project_id>/apply_final_corrections")
+def apply_final_corrections_alias(project_id):
+    """Alias dla apply_corrections."""
+    return apply_final_corrections(project_id)
