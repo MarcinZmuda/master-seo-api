@@ -58,8 +58,14 @@ except ImportError:
 # 🔗 N-gram API Configuration
 # ================================================================
 NGRAM_API_URL = os.getenv("NGRAM_API_URL", "https://gpt-ngram-api.onrender.com")
-NGRAM_ANALYSIS_ENDPOINT = f"{NGRAM_API_URL}/api/ngram_entity_analysis"
-print(f"[MASTER] 🔗 N-gram API: {NGRAM_API_URL}")
+
+# FIX: Sprawdź czy URL już zawiera endpoint (unikaj duplikacji)
+if "/api/ngram_entity_analysis" in NGRAM_API_URL:
+    NGRAM_ANALYSIS_ENDPOINT = NGRAM_API_URL
+else:
+    NGRAM_ANALYSIS_ENDPOINT = f"{NGRAM_API_URL}/api/ngram_entity_analysis"
+
+print(f"[MASTER] 🔗 N-gram API endpoint: {NGRAM_ANALYSIS_ENDPOINT}")
 
 # ================================================================
 # 📦 Import blueprints
