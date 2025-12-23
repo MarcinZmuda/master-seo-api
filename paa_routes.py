@@ -9,6 +9,36 @@ from firebase_admin import firestore
 # ------------------------------------------------------------
 paa_routes = Blueprint("paa_routes", __name__)
 
+
+# ------------------------------------------------------------
+# HELPERS - normalizacja
+# ------------------------------------------------------------
+def _normalize_h2_list(h2_list):
+    """Normalizuje H2 do listy stringów (obsługuje dict i string)."""
+    normalized = []
+    for h2 in h2_list:
+        if isinstance(h2, dict):
+            # H2 jako dict: {title: ..., type: ...}
+            title = h2.get("title") or h2.get("h2") or h2.get("name") or ""
+            if title.strip():
+                normalized.append(title.strip())
+        elif isinstance(h2, str) and h2.strip():
+            normalized.append(h2.strip())
+    return normalized
+
+
+def _deduplicate_list(items):
+    """Deduplikuje listę zachowując kolejność."""
+    seen = set()
+    result = []
+    for item in items:
+        lower = item.lower().strip()
+        if lower not in seen:
+            seen.add(lower)
+            result.append(item)
+    return result
+
+
 # ------------------------------------------------------------
 # 1. ANALYZE - Przygotuj dane do PAA (dla Custom GPT)
 # ------------------------------------------------------------
@@ -21,9 +51,7 @@ def analyze_for_paa(project_id):
     - Niewykorzystane H2
     - PAA z SERP
     
-    Custom GPT używa tych danych do napisania sekcji PAA.
-    
-    v23.1 - kompatybilność z nową strukturą danych:
+    v23.1 - kompatybilność z v22 i v23:
     - h2_structure (v23) z fallback na h2_list (v22)
     - s1_data.serp_analysis (v23) z fallback na serp_data (v22)
     - actual_uses (v23) z fallback na current_count (v22)
@@ -42,8 +70,9 @@ def analyze_for_paa(project_id):
     keywords_state = data.get("keywords_state", {})
     batches = data.get("batches", [])
     
-    # v23 FIX: h2_structure z fallback na h2_list
-    original_h2_list = data.get("h2_structure", data.get("h2_list", []))
+    # v23 FIX: h2_structure z fallback + normalizacja
+    raw_h2 = data.get("h2_structure", data.get("h2_list", []))
+    original_h2_list = _normalize_h2_list(raw_h2)
     
     # v23 FIX: PAA z s1_data.serp_analysis z fallback na serp_data
     s1_data = data.get("s1_data", data.get("serp_data", {}))
@@ -93,6 +122,9 @@ def analyze_for_paa(project_id):
     for match in re.findall(r'<h2[^>]*>([^<]+)</h2>', full_article, re.IGNORECASE):
         used_h2.append(match.strip())
     
+    # Deduplikacja
+    used_h2 = _deduplicate_list(used_h2)
+    
     # Tematy do UNIKANIA w FAQ (już omówione w artykule)
     topics_to_avoid = used_h2.copy()
     
@@ -107,6 +139,8 @@ def analyze_for_paa(project_id):
     article_lower = full_article.lower()
     
     for paa_q in serp_paa:
+        if not isinstance(paa_q, str):
+            continue
         paa_clean = paa_q.lower().replace("?", "").strip()
         paa_words = [w for w in paa_clean.split() if len(w) > 3]
         
@@ -165,28 +199,14 @@ def save_paa_section(project_id):
     """
     Zapisuje sekcję PAA wygenerowaną przez Custom GPT.
     
-    Expected body:
-    {
-        "questions": [
-            {
-                "question": "Pytanie?",
-                "answer": "Odpowiedź...",
-                "keywords_used": ["fraza1", "fraza2"]
-            }
-        ]
-    }
+    DUAL INPUT (kompatybilność z OpenAPI):
+    - Format 1: {"questions": [{question, answer, keywords_used}, ...]}
+    - Format 2: {"paa_section": "string"} (legacy/OpenAPI)
     """
     
     body = request.get_json()
     if not body:
         return jsonify({"error": "No JSON data"}), 400
-    
-    questions = body.get("questions", [])
-    if not questions:
-        return jsonify({"error": "No questions provided"}), 400
-    
-    if len(questions) < 1 or len(questions) > 5:
-        return jsonify({"error": "Expected 1-5 questions"}), 400
     
     db = firestore.client()
     doc_ref = db.collection("seo_projects").document(project_id)
@@ -194,6 +214,45 @@ def save_paa_section(project_id):
     
     if not doc.exists:
         return jsonify({"error": "Project not found"}), 404
+    
+    # --------------------------------------------
+    # DUAL INPUT: sprawdź format
+    # --------------------------------------------
+    questions = body.get("questions", [])
+    paa_section_raw = body.get("paa_section")
+    
+    # Format 2: paa_section jako string (legacy/OpenAPI kompatybilność)
+    if not questions and paa_section_raw:
+        if isinstance(paa_section_raw, str):
+            paa_data = {
+                "raw": paa_section_raw,
+                "format": "legacy_string",
+                "questions": [],
+                "html_schema": "",
+                "marker_format": paa_section_raw,
+                "keywords_used": [],
+                "question_count": 0,
+                "created_at": firestore.SERVER_TIMESTAMP
+            }
+            
+            try:
+                doc_ref.update({"paa_section": paa_data})
+            except Exception as e:
+                return jsonify({"error": str(e)}), 500
+            
+            return jsonify({
+                "status": "PAA_SAVED",
+                "project_id": project_id,
+                "format": "legacy_string",
+                "message": "Zapisano jako raw string. Preferowany format: {questions: [...]}"
+            }), 200
+    
+    # Format 1: questions array (preferowany)
+    if not questions:
+        return jsonify({"error": "No questions provided. Use {questions: [...]} or {paa_section: 'string'}"}), 400
+    
+    if len(questions) < 1 or len(questions) > 5:
+        return jsonify({"error": "Expected 1-5 questions"}), 400
     
     # Walidacja struktury
     validated_questions = []
@@ -224,6 +283,7 @@ def save_paa_section(project_id):
         "marker_format": marker_output,
         "keywords_used": list(set(all_keywords)),
         "question_count": len(validated_questions),
+        "format": "structured",
         "created_at": firestore.SERVER_TIMESTAMP
     }
     
@@ -272,7 +332,7 @@ def get_paa_section(project_id):
 
 
 # ------------------------------------------------------------
-# HELPERS
+# HELPERS - generatory
 # ------------------------------------------------------------
 def _generate_faq_schema_html(questions: list) -> str:
     """Generuje HTML z Schema.org FAQPage markup."""
