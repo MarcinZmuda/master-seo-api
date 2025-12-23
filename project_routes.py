@@ -123,10 +123,16 @@ def analyze_and_plan():
     # 1. S1 ANALYSIS (proxy do N-gram API)
     NGRAM_API_URL = os.getenv("NGRAM_API_URL", "https://gpt-ngram-api.onrender.com")
     
+    # FIX: Sprawdź czy URL już zawiera endpoint (unikaj duplikacji)
+    if "/api/ngram_entity_analysis" in NGRAM_API_URL:
+        ngram_endpoint = NGRAM_API_URL
+    else:
+        ngram_endpoint = f"{NGRAM_API_URL}/api/ngram_entity_analysis"
+    
     s1_data = {}
     try:
         s1_response = requests.post(
-            f"{NGRAM_API_URL}/api/ngram_entity_analysis",
+            ngram_endpoint,
             json={"main_keyword": main_keyword, "top_n": 30},
             timeout=60
         )
@@ -414,7 +420,7 @@ def create_project():
             "target_words": article_plan.total_target_words
         },
         "first_batch_instructions": get_batch_instructions(article_plan, 1)
-    }), 201
+    }), 200  # Changed from 201 for OpenAPI compatibility
 
 
 # ================================================================
