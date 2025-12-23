@@ -258,9 +258,10 @@ Zwróć TYLKO listę H2, każdy w nowej linii."""
     except ImportError:
         eeat_prompt = """
 ⭐ E-E-A-T TIPS:
-- Dodaj sygnały ekspertyzy (terminologia branżowa)
-- Cytuj źródła (przepisy, dane, badania)
+- Używaj terminologii branżowej
+- Podawaj konkretne źródła (Dz.U., art., rozporządzenia)
 - Podawaj aktualne daty i konkretne liczby
+- ZAKAZANE: cytaty ekspertów, "dr", "prof.", "adwokat twierdzi"
 """
     
     return jsonify({
@@ -594,16 +595,36 @@ def approve_batch(project_id):
     
     batch_number = len(batches) + 1
     
+    # ZABEZPIECZENIE: Sprawdź czy batch o tym numerze już nie istnieje
+    # (ochrona przed wielokrotnym wysłaniem tego samego batcha)
+    existing_batch_numbers = [b.get("batch_number", 0) for b in batches]
+    if batch_number in existing_batch_numbers:
+        # Batch już istnieje - zwróć info bez ponownego zliczania
+        return jsonify({
+            "status": "ALREADY_EXISTS",
+            "message": f"Batch {batch_number} already exists. Use rollback to replace.",
+            "batch_number": batch_number,
+            "total_batches": len(batches)
+        }), 409  # Conflict
+    
     # Walidacja
     result = validate_content(text=text, keywords_state=keywords_state, main_keyword=main_keyword)
     
-    # Aktualizuj keywords_state
+    # Aktualizuj keywords_state - ZLICZ TYLKO TEN BATCH
     text_lemmas = lemmatize_text(text)
+    
+    exceeded_keywords = []  # Lista przekroczonych fraz
+    locked_keywords = []    # Lista zablokowanych (osiągnięto max)
+    critical_exceeded = []  # Przekroczenia > 50%
     
     for rid, meta in keywords_state.items():
         keyword = meta.get("keyword", "")
         count = count_keyword_occurrences(text_lemmas, keyword)
-        meta["actual_uses"] = meta.get("actual_uses", 0) + count
+        
+        # Zapisz ile było przed i ile dodajemy
+        previous_uses = meta.get("actual_uses", 0)
+        meta["actual_uses"] = previous_uses + count
+        meta["last_batch_count"] = count  # ile w tym batchu
         
         actual = meta["actual_uses"]
         min_t = meta.get("target_min", 0)
@@ -612,7 +633,29 @@ def approve_batch(project_id):
         if actual < min_t:
             meta["status"] = "UNDER"
         elif actual > max_t:
-            meta["status"] = "OVER"
+            meta["status"] = "EXCEEDED"
+            exceeded_by = actual - max_t
+            exceeded_pct = (exceeded_by / max_t * 100) if max_t > 0 else 100
+            
+            exceeded_info = {
+                "keyword": keyword,
+                "actual": actual,
+                "max": max_t,
+                "exceeded_by": exceeded_by,
+                "exceeded_pct": round(exceeded_pct, 1)
+            }
+            exceeded_keywords.append(exceeded_info)
+            
+            # Krytyczne przekroczenie (>50% ponad limit)
+            if exceeded_pct > 50:
+                critical_exceeded.append(exceeded_info)
+        elif actual == max_t:
+            meta["status"] = "LOCKED"
+            locked_keywords.append({
+                "keyword": keyword,
+                "actual": actual,
+                "max": max_t
+            })
         else:
             meta["status"] = "OK"
         
@@ -653,8 +696,11 @@ def approve_batch(project_id):
         "version_history": vm.to_dict()["batch_histories"]
     })
     
-    return jsonify({
-        "status": "APPROVED",
+    # Przygotuj response z wyraźnym ostrzeżeniem o przekroczeniach
+    has_exceeded = len(exceeded_keywords) > 0
+    
+    response = {
+        "status": "APPROVED_WITH_WARNINGS" if has_exceeded else "APPROVED",
         "batch_number": batch_number,
         "version_id": version.version_id,
         "validation": {
@@ -664,10 +710,35 @@ def approve_batch(project_id):
             "errors": len(result.get_errors())
         },
         "keywords_summary": {
-            rid: {"keyword": m["keyword"], "actual": m["actual_uses"], "status": m["status"]}
-            for rid, m in list(keywords_state.items())[:10]
+            rid: {
+                "keyword": m["keyword"], 
+                "actual": m["actual_uses"], 
+                "max": m.get("target_max", 999), 
+                "status": m["status"],
+                "this_batch": m.get("last_batch_count", 0)  # ile w tym batchu
+            }
+            for rid, m in list(keywords_state.items())[:15]
         }
-    }), 200
+    }
+    
+    # KRYTYCZNE: Dodaj wyraźną sekcję o przekroczeniach
+    if exceeded_keywords:
+        response["EXCEEDED_KEYWORDS"] = exceeded_keywords
+        response["exceeded_count"] = len(exceeded_keywords)
+        response["action_required"] = "EXCEEDED keywords detected! Ask user: rewrite batch or continue?"
+    
+    # KRYTYCZNE PRZEKROCZENIA (>50% ponad limit)
+    if critical_exceeded:
+        response["CRITICAL_EXCEEDED"] = critical_exceeded
+        response["critical_count"] = len(critical_exceeded)
+        response["status"] = "CRITICAL_EXCEEDED"
+        response["action_required"] = "🚨 CRITICAL: Keywords exceeded by >50%! Must rewrite or user must confirm!"
+    
+    if locked_keywords:
+        response["LOCKED_KEYWORDS"] = locked_keywords
+        response["locked_count"] = len(locked_keywords)
+    
+    return jsonify(response), 200
 
 
 # ================================================================
