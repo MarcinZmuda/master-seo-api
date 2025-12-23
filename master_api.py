@@ -1,3 +1,22 @@
+"""
+===============================================================================
+🚀 MASTER SEO API v23.0 - Zrefaktoryzowany
+===============================================================================
+Zmiany względem v22.x:
+1. Połączony endpoint /api/article/analyze_and_plan (S1 + H2 + plan)
+2. Ujednolicone formaty JSON
+3. Integracja z BatchPlanner, UnifiedValidator, VersionManager
+4. Mniej redundantnych walidacji
+5. Wersjonowanie treści z rollbackiem
+
+Nowe endpointy:
+- POST /api/article/analyze_and_plan - S1 + H2 + plan w jednym
+- POST /api/project/{id}/rollback_batch - rollback wersji
+- GET /api/project/{id}/versions/{batch} - historia wersji
+
+===============================================================================
+"""
+
 import os
 import json
 import requests
@@ -7,39 +26,33 @@ from firebase_admin import credentials, initialize_app, firestore
 from datetime import datetime
 
 # ================================================================
-# 🔥 Firestore Initialization – kompatybilne z Render
+# 🔥 Firebase Initialization
 # ================================================================
 FIREBASE_CREDS_JSON = os.getenv("FIREBASE_CREDS_JSON")
 if not FIREBASE_CREDS_JSON:
-    raise RuntimeError(
-        "❌ Brak zmiennej środowiskowej FIREBASE_CREDS_JSON – "
-        "wgraj JSON z Service Account jako string do ENV."
-    )
+    raise RuntimeError("❌ FIREBASE_CREDS_JSON not set")
 
 try:
     creds_dict = json.loads(FIREBASE_CREDS_JSON)
 except json.JSONDecodeError as e:
-    raise RuntimeError(f"Niepoprawny JSON w FIREBASE_CREDS_JSON: {e}")
+    raise RuntimeError(f"Invalid JSON in FIREBASE_CREDS_JSON: {e}")
 
 cred = credentials.Certificate(creds_dict)
 firebase_app = initialize_app(cred)
 db = firestore.client()
 
 # ================================================================
-# ⚙️ Flask App Initialization
+# ⚙️ Flask App
 # ================================================================
 app = Flask(__name__)
-
-# 🔧 FIX: Zwiększenie limitu payloadu do 32MB (dla dużych analiz SERP/S1)
 app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024  # 32 MB
-
 CORS(app)
 
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-VERSION = "v22.1-semantic"
+VERSION = "v23.0"
 
 # ================================================================
-# 🧠 Check if semantic analysis is available
+# 🧠 Check modules
 # ================================================================
 try:
     from sentence_transformers import SentenceTransformer
@@ -47,56 +60,48 @@ try:
     print("[MASTER] ✅ Semantic analysis available")
 except ImportError:
     SEMANTIC_ENABLED = False
-    print("[MASTER] ⚠️ Semantic analysis NOT available (sentence-transformers not installed)")
+    print("[MASTER] ⚠️ Semantic analysis NOT available")
 
 # ================================================================
-# 🔗 N-gram API Configuration (for S1 proxy)
+# 🔗 N-gram API Configuration
 # ================================================================
 NGRAM_API_URL = os.getenv("NGRAM_API_URL", "https://gpt-ngram-api.onrender.com")
-
-# Sprawdź czy URL już zawiera endpoint
-if "/api/ngram_entity_analysis" in NGRAM_API_URL:
-    # URL już ma endpoint - użyj go bezpośrednio
-    NGRAM_BASE_URL = NGRAM_API_URL.replace("/api/ngram_entity_analysis", "")
-    NGRAM_ANALYSIS_ENDPOINT = NGRAM_API_URL
-    print(f"[MASTER] 🔗 N-gram API URL (full endpoint detected): {NGRAM_ANALYSIS_ENDPOINT}")
-else:
-    # URL to tylko base - dodaj endpoint
-    NGRAM_BASE_URL = NGRAM_API_URL
-    NGRAM_ANALYSIS_ENDPOINT = f"{NGRAM_API_URL}/api/ngram_entity_analysis"
-    print(f"[MASTER] 🔗 N-gram API URL (base URL): {NGRAM_BASE_URL}")
-
-print(f"[MASTER] 🎯 S1 Analysis endpoint: {NGRAM_ANALYSIS_ENDPOINT}")
+NGRAM_ANALYSIS_ENDPOINT = f"{NGRAM_API_URL}/api/ngram_entity_analysis"
+print(f"[MASTER] 🔗 N-gram API: {NGRAM_API_URL}")
 
 # ================================================================
-# 📦 Import blueprintów (po inicjalizacji Firestore)
+# 📦 Import blueprints
 # ================================================================
-from project_routes import project_routes
-from firestore_tracker_routes import tracker_routes
-from seo_optimizer import unified_prevalidation
-from final_review_routes import final_review_routes
-from paa_routes import paa_routes  # ⭐ NOWE
+# UWAGA: Po wdrożeniu zmień nazwy plików:
+# project_routes_v23.py → project_routes.py
+# final_review_routes_v23.py → final_review_routes.py
+try:
+    from project_routes import project_routes
+    from final_review_routes import final_review_routes
+except ImportError:
+    # Fallback dla developerki
+    from project_routes_v23 import project_routes
+    from final_review_routes_v23 import final_review_routes
+
+from paa_routes import paa_routes
 
 # ================================================================
-# 🔗 Rejestracja blueprintów
+# 🔗 Register blueprints
 # ================================================================
 app.register_blueprint(project_routes)
-app.register_blueprint(tracker_routes)
 app.register_blueprint(final_review_routes)
-app.register_blueprint(paa_routes)  # ⭐ NOWE
+app.register_blueprint(paa_routes)
 
 # ================================================================
-# 🔗 S1 PROXY ENDPOINTS (przekierowanie do N-gram API)
+# 🔗 S1 PROXY (zachowane dla kompatybilności wstecznej)
 # ================================================================
 @app.post("/api/s1_analysis")
 def s1_analysis_proxy():
     """
-    Proxy endpoint dla S1 analysis.
-    Przekierowuje request do N-gram API service.
+    Proxy do N-gram API.
+    UWAGA: Preferuj /api/article/analyze_and_plan dla pełnego workflow.
     """
     data = request.get_json(force=True)
-    
-    print(f"[S1_PROXY] 📡 Forwarding S1 analysis to {NGRAM_ANALYSIS_ENDPOINT}")
     
     try:
         response = requests.post(
@@ -107,196 +112,39 @@ def s1_analysis_proxy():
         )
         
         if response.status_code == 200:
-            result = response.json()
-            print(f"[S1_PROXY] ✅ S1 analysis completed successfully")
-            
-            # ⭐ NOWE: Dodaj semantic analysis do S1 wyniku
-            if SEMANTIC_ENABLED:
-                try:
-                    from seo_optimizer import semantic_keyword_coverage
-                    
-                    # Jeśli S1 zwrócił jakieś keywords
-                    if "keywords" in result:
-                        # Preferuj próbkę pełnego tekstu, jeśli backend ją zwraca (np. full_text_sample).
-                        # W przeciwnym razie buduj próbkę z pól zwrotnych SERP (snippety/PAA/related/H2),
-                        # aby uniknąć liczenia coverage na pustym tekście.
-                        sample_text = ""
-                        if isinstance(result, dict):
-                            ft = result.get("full_text_sample") or result.get("full_text_content") or ""
-                            if isinstance(ft, str) and ft.strip():
-                                sample_text = ft
-                            else:
-                                serp_analysis = result.get("serp_analysis", {}) or {}
-                                parts = []
-
-                                fs = serp_analysis.get("featured_snippet")
-                                if isinstance(fs, dict):
-                                    for k in ("snippet", "text", "answer"):
-                                        v = fs.get(k)
-                                        if isinstance(v, str) and v.strip():
-                                            parts.append(v.strip())
-                                elif isinstance(fs, str) and fs.strip():
-                                    parts.append(fs.strip())
-
-                                paa = serp_analysis.get("paa_questions", [])
-                                if isinstance(paa, list):
-                                    for item in paa:
-                                        if isinstance(item, dict):
-                                            q = item.get("question") or item.get("q")
-                                            a = item.get("answer") or item.get("snippet") or item.get("a")
-                                            if isinstance(q, str) and q.strip():
-                                                parts.append(q.strip())
-                                            if isinstance(a, str) and a.strip():
-                                                parts.append(a.strip())
-                                        elif isinstance(item, str) and item.strip():
-                                            parts.append(item.strip())
-
-                                snips = serp_analysis.get("competitor_snippets", [])
-                                if isinstance(snips, list):
-                                    for s in snips:
-                                        if isinstance(s, str) and s.strip():
-                                            parts.append(s.strip())
-
-                                related = serp_analysis.get("related_searches", [])
-                                if isinstance(related, list):
-                                    for r in related:
-                                        if isinstance(r, str) and r.strip():
-                                            parts.append(r.strip())
-
-                                h2p = serp_analysis.get("competitor_h2_patterns", [])
-                                if isinstance(h2p, list):
-                                    for h in h2p:
-                                        if isinstance(h, str) and h.strip():
-                                            parts.append(h.strip())
-
-                                sample_text = "\n".join(parts)
-
-                        sample_text = (sample_text or "")[:5000]
-                        
-                        # Dummy keywords_state dla semantic analysis
-                        dummy_kw_state = {
-                            str(i): {"keyword": kw, "actual_uses": 0}
-                            for i, kw in enumerate(result.get("keywords", []))
-                        }
-                        
-                        if not sample_text.strip():
-                            raise ValueError("Brak danych tekstowych do semantic coverage (serp_content/full_text_sample/pola serp_analysis puste).")
-                        
-                        semantic_cov = semantic_keyword_coverage(sample_text, dummy_kw_state)
-                        result["semantic_analysis"] = semantic_cov
-                        print(f"[S1_PROXY] ✅ Added semantic analysis to S1 result")
-                except Exception as e:
-                    print(f"[S1_PROXY] ⚠️ Semantic analysis failed: {e}")
-            
-            return jsonify(result), 200
+            return jsonify(response.json()), 200
         else:
-            print(f"[S1_PROXY] ❌ N-gram API error: {response.status_code}")
             return jsonify({
-                "error": "N-gram API error",
-                "status_code": response.status_code,
-                "details": response.text[:500]
+                "error": f"N-gram API error: {response.status_code}",
+                "details": response.text
             }), response.status_code
             
     except requests.exceptions.Timeout:
-        print(f"[S1_PROXY] ⏱️ Timeout after 90s")
-        return jsonify({
-            "error": "N-gram API timeout",
-            "message": "SERP analysis took too long (>90s). Try with fewer sources."
-        }), 504
-        
-    except requests.exceptions.ConnectionError:
-        print(f"[S1_PROXY] ❌ Connection error to {NGRAM_ANALYSIS_ENDPOINT}")
-        return jsonify({
-            "error": "Cannot connect to N-gram API",
-            "ngram_api_url": NGRAM_ANALYSIS_ENDPOINT,
-            "message": "Check if N-gram API service is running"
-        }), 503
-        
-    except Exception as e:
-        print(f"[S1_PROXY] ❌ Unexpected error: {e}")
-        return jsonify({
-            "error": "S1 proxy error",
-            "message": str(e)
-        }), 500
-
-
-@app.post("/api/synthesize_topics")
-def synthesize_topics_proxy():
-    """Proxy dla synthesize_topics."""
-    data = request.get_json(force=True)
-
-    # Normalizacja: jeśli ngrams to lista dictów (np. {"ngram": "...", ...}),
-    # przekształć ją do listy stringów dla kompatybilności z backendem.
-    if isinstance(data, dict):
-        ngrams = data.get("ngrams")
-        if isinstance(ngrams, list) and ngrams and isinstance(ngrams[0], dict):
-            data["ngrams"] = [x.get("ngram", "") for x in ngrams if isinstance(x, dict) and x.get("ngram")]
-    
-    try:
-        response = requests.post(
-            f"{NGRAM_BASE_URL}/api/synthesize_topics",
-            json=data,
-            timeout=30
-        )
-        return jsonify(response.json()), response.status_code
+        return jsonify({"error": "N-gram API timeout"}), 504
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
-@app.post("/api/generate_compliance_report")
-def compliance_report_proxy():
-    """Proxy dla generate_compliance_report."""
-    data = request.get_json(force=True)
-    
-    try:
-        response = requests.post(
-            f"{NGRAM_BASE_URL}/api/generate_compliance_report",
-            json=data,
-            timeout=30
-        )
-        return jsonify(response.json()), response.status_code
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.get("/api/s1_health")
-def s1_health_check():
-    """Sprawdza czy N-gram API service jest dostępny."""
-    try:
-        response = requests.get(f"{NGRAM_BASE_URL}/health", timeout=5)
-        if response.status_code == 200:
-            ngram_status = response.json()
-            return jsonify({
-                "status": "ok",
-                "ngram_api_status": ngram_status,
-                "ngram_base_url": NGRAM_BASE_URL,
-                "ngram_analysis_endpoint": NGRAM_ANALYSIS_ENDPOINT,
-                "proxy_enabled": True,
-                "semantic_enabled": SEMANTIC_ENABLED  # ⭐ NOWE
-            }), 200
-        else:
-            return jsonify({
-                "status": "degraded",
-                "ngram_api_status": "error",
-                "ngram_base_url": NGRAM_BASE_URL,
-                "proxy_enabled": True,
-                "semantic_enabled": SEMANTIC_ENABLED  # ⭐ NOWE
-            }), 200
-    except Exception as e:
-        return jsonify({
-            "status": "unavailable",
-            "error": str(e),
-            "ngram_base_url": NGRAM_BASE_URL,
-            "proxy_enabled": True,
-            "semantic_enabled": SEMANTIC_ENABLED  # ⭐ NOWE
-        }), 503
 
 # ================================================================
-# 🧠 MASTER DEBUG ROUTES (diagnostyka)
+# 🔗 H2 SUGGESTIONS PROXY (zachowane dla kompatybilności)
+# ================================================================
+@app.post("/api/project/s1_h2_suggestions")
+def h2_suggestions_proxy():
+    """
+    Generuje H2 suggestions.
+    UWAGA: Preferuj /api/article/analyze_and_plan dla pełnego workflow.
+    """
+    # Przekierowanie do nowego endpointu
+    from project_routes_v23 import analyze_and_plan
+    return analyze_and_plan()
+
+
+# ================================================================
+# 📊 DEBUG & STATUS ENDPOINTS
 # ================================================================
 @app.get("/api/master_debug/<project_id>")
 def master_debug(project_id):
-    """Pełna diagnostyka projektu: frazy, batch count, semantyka, ostrzeżenia."""
+    """Pełna diagnostyka projektu."""
     doc = db.collection("seo_projects").document(project_id).get()
     if not doc.exists:
         return jsonify({"error": "Project not found"}), 404
@@ -304,52 +152,217 @@ def master_debug(project_id):
     data = doc.to_dict()
     keywords = data.get("keywords_state", {})
     batches = data.get("batches", [])
-    total_batches = len(batches)
+    article_plan = data.get("article_plan", {})
+    version_history = data.get("version_history", {})
+    
+    # Policz wersje
+    total_versions = sum(
+        len(h.get("versions", [])) 
+        for h in version_history.values()
+    ) if version_history else 0
+    
+    return jsonify({
+        "project_id": project_id,
+        "topic": data.get("main_keyword"),
+        "version": data.get("version", "unknown"),
+        "total_batches": len(batches),
+        "planned_batches": article_plan.get("total_batches", 0),
+        "keywords_count": len(keywords),
+        "total_versions": total_versions,
+        "has_final_review": "final_review" in data,
+        "has_corrections": "corrected_article" in data,
+        "has_paa": "paa_section" in data,
+        "semantic_enabled": SEMANTIC_ENABLED
+    }), 200
 
-    all_warnings = []
-    for b in batches:
-        warns = b.get("warnings", [])
-        if warns:
-            all_warnings.extend(warns)
 
-    semantic_scores = [
-        b.get("language_audit", {}).get("semantic_score")
-        for b in batches if b.get("language_audit")
-    ]
-    avg_semantic = (
-        round(sum([s for s in semantic_scores if s]) / len(semantic_scores), 3)
-        if semantic_scores else 0
+@app.get("/api/project/<project_id>/status")
+def get_project_status(project_id):
+    """Status projektu."""
+    doc = db.collection("seo_projects").document(project_id).get()
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+
+    data = doc.to_dict()
+    keywords_state = data.get("keywords_state", {})
+    batches = data.get("batches", [])
+    article_plan = data.get("article_plan", {})
+    
+    # Keyword summary
+    keywords_summary = []
+    main_uses = 0
+    synonym_uses = 0
+    
+    for rid, meta in keywords_state.items():
+        actual = meta.get("actual_uses", 0)
+        is_main = meta.get("is_main_keyword", False)
+        is_syn = meta.get("is_synonym_of_main", False)
+        
+        if is_main:
+            main_uses = actual
+        elif is_syn:
+            synonym_uses += actual
+        
+        keywords_summary.append({
+            "keyword": meta.get("keyword"),
+            "type": meta.get("type"),
+            "actual": actual,
+            "target": f"{meta.get('target_min', 0)}-{meta.get('target_max', 999)}",
+            "status": meta.get("status"),
+            "is_main": is_main
+        })
+    
+    total = main_uses + synonym_uses
+    main_ratio = main_uses / total if total > 0 else 1.0
+    
+    return jsonify({
+        "project_id": project_id,
+        "main_keyword": data.get("main_keyword"),
+        "progress": {
+            "batches_written": len(batches),
+            "batches_planned": article_plan.get("total_batches", 0),
+            "percent": round(len(batches) / max(1, article_plan.get("total_batches", 1)) * 100)
+        },
+        "main_vs_synonyms": {
+            "main_uses": main_uses,
+            "synonym_uses": synonym_uses,
+            "ratio": round(main_ratio, 2),
+            "valid": main_ratio >= 0.5
+        },
+        "keywords": keywords_summary,
+        "status": {
+            "has_plan": bool(article_plan),
+            "has_final_review": "final_review" in data,
+            "has_paa": "paa_section" in data
+        }
+    }), 200
+
+
+# ================================================================
+# 🧪 MANUAL CHECK ENDPOINT
+# ================================================================
+@app.post("/api/manual_check")
+def manual_check():
+    """Ręczna walidacja tekstu."""
+    data = request.get_json()
+    if not data or "text" not in data:
+        return jsonify({"error": "Missing text"}), 400
+
+    from unified_validator import validate_content
+    
+    result = validate_content(
+        text=data["text"],
+        keywords_state=data.get("keywords_state", {}),
+        main_keyword=data.get("main_keyword", "")
     )
 
     return jsonify({
-        "project_id": project_id,
-        "topic": data.get("topic"),
-        "total_batches": total_batches,
-        "keywords_count": len(keywords),
-        "warnings_total": len(all_warnings),
-        "avg_semantic_score": avg_semantic,
-        "avg_density": round(
-            sum([b.get("language_audit", {}).get("density", 0) for b in batches]) / max(1, total_batches), 2
-        ),
-        "burstiness_avg": round(
-            sum([b.get("burstiness", 0) for b in batches]) / max(1, total_batches), 2
-        ),
-        "last_update": batches[-1]["timestamp"].isoformat() if batches else None,
-        "lsi_keywords": data.get("lsi_enrichment", {}).get("count", 0),
-        "has_final_review": "final_review" in data,
-        "semantic_enabled": SEMANTIC_ENABLED  # ⭐ NOWE
+        "status": "OK" if result.is_valid else "WARN",
+        "score": result.score,
+        "metrics": result.metrics,
+        "issues": [i.to_dict() for i in result.issues],
+        "keywords": result.keywords_analysis,
+        "structure": result.structure_analysis
     }), 200
 
+
 # ================================================================
-# 🚨 ERROR HANDLERS (Globalne)
+# 📋 API DOCUMENTATION ENDPOINT
+# ================================================================
+@app.get("/api/docs")
+def api_docs():
+    """Dokumentacja API."""
+    return jsonify({
+        "version": VERSION,
+        "endpoints": {
+            "analyze_and_plan": {
+                "method": "POST",
+                "path": "/api/article/analyze_and_plan",
+                "description": "S1 + H2 suggestions + plan w jednym requeście",
+                "input": {
+                    "main_keyword": "string (required)",
+                    "h2_structure": "array (optional)",
+                    "keywords": "array (optional)",
+                    "target_length": "int (default: 3000)"
+                }
+            },
+            "create_project": {
+                "method": "POST",
+                "path": "/api/project/create",
+                "description": "Tworzy projekt z BatchPlanem"
+            },
+            "pre_batch_info": {
+                "method": "GET",
+                "path": "/api/project/{id}/pre_batch_info",
+                "description": "Instrukcje dla następnego batcha"
+            },
+            "preview_batch": {
+                "method": "POST",
+                "path": "/api/project/{id}/preview_batch",
+                "description": "Walidacja batcha"
+            },
+            "approve_batch": {
+                "method": "POST",
+                "path": "/api/project/{id}/approve_batch",
+                "description": "Zapisuje batch z wersjonowaniem"
+            },
+            "rollback_batch": {
+                "method": "POST",
+                "path": "/api/project/{id}/rollback_batch",
+                "description": "Rollback do poprzedniej wersji"
+            },
+            "versions": {
+                "method": "GET",
+                "path": "/api/project/{id}/versions/{batch_number}",
+                "description": "Historia wersji batcha"
+            },
+            "final_review": {
+                "method": "POST",
+                "path": "/api/project/{id}/final_review",
+                "description": "Końcowa walidacja"
+            },
+            "apply_corrections": {
+                "method": "POST",
+                "path": "/api/project/{id}/apply_corrections",
+                "description": "Auto-korekta z Gemini"
+            },
+            "paa_analyze": {
+                "method": "GET",
+                "path": "/api/project/{id}/paa/analyze",
+                "description": "Dane do FAQ"
+            },
+            "paa_save": {
+                "method": "POST",
+                "path": "/api/project/{id}/paa/save",
+                "description": "Zapisz FAQ"
+            },
+            "export": {
+                "method": "GET",
+                "path": "/api/project/{id}/export",
+                "description": "Eksport artykułu"
+            }
+        },
+        "changes_from_v22": [
+            "Połączony endpoint analyze_and_plan (S1 + H2 + plan)",
+            "Ujednolicone nazwy pól JSON",
+            "BatchPlanner - planowanie z góry",
+            "VersionManager - wersjonowanie z rollbackiem",
+            "UnifiedValidator - jedna funkcja walidacyjna"
+        ]
+    }), 200
+
+
+# ================================================================
+# 🚨 ERROR HANDLERS
 # ================================================================
 @app.errorhandler(413)
 def request_entity_too_large(error):
-    return jsonify({"error": "Request Entity Too Large", "message": "Payload przekracza 32MB"}), 413
+    return jsonify({"error": "Request too large (max 32MB)"}), 413
 
 @app.errorhandler(500)
-def internal_server_error(error):
+def internal_error(error):
     return jsonify({"error": "Internal Server Error", "message": str(error)}), 500
+
 
 # ================================================================
 # 🏥 HEALTHCHECK
@@ -358,89 +371,46 @@ def internal_server_error(error):
 def health():
     return jsonify({
         "status": "ok",
-        "message": "Master SEO API działa",
         "version": VERSION,
         "timestamp": datetime.utcnow().isoformat(),
-        "modules": [
-            "project_routes",
-            "firestore_tracker_routes",
-            "final_review_routes",
-            "seo_optimizer",
-            "s1_proxy (to N-gram API)"
-        ],
-        "debug_mode": DEBUG_MODE,
-        "firebase_connected": True,
-        "ngram_base_url": NGRAM_BASE_URL,
-        "ngram_analysis_endpoint": NGRAM_ANALYSIS_ENDPOINT,
-        "s1_proxy_enabled": True,
-        "semantic_enabled": SEMANTIC_ENABLED  # ⭐ NOWE
+        "features": {
+            "batch_planner": True,
+            "version_manager": True,
+            "unified_validator": True,
+            "semantic_analysis": SEMANTIC_ENABLED
+        },
+        "ngram_api": NGRAM_API_URL,
+        "firebase": True
     }), 200
 
-# ================================================================
-# 🔎 VERSION CHECK
-# ================================================================
+
 @app.get("/api/version")
 def version_info():
     return jsonify({
-        "engine": "Brajen Semantic Engine",
+        "engine": "BRAJEN SEO Engine",
         "api_version": VERSION,
         "components": {
-            "project_routes": "v22.1-semantic",
-            "firestore_tracker_routes": "v22.1-semantic",
-            "seo_optimizer": "v22.1-semantic",
-            "final_review_routes": "v22.1-gemini-2.5",
-            "s1_proxy": "v22.1 (to N-gram API)"
+            "project_routes": "v23.0",
+            "final_review_routes": "v23.0",
+            "paa_routes": "v22.3",
+            "unified_validator": "v23.0",
+            "batch_planner": "v23.0",
+            "version_manager": "v23.0"
         },
-        "environment": {
-            "debug_mode": DEBUG_MODE,
-            "firebase_connected": True,
-            "ngram_base_url": NGRAM_BASE_URL,
-            "ngram_analysis_endpoint": NGRAM_ANALYSIS_ENDPOINT,
-            "semantic_enabled": SEMANTIC_ENABLED  # ⭐ NOWE
-        }
+        "breaking_changes": [
+            "Preferowany endpoint: /api/article/analyze_and_plan",
+            "Stare endpointy S1/H2 nadal działają (kompatybilność)"
+        ]
     }), 200
 
-# ================================================================
-# 🧩 MANUAL CHECK ENDPOINT (test unified_prevalidation)
-# ================================================================
-@app.post("/api/manual_check")
-def manual_check():
-    data = request.get_json()
-    if not data or "text" not in data:
-        return jsonify({"error": "Missing text"}), 400
-
-    dummy_keywords = data.get("keywords_state", {})
-    result = unified_prevalidation(data["text"], dummy_keywords)
-
-    return jsonify({
-        "status": "CHECK_OK",
-        "semantic_score": result["semantic_score"],
-        "density": result["density"],
-        "smog": result["smog"],
-        "readability": result["readability"],
-        "warnings": result["warnings"],
-        "semantic_coverage": result.get("semantic_coverage", {})  # ⭐ NOWE
-    }), 200
-
-# ================================================================
-# 🧩 AUTO FINAL REVIEW TRIGGER (po eksporcie)
-# ================================================================
-@app.post("/api/auto_final_review/<project_id>")
-def auto_final_review(project_id):
-    from final_review_routes import perform_final_review
-    try:
-        response = perform_final_review(project_id)
-        return response
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 # ================================================================
 # 🏃 Local Run
 # ================================================================
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8080))
-    print(f"\n🚀 Starting Master SEO API {VERSION} on port {port}")
+    print(f"\n🚀 Starting BRAJEN SEO API {VERSION} on port {port}")
     print(f"🔧 Debug mode: {DEBUG_MODE}")
-    print(f"🔗 S1 Proxy enabled → {NGRAM_ANALYSIS_ENDPOINT}")
-    print(f"🧠 Semantic analysis: {'ENABLED ✅' if SEMANTIC_ENABLED else 'DISABLED ⚠️'}\n")
+    print(f"🧠 Semantic: {'ENABLED' if SEMANTIC_ENABLED else 'DISABLED'}")
+    print(f"🔗 N-gram API: {NGRAM_API_URL}\n")
     app.run(host="0.0.0.0", port=port, debug=DEBUG_MODE)
