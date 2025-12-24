@@ -1,66 +1,105 @@
 #!/bin/bash
-# ===============================================
-# 🚀 run.sh — Render/Container bootstrap (v20)
-# ===============================================
-set -euo pipefail
 
-echo "==============================================="
-echo "🚀 SEO Master API starting..."
-echo "🐍 Python: $(python --version)"
-echo "📦 Environment: ${ENV:-production}"
-echo "🌍 Port: ${PORT:-8080}"
-echo "==============================================="
+# Master SEO API v23.8 - Run Script
 
-# --- Activate virtual environment if present ---
-if [ -d "venv" ]; then
-  source venv/bin/activate
-  echo "✅ Virtualenv activated"
+set -e
+
+# Kolory
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+echo -e "${GREEN}========================================${NC}"
+echo -e "${GREEN}   MASTER SEO API v23.8${NC}"
+echo -e "${GREEN}========================================${NC}"
+
+# Sprawdź czy Python jest zainstalowany
+if ! command -v python3 &> /dev/null; then
+    echo -e "${RED}Python3 nie jest zainstalowany!${NC}"
+    exit 1
 fi
 
-# --- Ensure dependencies are installed ---
-if [ -f "requirements.txt" ]; then
-  echo "📦 Installing dependencies..."
-  pip install --no-cache-dir -r requirements.txt
+# Sprawdź zmienne środowiskowe
+if [ -z "$GOOGLE_APPLICATION_CREDENTIALS" ]; then
+    echo -e "${YELLOW}⚠️  GOOGLE_APPLICATION_CREDENTIALS nie ustawione${NC}"
+    echo "   Ustaw: export GOOGLE_APPLICATION_CREDENTIALS=/path/to/firebase-key.json"
 fi
 
-# --- Ensure only lightweight spaCy model is present ---
-python - <<'EOF'
-import spacy
-import sys
-import subprocess
-try:
-    spacy.load("pl_core_news_md")
-    print("✅ SpaCy model pl_core_news_md is available")
-except Exception:
-    print("⚙️ Installing SpaCy model: pl_core_news_md")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "https://github.com/explosion/spacy-models/releases/download/pl_core_news_md-3.7.0/pl_core_news_md-3.7.0-py3-none-any.whl"])
-EOF
-
-# --- Check Firestore credentials (required) ---
-if [ -z "$FIREBASE_CREDS_JSON" ]; then
-  echo "❌ FIREBASE_CREDS_JSON not set — Firebase is required"
-  exit 1
-else
-  echo "✅ FIREBASE_CREDS_JSON environment variable detected"
+if [ -z "$GEMINI_API_KEY" ]; then
+    echo -e "${YELLOW}⚠️  GEMINI_API_KEY nie ustawione (Final Review nieaktywny)${NC}"
 fi
 
-# --- Run basic healthcheck ---
-echo "🔍 Running healthcheck..."
-python - <<'EOF'
-from master_api import app
-try:
-    print("✅ Master API import OK")
-except Exception as e:
-    print("❌ Master API import failed:", e)
-    raise
-EOF
+# Opcje uruchomienia
+MODE=${1:-dev}
+PORT=${PORT:-8080}
 
-# --- Start app ---
-if command -v gunicorn &> /dev/null
-then
-  echo "🚀 Launching via Gunicorn (light mode)..."
-  exec gunicorn --bind 0.0.0.0:${PORT:-8080} --workers 1 --threads 2 master_api:app
-else
-  echo "⚙️ Gunicorn not found, starting Flask dev server..."
-  python master_api.py
-fi
+case $MODE in
+    dev)
+        echo -e "${GREEN}🚀 Uruchamiam w trybie DEV (Flask debug)${NC}"
+        echo ""
+        export FLASK_ENV=development
+        export FLASK_DEBUG=1
+        python3 master_api.py
+        ;;
+    
+    prod)
+        echo -e "${GREEN}🚀 Uruchamiam w trybie PROD (Gunicorn)${NC}"
+        echo ""
+        gunicorn \
+            --bind 0.0.0.0:$PORT \
+            --workers 4 \
+            --threads 2 \
+            --timeout 120 \
+            --keep-alive 5 \
+            --access-logfile - \
+            --error-logfile - \
+            master_api:app
+        ;;
+    
+    docker)
+        echo -e "${GREEN}🐳 Buduję i uruchamiam Docker${NC}"
+        echo ""
+        docker build -t master-seo-api:v23.8 .
+        docker run -d \
+            --name seo-api \
+            -p $PORT:8080 \
+            -e GOOGLE_APPLICATION_CREDENTIALS=/app/firebase-key.json \
+            -e GEMINI_API_KEY=$GEMINI_API_KEY \
+            -v $(pwd)/firebase-key.json:/app/firebase-key.json:ro \
+            master-seo-api:v23.8
+        echo -e "${GREEN}✅ Container uruchomiony na porcie $PORT${NC}"
+        ;;
+    
+    docker-build)
+        echo -e "${GREEN}🐳 Buduję obraz Docker${NC}"
+        docker build -t master-seo-api:v23.8 .
+        echo -e "${GREEN}✅ Obraz zbudowany: master-seo-api:v23.8${NC}"
+        ;;
+    
+    test)
+        echo -e "${GREEN}🧪 Uruchamiam testy${NC}"
+        echo ""
+        python3 -m pytest tests/ -v
+        ;;
+    
+    install)
+        echo -e "${GREEN}📦 Instaluję zależności${NC}"
+        echo ""
+        pip install -r requirements.txt
+        python -m spacy download pl_core_news_md
+        echo -e "${GREEN}✅ Zależności zainstalowane${NC}"
+        ;;
+    
+    *)
+        echo "Użycie: ./run.sh [dev|prod|docker|docker-build|test|install]"
+        echo ""
+        echo "  dev          - Flask development server (domyślne)"
+        echo "  prod         - Gunicorn production server"
+        echo "  docker       - Build i run w Docker"
+        echo "  docker-build - Tylko build Docker image"
+        echo "  test         - Uruchom testy"
+        echo "  install      - Zainstaluj zależności"
+        exit 1
+        ;;
+esac
