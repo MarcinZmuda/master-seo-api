@@ -68,8 +68,8 @@ class ValidationConfig:
     INTRO_MAX_WORDS = 60
     
     # Fraza główna
-    MAIN_KEYWORD_RATIO_MIN = 0.50
-    H2_MAIN_KEYWORD_COVERAGE_MIN = 0.40
+    MAIN_KEYWORD_RATIO_MIN = 0.30
+    H2_MAIN_KEYWORD_COVERAGE_MIN = 0.20
     
     # N-gramy
     NGRAM_COVERAGE_MIN = 0.60
@@ -766,11 +766,11 @@ def _basic_eeat_check(text: str) -> Dict[str, Any]:
     
     recommendations = []
     if expertise_score < 0.4:
-        recommendations.append("Dodaj sygnały ekspertyzy (terminologia branżowa, doświadczenie)")
+        recommendations.append("Używaj terminologii branżowej i specjalistycznej")
     if authority_score < 0.4:
-        recommendations.append("Dodaj cytaty ze źródeł (przepisy, badania, dane)")
+        recommendations.append("Dodaj źródła prawne (Dz.U., art., rozporządzenia UE)")
     if trust_score < 0.4:
-        recommendations.append("Zwiększ wiarygodność (aktualne daty, konkretne liczby)")
+        recommendations.append("Zwiększ wiarygodność (aktualne daty, konkretne liczby, paragrafy)")
     
     return {
         "scores": {
@@ -1011,7 +1011,7 @@ def full_validate_with_eeat(
         result_dict["score"] = max(0, result_dict["score"] - 10)
         result_dict["issues"].append({
             "code": "LOW_EEAT",
-            "message": "Niski poziom sygnałów E-E-A-T (ekspertyza, autorytet, wiarygodność)",
+            "message": "Niski poziom sygnałów E-E-A-T - dodaj źródła prawne (Dz.U., art., rozporządzenia)",
             "severity": "WARNING",
             "details": result_dict["eeat_analysis"]
         })
