@@ -9,52 +9,21 @@ from firebase_admin import firestore
 # ------------------------------------------------------------
 paa_routes = Blueprint("paa_routes", __name__)
 
-
-# ------------------------------------------------------------
-# HELPERS - normalizacja
-# ------------------------------------------------------------
-def _normalize_h2_list(h2_list):
-    """Normalizuje H2 do listy stringów (obsługuje dict i string)."""
-    normalized = []
-    for h2 in h2_list:
-        if isinstance(h2, dict):
-            # H2 jako dict: {title: ..., type: ...}
-            title = h2.get("title") or h2.get("h2") or h2.get("name") or ""
-            if title.strip():
-                normalized.append(title.strip())
-        elif isinstance(h2, str) and h2.strip():
-            normalized.append(h2.strip())
-    return normalized
-
-
-def _deduplicate_list(items):
-    """Deduplikuje listę zachowując kolejność."""
-    seen = set()
-    result = []
-    for item in items:
-        lower = item.lower().strip()
-        if lower not in seen:
-            seen.add(lower)
-            result.append(item)
-    return result
-
-
 # ------------------------------------------------------------
 # 1. ANALYZE - Przygotuj dane do PAA (dla Custom GPT)
 # ------------------------------------------------------------
 @paa_routes.get("/api/project/<project_id>/paa/analyze")
 def analyze_for_paa(project_id):
     """
-    Analizuje projekt i zwraca:
+    v23.8: Analizuje projekt i zwraca:
+    - Semantic gaps (tematy niepokryte w artykule!)
     - Niewykorzystane frazy EXTENDED
     - Niewykorzystane frazy BASIC
     - Niewykorzystane H2
     - PAA z SERP
     
-    v23.1 - kompatybilność z v22 i v23:
-    - h2_structure (v23) z fallback na h2_list (v22)
-    - s1_data.serp_analysis (v23) z fallback na serp_data (v22)
-    - actual_uses (v23) z fallback na current_count (v22)
+    Custom GPT używa tych danych do napisania sekcji PAA.
+    FAQ powinno wypełniać LUKI SEMANTYCZNE!
     """
     
     db = firestore.client()
@@ -66,20 +35,30 @@ def analyze_for_paa(project_id):
     data = doc.to_dict() or {}
     
     # Dane projektu
-    main_keyword = data.get("main_keyword", data.get("topic", ""))
+    main_keyword = data.get("topic") or data.get("main_keyword", "")
     keywords_state = data.get("keywords_state", {})
     batches = data.get("batches", [])
+    original_h2_list = data.get("h2_list", [])
     
-    # v23 FIX: h2_structure z fallback + normalizacja
-    raw_h2 = data.get("h2_structure", data.get("h2_list", []))
-    original_h2_list = _normalize_h2_list(raw_h2)
-    
-    # v23 FIX: PAA z s1_data.serp_analysis z fallback na serp_data
-    s1_data = data.get("s1_data", data.get("serp_data", {}))
-    serp_analysis = s1_data.get("serp_analysis", s1_data)
-    serp_paa = serp_analysis.get("paa_questions", [])
+    # PAA z SERP
+    serp_paa = data.get("serp_data", {}).get("paa_questions", [])
     if not serp_paa:
         serp_paa = data.get("paa_questions", [])
+    
+    # --------------------------------------------
+    # v23.8: SEMANTIC GAPS ANALYSIS
+    # --------------------------------------------
+    semantic_gaps = []
+    full_article = "\n\n".join([b.get("text", "") for b in batches])
+    
+    try:
+        from text_analyzer import analyze_semantic_coverage
+        if full_article and keywords_state:
+            keywords_list = [meta.get("keyword", "") for meta in keywords_state.values() if meta.get("keyword")]
+            sem_result = analyze_semantic_coverage(full_article, keywords_list)
+            semantic_gaps = sem_result.get("gaps", [])
+    except Exception as e:
+        print(f"[PAA] Semantic analysis skipped: {e}")
     
     # --------------------------------------------
     # Znajdź NIEWYKORZYSTANE frazy
@@ -89,8 +68,7 @@ def analyze_for_paa(project_id):
     underused = []
     
     for kw_id, kw_data in keywords_state.items():
-        # v23 FIX: actual_uses z fallback na current_count
-        current = kw_data.get("actual_uses", kw_data.get("current_count", 0))
+        current = kw_data.get("current_count", 0)
         target_min = kw_data.get("target_min", 1)
         keyword = kw_data.get("keyword", "")
         kw_type = kw_data.get("type", "BASIC")
@@ -98,7 +76,7 @@ def analyze_for_paa(project_id):
         if current == 0:
             if kw_type == "EXTENDED":
                 unused_extended.append(keyword)
-            elif not kw_data.get("is_main_keyword"):
+            else:
                 unused_basic.append(keyword)
         elif current < target_min:
             underused.append({
@@ -112,7 +90,6 @@ def analyze_for_paa(project_id):
     # --------------------------------------------
     # Znajdź UŻYTE H2 (tematy już omówione - do unikania w FAQ!)
     # --------------------------------------------
-    full_article = "\n\n".join([b.get("text", "") for b in batches])
     used_h2 = []
     
     # Format h2:
@@ -121,9 +98,6 @@ def analyze_for_paa(project_id):
     # Format <h2>
     for match in re.findall(r'<h2[^>]*>([^<]+)</h2>', full_article, re.IGNORECASE):
         used_h2.append(match.strip())
-    
-    # Deduplikacja
-    used_h2 = _deduplicate_list(used_h2)
     
     # Tematy do UNIKANIA w FAQ (już omówione w artykule)
     topics_to_avoid = used_h2.copy()
@@ -139,8 +113,6 @@ def analyze_for_paa(project_id):
     article_lower = full_article.lower()
     
     for paa_q in serp_paa:
-        if not isinstance(paa_q, str):
-            continue
         paa_clean = paa_q.lower().replace("?", "").strip()
         paa_words = [w for w in paa_clean.split() if len(w) > 3]
         
@@ -150,12 +122,18 @@ def analyze_for_paa(project_id):
                 unused_paa.append(paa_q)
     
     # --------------------------------------------
-    # Response dla Custom GPT
+    # Response dla Custom GPT - v23.8 z semantic gaps
     # --------------------------------------------
     return jsonify({
         "status": "READY_FOR_PAA",
         "project_id": project_id,
         "main_keyword": main_keyword,
+        
+        # v23.8: SEMANTIC GAPS - najważniejsze!
+        "semantic_gaps": {
+            "keywords": semantic_gaps[:5],
+            "reason": "Te tematy NIE są pokryte w artykule - FAQ powinno je wypełnić!"
+        },
         
         "unused_data": {
             "extended_keywords": unused_extended[:10],
@@ -173,6 +151,7 @@ def analyze_for_paa(project_id):
         "original_serp_paa": serp_paa[:10],
         
         "summary": {
+            "semantic_gaps_count": len(semantic_gaps),
             "extended_unused": len(unused_extended),
             "basic_unused": len(unused_basic),
             "h2_unused": len(unused_h2),
@@ -182,8 +161,10 @@ def analyze_for_paa(project_id):
         
         "instructions": {
             "goal": "Napisz sekcję PAA z 3 pytaniami",
+            "priority_1": "Wypełnij SEMANTIC GAPS - tematy niepokryte w artykule!",
+            "priority_2": "Użyj pytań z serp_paa (prawdziwe pytania z Google)",
+            "priority_3": "Wpleć extended_keywords i unused_h2",
             "critical_rule": "FAQ NIE MOŻE powtarzać tematów z artykułu! Sprawdź 'avoid_in_faq'.",
-            "priority": "1. serp_paa (prawdziwe pytania z Google!), 2. extended_keywords, 3. unused_h2",
             "question_format": "Zacznij od: Jak/Czy/Co/Dlaczego/Kiedy/Ile/Czego (5-10 słów)",
             "answer_format": "80-120 słów, pierwsze zdanie = bezpośrednia odpowiedź",
             "save_endpoint": f"POST /api/project/{project_id}/paa/save"
@@ -199,14 +180,28 @@ def save_paa_section(project_id):
     """
     Zapisuje sekcję PAA wygenerowaną przez Custom GPT.
     
-    DUAL INPUT (kompatybilność z OpenAPI):
-    - Format 1: {"questions": [{question, answer, keywords_used}, ...]}
-    - Format 2: {"paa_section": "string"} (legacy/OpenAPI)
+    Expected body:
+    {
+        "questions": [
+            {
+                "question": "Pytanie?",
+                "answer": "Odpowiedź...",
+                "keywords_used": ["fraza1", "fraza2"]
+            }
+        ]
+    }
     """
     
     body = request.get_json()
     if not body:
         return jsonify({"error": "No JSON data"}), 400
+    
+    questions = body.get("questions", [])
+    if not questions:
+        return jsonify({"error": "No questions provided"}), 400
+    
+    if len(questions) < 1 or len(questions) > 5:
+        return jsonify({"error": "Expected 1-5 questions"}), 400
     
     db = firestore.client()
     doc_ref = db.collection("seo_projects").document(project_id)
@@ -214,45 +209,6 @@ def save_paa_section(project_id):
     
     if not doc.exists:
         return jsonify({"error": "Project not found"}), 404
-    
-    # --------------------------------------------
-    # DUAL INPUT: sprawdź format
-    # --------------------------------------------
-    questions = body.get("questions", [])
-    paa_section_raw = body.get("paa_section")
-    
-    # Format 2: paa_section jako string (legacy/OpenAPI kompatybilność)
-    if not questions and paa_section_raw:
-        if isinstance(paa_section_raw, str):
-            paa_data = {
-                "raw": paa_section_raw,
-                "format": "legacy_string",
-                "questions": [],
-                "html_schema": "",
-                "marker_format": paa_section_raw,
-                "keywords_used": [],
-                "question_count": 0,
-                "created_at": firestore.SERVER_TIMESTAMP
-            }
-            
-            try:
-                doc_ref.update({"paa_section": paa_data})
-            except Exception as e:
-                return jsonify({"error": str(e)}), 500
-            
-            return jsonify({
-                "status": "PAA_SAVED",
-                "project_id": project_id,
-                "format": "legacy_string",
-                "message": "Zapisano jako raw string. Preferowany format: {questions: [...]}"
-            }), 200
-    
-    # Format 1: questions array (preferowany)
-    if not questions:
-        return jsonify({"error": "No questions provided. Use {questions: [...]} or {paa_section: 'string'}"}), 400
-    
-    if len(questions) < 1 or len(questions) > 5:
-        return jsonify({"error": "Expected 1-5 questions"}), 400
     
     # Walidacja struktury
     validated_questions = []
@@ -283,7 +239,6 @@ def save_paa_section(project_id):
         "marker_format": marker_output,
         "keywords_used": list(set(all_keywords)),
         "question_count": len(validated_questions),
-        "format": "structured",
         "created_at": firestore.SERVER_TIMESTAMP
     }
     
@@ -332,7 +287,7 @@ def get_paa_section(project_id):
 
 
 # ------------------------------------------------------------
-# HELPERS - generatory
+# HELPERS
 # ------------------------------------------------------------
 def _generate_faq_schema_html(questions: list) -> str:
     """Generuje HTML z Schema.org FAQPage markup."""
