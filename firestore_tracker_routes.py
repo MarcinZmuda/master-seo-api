@@ -1,10 +1,10 @@
 """
-SEO Content Tracker Routes - v22.1 Brajen Semantic Engine
+SEO Content Tracker Routes - v23.8 Brajen Semantic Engine
++ Morfeusz2 lemmatization (with spaCy fallback)
 + Interactive Final Review (Gemini)
 + Burstiness validation (3.2-3.8)
 + Transition words validation (25-50%)
 + Metrics object in response
-+ FIX: approve_batch accepts corrected_text/text/batch_text
 """
 
 from flask import Blueprint, request, jsonify
@@ -19,12 +19,41 @@ from google.api_core.exceptions import InvalidArgument
 import google.generativeai as genai
 import os
 
+# v23.8: Import polish_lemmatizer (Morfeusz2 + spaCy fallback)
+try:
+    from polish_lemmatizer import count_phrase_occurrences, get_backend_info, init_backend
+    LEMMATIZER_ENABLED = True
+    LEMMATIZER_BACKEND = init_backend()
+    print(f"[TRACKER] Lemmatizer loaded: {LEMMATIZER_BACKEND}")
+except ImportError as e:
+    LEMMATIZER_ENABLED = False
+    LEMMATIZER_BACKEND = "PREFIX"
+    print(f"[TRACKER] Lemmatizer not available, using prefix matching: {e}")
+
+# v23.7: Import semantic analyzer
+try:
+    from semantic_analyzer import semantic_validation, find_semantic_gaps
+    SEMANTIC_ANALYZER_ENABLED = True
+    print("[TRACKER] Semantic Analyzer loaded")
+except ImportError as e:
+    SEMANTIC_ANALYZER_ENABLED = False
+    print(f"[TRACKER] Semantic Analyzer not available: {e}")
+
+# v23.7: Import keyword limiter (anty-stuffing)
+try:
+    from keyword_limiter import validate_keyword_limits, check_header_variation
+    KEYWORD_LIMITER_ENABLED = True
+    print("[TRACKER] Keyword Limiter loaded")
+except ImportError as e:
+    KEYWORD_LIMITER_ENABLED = False
+    print(f"[TRACKER] Keyword Limiter not available: {e}")
+
 tracker_routes = Blueprint("tracker_routes", __name__)
 
 # --- INIT SPACY (MD for Polish - fix for Docker timeout) ---
 try:
     nlp = spacy.load("pl_core_news_md")
-    print("[TRACKER] ✅ Załadowano model pl_core_news_md")
+    print("[TRACKER] Załadowano model pl_core_news_md")
 except OSError:
     from spacy.cli import download
     download("pl_core_news_md")
@@ -45,6 +74,13 @@ def count_lemma_only(text_lemmas, keyword_lemmas):
     """
     Proste zliczanie lematów - szuka dokładnej sekwencji lematów frazy w tekście.
     Używane dla BASIC keywords.
+    
+    Args:
+        text_lemmas: lista lematów z tekstu batcha
+        keyword_lemmas: lista lematów frazy kluczowej
+    
+    Returns:
+        int: liczba wystąpień frazy
     """
     if not text_lemmas or not keyword_lemmas:
         return 0
@@ -56,11 +92,70 @@ def count_lemma_only(text_lemmas, keyword_lemmas):
         return 0
     
     count = 0
+    # Przesuwamy okno po tekście i szukamy dokładnych dopasowań sekwencji lematów
     for i in range(text_len - kw_len + 1):
         if text_lemmas[i:i + kw_len] == keyword_lemmas:
             count += 1
     
     return count
+
+
+# ============================================================================
+# 1b. v23.8: COUNT ALL FORMS (Morfeusz2 + spaCy fallback)
+# ============================================================================
+def count_all_forms(text: str, keyword: str) -> int:
+    """
+    Liczy WSZYSTKIE odmiany słowa/frazy w tekście.
+    
+    v23.8: Używa Morfeusz2 (najdokładniejszy dla polskiego)
+           z fallbackiem na spaCy, potem prefix matching.
+    
+    Args:
+        text: oryginalny tekst
+        keyword: fraza kluczowa
+    
+    Returns:
+        int: liczba wystąpień wszystkich odmian
+    """
+    if not text or not keyword:
+        return 0
+    
+    if LEMMATIZER_ENABLED:
+        result = count_phrase_occurrences(text, keyword)
+        return result.get("count", 0)
+    
+    # Fallback: prefix matching
+    text_lower = text.lower()
+    keyword_lower = keyword.lower().strip()
+    words = keyword_lower.split()
+    
+    if len(words) == 1:
+        word = words[0]
+        if len(word) <= 4:
+            stem = word
+        elif len(word) <= 6:
+            stem = word[:len(word)-1]
+        else:
+            stem = word[:6]
+        
+        pattern = rf'\b{re.escape(stem)}\w*\b'
+        matches = re.findall(pattern, text_lower)
+        return len(matches)
+    
+    else:
+        stems = []
+        for word in words:
+            if len(word) <= 3:
+                stems.append(re.escape(word))
+            elif len(word) <= 5:
+                stems.append(re.escape(word[:len(word)-1]) + r'\w*')
+            else:
+                stems.append(re.escape(word[:5]) + r'\w*')
+        
+        # Stwórz pattern dla całej frazy (słowa mogą być oddzielone 1-3 słowami)
+        pattern = r'\b' + r'\s+(?:\w+\s+){0,2}'.join(stems) + r'\b'
+        matches = re.findall(pattern, text_lower)
+        return len(matches)
 
 
 # ============================================================================
@@ -117,6 +212,8 @@ def calculate_burstiness(text):
     """
     Oblicza burstiness - zróżnicowanie długości zdań.
     Target: 3.2-3.8 (optymalnie 3.5)
+    
+    v22.0: Zmieniona skala z 0-10 na 0-5 dla lepszego dopasowania do targetów.
     """
     sentences = re.split(r'[.!?]+', text)
     sentences = [s.strip() for s in sentences if s.strip()]
@@ -129,7 +226,9 @@ def calculate_burstiness(text):
     if not mean:
         return 0.0
     
+    # Normalizacja do skali gdzie 3.5 to optimum
     raw_score = math.sqrt(variance) / mean
+    # Mapowanie na skalę 0-5 (zamiast 0-10)
     normalized = raw_score * 5
     return round(normalized, 2)
 
@@ -138,15 +237,22 @@ def calculate_burstiness(text):
 # 🆕 v22.0: TRANSITION WORDS VALIDATION
 # ============================================================================
 TRANSITION_WORDS_PL = [
+    # Dodawanie
     "również", "także", "ponadto", "dodatkowo", "co więcej",
     "oprócz tego", "poza tym", "w dodatku", "nie tylko", "ale także",
+    # Kontrast
     "jednak", "jednakże", "natomiast", "ale", "z drugiej strony",
     "mimo to", "niemniej", "pomimo", "choć", "chociaż", "wprawdzie",
+    # Przyczyna/skutek
     "dlatego", "w związku z tym", "w rezultacie", "wskutek", "ponieważ",
     "zatem", "więc", "stąd", "w konsekwencji", "przez co",
+    # Przykłady
     "na przykład", "przykładowo", "między innymi", "m.in.", "np.",
+    # Podsumowanie
     "podsumowując", "reasumując", "w skrócie", "ogólnie rzecz biorąc",
+    # Sekwencja
     "po pierwsze", "po drugie", "następnie", "potem", "w końcu", "na koniec",
+    # Question hooks
     "efekt?", "rezultat?", "co się dzieje?", "i co dalej?", "co to oznacza?",
     "dlaczego?", "jak to działa?", "mechanizm?", "przyczyna?"
 ]
@@ -159,6 +265,7 @@ BANNED_SECTION_OPENERS = [
 def calculate_transition_score(text: str) -> dict:
     """
     Oblicza jakość przejść między zdaniami.
+    Zwraca dict z ratio i warnings.
     Target: 25-50% zdań z transition words
     """
     text_lower = text.lower()
@@ -171,13 +278,16 @@ def calculate_transition_score(text: str) -> dict:
     warnings = []
     
     for i, sentence in enumerate(sentences):
-        sentence_lower = sentence.lower()[:100]
+        sentence_lower = sentence.lower()[:100]  # Sprawdzamy początek
+        
+        # Sprawdź czy zawiera transition word
         has_transition = any(tw in sentence_lower for tw in TRANSITION_WORDS_PL)
         if has_transition:
             transition_count += 1
     
     ratio = transition_count / len(sentences) if sentences else 0
     
+    # Walidacja ratio
     if ratio < 0.20:
         warnings.append(f"⚠️ Za mało transition words: {ratio:.0%} (min 25%)")
     elif ratio > 0.55:
@@ -194,9 +304,12 @@ def calculate_transition_score(text: str) -> dict:
 def check_banned_openers(text: str) -> list:
     """
     Sprawdza czy sekcje zaczynają się od zakazanych słów.
+    Zwraca listę warnings.
     """
     warnings = []
     
+    # Znajdź pierwsze zdania po <h2> i <h3>
+    # Pattern: <h2>...</h2> następnie <p>pierwsze zdanie
     h2_pattern = re.compile(r'</h2>\s*<p>([^.!?]+[.!?])', re.IGNORECASE)
     h3_pattern = re.compile(r'</h3>\s*<p>([^.!?]+[.!?])', re.IGNORECASE)
     
@@ -220,19 +333,23 @@ def check_banned_openers(text: str) -> list:
 def validate_metrics(burstiness: float, transition_data: dict, density: float) -> list:
     """
     Waliduje wszystkie metryki i zwraca listę warnings.
+    ⭐ v23.8: Zaktualizowany próg density na 1.5% 
     """
     warnings = []
     
+    # Burstiness validation (target: 3.2-3.8)
     if burstiness < 3.2:
-        warnings.append(f"⚠️ Burstiness za niski: {burstiness} (min 3.2)")
+        warnings.append(f"⚠️ Burstiness za niski: {burstiness} (min 3.2) - dodaj więcej zróżnicowania w długości zdań")
     elif burstiness > 3.8:
-        warnings.append(f"⚠️ Burstiness za wysoki: {burstiness} (max 3.8)")
+        warnings.append(f"⚠️ Burstiness za wysoki: {burstiness} (max 3.8) - wyrównaj długości zdań")
     
-    if density > 3.0:
-        warnings.append(f"⚠️ Keyword density za wysoka: {density}% (max 3.0%)")
-    elif density > 2.5:
-        warnings.append(f"⚡ Keyword density blisko limitu: {density}%")
+    # v23.8: Density validation - zaktualizowane progi (max 1.5%)
+    if density > 2.0:
+        warnings.append(f"⚠️ Keyword density za wysoka: {density}% (max 1.5%)")
+    elif density > 1.5:
+        warnings.append(f"⚡ Keyword density blisko limitu: {density}% (warning at 1.5%)")
     
+    # Transition warnings już są w transition_data
     warnings.extend(transition_data.get("warnings", []))
     
     return warnings
@@ -251,30 +368,33 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
     project_data = doc.to_dict()
     keywords_state = project_data.get("keywords_state", {})
     
-    clean_text = re.sub(r"<[^>]+>", " ", batch_text)
-    clean_text = re.sub(r"\s+", " ", clean_text).lower()
+    # ⭐ KROK 1: Przygotuj lematy tekstu (raz dla całego batcha)
+    # Usuń tagi HTML przed lematyzacją
+    # ⭐ v23.7: Zachowaj ORYGINALNY tekst do zliczania (bez lowercase!)
+    clean_text_original = re.sub(r"<[^>]+>", " ", batch_text)
+    clean_text_original = re.sub(r"\s+", " ", clean_text_original)
+    
+    clean_text = clean_text_original.lower()
     doc_nlp = nlp(clean_text)
     text_lemmas = [t.lemma_.lower() for t in doc_nlp if t.is_alpha]
     
+    # ⭐ KROK 2: Policz wystąpienia w batchu BEZ aktualizacji stanu
     batch_counts = {}
     for rid, meta in keywords_state.items():
-        keyword = meta.get("keyword", "").lower().strip()
+        keyword = meta.get("keyword", "").strip()
         kw_type = meta.get("type", "BASIC").upper()
         
         if not keyword:
             batch_counts[rid] = 0
             continue
         
-        kw_doc = nlp(keyword)
-        keyword_lemmas = [t.lemma_.lower() for t in kw_doc if t.is_alpha]
-        
-        if kw_type == "BASIC":
-            count = count_lemma_only(text_lemmas, keyword_lemmas)
-        else:
-            count = count_robust(doc_nlp, meta)
+        # ⭐ FIX v23.7: Używaj count_all_forms (jak NeuronWriter)!
+        # Liczy WSZYSTKIE odmiany słowa, nie tylko dokładne dopasowanie lematów
+        count = count_all_forms(clean_text_original, keyword)
         
         batch_counts[rid] = count
     
+    # ⭐ KROK 3: Sprawdź czy BASIC keywords przekroczą target_max (WARNING, nie BLOCK)
     exceeded_keywords = []
     for rid, batch_count in batch_counts.items():
         meta = keywords_state[rid]
@@ -297,13 +417,16 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
                 "exceeded_by": new_total - target_max
             })
     
+    # ⭐ KROK 4: Exceeded keywords → WARNING (nie BLOCK!)
+    # Batch przechodzi, ale z ostrzeżeniem
     exceeded_warnings = []
     if exceeded_keywords:
         for ek in exceeded_keywords:
             exceeded_warnings.append(
-                f"⚠️ EXCEEDED: '{ek['keyword']}' będzie {ek['would_be']}x (max {ek['target_max']}x)"
+                f"⚠️ EXCEEDED: '{ek['keyword']}' będzie {ek['would_be']}x (max {ek['target_max']}x) - przekroczenie o {ek['exceeded_by']}x"
             )
     
+    # ⭐ KROK 5: Aktualizuj stan keywords
     for rid, batch_count in batch_counts.items():
         meta = keywords_state[rid]
         kw_type = meta.get("type", "BASIC").upper()
@@ -314,6 +437,7 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         max_t = meta.get("target_max", 999)
         actual = meta["actual_uses"]
         
+        # Status calculation
         if actual < min_t:
             meta["status"] = "UNDER"
         elif actual == max_t:
@@ -323,12 +447,14 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         elif actual > max_t:
             meta["status"] = "OVER"
         
+        # ⭐ remaining_max - tylko dla BASIC
         if kw_type == "BASIC":
             meta["remaining_max"] = max(0, max_t - actual)
             meta["optimal_target"] = max_t
         
         keywords_state[rid] = meta
 
+    # 🔹 Prewalidacja z unified_prevalidation
     precheck = unified_prevalidation(batch_text, keywords_state)
     warnings = precheck.get("warnings", [])
     semantic_score = precheck.get("semantic_score", 1.0)
@@ -337,12 +463,58 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
     smog = precheck.get("smog", 0.0)
     readability = precheck.get("readability", 0.0)
     
+    # ⭐ v23.7: NOWA analiza semantyczna (sentence-level)
+    semantic_gaps = []
+    semantic_analysis = {}
+    if SEMANTIC_ANALYZER_ENABLED:
+        try:
+            semantic_result = semantic_validation(batch_text, keywords_state, min_coverage=0.4)
+            semantic_analysis = semantic_result
+            
+            if not semantic_result.get("valid", True):
+                semantic_gaps = semantic_result.get("gaps", [])
+                gap_warning = f"⚠️ Semantic gaps (tematy niepokryte): {', '.join(semantic_gaps[:5])}"
+                warnings.append(gap_warning)
+                
+            # Aktualizuj semantic_score z nowej analizy
+            if semantic_result.get("semantic_enabled"):
+                semantic_score = semantic_result.get("overall_coverage", semantic_score)
+                
+        except Exception as e:
+            print(f"[TRACKER] ⚠️ Semantic analysis error: {e}")
+    
+    # NOWE: Dodaj exceeded_warnings (zamiast BLOCK)
     warnings.extend(exceeded_warnings)
     
+    # v23.8: Keyword Limiter - (anty-stuffing + entity match + progressive refinement)
+    keyword_limit_result = {}
+    if KEYWORD_LIMITER_ENABLED:
+        try:
+            main_keyword = project_data.get("topic") or project_data.get("main_keyword", "")
+            title = project_data.get("title", "")
+            meta_description = project_data.get("meta_description", "")
+            h1 = project_data.get("h1", "")
+            
+            keyword_limit_result = validate_keyword_limits(
+                text=batch_text,
+                main_keyword=main_keyword,
+                title=title,
+                meta_description=meta_description,
+                h1=h1
+            )
+            
+            if keyword_limit_result.get("warnings"):
+                warnings.extend(keyword_limit_result["warnings"])
+                
+        except Exception as e:
+            print(f"[TRACKER] ⚠️ Keyword limiter error: {e}")
+    
+    # 🆕 v22.0: Oblicz metryki
     burstiness = calculate_burstiness(batch_text)
     transition_data = calculate_transition_score(batch_text)
     banned_opener_warnings = check_banned_openers(batch_text)
     
+    # 🆕 v22.0: Walidacja metryk
     metrics_warnings = validate_metrics(burstiness, transition_data, density)
     warnings.extend(metrics_warnings)
     warnings.extend(banned_opener_warnings)
@@ -386,6 +558,7 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
     except Exception as e:
         print(f"[FIRESTORE] ⚠️ Błąd zapisu: {e}")
 
+    # ⭐ KROK 6: Przygotuj keyword_targets dla response (z remaining_max dla BASIC!)
     keyword_targets = []
     for rid, meta in keywords_state.items():
         kw_type = meta.get("type", "BASIC").upper()
@@ -397,9 +570,10 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
             "target_max": meta.get("target_max", 999),
             "status": meta.get("status"),
             "type": kw_type,
-            "batch_count": batch_counts.get(rid, 0)
+            "batch_count": batch_counts.get(rid, 0)  # ⭐ Ile było w tym batchu
         }
         
+        # ⭐ remaining_max tylko dla BASIC
         if kw_type == "BASIC":
             target_info["optimal_target"] = meta.get("optimal_target", meta.get("target_max", 999))
             target_info["remaining_max"] = meta.get("remaining_max", 0)
@@ -407,6 +581,7 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         
         keyword_targets.append(target_info)
 
+    # 🆕 v22.0: Metrics object w response
     return {
         "status": status,
         "semantic_score": semantic_score,
@@ -415,8 +590,16 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         "density": density,
         "burstiness": burstiness,
         "warnings": warnings,
-        "exceeded_keywords": exceeded_keywords,
-        "keyword_targets": keyword_targets,
+        "exceeded_keywords": exceeded_keywords,  # NOWE: lista przekroczonych (WARNING nie BLOCK)
+        "keyword_targets": keyword_targets,  # ⭐ CRITICAL FOR GPT!
+        # ⭐ v23.7: Semantic analysis results
+        "semantic_analysis": {
+            "enabled": SEMANTIC_ANALYZER_ENABLED,
+            "overall_coverage": semantic_analysis.get("overall_coverage", 0) if semantic_analysis else 0,
+            "gaps": semantic_gaps,
+            "gap_count": len(semantic_gaps),
+            "summary": semantic_analysis.get("summary", {}) if semantic_analysis else {}
+        },
         "metrics": {
             "burstiness": {
                 "value": burstiness,
@@ -430,8 +613,8 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
             },
             "density": {
                 "value": density,
-                "target": "<3.0%",
-                "status": "OK" if density <= 3.0 else "WARN"
+                "target": "<1.5%",
+                "status": "OK" if density <= 1.5 else "WARN"
             },
             "semantic_score": {
                 "value": semantic_score,
@@ -450,16 +633,11 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
 @tracker_routes.post("/api/project/<project_id>/preview_batch")
 def preview_batch(project_id):
     data = request.get_json(force=True)
-    text = data.get("batch_text") or data.get("text") or data.get("corrected_text") or ""
+    text = data.get("batch_text", "")
     forced = data.get("forced", False)
-    
-    if not text.strip():
-        return jsonify({
-            "error": "No text provided",
-            "hint": "Send 'batch_text', 'text', or 'corrected_text' field"
-        }), 400
-    
     result = process_batch_in_firestore(project_id, text, forced=forced)
+    
+    # ⭐ v22.1: Nie blokujemy - exceeded keywords to tylko WARNING
     result["mode"] = "PREVIEW_ONLY"
     return jsonify(result), 200
 
@@ -469,26 +647,16 @@ def approve_batch(project_id):
     """
     Zapisuje batch i automatycznie uruchamia końcowy audyt (Gemini),
     jeśli to był ostatni batch.
-    
-    ⭐ FIX v22.1: Akceptuje corrected_text, text, lub batch_text
     """
     data = request.get_json(force=True)
-    
-    # ⭐ FIX: Akceptuj różne nazwy pól
-    text = data.get("corrected_text") or data.get("text") or data.get("batch_text") or ""
-    
-    if not text.strip():
-        return jsonify({
-            "error": "No text provided",
-            "hint": "Send 'corrected_text', 'text', or 'batch_text' field with content",
-            "received_fields": list(data.keys())
-        }), 400
-    
+    text = data.get("corrected_text", "")
     meta_trace = data.get("meta_trace", {})
     forced = data.get("forced", False)
 
     # Zapisz batch
     result = process_batch_in_firestore(project_id, text, meta_trace, forced)
+    
+    # ⭐ v22.1: Nie blokujemy - exceeded keywords to tylko WARNING
     result["mode"] = "APPROVE"
 
     # 🔹 Sprawdź, czy to ostatni batch
@@ -503,6 +671,7 @@ def approve_batch(project_id):
     total_current = len(project_data.get("batches", []))
 
     if total_planned and total_current >= total_planned and GEMINI_API_KEY:
+        # Jeśli final review już istnieje i nie wymuszono, nie generujemy ponownie.
         existing_fr = project_data.get("final_review") if isinstance(project_data, dict) else None
         if existing_fr and not forced:
             result["final_review"] = existing_fr.get("review_text") if isinstance(existing_fr, dict) else existing_fr
@@ -513,6 +682,7 @@ def approve_batch(project_id):
             print(f"[TRACKER] 🧠 Final batch detected → uruchamiam Gemini review dla {project_id}")
             model_name = os.getenv("FINAL_REVIEW_MODEL", "gemini-2.5-flash")
             model = genai.GenerativeModel(model_name)
+            # ✅ POPRAWKA: Usunięto [:15000] - teraz analizuje CAŁY artykuł
             full_article = "\n\n".join([b.get("text", "") for b in project_data.get("batches", [])])
             print(f"[TRACKER] 🔍 Analiza CAŁEGO artykułu ({len(full_article)} znaków)...")
             review_prompt = (
@@ -531,11 +701,11 @@ def approve_batch(project_id):
                     "created_at": firestore.SERVER_TIMESTAMP,
                     "model": model_name,
                     "status": "REVIEW_READY",
-                    "article_length": len(full_article)
+                    "article_length": len(full_article)  # ⭐ DODANO tracking długości
                 }
             })
             result["final_review"] = review_text
-            result["article_length"] = len(full_article)
+            result["article_length"] = len(full_article)  # ⭐ DODANO info o długości
             result["next_action"] = "Czy chcesz wprowadzić poprawki automatycznie? (POST /api/project/<id>/apply_final_corrections)"
             result["final_review_status"] = "READY"
             print(f"[TRACKER] ✅ Raport Gemini zapisany w Firestore → {project_id}")
@@ -568,12 +738,14 @@ def debug_keywords(project_id):
             "target": f"{meta.get('target_min')}-{meta.get('target_max')}"
         }
         
+        # ⭐ remaining_max tylko dla BASIC
         if kw_type == "BASIC":
             stat_entry["optimal_target"] = meta.get("optimal_target", meta.get("target_max", 999))
             stat_entry["remaining_max"] = meta.get("remaining_max", max(0, meta.get("target_max", 999) - meta.get("actual_uses", 0)))
         
         stats.append(stat_entry)
     
+    # 🆕 v22.0: Dodaj średnie metryki z batchy
     avg_burstiness = 0
     avg_transition = 0
     if batches:
