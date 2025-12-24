@@ -628,6 +628,58 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
 
 
 # ============================================================================
+# 4b. COMPACT RESPONSE (dla Custom GPT - limit ~100KB)
+# ============================================================================
+def _compact_response(result: dict) -> dict:
+    """
+    Zwraca skróconą wersję odpowiedzi dla Custom GPT.
+    Redukuje rozmiar z ~220KB do ~15KB.
+    """
+    # Zachowaj tylko najważniejsze pola
+    compact = {
+        "status": result.get("status"),
+        "semantic_score": result.get("semantic_score"),
+        "density": result.get("density"),
+        "burstiness": result.get("burstiness"),
+        "warnings": result.get("warnings", [])[:5],  # Max 5 warnings
+        "exceeded_keywords": result.get("exceeded_keywords", []),
+    }
+    
+    # Metrics - tylko statusy
+    metrics = result.get("metrics", {})
+    compact["metrics_summary"] = {
+        "burstiness": metrics.get("burstiness", {}).get("status", "?"),
+        "transition": metrics.get("transition_ratio", {}).get("status", "?"),
+        "density": metrics.get("density", {}).get("status", "?"),
+        "semantic": metrics.get("semantic_score", {}).get("status", "?")
+    }
+    
+    # Keywords - tylko te ważne (UNDER, OVER, lub z batch_count > 0)
+    keyword_targets = result.get("keyword_targets", [])
+    important_keywords = []
+    for kw in keyword_targets:
+        status = kw.get("status", "")
+        batch_count = kw.get("batch_count", 0)
+        if status in ["UNDER", "OVER"] or batch_count > 0:
+            important_keywords.append({
+                "keyword": kw.get("keyword"),
+                "current": kw.get("current"),
+                "target_max": kw.get("target_max"),
+                "status": status,
+                "batch_count": batch_count
+            })
+    
+    compact["keywords"] = important_keywords[:15]  # Max 15 keywords
+    compact["keywords_total"] = len(keyword_targets)
+    
+    # Semantic gaps - max 5
+    semantic = result.get("semantic_analysis", {})
+    compact["semantic_gaps"] = semantic.get("gaps", [])[:5]
+    
+    return compact
+
+
+# ============================================================================
 # 5. ROUTES — PREVIEW, APPROVE, DEBUG
 # ============================================================================
 @tracker_routes.post("/api/project/<project_id>/preview_batch")
@@ -647,16 +699,22 @@ def approve_batch(project_id):
     """
     Zapisuje batch i automatycznie uruchamia końcowy audyt (Gemini),
     jeśli to był ostatni batch.
+    
+    v23.8: Dodano parametr compact=true dla mniejszych odpowiedzi (dla Custom GPT)
     """
     data = request.get_json(force=True)
     text = data.get("corrected_text", "")
     meta_trace = data.get("meta_trace", {})
     forced = data.get("forced", False)
+    compact = data.get("compact", True)  # Domyślnie TRUE dla GPT
 
     # Zapisz batch
     result = process_batch_in_firestore(project_id, text, meta_trace, forced)
     
-    # ⭐ v22.1: Nie blokujemy - exceeded keywords to tylko WARNING
+    # v23.8: Kompaktowa odpowiedź dla Custom GPT (< 50KB)
+    if compact:
+        result = _compact_response(result)
+    
     result["mode"] = "APPROVE"
 
     # 🔹 Sprawdź, czy to ostatni batch
