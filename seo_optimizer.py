@@ -304,7 +304,7 @@ def semantic_keyword_coverage(text: str, keywords_state: dict) -> dict:
             
             coverage[keyword] = {
                 "semantic_similarity": round(float(similarity), 3),
-                "status": "COVERED" if similarity > 0.60 else "WEAK",
+                "status": "COVERED" if similarity > 0.50 else "WEAK",
                 "actual_uses": meta.get("actual_uses", 0),
                 "type": meta.get("type", "BASIC")
             }
