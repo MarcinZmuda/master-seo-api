@@ -93,10 +93,19 @@ def s1_analysis_proxy():
     """
     Proxy endpoint dla S1 analysis.
     Przekierowuje request do N-gram API service.
+    
+    v23.8: Domyślnie analizuje 6 stron (nie 30) dla szybkości.
+    Można nadpisać: {"max_urls": 10}
     """
     data = request.get_json(force=True)
     
-    print(f"[S1_PROXY] 📡 Forwarding S1 analysis to {NGRAM_ANALYSIS_ENDPOINT}")
+    # v23.8: Domyślnie 6 stron zamiast 30
+    if "max_urls" not in data:
+        data["max_urls"] = 6
+    if "top_results" not in data:
+        data["top_results"] = 6
+    
+    print(f"[S1_PROXY] 📡 Forwarding S1 analysis to {NGRAM_ANALYSIS_ENDPOINT} (max_urls={data.get('max_urls')})")
     
     try:
         response = requests.post(
