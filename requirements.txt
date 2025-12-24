@@ -16,6 +16,9 @@ pl_core_news_md @ https://github.com/explosion/spacy-models/releases/download/pl
 # Fuzzy matching
 rapidfuzz>=3.5.0
 
+# Text statistics (readability, SMOG index)
+textstat>=0.7.3
+
 # Semantic analysis
 sentence-transformers>=2.2.0
 scikit-learn>=1.3.0
