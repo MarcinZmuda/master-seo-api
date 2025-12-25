@@ -75,7 +75,8 @@ from project_routes import project_routes
 from firestore_tracker_routes import tracker_routes
 from seo_optimizer import unified_prevalidation
 from final_review_routes import final_review_routes
-from paa_routes import paa_routes  # ⭐ NOWE
+from paa_routes import paa_routes
+from export_routes import export_routes  # v23.8: Eksport PDF/DOCX
 
 # ================================================================
 # 🔗 Rejestracja blueprintów
@@ -83,7 +84,8 @@ from paa_routes import paa_routes  # ⭐ NOWE
 app.register_blueprint(project_routes)
 app.register_blueprint(tracker_routes)
 app.register_blueprint(final_review_routes)
-app.register_blueprint(paa_routes)  # ⭐ NOWE
+app.register_blueprint(paa_routes)
+app.register_blueprint(export_routes)  # v23.8: Eksport PDF/DOCX
 
 # ================================================================
 # 🔗 S1 PROXY ENDPOINTS (przekierowanie do N-gram API)
@@ -93,19 +95,10 @@ def s1_analysis_proxy():
     """
     Proxy endpoint dla S1 analysis.
     Przekierowuje request do N-gram API service.
-    
-    v23.8: Domyślnie analizuje 6 stron (nie 30) dla szybkości.
-    Można nadpisać: {"max_urls": 10}
     """
     data = request.get_json(force=True)
     
-    # v23.8: Domyślnie 6 stron zamiast 30
-    if "max_urls" not in data:
-        data["max_urls"] = 6
-    if "top_results" not in data:
-        data["top_results"] = 6
-    
-    print(f"[S1_PROXY] 📡 Forwarding S1 analysis to {NGRAM_ANALYSIS_ENDPOINT} (max_urls={data.get('max_urls')})")
+    print(f"[S1_PROXY] 📡 Forwarding S1 analysis to {NGRAM_ANALYSIS_ENDPOINT}")
     
     try:
         response = requests.post(
