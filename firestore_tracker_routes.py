@@ -710,11 +710,6 @@ def approve_batch(project_id):
 
     # Zapisz batch
     result = process_batch_in_firestore(project_id, text, meta_trace, forced)
-    
-    # v23.8: Kompaktowa odpowiedź dla Custom GPT (< 50KB)
-    if compact:
-        result = _compact_response(result)
-    
     result["mode"] = "APPROVE"
 
     # 🔹 Sprawdź, czy to ostatni batch
@@ -722,6 +717,8 @@ def approve_batch(project_id):
     doc_ref = db.collection("seo_projects").document(project_id)
     doc = doc_ref.get()
     if not doc.exists:
+        if compact:
+            result = _compact_response(result)
         return jsonify(result), 200
 
     project_data = doc.to_dict()
@@ -732,15 +729,21 @@ def approve_batch(project_id):
         # Jeśli final review już istnieje i nie wymuszono, nie generujemy ponownie.
         existing_fr = project_data.get("final_review") if isinstance(project_data, dict) else None
         if existing_fr and not forced:
-            result["final_review"] = existing_fr.get("review_text") if isinstance(existing_fr, dict) else existing_fr
-            result["final_review_status"] = existing_fr.get("status") if isinstance(existing_fr, dict) else "REVIEW_READY"
-            result["next_action"] = "Final review już istnieje. Jeśli chcesz przeliczyć, wyślij approve_batch z forced=true."
+            # v23.8: Tylko status, nie cały tekst review (dla compact)
+            if compact:
+                result["final_review_status"] = "READY"
+                result["final_review_preview"] = (existing_fr.get("review_text", "")[:200] + "...") if isinstance(existing_fr, dict) else "..."
+            else:
+                result["final_review"] = existing_fr.get("review_text") if isinstance(existing_fr, dict) else existing_fr
+                result["final_review_status"] = existing_fr.get("status") if isinstance(existing_fr, dict) else "REVIEW_READY"
+            result["next_action"] = "GET /api/project/{id}/final_review aby zobaczyć pełny raport"
+            if compact:
+                result = _compact_response(result)
             return jsonify(result), 200
         try:
             print(f"[TRACKER] 🧠 Final batch detected → uruchamiam Gemini review dla {project_id}")
             model_name = os.getenv("FINAL_REVIEW_MODEL", "gemini-2.5-flash")
             model = genai.GenerativeModel(model_name)
-            # ✅ POPRAWKA: Usunięto [:15000] - teraz analizuje CAŁY artykuł
             full_article = "\n\n".join([b.get("text", "") for b in project_data.get("batches", [])])
             print(f"[TRACKER] 🔍 Analiza CAŁEGO artykułu ({len(full_article)} znaków)...")
             review_prompt = (
@@ -759,18 +762,27 @@ def approve_batch(project_id):
                     "created_at": firestore.SERVER_TIMESTAMP,
                     "model": model_name,
                     "status": "REVIEW_READY",
-                    "article_length": len(full_article)  # ⭐ DODANO tracking długości
+                    "article_length": len(full_article)
                 }
             })
-            result["final_review"] = review_text
-            result["article_length"] = len(full_article)  # ⭐ DODANO info o długości
-            result["next_action"] = "Czy chcesz wprowadzić poprawki automatycznie? (POST /api/project/<id>/apply_final_corrections)"
+            # v23.8: W compact mode tylko preview
+            if compact:
+                result["final_review_status"] = "READY"
+                result["final_review_preview"] = review_text[:300] + "..."
+            else:
+                result["final_review"] = review_text
+            result["article_length"] = len(full_article)
+            result["next_action"] = "GET /api/project/{id}/final_review aby zobaczyć pełny raport"
             result["final_review_status"] = "READY"
             print(f"[TRACKER] ✅ Raport Gemini zapisany w Firestore → {project_id}")
         except Exception as e:
             print(f"[TRACKER] ⚠️ Błąd Gemini review: {e}")
             result["final_review_error"] = str(e)
 
+    # v23.8: Kompaktowa odpowiedź NA KOŃCU (po dodaniu wszystkiego)
+    if compact:
+        result = _compact_response(result)
+    
     return jsonify(result), 200
 
 
@@ -778,6 +790,68 @@ def approve_batch(project_id):
 def debug_keywords(project_id):
     db = firestore.client()
     doc = db.collection("seo_projects").document(project_id).get()
+
+
+@tracker_routes.delete("/api/project/<project_id>")
+def delete_project(project_id):
+    """
+    Usuwa projekt z Firestore.
+    v23.8: Dodano dla czyszczenia starych/uszkodzonych projektów.
+    """
+    db = firestore.client()
+    doc_ref = db.collection("seo_projects").document(project_id)
+    doc = doc_ref.get()
+    
+    if not doc.exists:
+        return jsonify({"error": "Project not found", "project_id": project_id}), 404
+    
+    doc_ref.delete()
+    print(f"[TRACKER] 🗑️ Usunięto projekt: {project_id}")
+    
+    return jsonify({
+        "status": "DELETED",
+        "project_id": project_id,
+        "message": "Projekt usunięty. Utwórz nowy przez POST /api/project/create"
+    }), 200
+
+
+@tracker_routes.post("/api/project/<project_id>/reset")
+def reset_project(project_id):
+    """
+    Resetuje projekt - usuwa batche i keywords_state, zachowuje konfigurację.
+    v23.8: Alternatywa dla pełnego usunięcia.
+    """
+    db = firestore.client()
+    doc_ref = db.collection("seo_projects").document(project_id)
+    doc = doc_ref.get()
+    
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+    
+    project_data = doc.to_dict()
+    
+    # Zachowaj konfigurację, usuń dane
+    doc_ref.update({
+        "batches": [],
+        "final_review": None,
+        "keywords_state": {
+            rid: {
+                **meta,
+                "actual_uses": 0,
+                "status": "UNDER",
+                "remaining_max": meta.get("target_max", 999)
+            }
+            for rid, meta in project_data.get("keywords_state", {}).items()
+        }
+    })
+    
+    print(f"[TRACKER] 🔄 Reset projektu: {project_id}")
+    
+    return jsonify({
+        "status": "RESET",
+        "project_id": project_id,
+        "message": "Projekt zresetowany. Batche usunięte, keywords wyzerowane."
+    }), 200
     if not doc.exists:
         return jsonify({"error": "Project not found"}), 404
     data = doc.to_dict()
