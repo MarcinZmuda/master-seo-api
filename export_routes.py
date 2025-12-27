@@ -1,6 +1,7 @@
 """
 Export Routes - v23.8 (Simple)
 Eksport artykułów do DOCX/HTML/TXT - bezpośredni download bez Storage
++ Editorial Review (Gemini jako redaktor naczelny)
 """
 
 import os
@@ -17,7 +18,15 @@ from docx import Document
 from docx.shared import Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
+# Gemini for Editorial Review
+import google.generativeai as genai
+
 export_routes = Blueprint("export_routes", __name__)
+
+# Gemini config
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 
 
 def html_to_text(html: str) -> str:
@@ -158,7 +167,138 @@ p {{ text-align: justify; }}
 
 
 # ============================================================================
-# ROUTES
+# 🆕 EDITORIAL REVIEW - Gemini jako redaktor naczelny
+# ============================================================================
+
+@export_routes.post("/api/project/<project_id>/editorial_review")
+def editorial_review(project_id):
+    """
+    v23.8: Weryfikacja przez Gemini jako redaktora naczelnego.
+    Zwraca ocenę i sugestie poprawek do przedstawienia użytkownikowi.
+    """
+    db = firestore.client()
+    doc = db.collection("seo_projects").document(project_id).get()
+    
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+    
+    project_data = doc.to_dict()
+    batches = project_data.get("batches", [])
+    
+    if not batches:
+        return jsonify({"error": "No content to review"}), 400
+    
+    if not GEMINI_API_KEY:
+        return jsonify({"error": "Gemini API not configured"}), 500
+    
+    # Pobierz kategorię z requestu lub z projektu
+    data = request.get_json(force=True) if request.is_json else {}
+    category = data.get("category") or project_data.get("category") or "prawo"
+    
+    # Połącz batche
+    full_text = "\n\n".join([b.get("text", "") for b in batches])
+    topic = project_data.get("topic") or project_data.get("main_keyword", "")
+    word_count = len(full_text.split())
+    
+    try:
+        model = genai.GenerativeModel("gemini-2.5-flash")
+        
+        prompt = f"""Jesteś redaktorem naczelnym portalu internetowego oraz specjalistą od tematyki: {category}.
+
+Oceń poniższy artykuł pt. "{topic}" pod kątem:
+
+1. **MERYTORYKA** (0-10): 
+   - Czy informacje są poprawne i aktualne?
+   - Czy są błędy rzeczowe?
+   - Czy brakuje ważnych informacji?
+
+2. **STRUKTURA** (0-10):
+   - Czy artykuł jest logicznie zorganizowany?
+   - Czy nagłówki dobrze odzwierciedlają treść?
+   - Czy jest odpowiednia długość akapitów?
+
+3. **STYL I JĘZYK** (0-10):
+   - Czy tekst jest czytelny i płynny?
+   - Czy nie ma powtórzeń?
+   - Czy język jest odpowiedni dla grupy docelowej?
+
+4. **SEO** (0-10):
+   - Czy fraza główna jest odpowiednio użyta?
+   - Czy nagłówki są przyjazne dla SEO?
+   - Czy są linki wewnętrzne/zewnętrzne (lub ich brak)?
+
+5. **KONKRETNE POPRAWKI**:
+   Wymień 3-5 konkretnych miejsc do poprawy z cytatem i sugestią.
+
+---
+ARTYKUŁ ({word_count} słów):
+
+{full_text[:15000]}
+
+---
+Odpowiedz w formacie JSON:
+{{
+  "overall_score": <średnia 0-10>,
+  "scores": {{
+    "merytoryka": <0-10>,
+    "struktura": <0-10>,
+    "styl": <0-10>,
+    "seo": <0-10>
+  }},
+  "summary": "<2-3 zdania podsumowania>",
+  "corrections": [
+    {{"issue": "<problem>", "quote": "<cytat z artykułu>", "suggestion": "<jak poprawić>"}},
+    ...
+  ],
+  "recommendation": "APPROVE" | "NEEDS_REVISION" | "MAJOR_REWRITE"
+}}
+"""
+        
+        response = model.generate_content(prompt)
+        review_text = response.text.strip()
+        
+        # Próbuj sparsować JSON
+        try:
+            # Wyciągnij JSON z odpowiedzi (może być otoczony markdown)
+            json_match = re.search(r'\{[\s\S]*\}', review_text)
+            if json_match:
+                import json
+                review_data = json.loads(json_match.group())
+            else:
+                review_data = {"raw_response": review_text}
+        except:
+            review_data = {"raw_response": review_text}
+        
+        # Zapisz w Firestore
+        db.collection("seo_projects").document(project_id).update({
+            "editorial_review": {
+                "review": review_data,
+                "category": category,
+                "word_count": word_count,
+                "created_at": firestore.SERVER_TIMESTAMP
+            }
+        })
+        
+        return jsonify({
+            "status": "REVIEW_COMPLETE",
+            "project_id": project_id,
+            "topic": topic,
+            "word_count": word_count,
+            "category": category,
+            "review": review_data,
+            "next_steps": {
+                "if_approved": f"GET /api/project/{project_id}/export/docx",
+                "if_needs_revision": "Popraw artykuł i wywołaj POST /api/project/{project_id}/editorial_review ponownie"
+            }
+        }), 200
+        
+    except Exception as e:
+        print(f"[EDITORIAL] ❌ Error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+# ============================================================================
+# EXPORT ROUTES
 # ============================================================================
 
 @export_routes.get("/api/project/<project_id>/export/docx")
@@ -273,7 +413,7 @@ Wygenerowano: {datetime.now().strftime('%Y-%m-%d %H:%M')}
 
 @export_routes.get("/api/project/<project_id>/export")
 def export_info(project_id):
-    """Lista dostępnych formatów eksportu."""
+    """Lista dostępnych formatów eksportu + status editorial review."""
     db = firestore.client()
     doc = db.collection("seo_projects").document(project_id).get()
     
@@ -282,15 +422,24 @@ def export_info(project_id):
     
     project_data = doc.to_dict()
     batches = project_data.get("batches", [])
+    editorial = project_data.get("editorial_review", {})
     
     return jsonify({
         "project_id": project_id,
         "topic": project_data.get("topic") or project_data.get("main_keyword"),
         "batches_count": len(batches),
         "has_faq": bool(project_data.get("paa_section", {}).get("questions")),
+        "editorial_review": {
+            "completed": bool(editorial),
+            "recommendation": editorial.get("review", {}).get("recommendation") if editorial else None,
+            "overall_score": editorial.get("review", {}).get("overall_score") if editorial else None
+        },
         "export_formats": {
             "docx": f"/api/project/{project_id}/export/docx",
             "html": f"/api/project/{project_id}/export/html",
             "txt": f"/api/project/{project_id}/export/txt"
+        },
+        "actions": {
+            "editorial_review": f"POST /api/project/{project_id}/editorial_review"
         }
     }), 200
