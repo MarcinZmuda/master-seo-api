@@ -245,6 +245,108 @@ def synthesize_topics_proxy():
         return jsonify({"error": str(e)}), 500
 
 
+# ============================================================================
+# 🆕 v23.8: ANALYZE SERP LENGTH - mediana długości z konkurencji
+# ============================================================================
+@app.post("/api/analyze_serp_length")
+def analyze_serp_length():
+    """
+    Analizuje długość artykułów konkurencji i zwraca rekomendowaną długość.
+    
+    Wysyła request do N-gram API żeby pobrać word_count z konkurencji,
+    oblicza medianę i zwraca sugerowaną długość artykułu.
+    """
+    data = request.get_json(force=True)
+    keyword = data.get("keyword") or data.get("main_keyword", "")
+    
+    if not keyword:
+        return jsonify({"error": "Missing keyword"}), 400
+    
+    try:
+        # Pobierz analizę SERP (max 6 stron)
+        response = requests.post(
+            NGRAM_ANALYSIS_ENDPOINT,
+            json={"keyword": keyword, "max_urls": 6, "top_results": 6},
+            timeout=60,
+            headers={'Content-Type': 'application/json'}
+        )
+        
+        if response.status_code != 200:
+            # Fallback do domyślnej wartości
+            return jsonify({
+                "keyword": keyword,
+                "recommended_length": 3000,
+                "source": "default",
+                "message": "Could not analyze SERP, using default 3000 words"
+            }), 200
+        
+        result = response.json()
+        
+        # Szukaj word_count w danych konkurencji
+        word_counts = []
+        
+        # Sprawdź różne możliwe lokalizacje danych
+        serp_data = result.get("serp_analysis", {}) or {}
+        competitors = serp_data.get("competitors", []) or result.get("competitors", []) or []
+        
+        for comp in competitors:
+            if isinstance(comp, dict):
+                wc = comp.get("word_count") or comp.get("wordCount") or comp.get("content_length", 0)
+                if wc and wc > 100:  # Min 100 słów żeby było sensowne
+                    word_counts.append(wc)
+        
+        # Jeśli nie ma danych o długości, użyj heurystyki z ilości N-gramów
+        if not word_counts:
+            ngrams_count = len(result.get("ngrams", []) or result.get("hybrid_ngrams", []) or [])
+            # Heurystyka: ~50 n-gramów = ~2000 słów, ~100 n-gramów = ~3500 słów
+            estimated = max(2000, min(5000, 2000 + ngrams_count * 20))
+            word_counts = [estimated]
+        
+        # Oblicz statystyki
+        word_counts.sort()
+        n = len(word_counts)
+        
+        if n == 0:
+            median = 3000
+        elif n % 2 == 0:
+            median = (word_counts[n//2 - 1] + word_counts[n//2]) // 2
+        else:
+            median = word_counts[n//2]
+        
+        avg = sum(word_counts) // n if n > 0 else 3000
+        min_wc = min(word_counts) if word_counts else 2000
+        max_wc = max(word_counts) if word_counts else 4000
+        
+        # Rekomendacja: mediana + 10% (żeby być trochę lepszym od konkurencji)
+        recommended = int(median * 1.1)
+        # Ogranicz do sensownego zakresu
+        recommended = max(1500, min(6000, recommended))
+        
+        return jsonify({
+            "keyword": keyword,
+            "analyzed_competitors": n,
+            "word_counts": word_counts,
+            "statistics": {
+                "median": median,
+                "average": avg,
+                "min": min_wc,
+                "max": max_wc
+            },
+            "recommended_length": recommended,
+            "source": "serp_analysis",
+            "note": f"Rekomendowana długość {recommended} słów (mediana konkurencji + 10%)"
+        }), 200
+        
+    except Exception as e:
+        print(f"[SERP_LENGTH] ❌ Error: {e}")
+        return jsonify({
+            "keyword": keyword,
+            "recommended_length": 3000,
+            "source": "fallback",
+            "error": str(e)
+        }), 200
+
+
 @app.post("/api/generate_compliance_report")
 def compliance_report_proxy():
     """Proxy dla generate_compliance_report."""
