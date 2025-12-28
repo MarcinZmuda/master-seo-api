@@ -122,7 +122,7 @@ def analyze_for_paa(project_id):
                 unused_paa.append(paa_q)
     
     # --------------------------------------------
-    # Response dla Custom GPT - v23.8 z semantic gaps
+    # Response dla Custom GPT - v23.9 WSZYSTKIE nieużyte frazy
     # --------------------------------------------
     return jsonify({
         "status": "READY_FOR_PAA",
@@ -131,43 +131,48 @@ def analyze_for_paa(project_id):
         
         # v23.8: SEMANTIC GAPS - najważniejsze!
         "semantic_gaps": {
-            "keywords": semantic_gaps[:5],
+            "keywords": semantic_gaps,  # WSZYSTKIE gaps
             "reason": "Te tematy NIE są pokryte w artykule - FAQ powinno je wypełnić!"
         },
         
-        "unused_data": {
-            "extended_keywords": unused_extended[:10],
-            "basic_keywords": unused_basic[:10],
-            "underused_keywords": underused[:5],
-            "unused_h2": unused_h2[:5],
-            "serp_paa": unused_paa[:5]
+        # v23.9: WSZYSTKIE nieużyte frazy (nie tylko 10)
+        "unused_keywords": {
+            "basic": unused_basic,      # WSZYSTKIE nieużyte BASIC
+            "extended": unused_extended, # WSZYSTKIE nieużyte EXTENDED
+            "total": len(unused_basic) + len(unused_extended),
+            "instruction": "Wpleć te frazy w odpowiedzi FAQ!"
         },
+        
+        "underused_keywords": underused,  # Frazy poniżej minimum
+        
+        "unused_h2": unused_h2,  # Tematy z planu które nie zostały użyte
+        
+        "serp_paa": unused_paa,  # Pytania z Google PAA
         
         "avoid_in_faq": {
-            "topics_already_covered": topics_to_avoid,
-            "reason": "Te tematy są już omówione w artykule - FAQ musi odpowiadać na INNE pytania!"
+            "topics": topics_to_avoid,
+            "reason": "Te tematy są już omówione w artykule - NIE powtarzaj!"
         },
         
-        "original_serp_paa": serp_paa[:10],
-        
         "summary": {
-            "semantic_gaps_count": len(semantic_gaps),
-            "extended_unused": len(unused_extended),
+            "semantic_gaps": len(semantic_gaps),
             "basic_unused": len(unused_basic),
+            "extended_unused": len(unused_extended),
+            "underused": len(underused),
             "h2_unused": len(unused_h2),
-            "serp_paa_available": len(unused_paa),
-            "topics_to_avoid": len(topics_to_avoid)
+            "serp_paa": len(unused_paa)
         },
         
         "instructions": {
-            "goal": "Napisz sekcję PAA z 3 pytaniami",
-            "priority_1": "Wypełnij SEMANTIC GAPS - tematy niepokryte w artykule!",
-            "priority_2": "Użyj pytań z serp_paa (prawdziwe pytania z Google)",
-            "priority_3": "Wpleć extended_keywords i unused_h2",
-            "critical_rule": "FAQ NIE MOŻE powtarzać tematów z artykułu! Sprawdź 'avoid_in_faq'.",
-            "question_format": "Zacznij od: Jak/Czy/Co/Dlaczego/Kiedy/Ile/Czego (5-10 słów)",
-            "answer_format": "80-120 słów, pierwsze zdanie = bezpośrednia odpowiedź",
-            "save_endpoint": f"POST /api/project/{project_id}/paa/save"
+            "goal": "Napisz sekcję FAQ z 3-5 pytaniami",
+            "priority_1": "Wypełnij SEMANTIC GAPS - tematy niepokryte!",
+            "priority_2": "Użyj WSZYSTKICH nieużytych fraz (basic + extended)",
+            "priority_3": "Użyj pytań z serp_paa (prawdziwe z Google)",
+            "critical": "FAQ NIE MOŻE powtarzać tematów z artykułu!",
+            "format": {
+                "question": "5-10 słów, zacznij od Jak/Czy/Co/Dlaczego",
+                "answer": "80-120 słów, pierwsze zdanie = odpowiedź"
+            }
         }
     }), 200
 
