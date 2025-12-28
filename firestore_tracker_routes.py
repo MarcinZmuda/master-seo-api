@@ -1,9 +1,10 @@
 """
-SEO Content Tracker Routes - v23.9 BRAJEN SEO Engine
+SEO Content Tracker Routes - v23.9.2 BRAJEN SEO Engine
 + Minimal approve_batch response (~500B instead of 220KB)
 + Morfeusz2 lemmatization (with spaCy fallback)
 + Burstiness validation (3.2-3.8)
 + Transition words validation (25-50%)
++ Hierarchical keyword deduplication (v23.9.2)
 """
 
 from flask import Blueprint, request, jsonify
@@ -49,6 +50,14 @@ try:
 except ImportError as e:
     KEYWORD_LIMITER_ENABLED = False
     print(f"[TRACKER] Keyword Limiter not available: {e}")
+# v23.9.2: Hierarchical keyword deduplication
+try:
+    from hierarchical_keyword_dedup import deduplicate_batch_counts
+    DEDUP_ENABLED = True
+    print("[TRACKER] ✅ Hierarchical Keyword Deduplication loaded")
+except ImportError as e:
+    DEDUP_ENABLED = False
+    print(f"[TRACKER] ⚠️ Deduplication not available: {e}")
 
 tracker_routes = Blueprint("tracker_routes", __name__)
 
@@ -188,15 +197,19 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
     clean_text_original = re.sub(r"<[^>]+>", " ", batch_text)
     clean_text_original = re.sub(r"\s+", " ", clean_text_original)
     
-    # Count keywords in batch
-    batch_counts = {}
-    for rid, meta in keywords_state.items():
-        keyword = meta.get("keyword", "").strip()
-        if not keyword:
-            batch_counts[rid] = 0
-            continue
-        batch_counts[rid] = count_all_forms(clean_text_original, keyword)
-    
+# Count keywords in batch - v23.9.2: z deduplikacją hierarchiczną
+    if DEDUP_ENABLED:
+        # "renta rodzinna" nie liczy się podwójnie jako "renta"
+        batch_counts = deduplicate_batch_counts(clean_text_original, keywords_state)
+    else:
+        # Fallback - stara metoda bez deduplikacji
+        batch_counts = {}
+        for rid, meta in keywords_state.items():
+            keyword = meta.get("keyword", "").strip()
+            if not keyword:
+                batch_counts[rid] = 0
+                continue
+            batch_counts[rid] = count_all_forms(clean_text_original, keyword)
     # Check exceeded
     exceeded_keywords = []
     for rid, batch_count in batch_counts.items():
