@@ -1,7 +1,6 @@
 import os
 import re
 import json
-import spacy
 import textstat
 from collections import Counter
 from typing import List, Dict
@@ -33,17 +32,10 @@ except ImportError:
     SEMANTIC_ENABLED = False
 
 # ================================================================
-# 🧠 Ładowanie modelu spaCy (Polish)
+# 🧠 Współdzielony model spaCy (v23.9 - oszczędność RAM)
 # ================================================================
-try:
-    nlp = spacy.load("pl_core_news_md")
-    print("[SEO_OPT] ✅ Załadowano model pl_core_news_md (Light Edition)")
-except OSError:
-    from spacy.cli import download
-    print("[SEO_OPT] ⚠️ Model pl_core_news_md nieznaleziony – próba pobrania...")
-    download("pl_core_news_md")
-    nlp = spacy.load("pl_core_news_md")
-    print("[SEO_OPT] ✅ Model pobrany i załadowany")
+from shared_nlp import get_nlp
+nlp = get_nlp()
 
 # ================================================================
 # 🛡️ HELPER: Safe Gemini Call (Anti-Crash)
