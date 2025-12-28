@@ -774,8 +774,29 @@ def get_pre_batch_info(project_id):
     gpt_prompt = "\n".join(prompt_sections)
     
     # ================================================================
-    # 📊 RESPONSE
+    # 📊 RESPONSE - v23.9 OPTYMALIZACJA
     # ================================================================
+    
+    # === BASIC keywords - PEŁNE DANE ===
+    basic_keywords = []
+    for kw in keyword_plan:
+        if kw.get("type") == "BASIC":
+            basic_keywords.append({
+                "keyword": kw.get("keyword"),
+                "actual": kw.get("actual", 0),
+                "target": f"{kw.get('target_min', 0)}-{kw.get('target_max', 999)}",
+                "remaining": kw.get("remaining_to_max", 0),
+                "priority": kw.get("priority"),
+                "suggested": kw.get("suggested", 0),
+                "reason": kw.get("reason", "")
+            })
+    
+    # === EXTENDED keywords - TYLKO NAZWY ===
+    extended_keywords = [kw.get("keyword") for kw in keyword_plan if kw.get("type") == "EXTENDED"]
+    
+    # === BLOCKED - tylko nazwy ===
+    blocked_names = [kw.get("keyword") for kw in locked_keywords + exceeded_keywords]
+    
     return jsonify({
         "project_id": project_id,
         "topic": data.get("topic"),
@@ -783,58 +804,51 @@ def get_pre_batch_info(project_id):
         "total_planned_batches": total_planned_batches,
         "remaining_batches": remaining_batches,
         
-        # v23.8: Semantic gaps
+        # Semantic gaps
         "semantic_gaps": semantic_gaps[:5],
         
-        # v23.8: Early ratio warning
+        # Ratio warning
         "ratio_warning": ratio_warning,
         
-        # Main vs Synonyms
+        # Main keyword status
         "main_keyword_status": {
             "main_keyword": main_keyword,
             "main_uses": main_keyword_uses,
             "synonym_uses": synonym_uses,
             "main_ratio": round(main_ratio, 2),
-            "valid": main_ratio >= 0.3,
-            "warning": None if main_ratio >= 0.3 else f"Za dużo synonimów! Używaj '{main_keyword}'"
+            "warning": None if main_ratio >= 0.3 else f"Ratio {main_ratio:.0%} < 30%! Użyj więcej \'{main_keyword}\'"
         },
         
-        # N-gramy dla batcha
+        # N-gramy
         "batch_ngrams": batch_ngrams,
         
-        "keyword_plan": keyword_plan,
-        "critical_keywords": critical_keywords,
-        "high_priority_keywords": high_priority,
-        "normal_keywords": normal_keywords,
-        "low_priority_keywords": low_priority,
-        "locked_keywords": locked_keywords,
-        "exceeded_keywords": exceeded_keywords,
-        "extended_unused": extended_unused,
+        # v23.9: BASIC pełne, EXTENDED tylko nazwy
+        "basic_keywords": basic_keywords,
+        "extended_keywords": extended_keywords,
+        "blocked_keywords": blocked_names,
         
-        "h2_structure": h2_structure,
-        "h2_already_written": used_h2,
+        # H2
         "h2_remaining": remaining_h2,
-        "topics_already_covered": all_topics_covered,
+        "h2_already_written": used_h2,
+        
+        # Context
         "last_sentences": last_sentences,
         
+        # Summary
         "summary": {
-            "critical_count": len(critical_keywords),
-            "high_priority_count": len(high_priority),
-            "normal_count": len(normal_keywords),
-            "extended_unused_count": len(extended_unused),
-            "locked_count": len(locked_keywords),
+            "basic_count": len(basic_keywords),
+            "extended_count": len(extended_keywords),
+            "blocked_count": len(blocked_names),
             "h2_remaining": len(remaining_h2),
             "semantic_gaps_count": len(semantic_gaps)
         },
         
-        "gpt_prompt": gpt_prompt,
-        
+        # Instructions
         "instructions": {
-            "main_keyword": f"Używaj '{main_keyword}' częściej niż synonimów!",
-            "ngrams": "Wpleć n-gramy z analizy konkurencji",
-            "semantic_gaps": "Wypełnij luki tematyczne z listy semantic_gaps",
-            "h3_min_length": "Każda sekcja H3 musi mieć min. 80 słów",
-            "max_lists": "Max 1 lista wypunktowana na artykuł"
+            "basic": "Użyj fraz BASIC wg priorytetów i suggested",
+            "extended": "Wpleć naturalnie frazy EXTENDED gdy pasują",
+            "blocked": "NIE używaj fraz z blocked_keywords",
+            "main_keyword": f"\'{main_keyword}\' ≥30% użyć"
         }
     }), 200
 
