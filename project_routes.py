@@ -3,12 +3,15 @@ import re
 import os
 import json
 import math
-import spacy
 from flask import Blueprint, request, jsonify
 from firebase_admin import firestore
 from firestore_tracker_routes import process_batch_in_firestore
 import google.generativeai as genai
 from seo_optimizer import unified_prevalidation
+
+# v23.9: Współdzielony model spaCy (oszczędność RAM)
+from shared_nlp import get_nlp
+nlp = get_nlp()
 
 # Gemini API configuration
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -16,17 +19,6 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 else:
     print("[WARNING] ⚠️ GEMINI_API_KEY not set - LSI enrichment fallback mode")
-
-# spaCy model
-try:
-    nlp = spacy.load("pl_core_news_md")
-    print("[INIT] ✅ spaCy pl_core_news_md loaded")
-except OSError:
-    from spacy.cli import download
-    print("⚠️ Downloading pl_core_news_md fallback...")
-    download("pl_core_news_md")
-    nlp = spacy.load("pl_core_news_md")
-
 project_routes = Blueprint("project_routes", __name__)
 
 # ⭐ GEMINI MODEL - centralnie zdefiniowany
