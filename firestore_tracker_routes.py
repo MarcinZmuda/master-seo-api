@@ -11,12 +11,15 @@ from firebase_admin import firestore
 import re
 import math
 import datetime
-import spacy
 from rapidfuzz import fuzz
 from seo_optimizer import unified_prevalidation
 from google.api_core.exceptions import InvalidArgument
 import google.generativeai as genai
 import os
+
+# v23.9: Współdzielony model spaCy (oszczędność RAM)
+from shared_nlp import get_nlp
+nlp = get_nlp()
 
 # v23.8: Import polish_lemmatizer (Morfeusz2 + spaCy fallback)
 try:
@@ -48,15 +51,6 @@ except ImportError as e:
     print(f"[TRACKER] Keyword Limiter not available: {e}")
 
 tracker_routes = Blueprint("tracker_routes", __name__)
-
-# --- INIT SPACY ---
-try:
-    nlp = spacy.load("pl_core_news_md")
-    print("[TRACKER] Załadowano model pl_core_news_md")
-except OSError:
-    from spacy.cli import download
-    download("pl_core_news_md")
-    nlp = spacy.load("pl_core_news_md")
 
 # --- Gemini Config ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
