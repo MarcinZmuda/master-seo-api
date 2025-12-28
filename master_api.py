@@ -36,7 +36,7 @@ app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024  # 32 MB
 CORS(app)
 
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-VERSION = "v22.1-semantic"
+VERSION = "v23.9-optimized"
 
 # ================================================================
 # 🧠 Check if semantic analysis is available
@@ -56,12 +56,10 @@ NGRAM_API_URL = os.getenv("NGRAM_API_URL", "https://gpt-ngram-api.onrender.com")
 
 # Sprawdź czy URL już zawiera endpoint
 if "/api/ngram_entity_analysis" in NGRAM_API_URL:
-    # URL już ma endpoint - użyj go bezpośrednio
     NGRAM_BASE_URL = NGRAM_API_URL.replace("/api/ngram_entity_analysis", "")
     NGRAM_ANALYSIS_ENDPOINT = NGRAM_API_URL
     print(f"[MASTER] 🔗 N-gram API URL (full endpoint detected): {NGRAM_ANALYSIS_ENDPOINT}")
 else:
-    # URL to tylko base - dodaj endpoint
     NGRAM_BASE_URL = NGRAM_API_URL
     NGRAM_ANALYSIS_ENDPOINT = f"{NGRAM_API_URL}/api/ngram_entity_analysis"
     print(f"[MASTER] 🔗 N-gram API URL (base URL): {NGRAM_BASE_URL}")
@@ -76,7 +74,7 @@ from firestore_tracker_routes import tracker_routes
 from seo_optimizer import unified_prevalidation
 from final_review_routes import final_review_routes
 from paa_routes import paa_routes
-from export_routes import export_routes  # v23.8: Eksport PDF/DOCX
+from export_routes import export_routes  # v23.9: Eksport DOCX/HTML/TXT + Editorial Review
 
 # ================================================================
 # 🔗 Rejestracja blueprintów
@@ -85,7 +83,7 @@ app.register_blueprint(project_routes)
 app.register_blueprint(tracker_routes)
 app.register_blueprint(final_review_routes)
 app.register_blueprint(paa_routes)
-app.register_blueprint(export_routes)  # v23.8: Eksport PDF/DOCX
+app.register_blueprint(export_routes)  # v23.9: Eksport + Editorial Review
 
 # ================================================================
 # 🔗 S1 PROXY ENDPOINTS (przekierowanie do N-gram API)
@@ -95,8 +93,16 @@ def s1_analysis_proxy():
     """
     Proxy endpoint dla S1 analysis.
     Przekierowuje request do N-gram API service.
+    
+    v23.9: Domyślnie 6 stron zamiast 30 (szybszy response)
     """
     data = request.get_json(force=True)
+    
+    # v23.9: Domyślnie 6 stron zamiast 30
+    if "max_urls" not in data:
+        data["max_urls"] = 6
+    if "top_results" not in data:
+        data["top_results"] = 6
     
     print(f"[S1_PROXY] 📡 Forwarding S1 analysis to {NGRAM_ANALYSIS_ENDPOINT}")
     
@@ -112,16 +118,12 @@ def s1_analysis_proxy():
             result = response.json()
             print(f"[S1_PROXY] ✅ S1 analysis completed successfully")
             
-            # ⭐ NOWE: Dodaj semantic analysis do S1 wyniku
+            # Dodaj semantic analysis do S1 wyniku
             if SEMANTIC_ENABLED:
                 try:
                     from seo_optimizer import semantic_keyword_coverage
                     
-                    # Jeśli S1 zwrócił jakieś keywords
                     if "keywords" in result:
-                        # Preferuj próbkę pełnego tekstu, jeśli backend ją zwraca (np. full_text_sample).
-                        # W przeciwnym razie buduj próbkę z pól zwrotnych SERP (snippety/PAA/related/H2),
-                        # aby uniknąć liczenia coverage na pustym tekście.
                         sample_text = ""
                         if isinstance(result, dict):
                             ft = result.get("full_text_sample") or result.get("full_text_content") or ""
@@ -175,18 +177,15 @@ def s1_analysis_proxy():
 
                         sample_text = (sample_text or "")[:5000]
                         
-                        # Dummy keywords_state dla semantic analysis
                         dummy_kw_state = {
                             str(i): {"keyword": kw, "actual_uses": 0}
                             for i, kw in enumerate(result.get("keywords", []))
                         }
                         
-                        if not sample_text.strip():
-                            raise ValueError("Brak danych tekstowych do semantic coverage (serp_content/full_text_sample/pola serp_analysis puste).")
-                        
-                        semantic_cov = semantic_keyword_coverage(sample_text, dummy_kw_state)
-                        result["semantic_analysis"] = semantic_cov
-                        print(f"[S1_PROXY] ✅ Added semantic analysis to S1 result")
+                        if sample_text.strip():
+                            semantic_cov = semantic_keyword_coverage(sample_text, dummy_kw_state)
+                            result["semantic_analysis"] = semantic_cov
+                            print(f"[S1_PROXY] ✅ Added semantic analysis to S1 result")
                 except Exception as e:
                     print(f"[S1_PROXY] ⚠️ Semantic analysis failed: {e}")
             
@@ -227,8 +226,6 @@ def synthesize_topics_proxy():
     """Proxy dla synthesize_topics."""
     data = request.get_json(force=True)
 
-    # Normalizacja: jeśli ngrams to lista dictów (np. {"ngram": "...", ...}),
-    # przekształć ją do listy stringów dla kompatybilności z backendem.
     if isinstance(data, dict):
         ngrams = data.get("ngrams")
         if isinstance(ngrams, list) and ngrams and isinstance(ngrams[0], dict):
@@ -246,15 +243,14 @@ def synthesize_topics_proxy():
 
 
 # ============================================================================
-# 🆕 v23.8: ANALYZE SERP LENGTH - mediana długości z konkurencji
+# 🆕 v23.9: ANALYZE SERP LENGTH - mediana długości z konkurencji
 # ============================================================================
 @app.post("/api/analyze_serp_length")
 def analyze_serp_length():
     """
     Analizuje długość artykułów konkurencji i zwraca rekomendowaną długość.
     
-    Wysyła request do N-gram API żeby pobrać word_count z konkurencji,
-    oblicza medianę i zwraca sugerowaną długość artykułu.
+    Zamiast stałych 3000 słów - pobiera medianę z konkurencji.
     """
     data = request.get_json(force=True)
     keyword = data.get("keyword") or data.get("main_keyword", "")
@@ -272,7 +268,6 @@ def analyze_serp_length():
         )
         
         if response.status_code != 200:
-            # Fallback do domyślnej wartości
             return jsonify({
                 "keyword": keyword,
                 "recommended_length": 3000,
@@ -285,20 +280,18 @@ def analyze_serp_length():
         # Szukaj word_count w danych konkurencji
         word_counts = []
         
-        # Sprawdź różne możliwe lokalizacje danych
         serp_data = result.get("serp_analysis", {}) or {}
         competitors = serp_data.get("competitors", []) or result.get("competitors", []) or []
         
         for comp in competitors:
             if isinstance(comp, dict):
                 wc = comp.get("word_count") or comp.get("wordCount") or comp.get("content_length", 0)
-                if wc and wc > 100:  # Min 100 słów żeby było sensowne
+                if wc and wc > 100:
                     word_counts.append(wc)
         
-        # Jeśli nie ma danych o długości, użyj heurystyki z ilości N-gramów
+        # Heurystyka jeśli brak danych
         if not word_counts:
             ngrams_count = len(result.get("ngrams", []) or result.get("hybrid_ngrams", []) or [])
-            # Heurystyka: ~50 n-gramów = ~2000 słów, ~100 n-gramów = ~3500 słów
             estimated = max(2000, min(5000, 2000 + ngrams_count * 20))
             word_counts = [estimated]
         
@@ -317,9 +310,8 @@ def analyze_serp_length():
         min_wc = min(word_counts) if word_counts else 2000
         max_wc = max(word_counts) if word_counts else 4000
         
-        # Rekomendacja: mediana + 10% (żeby być trochę lepszym od konkurencji)
+        # Rekomendacja: mediana + 10%
         recommended = int(median * 1.1)
-        # Ogranicz do sensownego zakresu
         recommended = max(1500, min(6000, recommended))
         
         return jsonify({
@@ -376,7 +368,7 @@ def s1_health_check():
                 "ngram_base_url": NGRAM_BASE_URL,
                 "ngram_analysis_endpoint": NGRAM_ANALYSIS_ENDPOINT,
                 "proxy_enabled": True,
-                "semantic_enabled": SEMANTIC_ENABLED  # ⭐ NOWE
+                "semantic_enabled": SEMANTIC_ENABLED
             }), 200
         else:
             return jsonify({
@@ -384,7 +376,7 @@ def s1_health_check():
                 "ngram_api_status": "error",
                 "ngram_base_url": NGRAM_BASE_URL,
                 "proxy_enabled": True,
-                "semantic_enabled": SEMANTIC_ENABLED  # ⭐ NOWE
+                "semantic_enabled": SEMANTIC_ENABLED
             }), 200
     except Exception as e:
         return jsonify({
@@ -392,15 +384,16 @@ def s1_health_check():
             "error": str(e),
             "ngram_base_url": NGRAM_BASE_URL,
             "proxy_enabled": True,
-            "semantic_enabled": SEMANTIC_ENABLED  # ⭐ NOWE
+            "semantic_enabled": SEMANTIC_ENABLED
         }), 503
+
 
 # ================================================================
 # 🧠 MASTER DEBUG ROUTES (diagnostyka)
 # ================================================================
 @app.get("/api/master_debug/<project_id>")
 def master_debug(project_id):
-    """Pełna diagnostyka projektu: frazy, batch count, semantyka, ostrzeżenia."""
+    """Pełna diagnostyka projektu."""
     doc = db.collection("seo_projects").document(project_id).get()
     if not doc.exists:
         return jsonify({"error": "Project not found"}), 404
@@ -441,8 +434,9 @@ def master_debug(project_id):
         "last_update": batches[-1]["timestamp"].isoformat() if batches else None,
         "lsi_keywords": data.get("lsi_enrichment", {}).get("count", 0),
         "has_final_review": "final_review" in data,
-        "semantic_enabled": SEMANTIC_ENABLED  # ⭐ NOWE
+        "semantic_enabled": SEMANTIC_ENABLED
     }), 200
+
 
 # ================================================================
 # 🚨 ERROR HANDLERS (Globalne)
@@ -454,6 +448,7 @@ def request_entity_too_large(error):
 @app.errorhandler(500)
 def internal_server_error(error):
     return jsonify({"error": "Internal Server Error", "message": str(error)}), 500
+
 
 # ================================================================
 # 🏥 HEALTHCHECK
@@ -469,6 +464,8 @@ def health():
             "project_routes",
             "firestore_tracker_routes",
             "final_review_routes",
+            "paa_routes",
+            "export_routes",
             "seo_optimizer",
             "s1_proxy (to N-gram API)"
         ],
@@ -477,8 +474,17 @@ def health():
         "ngram_base_url": NGRAM_BASE_URL,
         "ngram_analysis_endpoint": NGRAM_ANALYSIS_ENDPOINT,
         "s1_proxy_enabled": True,
-        "semantic_enabled": SEMANTIC_ENABLED  # ⭐ NOWE
+        "semantic_enabled": SEMANTIC_ENABLED,
+        "features_v23_9": [
+            "approve_batch: minimal response (~500B)",
+            "pre_batch_info: BASIC full, EXTENDED names only",
+            "paa/analyze: ALL unused keywords",
+            "analyze_serp_length: dynamic article length",
+            "editorial_review: Gemini as editor",
+            "export: DOCX/HTML/TXT direct download"
+        ]
     }), 200
+
 
 # ================================================================
 # 🔎 VERSION CHECK
@@ -486,23 +492,30 @@ def health():
 @app.get("/api/version")
 def version_info():
     return jsonify({
-        "engine": "Brajen Semantic Engine",
+        "engine": "BRAJEN SEO Engine",
         "api_version": VERSION,
         "components": {
-            "project_routes": "v22.1-semantic",
-            "firestore_tracker_routes": "v22.1-semantic",
-            "seo_optimizer": "v22.1-semantic",
-            "final_review_routes": "v22.1-gemini-2.5",
-            "s1_proxy": "v22.1 (to N-gram API)"
+            "project_routes": "v23.9-optimized",
+            "firestore_tracker_routes": "v23.9-minimal-response",
+            "paa_routes": "v23.9-all-unused",
+            "export_routes": "v23.9-editorial-review",
+            "seo_optimizer": "v23.9",
+            "final_review_routes": "v23.9",
+            "s1_proxy": "v23.9 (6 URLs default)"
+        },
+        "optimizations": {
+            "approve_batch_response": "~500B (was 220KB)",
+            "pre_batch_info_response": "~5-10KB (was 30-60KB)",
+            "s1_default_urls": 6
         },
         "environment": {
             "debug_mode": DEBUG_MODE,
             "firebase_connected": True,
             "ngram_base_url": NGRAM_BASE_URL,
-            "ngram_analysis_endpoint": NGRAM_ANALYSIS_ENDPOINT,
-            "semantic_enabled": SEMANTIC_ENABLED  # ⭐ NOWE
+            "semantic_enabled": SEMANTIC_ENABLED
         }
     }), 200
+
 
 # ================================================================
 # 🧩 MANUAL CHECK ENDPOINT (test unified_prevalidation)
@@ -523,8 +536,9 @@ def manual_check():
         "smog": result["smog"],
         "readability": result["readability"],
         "warnings": result["warnings"],
-        "semantic_coverage": result.get("semantic_coverage", {})  # ⭐ NOWE
+        "semantic_coverage": result.get("semantic_coverage", {})
     }), 200
+
 
 # ================================================================
 # 🧩 AUTO FINAL REVIEW TRIGGER (po eksporcie)
@@ -538,6 +552,7 @@ def auto_final_review(project_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 # ================================================================
 # 🏃 Local Run
 # ================================================================
@@ -546,5 +561,10 @@ if __name__ == "__main__":
     print(f"\n🚀 Starting Master SEO API {VERSION} on port {port}")
     print(f"🔧 Debug mode: {DEBUG_MODE}")
     print(f"🔗 S1 Proxy enabled → {NGRAM_ANALYSIS_ENDPOINT}")
-    print(f"🧠 Semantic analysis: {'ENABLED ✅' if SEMANTIC_ENABLED else 'DISABLED ⚠️'}\n")
+    print(f"🧠 Semantic analysis: {'ENABLED ✅' if SEMANTIC_ENABLED else 'DISABLED ⚠️'}")
+    print(f"📦 Features v23.9:")
+    print(f"   - approve_batch: minimal response (~500B)")
+    print(f"   - pre_batch_info: BASIC full, EXTENDED names")
+    print(f"   - analyze_serp_length: dynamic article length")
+    print(f"   - editorial_review: Gemini as editor\n")
     app.run(host="0.0.0.0", port=port, debug=DEBUG_MODE)
