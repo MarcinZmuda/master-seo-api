@@ -524,19 +524,6 @@ def _minimal_batch_response(result: dict, project_data: dict = None) -> dict:
     
     return response
 
-
-# ============================================================================
-# 5. ROUTES
-# ============================================================================
-@tracker_routes.post("/api/project/<project_id>/preview_batch")
-def preview_batch(project_id):
-    data = request.get_json(force=True)
-    text = data.get("batch_text", "")
-    result = process_batch_in_firestore(project_id, text, forced=False)
-    result["mode"] = "PREVIEW_ONLY"
-    return jsonify(result), 200
-
-
 @tracker_routes.post("/api/project/<project_id>/approve_batch")
 def approve_batch(project_id):
     """
