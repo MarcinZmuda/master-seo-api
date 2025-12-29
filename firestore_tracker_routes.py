@@ -1,13 +1,12 @@
 """
-SEO Content Tracker Routes - v25.0 BRAJEN SEO Engine
-+ NEW: Density ranges (0.5-1.5% optimal, 2% acceptable, 3% max)
-+ NEW: Coverage-first logic (BASIC min 1x, EXTENDED exactly 1x)
+SEO Content Tracker Routes - v24.0 BRAJEN SEO Engine
 + Minimal approve_batch response (~500B instead of 220KB)
 + Morfeusz2 lemmatization (with spaCy fallback)
 + Burstiness validation (3.2-3.8)
 + Transition words validation (25-50%)
-+ Per-batch keyword validation
-+ Rozróżnienie EXCEEDED TOTAL vs per-batch warnings
++ v24.0: Per-batch keyword validation
++ v24.0: Fixed density limit (3.0% from seo_rules.json)
++ v24.0: Rozróżnienie EXCEEDED TOTAL vs per-batch warnings
 """
 
 from flask import Blueprint, request, jsonify
@@ -65,33 +64,8 @@ except ImportError as e:
 
 tracker_routes = Blueprint("tracker_routes", __name__)
 
-# ============================================================================
-# v25.0: NEW DENSITY CONFIGURATION
-# ============================================================================
-DENSITY_OPTIMAL_MIN = 0.5   # Poniżej = za mało fraz
-DENSITY_OPTIMAL_MAX = 1.5   # Optymalny zakres
-DENSITY_ACCEPTABLE_MAX = 2.0  # Akceptowalne
-DENSITY_WARNING_MAX = 2.5   # Ostrzeżenie
-DENSITY_MAX = 3.0           # Hard limit - powyżej = keyword stuffing
-
-def get_density_status(density: float) -> tuple:
-    """
-    v25.0: Zwraca status density z kolorowym oznaczeniem.
-    Returns: (status_code, message)
-    """
-    if density < DENSITY_OPTIMAL_MIN:
-        return "LOW", f"⚪ Za nisko ({density:.1f}%) - dodaj więcej fraz kluczowych"
-    elif density <= DENSITY_OPTIMAL_MAX:
-        return "OPTIMAL", f"✅ Optymalne ({density:.1f}%)"
-    elif density <= DENSITY_ACCEPTABLE_MAX:
-        return "ACCEPTABLE", f"🟢 OK ({density:.1f}%)"
-    elif density <= DENSITY_WARNING_MAX:
-        return "WARNING", f"🟡 Wysoko ({density:.1f}%) - uważaj"
-    elif density <= DENSITY_MAX:
-        return "HIGH", f"🟠 Za wysoko ({density:.1f}%) - ogranicz frazy"
-    else:
-        return "STUFFING", f"🔴 KEYWORD STUFFING ({density:.1f}%) - przepisz!"
-
+# v24.0: Density limit from seo_rules.json (was hardcoded 1.5%)
+DENSITY_MAX = 3.0
 
 # --- Gemini Config ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -197,9 +171,7 @@ def calculate_transition_score(text: str) -> dict:
 
 
 def validate_metrics(burstiness: float, transition_data: dict, density: float) -> list:
-    """
-    v25.0: Waliduje metryki z nowymi zakresami density.
-    """
+    """Waliduje metryki"""
     warnings = []
     
     if burstiness < 3.2:
@@ -207,84 +179,12 @@ def validate_metrics(burstiness: float, transition_data: dict, density: float) -
     elif burstiness > 3.8:
         warnings.append(f"⚠️ Burstiness za wysoki: {burstiness} (max 3.8)")
     
-    # v25.0: Nowa logika density z zakresami
-    density_status, density_msg = get_density_status(density)
-    
-    if density_status == "STUFFING":
-        warnings.append(f"🔴 KEYWORD STUFFING: {density:.1f}% (max {DENSITY_MAX}%)")
-    elif density_status == "HIGH":
-        warnings.append(f"🟠 Density za wysoka: {density:.1f}% (zalecane < {DENSITY_ACCEPTABLE_MAX}%)")
-    elif density_status == "WARNING":
-        warnings.append(f"🟡 Density wysoka: {density:.1f}% (optymalne: {DENSITY_OPTIMAL_MIN}-{DENSITY_OPTIMAL_MAX}%)")
-    elif density_status == "LOW":
-        warnings.append(f"⚪ Density niska: {density:.1f}% (min {DENSITY_OPTIMAL_MIN}%)")
+    # v24.0: Fixed density limit (was 1.5%, now 3.0% from seo_rules.json)
+    if density > DENSITY_MAX:
+        warnings.append(f"⚠️ Keyword density za wysoka: {density}% (max {DENSITY_MAX}%)")
     
     warnings.extend(transition_data.get("warnings", []))
     return warnings
-
-
-# ============================================================================
-# v25.0: COVERAGE VALIDATION
-# ============================================================================
-def validate_coverage(keywords_state: dict) -> dict:
-    """
-    v25.0: Sprawdza coverage dla BASIC i EXTENDED keywords.
-    BASIC: każda min 1x (hard requirement), target z inputu
-    EXTENDED: każda dokładnie 1x
-    """
-    basic_total = 0
-    basic_covered = 0
-    basic_missing = []
-    basic_target_met = 0
-    
-    extended_total = 0
-    extended_covered = 0
-    extended_missing = []
-    
-    for rid, meta in keywords_state.items():
-        kw_type = meta.get("type", "BASIC").upper()
-        keyword = meta.get("keyword", "")
-        actual = meta.get("actual_uses", 0)
-        target_min = meta.get("target_min", 1)
-        
-        if kw_type in ["BASIC", "MAIN"]:
-            basic_total += 1
-            if actual >= 1:  # Hard requirement: min 1x
-                basic_covered += 1
-            else:
-                basic_missing.append(keyword)
-            
-            if actual >= target_min:  # Target met
-                basic_target_met += 1
-                
-        elif kw_type == "EXTENDED":
-            extended_total += 1
-            if actual >= 1:
-                extended_covered += 1
-            else:
-                extended_missing.append(keyword)
-    
-    basic_coverage = (basic_covered / basic_total * 100) if basic_total > 0 else 100
-    extended_coverage = (extended_covered / extended_total * 100) if extended_total > 0 else 100
-    
-    return {
-        "basic": {
-            "total": basic_total,
-            "covered": basic_covered,
-            "coverage_percent": round(basic_coverage, 1),
-            "target_met": basic_target_met,
-            "missing": basic_missing[:5],  # Max 5 dla czytelności
-            "status": "OK" if basic_coverage == 100 else "INCOMPLETE"
-        },
-        "extended": {
-            "total": extended_total,
-            "covered": extended_covered,
-            "coverage_percent": round(extended_coverage, 1),
-            "missing": extended_missing[:5],
-            "status": "OK" if extended_coverage == 100 else "INCOMPLETE"
-        },
-        "overall_coverage": round((basic_coverage + extended_coverage) / 2, 1) if extended_total > 0 else basic_coverage
-    }
 
 
 # ============================================================================
@@ -301,14 +201,16 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
     keywords_state = project_data.get("keywords_state", {})
     
     # v24.2: UNIFIED COUNTING - jedna funkcja dla całego systemu
+    # Zastępuje: count_all_forms + deduplicate_keyword_counts + stuffing detection
     try:
         from keyword_counter import count_keywords_for_state, get_stuffing_warnings, count_keywords
         
         # Zbierz keywordy do analizy szczegółowej
         keywords = [meta.get("keyword", "").strip() for meta in keywords_state.values() if meta.get("keyword")]
         
-        # Policz z longest-match-first (automatyczna deduplikacja zagnieżdżonych)
-        batch_counts = count_keywords_for_state(batch_text, keywords_state)
+        # v25.0: Policz z OVERLAPPING dla actual_uses (każda fraza osobno)
+        # Density używa EXCLUSIVE (w seo_optimizer.py), ale actual_uses = overlapping
+        batch_counts = count_keywords_for_state(batch_text, keywords_state, use_exclusive_for_nested=False)
         
         # Stuffing warnings (zintegrowane z tym samym licznikiem)
         stuffing_warnings = get_stuffing_warnings(batch_text, keywords_state)
@@ -319,89 +221,173 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         in_intro = full_result.get("in_intro", {})
         
         UNIFIED_COUNTING = True
-        
-    except ImportError:
-        # Fallback do starej metody
+    except ImportError as e:
+        print(f"[TRACKER] keyword_counter not available, using legacy: {e}")
         UNIFIED_COUNTING = False
+        
+        # LEGACY FALLBACK - stara metoda
+        clean_text_original = re.sub(r"<[^>]+>", " ", batch_text)
+        clean_text_original = re.sub(r"\s+", " ", clean_text_original)
+        
         batch_counts = {}
+        for rid, meta in keywords_state.items():
+            keyword = meta.get("keyword", "").strip()
+            if not keyword:
+                batch_counts[rid] = 0
+                continue
+            batch_counts[rid] = count_all_forms(clean_text_original, keyword)
+        
+        # Legacy deduplikacja
+        if DEDUP_ENABLED:
+            raw_counts = {meta.get("keyword", ""): batch_counts.get(rid, 0) 
+                          for rid, meta in keywords_state.items() if meta.get("keyword")}
+            adjusted = deduplicate_keyword_counts(raw_counts)
+            for rid, meta in keywords_state.items():
+                kw = meta.get("keyword", "")
+                if kw in adjusted:
+                    batch_counts[rid] = adjusted[kw]
+        
+        # Legacy stuffing
         stuffing_warnings = []
+        paragraphs = batch_text.split('\n\n')
+        for rid, meta in keywords_state.items():
+            if meta.get("type", "BASIC").upper() not in ["BASIC", "MAIN"]:
+                continue
+            keyword = meta.get("keyword", "").lower()
+            if not keyword:
+                continue
+            for para in paragraphs:
+                if para.lower().count(keyword) > 3:
+                    stuffing_warnings.append(f"⚠️ '{meta.get('keyword')}' występuje >3x w jednym akapicie")
+                    break
+        
         in_headers = {}
         in_intro = {}
-        
-        for rid, meta in keywords_state.items():
-            keyword = meta.get("keyword", "")
-            if keyword:
-                batch_counts[keyword] = count_all_forms(batch_text, keyword)
-
-    # Update keywords_state with new counts
-    exceeded_keywords = []
-    per_batch_warnings = []
     
-    for rid, meta in keywords_state.items():
-        keyword = meta.get("keyword", "")
+    # v24.0: Walidacja pierwszego zdania (dla INTRO batcha)
+    batches_done = len(project_data.get("batches", []))
+    main_keyword = project_data.get("main_keyword", project_data.get("topic", ""))
+    first_sentence_warning = None
+    
+    if batches_done == 0 and main_keyword:  # To jest INTRO
+        first_sentence = batch_text.split('.')[0] if batch_text else ""
+        if main_keyword.lower() not in first_sentence.lower():
+            first_sentence_warning = f"⚠️ Pierwsze zdanie nie zawiera głównej frazy '{main_keyword}' - kluczowe dla featured snippet!"
+    
+    # v24.0: Pobierz info o batchach do walidacji per-batch
+    total_batches = project_data.get("total_planned_batches", 4)
+    remaining_batches = max(1, total_batches - batches_done)
+    
+    # v24.0: Per-batch warnings (informacyjne, nie blokują)
+    per_batch_warnings = []
+    for rid, batch_count in batch_counts.items():
+        if batch_count == 0:
+            continue
+        meta = keywords_state[rid]
         kw_type = meta.get("type", "BASIC").upper()
-        
-        if not keyword:
+        if kw_type not in ["BASIC", "MAIN"]:
             continue
         
-        batch_count = batch_counts.get(keyword, 0)
-        old_actual = meta.get("actual_uses", 0)
-        new_actual = old_actual + batch_count
-        target_min = meta.get("target_min", 1)
+        keyword = meta.get("keyword", "")
         target_max = meta.get("target_max", 999)
+        actual = meta.get("actual_uses", 0)
+        remaining_to_max = max(0, target_max - actual)
         
-        # v25.0: EXTENDED = dokładnie 1x, więcej to warning
-        if kw_type == "EXTENDED" and new_actual > 1:
-            per_batch_warnings.append(f"ℹ️ EXTENDED '{keyword}' użyta {new_actual}x (cel: 1x)")
-        
-        # Update state
-        keywords_state[rid]["actual_uses"] = new_actual
-        keywords_state[rid]["remaining_max"] = max(0, target_max - new_actual)
-        
-        # Status update
-        if new_actual > target_max:
-            keywords_state[rid]["status"] = "EXCEEDED"
-            exceeded_keywords.append({
-                "keyword": keyword,
-                "actual": new_actual,
-                "target_max": target_max,
-                "would_be": new_actual,
-                "excess": new_actual - target_max
-            })
-        elif new_actual >= target_min:
-            keywords_state[rid]["status"] = "OK"
+        # Oblicz suggested per batch
+        if remaining_to_max > 0 and remaining_batches > 0:
+            suggested = math.ceil(remaining_to_max / remaining_batches)
         else:
-            keywords_state[rid]["status"] = "UNDER"
+            suggested = 0
+        
+        # Warning jeśli batch_count > suggested * 1.5 (ale nie blokuje)
+        if suggested > 0 and batch_count > suggested * 1.5:
+            per_batch_warnings.append(
+                f"ℹ️ '{keyword}': użyto {batch_count}x w batchu (sugerowano ~{suggested}x). "
+                f"Zostało {max(0, remaining_to_max - batch_count)}/{target_max} dla artykułu."
+            )
     
-    # Calculate metrics
-    burstiness = calculate_burstiness(batch_text)
-    transition_data = calculate_transition_score(batch_text)
+    # Check EXCEEDED TOTAL (całkowity limit artykułu - to jest KRYTYCZNE)
+    exceeded_keywords = []
+    for rid, batch_count in batch_counts.items():
+        meta = keywords_state[rid]
+        if meta.get("type", "BASIC").upper() not in ["BASIC", "MAIN"]:
+            continue
+        current = meta.get("actual_uses", 0)
+        target_max = meta.get("target_max", 999)
+        new_total = current + batch_count
+        if new_total > target_max:
+            exceeded_keywords.append({
+                "keyword": meta.get("keyword"),
+                "current": current,
+                "batch_uses": batch_count,
+                "would_be": new_total,
+                "target_max": target_max,
+                "exceeded_by": new_total - target_max
+            })
     
-    # v25.0: Density z unified_prevalidation
-    prevalidation = unified_prevalidation(batch_text, keywords_state)
-    density = prevalidation.get("density", 0)
-    semantic_score = prevalidation.get("semantic_score", 0)
+    # Update keywords state
+    for rid, batch_count in batch_counts.items():
+        meta = keywords_state[rid]
+        meta["actual_uses"] = meta.get("actual_uses", 0) + batch_count
+        
+        min_t = meta.get("target_min", 0)
+        max_t = meta.get("target_max", 999)
+        actual = meta["actual_uses"]
+        
+        if actual < min_t:
+            meta["status"] = "UNDER"
+        elif actual == max_t:
+            meta["status"] = "OPTIMAL"
+        elif min_t <= actual < max_t:
+            meta["status"] = "OK"
+        else:
+            meta["status"] = "OVER"
+        
+        if meta.get("type", "BASIC").upper() == "BASIC":
+            meta["remaining_max"] = max(0, max_t - actual)
+        
+        keywords_state[rid] = meta
+
+    # Prevalidation
+    precheck = unified_prevalidation(batch_text, keywords_state)
+    warnings = precheck.get("warnings", [])
+    semantic_score = precheck.get("semantic_score", 1.0)
+    density = precheck.get("density", 0.0)
     
-    # v25.0: Coverage validation
-    coverage = validate_coverage(keywords_state)
-    
-    # v24.1: Semantic gaps
+    # v24.1: Semantic validation - czy frazy są semantycznie pokryte
     semantic_gaps = []
     if SEMANTIC_ENABLED:
         try:
-            gaps_result = find_semantic_gaps(batch_text, keywords_state)
-            semantic_gaps = gaps_result.get("gaps", [])
+            sem_result = semantic_validation(batch_text, keywords_state, min_coverage=0.4)
+            if sem_result.get("semantic_enabled"):
+                semantic_gaps = sem_result.get("gaps", [])
+                overall_coverage = sem_result.get("overall_coverage", 1.0)
+                if overall_coverage < 0.4:
+                    warnings.append(f"⚠️ Semantyczne pokrycie {overall_coverage:.0%} < 40% - rozwiń tematy: {', '.join(semantic_gaps[:3])}")
+                elif semantic_gaps:
+                    # Info, nie warning - są luki ale ogólne pokrycie OK
+                    pass
         except Exception as e:
-            print(f"[TRACKER] Semantic gaps error: {e}")
+            print(f"[TRACKER] Semantic validation error: {e}")
     
-    # Validate all metrics
-    warnings = validate_metrics(burstiness, transition_data, density)
+    # v24.0: Walidacja pierwszego zdania (WAŻNE dla SEO)
+    if first_sentence_warning:
+        warnings.insert(0, first_sentence_warning)  # Na początku - ważne!
+    
+    # v24.0: Keyword stuffing warnings
     warnings.extend(stuffing_warnings)
     
-    # Structure validation
+    # v24.0: EXCEEDED TOTAL warnings (KRYTYCZNE - przekroczono limit całkowity)
+    for ek in exceeded_keywords:
+        warnings.append(f"❌ EXCEEDED TOTAL: '{ek['keyword']}' = {ek['would_be']}x (limit {ek['target_max']}x dla CAŁEGO artykułu)")
+    
+    # Metrics
+    burstiness = calculate_burstiness(batch_text)
+    transition_data = calculate_transition_score(batch_text)
+    metrics_warnings = validate_metrics(burstiness, transition_data, density)
+    warnings.extend(metrics_warnings)
+
     struct_check = validate_structure(batch_text)
-    if not struct_check["valid"]:
-        warnings.append(struct_check["error"])
     valid_struct = struct_check["valid"]
 
     status = "APPROVED"
@@ -410,12 +396,10 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
     if forced:
         status = "FORCED"
     
-    # v25.0: Sprawdź czy są krytyczne problemy
+    # v24.0: Jeśli tylko per_batch warnings (nie EXCEEDED TOTAL) - status APPROVED
     has_critical = any("EXCEEDED TOTAL" in w for w in warnings)
-    has_stuffing = any("STUFFING" in w for w in warnings)
-    has_density_issue = density > DENSITY_MAX
-    
-    if not has_critical and not has_stuffing and not has_density_issue and not exceeded_keywords:
+    has_density_issue = any("density" in w.lower() and density > DENSITY_MAX for w in warnings)
+    if not has_critical and not has_density_issue and not exceeded_keywords:
         status = "APPROVED"
 
     # Save batch
@@ -425,14 +409,12 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         "timestamp": datetime.datetime.now(datetime.timezone.utc),
         "burstiness": burstiness,
         "transition_ratio": transition_data.get("ratio", 0),
-        "batch_counts": batch_counts,
-        "per_batch_info": per_batch_warnings,
-        "semantic_gaps": semantic_gaps,
-        "coverage": coverage,  # v25.0: coverage info
+        "batch_counts": batch_counts,  # v24.0: zapisuj counts dla debug
+        "per_batch_info": per_batch_warnings,  # v24.0: info per batch
+        "semantic_gaps": semantic_gaps,  # v24.1: luki semantyczne
         "language_audit": {
             "semantic_score": semantic_score,
             "density": density,
-            "density_status": get_density_status(density)[0],  # v25.0
             "burstiness": burstiness
         },
         "warnings": warnings,
@@ -451,27 +433,25 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         "status": status,
         "semantic_score": semantic_score,
         "density": density,
-        "density_status": get_density_status(density),  # v25.0: (status_code, message)
         "burstiness": burstiness,
         "warnings": warnings,
-        "per_batch_warnings": per_batch_warnings,
-        "semantic_gaps": semantic_gaps,
-        "coverage": coverage,  # v25.0
+        "per_batch_warnings": per_batch_warnings,  # v24.0: osobno
+        "semantic_gaps": semantic_gaps,  # v24.1: frazy bez pokrycia
         "exceeded_keywords": exceeded_keywords,
         "batch_counts": batch_counts,
-        "unified_counting": UNIFIED_COUNTING if 'UNIFIED_COUNTING' in dir() else False,
-        "in_headers": in_headers if 'in_headers' in dir() else {},
-        "in_intro": in_intro if 'in_intro' in dir() else {},
+        "unified_counting": UNIFIED_COUNTING if 'UNIFIED_COUNTING' in dir() else False,  # v24.2
+        "in_headers": in_headers if 'in_headers' in dir() else {},  # v24.2: frazy w H2/H3
+        "in_intro": in_intro if 'in_intro' in dir() else {},  # v24.2: frazy w intro
         "status_code": 200
     }
 
 
 # ============================================================================
-# 4. MINIMAL RESPONSE (v25.0 - z coverage info)
+# 4. MINIMAL RESPONSE (v24.0 - rozróżnia EXCEEDED TOTAL vs per-batch)
 # ============================================================================
 def _minimal_batch_response(result: dict, project_data: dict = None) -> dict:
     """
-    v25.0: Rozróżnia EXCEEDED TOTAL vs per-batch warnings + coverage info.
+    v24.0: Rozróżnia EXCEEDED TOTAL (blokuje) vs per-batch warnings (info).
     """
     problems = []  # Krytyczne - wymagają reakcji
     info = []  # Informacyjne - można zignorować
@@ -481,23 +461,16 @@ def _minimal_batch_response(result: dict, project_data: dict = None) -> dict:
     for ex in exceeded:
         problems.append(f"❌ '{ex['keyword']}' PRZEKROCZYŁA CAŁKOWITY LIMIT ({ex['would_be']}/{ex['target_max']})")
     
-    # v25.0: Density stuffing - KRYTYCZNE
-    density_status = result.get("density_status", ("OK", ""))
-    if density_status[0] == "STUFFING":
-        problems.append(density_status[1])
-    elif density_status[0] in ["HIGH", "WARNING"]:
-        info.append(density_status[1])
-    
     # Per-batch warnings - tylko INFO
     for w in result.get("per_batch_warnings", []):
         info.append(w)
     
-    # Inne ważne warnings
+    # Inne ważne warnings (density)
     for w in result.get("warnings", []):
-        if "EXCEEDED TOTAL" in str(w) or "STUFFING" in str(w):
+        if "EXCEEDED TOTAL" in str(w):
             if w not in problems:
                 problems.append(w)
-        elif "density" in str(w).lower() and "🔴" in str(w):
+        elif "density" in str(w).lower():
             problems.append(w)
     
     # Status
@@ -506,6 +479,7 @@ def _minimal_batch_response(result: dict, project_data: dict = None) -> dict:
         status = "WARN"
     if result.get("status") == "FORCED":
         status = "FORCED"
+    # v24.0: Jeśli status APPROVED z process_batch - zachowaj
     if result.get("status") == "APPROVED":
         status = "OK"
     
@@ -517,17 +491,6 @@ def _minimal_batch_response(result: dict, project_data: dict = None) -> dict:
         batches_planned = len(project_data.get("batches_plan", [])) or project_data.get("total_planned_batches", 4)
         batch_number = batches_done
         remaining_batches = max(0, batches_planned - batches_done)
-    
-    # v25.0: Coverage info
-    coverage = result.get("coverage", {})
-    coverage_summary = None
-    if coverage:
-        basic_cov = coverage.get("basic", {}).get("coverage_percent", 100)
-        ext_cov = coverage.get("extended", {}).get("coverage_percent", 100)
-        if basic_cov < 100 or ext_cov < 100:
-            coverage_summary = f"📊 Coverage: BASIC {basic_cov:.0f}%, EXTENDED {ext_cov:.0f}%"
-            if remaining_batches == 0 and (basic_cov < 100 or ext_cov < 100):
-                problems.append(f"⚠️ Ostatni batch! Brakuje coverage: BASIC {100-basic_cov:.0f}%, EXTENDED {100-ext_cov:.0f}%")
     
     # Next action
     if exceeded:
@@ -554,29 +517,18 @@ def _minimal_batch_response(result: dict, project_data: dict = None) -> dict:
         "remaining_batches": remaining_batches
     }
     
-    # v25.0: Density status
-    response["density"] = {
-        "value": result.get("density", 0),
-        "status": density_status[0],
-        "message": density_status[1]
-    }
-    
-    # v25.0: Coverage summary
-    if coverage_summary:
-        response["coverage"] = coverage_summary
-    
+    # v24.0: Osobno problems (krytyczne) i info (per-batch)
     if problems:
         response["problems"] = problems
     if info:
-        response["info"] = info
+        response["info"] = info  # Per-batch to tylko info
     
     return response
-
 
 @tracker_routes.post("/api/project/<project_id>/approve_batch")
 def approve_batch(project_id):
     """
-    v25.0: MINIMALNA ODPOWIEDŹ z coverage i density status
+    v23.9: MINIMALNA ODPOWIEDŹ (~500B zamiast 220KB)
     """
     data = request.get_json(force=True)
     text = data.get("corrected_text", "")
@@ -603,9 +555,6 @@ def debug_keywords(project_id):
     keywords = data.get("keywords_state", {})
     batches = data.get("batches", [])
     
-    # v25.0: Coverage info
-    coverage = validate_coverage(keywords)
-    
     stats = []
     for rid, meta in keywords.items():
         stats.append({
@@ -620,13 +569,7 @@ def debug_keywords(project_id):
     return jsonify({
         "project_id": project_id,
         "keywords": stats,
-        "batches": len(batches),
-        "coverage": coverage,  # v25.0
-        "density_config": {  # v25.0: show current config
-            "optimal": f"{DENSITY_OPTIMAL_MIN}-{DENSITY_OPTIMAL_MAX}%",
-            "acceptable_max": f"{DENSITY_ACCEPTABLE_MAX}%",
-            "hard_max": f"{DENSITY_MAX}%"
-        }
+        "batches": len(batches)
     }), 200
 
 
