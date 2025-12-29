@@ -1,11 +1,21 @@
 import os
 import re
 import json
+import spacy
 import textstat
 from collections import Counter
 from typing import List, Dict
 import google.generativeai as genai
 from rich import print
+
+# v24.2: Unified keyword counting
+try:
+    from keyword_counter import count_single_keyword, count_multiple_keywords, get_keyword_density
+    UNIFIED_COUNTER = True
+    print("[SEO_OPT] ✅ Unified keyword counter loaded")
+except ImportError:
+    UNIFIED_COUNTER = False
+    print("[SEO_OPT] ⚠️ keyword_counter not available, using legacy regex")
 
 # ================================================================
 # ⚙️ Konfiguracja środowiska
@@ -32,10 +42,17 @@ except ImportError:
     SEMANTIC_ENABLED = False
 
 # ================================================================
-# 🧠 Współdzielony model spaCy (v23.9 - oszczędność RAM)
+# 🧠 Ładowanie modelu spaCy (Polish)
 # ================================================================
-from shared_nlp import get_nlp
-nlp = get_nlp()
+try:
+    nlp = spacy.load("pl_core_news_md")
+    print("[SEO_OPT] ✅ Załadowano model pl_core_news_md (Light Edition)")
+except OSError:
+    from spacy.cli import download
+    print("[SEO_OPT] ⚠️ Model pl_core_news_md nieznaleziony – próba pobrania...")
+    download("pl_core_news_md")
+    nlp = spacy.load("pl_core_news_md")
+    print("[SEO_OPT] ✅ Model pobrany i załadowany")
 
 # ================================================================
 # 🛡️ HELPER: Safe Gemini Call (Anti-Crash)
@@ -122,11 +139,15 @@ def generate_semantic_outline(topic: str, keywords: List[str]) -> str:
 # ================================================================
 def validate_batch_keywords(text: str, required_keywords: List[str]) -> Dict[str, int]:
     """Sprawdza, ile słów kluczowych z listy występuje w tekście."""
-    text_lower = text.lower()
-    results = {}
-    for kw in required_keywords:
-        results[kw] = len(re.findall(rf"\b{re.escape(kw.lower())}\b", text_lower))
-    return results
+    # v24.2: Unified counting
+    if UNIFIED_COUNTER:
+        return count_multiple_keywords(text, required_keywords)
+    else:
+        text_lower = text.lower()
+        results = {}
+        for kw in required_keywords:
+            results[kw] = len(re.findall(rf"\b{re.escape(kw.lower())}\b", text_lower))
+        return results
 
 # ================================================================
 # 🧠 Funkcja: optymalizacja tekstu
@@ -249,17 +270,22 @@ def calculate_keyword_density(text: str, keywords_state: dict) -> float:
     if not text or not keywords_state:
         return 0.0
     
-    text_lower = text.lower()
     total_words = len(text.split())
-    
     if total_words == 0:
         return 0.0
     
-    keyword_count = 0
-    for rid, meta in keywords_state.items():
-        keyword = meta.get("keyword", "").lower()
-        if keyword:
-            keyword_count += len(re.findall(rf"\b{re.escape(keyword)}\b", text_lower))
+    # v24.2: Unified counting
+    if UNIFIED_COUNTER:
+        keywords = [meta.get("keyword", "") for meta in keywords_state.values() if meta.get("keyword")]
+        keyword_counts = count_multiple_keywords(text, keywords)
+        keyword_count = sum(keyword_counts.values())
+    else:
+        text_lower = text.lower()
+        keyword_count = 0
+        for rid, meta in keywords_state.items():
+            keyword = meta.get("keyword", "").lower()
+            if keyword:
+                keyword_count += len(re.findall(rf"\b{re.escape(keyword)}\b", text_lower))
     
     density = (keyword_count / total_words) * 100
     return round(density, 2)
