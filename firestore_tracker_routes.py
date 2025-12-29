@@ -200,30 +200,68 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
     project_data = doc.to_dict()
     keywords_state = project_data.get("keywords_state", {})
     
-    # Prepare text
-    clean_text_original = re.sub(r"<[^>]+>", " ", batch_text)
-    clean_text_original = re.sub(r"\s+", " ", clean_text_original)
-    
-    # Count keywords in batch
-    batch_counts = {}
-    for rid, meta in keywords_state.items():
-        keyword = meta.get("keyword", "").strip()
-        if not keyword:
-            batch_counts[rid] = 0
-            continue
-        batch_counts[rid] = count_all_forms(clean_text_original, keyword)
-    
-    # v24.0: Deduplikacja fraz zagnieżdżonych
-    # "renta" w "renta rodzinna" - odejmij żeby nie liczyć podwójnie
-    if DEDUP_ENABLED:
-        raw_counts = {meta.get("keyword", ""): batch_counts.get(rid, 0) 
-                      for rid, meta in keywords_state.items() if meta.get("keyword")}
-        adjusted = deduplicate_keyword_counts(raw_counts)
-        # Przepisz adjusted z powrotem do batch_counts
+    # v24.2: UNIFIED COUNTING - jedna funkcja dla całego systemu
+    # Zastępuje: count_all_forms + deduplicate_keyword_counts + stuffing detection
+    try:
+        from keyword_counter import count_keywords_for_state, get_stuffing_warnings, count_keywords
+        
+        # Zbierz keywordy do analizy szczegółowej
+        keywords = [meta.get("keyword", "").strip() for meta in keywords_state.values() if meta.get("keyword")]
+        
+        # Policz z longest-match-first (automatyczna deduplikacja zagnieżdżonych)
+        batch_counts = count_keywords_for_state(batch_text, keywords_state)
+        
+        # Stuffing warnings (zintegrowane z tym samym licznikiem)
+        stuffing_warnings = get_stuffing_warnings(batch_text, keywords_state)
+        
+        # Szczegóły do diagnostyki
+        full_result = count_keywords(batch_text, keywords)
+        in_headers = full_result.get("in_headers", {})
+        in_intro = full_result.get("in_intro", {})
+        
+        UNIFIED_COUNTING = True
+    except ImportError as e:
+        print(f"[TRACKER] keyword_counter not available, using legacy: {e}")
+        UNIFIED_COUNTING = False
+        
+        # LEGACY FALLBACK - stara metoda
+        clean_text_original = re.sub(r"<[^>]+>", " ", batch_text)
+        clean_text_original = re.sub(r"\s+", " ", clean_text_original)
+        
+        batch_counts = {}
         for rid, meta in keywords_state.items():
-            kw = meta.get("keyword", "")
-            if kw in adjusted:
-                batch_counts[rid] = adjusted[kw]
+            keyword = meta.get("keyword", "").strip()
+            if not keyword:
+                batch_counts[rid] = 0
+                continue
+            batch_counts[rid] = count_all_forms(clean_text_original, keyword)
+        
+        # Legacy deduplikacja
+        if DEDUP_ENABLED:
+            raw_counts = {meta.get("keyword", ""): batch_counts.get(rid, 0) 
+                          for rid, meta in keywords_state.items() if meta.get("keyword")}
+            adjusted = deduplicate_keyword_counts(raw_counts)
+            for rid, meta in keywords_state.items():
+                kw = meta.get("keyword", "")
+                if kw in adjusted:
+                    batch_counts[rid] = adjusted[kw]
+        
+        # Legacy stuffing
+        stuffing_warnings = []
+        paragraphs = batch_text.split('\n\n')
+        for rid, meta in keywords_state.items():
+            if meta.get("type", "BASIC").upper() not in ["BASIC", "MAIN"]:
+                continue
+            keyword = meta.get("keyword", "").lower()
+            if not keyword:
+                continue
+            for para in paragraphs:
+                if para.lower().count(keyword) > 3:
+                    stuffing_warnings.append(f"⚠️ '{meta.get('keyword')}' występuje >3x w jednym akapicie")
+                    break
+        
+        in_headers = {}
+        in_intro = {}
     
     # v24.0: Walidacja pierwszego zdania (dla INTRO batcha)
     batches_done = len(project_data.get("batches", []))
@@ -234,24 +272,6 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         first_sentence = batch_text.split('.')[0] if batch_text else ""
         if main_keyword.lower() not in first_sentence.lower():
             first_sentence_warning = f"⚠️ Pierwsze zdanie nie zawiera głównej frazy '{main_keyword}' - kluczowe dla featured snippet!"
-    
-    # v24.0: Wykrywanie keyword stuffing per paragraf
-    stuffing_warnings = []
-    paragraphs = batch_text.split('\n\n')
-    for rid, meta in keywords_state.items():
-        if meta.get("type", "BASIC").upper() not in ["BASIC", "MAIN"]:
-            continue
-        keyword = meta.get("keyword", "").lower()
-        if not keyword:
-            continue
-        for i, para in enumerate(paragraphs):
-            para_lower = para.lower()
-            count_in_para = para_lower.count(keyword)
-            if count_in_para > 3:
-                stuffing_warnings.append(
-                    f"⚠️ '{meta.get('keyword')}' występuje {count_in_para}x w jednym akapicie - rozłóż równomiernie"
-                )
-                break  # Jeden warning per keyword wystarczy
     
     # v24.0: Pobierz info o batchach do walidacji per-batch
     total_batches = project_data.get("total_planned_batches", 4)
@@ -418,6 +438,9 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         "semantic_gaps": semantic_gaps,  # v24.1: frazy bez pokrycia
         "exceeded_keywords": exceeded_keywords,
         "batch_counts": batch_counts,
+        "unified_counting": UNIFIED_COUNTING if 'UNIFIED_COUNTING' in dir() else False,  # v24.2
+        "in_headers": in_headers if 'in_headers' in dir() else {},  # v24.2: frazy w H2/H3
+        "in_intro": in_intro if 'in_intro' in dir() else {},  # v24.2: frazy w intro
         "status_code": 200
     }
 
