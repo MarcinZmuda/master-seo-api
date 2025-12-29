@@ -1,28 +1,21 @@
+# hierarchical_keyword_dedup.py
 """
 ===============================================================================
-🔢 HIERARCHICAL KEYWORD DEDUPLICATION v23.9.2
+HIERARCHICAL KEYWORD DEDUPLICATION v24.0
 ===============================================================================
-Rozwiązuje problem podwójnego liczenia fraz zagnieżdżonych.
+Rozwiazuje problem podwojnego liczenia fraz zagniezdzonych.
 
-Problem:
-  "renta rodzinna" zawiera "renta"
-  Tekst: "renta rodzinna jest świadczeniem" 
-  → Stary system: renta=1, renta rodzinna=1 (podwójne liczenie!)
-  → Nowy system: renta=0, renta rodzinna=1 (deduplikacja)
-
-Algorytm:
-  1. Posortuj frazy od najdłuższych do najkrótszych
-  2. Dla każdej frazy krótkiej, odejmij wystąpienia w dłuższych frazach
-  3. Zwróć skorygowane liczniki
-
-Przykład:
-  Frazy: ["renta", "renta rodzinna", "renta wdowia"]
-  Tekst zawiera: "renta rodzinna" 3x, "renta wdowia" 2x, "renta" samodzielnie 5x
+PROBLEM:
+  Frazy: "renta rodzinna" i "renta"
+  Tekst: "Renta rodzinna przysluguje... Renta rodzinna to..."
   
-  Surowe liczniki: renta=10, renta rodzinna=3, renta wdowia=2
-  Po deduplikacji: renta=5, renta rodzinna=3, renta wdowia=2
-  
-  Bo: 10 - 3 - 2 = 5 (samodzielnych wystąpień "renta")
+  BEZ DEDUP: "renta rodzinna" = 2, "renta" = 2 (liczy te same!)
+  Z DEDUP:   "renta rodzinna" = 2, "renta" = 0 (poprawnie!)
+
+LOGIKA:
+  Jesli krotsza fraza wystepuje WEWNATRZ dluzszej frazy,
+  odejmujemy te wystapienia od krotszej.
+
 ===============================================================================
 """
 
@@ -30,156 +23,174 @@ import re
 from typing import Dict, List, Tuple
 
 
-def normalize_text(text: str) -> str:
-    """Normalizuje tekst do porównań."""
-    text = re.sub(r'<[^>]+>', ' ', text)
-    text = re.sub(r'\s+', ' ', text).lower().strip()
-    return text
+def deduplicate_keyword_counts(
+    raw_counts: Dict[str, int],
+    keywords_list: List[str] = None
+) -> Dict[str, int]:
+    """
+    Deduplikuje zliczenia fraz - odejmuje wystapienia zagniezdzonych.
+    
+    LOGIKA:
+    - Dla kazdej frazy odejmujemy wszystkie BEZPOSREDNIE dzieci
+    - Bezposrednie dziecko = fraza ktora zawiera nasza fraze, ale nie ma posrednika
+    
+    Args:
+        raw_counts: Surowe zliczenia np. {"renta rodzinna": 5, "renta": 8}
+        keywords_list: Lista wszystkich fraz (opcjonalna)
+    
+    Returns:
+        Skorygowane zliczenia
+    
+    Przyklady:
+        >>> deduplicate_keyword_counts({"renta rodzinna": 5, "renta": 8})
+        {"renta rodzinna": 5, "renta": 3}
+        
+        >>> deduplicate_keyword_counts({
+        ...     "renta rodzinna": 4,
+        ...     "renta wdowia": 3,
+        ...     "renta": 12
+        ... })
+        {"renta rodzinna": 4, "renta wdowia": 3, "renta": 5}
+        # renta: 12 - 4 - 3 = 5 (odjete OBA bezposrednie dzieci)
+    """
+    if not isinstance(raw_counts, dict):
+        return {}
+    
+    if not raw_counts:
+        return {}
+    
+    keywords = keywords_list or list(raw_counts.keys())
+    
+    # Sortuj od najdluzszej do najkrotszej
+    sorted_keywords = sorted(keywords, key=len, reverse=True)
+    
+    # Kopia do modyfikacji
+    adjusted_counts = raw_counts.copy()
+    
+    # Dla kazdej krotszej frazy znajdz WSZYSTKIE bezposrednie dzieci
+    for i, short_kw in enumerate(sorted_keywords):
+        short_kw_lower = short_kw.lower().strip()
+        
+        if not short_kw_lower:
+            continue
+        
+        # Zbierz wszystkich bezposrednich rodzicow (frazy ktore zawieraja short_kw)
+        direct_parents = []
+        
+        for long_kw in sorted_keywords[:i]:
+            long_kw_lower = long_kw.lower().strip()
+            
+            if _is_phrase_inside(short_kw_lower, long_kw_lower):
+                # To jest potencjalny rodzic
+                # Sprawdz czy jest "bezposredni" (nie ma posrednika miedzy short a long)
+                is_direct = True
+                for middle_kw in sorted_keywords[:i]:
+                    if middle_kw == long_kw:
+                        continue
+                    middle_lower = middle_kw.lower().strip()
+                    # Czy jest fraza posrodku? (zawiera short i jest zawarta w long)
+                    if (_is_phrase_inside(short_kw_lower, middle_lower) and 
+                        _is_phrase_inside(middle_lower, long_kw_lower)):
+                        is_direct = False
+                        break
+                
+                if is_direct:
+                    direct_parents.append(long_kw)
+        
+        # Odejmij WSZYSTKICH bezposrednich rodzicow
+        total_to_subtract = sum(raw_counts.get(parent, 0) for parent in direct_parents)
+        current_short = adjusted_counts.get(short_kw, 0)
+        adjusted_counts[short_kw] = max(0, current_short - total_to_subtract)
+    
+    return adjusted_counts
 
 
-def count_phrase_raw(text: str, phrase: str) -> int:
-    """Liczy surowe wystąpienia frazy (bez deduplikacji)."""
-    text_lower = text.lower()
-    phrase_lower = phrase.lower().strip()
+def _is_phrase_inside(short_phrase: str, long_phrase: str) -> bool:
+    """
+    Sprawdza czy krotsza fraza wystepuje jako cale slowo wewnatrz dluzszej.
     
-    if not phrase_lower:
-        return 0
-    
-    # Dopasowanie z tolerancją na odmianę (prefix matching)
-    words = phrase_lower.split()
-    if len(words) == 1:
-        # Pojedyncze słowo - prefix match
-        pattern = r'\b' + re.escape(words[0][:4]) + r'\w*\b'
-    else:
-        # Wielowyrazowa fraza - każde słowo prefix match, max 2 słowa między
-        stems = [re.escape(w[:4]) + r'\w*' for w in words]
-        pattern = r'\b' + r'\s+(?:\w+\s+){0,2}'.join(stems) + r'\b'
-    
-    return len(re.findall(pattern, text_lower, re.IGNORECASE))
-
-
-def is_subphrase(short: str, long: str) -> bool:
-    """Sprawdza czy krótsza fraza jest częścią dłuższej."""
-    short_words = set(short.lower().split())
-    long_words = set(long.lower().split())
-    
-    # Krótsza musi mieć mniej słów i wszystkie jej słowa muszą być w dłuższej
-    if len(short_words) >= len(long_words):
+    "renta" in "renta rodzinna" -> True
+    "rent" in "renta rodzinna" -> False (nie cale slowo)
+    "rodzinna" in "renta rodzinna" -> True
+    """
+    if not short_phrase or not long_phrase:
         return False
     
-    # Sprawdź czy stemmy krótszej są w dłuższej
-    short_stems = {w[:4] for w in short_words if len(w) >= 4}
-    long_stems = {w[:4] for w in long_words if len(w) >= 4}
+    if len(short_phrase) >= len(long_phrase):
+        return False
     
-    return short_stems.issubset(long_stems)
+    # Sprawdz czy wystepuje jako cale slowo (word boundary)
+    pattern = r'\b' + re.escape(short_phrase) + r'\b'
+    return bool(re.search(pattern, long_phrase, re.IGNORECASE))
 
 
-def deduplicate_keyword_counts(
-    text: str, 
-    keywords: Dict[str, dict],
-    raw_counts: Dict[str, int] = None
-) -> Dict[str, int]:
+def get_nesting_map(keywords: List[str]) -> Dict[str, List[str]]:
     """
-    Deduplikuje liczniki fraz - odejmuje wystąpienia w dłuższych frazach.
+    Tworzy mape zagniezdzenia fraz.
     
     Args:
-        text: Tekst do analizy
-        keywords: Słownik {rid: {"keyword": "fraza", "type": "BASIC|EXTENDED", ...}}
-        raw_counts: Opcjonalne surowe liczniki (jeśli już policzone)
+        keywords: Lista fraz
     
     Returns:
-        Dict {rid: deduplicated_count}
+        Slownik gdzie klucz to fraza, wartosc to lista fraz ktore ja zawieraja
+        
+    Przyklad:
+        >>> get_nesting_map(["renta", "renta rodzinna", "renta wdowia"])
+        {
+            "renta": ["renta rodzinna", "renta wdowia"],
+            "renta rodzinna": [],
+            "renta wdowia": []
+        }
     """
-    text_normalized = normalize_text(text)
+    nesting = {kw: [] for kw in keywords}
     
-    # Zbierz wszystkie frazy z ich rid
-    phrases: List[Tuple[str, str, str]] = []  # (rid, keyword, type)
-    for rid, meta in keywords.items():
-        keyword = meta.get("keyword", "").strip()
-        kw_type = meta.get("type", "BASIC").upper()
-        if keyword:
-            phrases.append((rid, keyword, kw_type))
+    sorted_keywords = sorted(keywords, key=len)
     
-    # Posortuj od najdłuższych (wg liczby słów)
-    phrases.sort(key=lambda x: len(x[1].split()), reverse=True)
+    for i, short_kw in enumerate(sorted_keywords):
+        for long_kw in sorted_keywords[i+1:]:
+            if _is_phrase_inside(short_kw.lower(), long_kw.lower()):
+                nesting[short_kw].append(long_kw)
     
-    # Policz surowe wystąpienia
-    if raw_counts:
-        counts = dict(raw_counts)
-    else:
-        counts = {}
-        for rid, keyword, _ in phrases:
-            counts[rid] = count_phrase_raw(text_normalized, keyword)
-    
-    # Deduplikacja - dla każdej frazy odejmij wystąpienia w dłuższych
-    deduplicated = {}
-    
-    for i, (rid, keyword, _) in enumerate(phrases):
-        raw_count = counts.get(rid, 0)
-        
-        # Znajdź wszystkie dłuższe frazy, które zawierają tę frazę
-        overlap_count = 0
-        for j in range(i):  # Tylko wcześniejsze (dłuższe) frazy
-            longer_rid, longer_keyword, _ = phrases[j]
-            if is_subphrase(keyword, longer_keyword):
-                # Odejmij wystąpienia dłuższej frazy
-                overlap_count += deduplicated.get(longer_rid, counts.get(longer_rid, 0))
-        
-        # Skorygowany licznik = surowy - overlap (min 0)
-        deduplicated[rid] = max(0, raw_count - overlap_count)
-    
-    return deduplicated
+    return nesting
 
 
-def deduplicate_batch_counts(
-    text: str,
-    keywords_state: Dict[str, dict]
-) -> Dict[str, int]:
+def analyze_keyword_hierarchy(keywords: List[str]) -> Dict:
     """
-    Wrapper dla process_batch_in_firestore.
+    Analizuje hierarchie fraz i zwraca raport.
     
-    Args:
-        text: Tekst batcha
-        keywords_state: Stan keywords z Firestore
-    
-    Returns:
-        Dict {rid: deduplicated_count} gotowy do użycia w batch_counts
+    Uzyteczne do debugowania i zrozumienia struktury fraz.
     """
-    return deduplicate_keyword_counts(text, keywords_state)
+    nesting = get_nesting_map(keywords)
+    
+    nested_phrases = {k: v for k, v in nesting.items() if v}
+    independent_phrases = [k for k, v in nesting.items() if not v]
+    
+    return {
+        "total_keywords": len(keywords),
+        "nested_phrases": nested_phrases,
+        "nested_count": len(nested_phrases),
+        "independent_phrases": independent_phrases,
+        "independent_count": len(independent_phrases),
+        "warning": "Frazy zagniezdzene beda mialy skorygowane zliczenia" if nested_phrases else None
+    }
 
 
 # ============================================================================
-# PRZYKŁAD UŻYCIA
+# PRZYKLAD UZYCIA
 # ============================================================================
 if __name__ == "__main__":
     # Test
-    test_text = """
-    Renta rodzinna przysługuje członkom rodziny zmarłego. 
-    Renta wdowia to szczególny rodzaj renty rodzinnej.
-    Sama renta może być przyznana w różnych okolicznościach.
-    Prawo do renty mają osoby niezdolne do pracy.
-    Renta z tytułu niezdolności do pracy wymaga orzeczenia.
-    """
-    
-    test_keywords = {
-        "kw1": {"keyword": "renta", "type": "MAIN"},
-        "kw2": {"keyword": "renta rodzinna", "type": "BASIC"},
-        "kw3": {"keyword": "renta wdowia", "type": "BASIC"},
-        "kw4": {"keyword": "prawo do renty", "type": "EXTENDED"},
+    raw = {
+        "renta rodzinna": 5,
+        "renta": 8,
+        "rodzinna": 2
     }
     
-    print("=== TEST DEDUPLIKACJI ===")
-    print(f"Tekst: {test_text[:100]}...")
-    print()
+    print("RAW:", raw)
+    print("DEDUP:", deduplicate_keyword_counts(raw))
+    # Oczekiwany wynik:
+    # renta rodzinna: 5 (bez zmian - najdluzsza)
+    # renta: 8 - 5 = 3 (odejmujemy "renta rodzinna")
+    # rodzinna: 2 - 5 = 0 (odejmujemy "renta rodzinna", min 0)
     
-    # Surowe liczniki
-    for rid, meta in test_keywords.items():
-        raw = count_phrase_raw(test_text, meta["keyword"])
-        print(f"  {meta['keyword']}: {raw} (surowe)")
-    
-    print()
-    
-    # Po deduplikacji
-    deduped = deduplicate_keyword_counts(test_text, test_keywords)
-    for rid, meta in test_keywords.items():
-        print(f"  {meta['keyword']}: {deduped[rid]} (po deduplikacji)")
+    print("\nHIERARCHY:", analyze_keyword_hierarchy(list(raw.keys())))
