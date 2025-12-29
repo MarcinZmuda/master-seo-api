@@ -1,5 +1,5 @@
 # ================================================================
-# 🔍 FINAL REVIEW ROUTES v22.4 - FIXED ERROR HANDLING
+# 🔍 FINAL REVIEW ROUTES v24.2 - UNIFIED KEYWORD COUNTING
 # ================================================================
 
 import os
@@ -9,6 +9,15 @@ import traceback
 from flask import Blueprint, request, jsonify
 from firebase_admin import firestore
 import google.generativeai as genai
+
+# v24.2: Unified keyword counting
+try:
+    from keyword_counter import count_single_keyword, count_keywords_for_state, get_keyword_details
+    UNIFIED_COUNTER = True
+    print("[FINAL_REVIEW] ✅ Unified keyword counter loaded")
+except ImportError:
+    UNIFIED_COUNTER = False
+    print("[FINAL_REVIEW] ⚠️ keyword_counter not available, using legacy regex")
 
 final_review_routes = Blueprint("final_review_routes", __name__)
 
@@ -35,6 +44,11 @@ def detect_missing_keywords(text, keywords_state):
         underused_basic = []
         underused_extended = []
         
+        # v24.2: Unified counting
+        if UNIFIED_COUNTER:
+            # Używa hybrydowego liczenia z keyword_counter
+            counts = count_keywords_for_state(text, keywords_state)
+        
         for rid, meta in keywords_state.items():
             keyword = meta.get("keyword", "")
             if not keyword:
@@ -43,10 +57,14 @@ def detect_missing_keywords(text, keywords_state):
             kw_type = meta.get("type", "BASIC").upper()
             target_min = meta.get("target_min", 1)
             
-            try:
-                actual = len(re.findall(rf"\b{re.escape(keyword.lower())}\b", text_lower))
-            except:
-                actual = text_lower.count(keyword.lower())
+            # v24.2: Unified vs legacy counting
+            if UNIFIED_COUNTER:
+                actual = counts.get(rid, 0)
+            else:
+                try:
+                    actual = len(re.findall(rf"\b{re.escape(keyword.lower())}\b", text_lower))
+                except:
+                    actual = text_lower.count(keyword.lower())
             
             info = {
                 "keyword": keyword,
@@ -109,10 +127,14 @@ def check_main_vs_synonyms(text, main_keyword, keywords_state):
         
         text_lower = text.lower()
         
-        try:
-            main_count = len(re.findall(rf"\b{re.escape(main_keyword.lower())}\b", text_lower))
-        except:
-            main_count = text_lower.count(main_keyword.lower())
+        # v24.2: Unified counting
+        if UNIFIED_COUNTER:
+            main_count = count_single_keyword(text, main_keyword)
+        else:
+            try:
+                main_count = len(re.findall(rf"\b{re.escape(main_keyword.lower())}\b", text_lower))
+            except:
+                main_count = text_lower.count(main_keyword.lower())
         
         synonym_counts = {}
         synonym_total = 0
@@ -121,10 +143,14 @@ def check_main_vs_synonyms(text, main_keyword, keywords_state):
             if meta.get("is_synonym_of_main"):
                 kw = meta.get("keyword", "").lower()
                 if kw:
-                    try:
-                        count = len(re.findall(rf"\b{re.escape(kw)}\b", text_lower))
-                    except:
-                        count = text_lower.count(kw)
+                    # v24.2: Unified counting
+                    if UNIFIED_COUNTER:
+                        count = count_single_keyword(text, kw)
+                    else:
+                        try:
+                            count = len(re.findall(rf"\b{re.escape(kw)}\b", text_lower))
+                        except:
+                            count = text_lower.count(kw)
                     if count > 0:
                         synonym_counts[meta.get("keyword")] = count
                         synonym_total += count
@@ -564,17 +590,22 @@ Zwróć TYLKO poprawiony artykuł."""
         corrected = re.sub(r'^```(?:html|markdown)?\n?', '', corrected)
         corrected = re.sub(r'\n?```$', '', corrected)
         
-        # Verify
+        # Verify - v24.2: Unified counting
         verification = {}
         for k in keywords_to_add[:5]:
-            kw = k["keyword"].lower()
-            try:
-                before = len(re.findall(rf"\b{re.escape(kw)}\b", full_text.lower()))
-                after = len(re.findall(rf"\b{re.escape(kw)}\b", corrected.lower()))
-            except:
-                before = full_text.lower().count(kw)
-                after = corrected.lower().count(kw)
-            verification[k["keyword"]] = {"before": before, "after": after, "added": after - before}
+            kw = k["keyword"]
+            if UNIFIED_COUNTER:
+                before = count_single_keyword(full_text, kw)
+                after = count_single_keyword(corrected, kw)
+            else:
+                kw_lower = kw.lower()
+                try:
+                    before = len(re.findall(rf"\b{re.escape(kw_lower)}\b", full_text.lower()))
+                    after = len(re.findall(rf"\b{re.escape(kw_lower)}\b", corrected.lower()))
+                except:
+                    before = full_text.lower().count(kw_lower)
+                    after = corrected.lower().count(kw_lower)
+            verification[kw] = {"before": before, "after": after, "added": after - before}
         
         doc_ref = db.collection("seo_projects").document(project_id)
         doc_ref.update({
