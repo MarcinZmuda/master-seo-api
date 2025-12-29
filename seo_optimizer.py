@@ -1,3 +1,15 @@
+"""
+SEO OPTIMIZER - v25.0 BRAJEN SEO Engine
+
+KLUCZOWA ZMIANA v25.0:
+- Density obliczana z EXCLUSIVE counts (bez podwójnego liczenia zagnieżdżonych fraz)
+- actual_uses nadal używa OVERLAPPING (każda fraza liczona osobno)
+
+DLACZEGO:
+- Google NIE liczy zagnieżdżonych fraz podwójnie dla density
+- Ale dla trackowania każdej frazy chcemy wiedzieć ile razy występuje
+"""
+
 import os
 import re
 import json
@@ -10,7 +22,7 @@ from rich import print
 
 # v24.2: Unified keyword counting
 try:
-    from keyword_counter import count_single_keyword, count_multiple_keywords, get_keyword_density
+    from keyword_counter import count_single_keyword, count_multiple_keywords, get_keyword_density, count_keywords
     UNIFIED_COUNTER = True
     print("[SEO_OPT] ✅ Unified keyword counter loaded")
 except ImportError:
@@ -58,10 +70,7 @@ except OSError:
 # 🛡️ HELPER: Safe Gemini Call (Anti-Crash)
 # ================================================================
 def safe_generate_content(model, prompt: str, max_retries=1):
-    """
-    Bezpieczne wywołanie Gemini z obsługą błędów długości.
-    Jeśli prompt jest za długi, przycina go i próbuje ponownie.
-    """
+    """Bezpieczne wywołanie Gemini z obsługą błędów długości."""
     try:
         return model.generate_content(prompt)
     except Exception as e:
@@ -69,11 +78,8 @@ def safe_generate_content(model, prompt: str, max_retries=1):
         if "too large" in error_msg or "exhausted" in error_msg or "400" in error_msg:
             print(f"[SEO_OPT] ⚠️ Gemini Payload too large! Truncating input... Error: {e}")
             if max_retries > 0:
-                # Drastyczne cięcie - bierzemy ostatnie 15k znaków lub pierwsze 15k
                 safe_prompt = prompt[:15000] + "\n\n[TRUNCATED FOR SAFETY]"
                 return safe_generate_content(model, safe_prompt, max_retries - 1)
-        
-        # Jeśli to inny błąd lub retries się skończyły
         print(f"[SEO_OPT] ❌ Gemini Critical Error: {e}")
         raise e
 
@@ -84,7 +90,6 @@ def extract_keywords(text: str, top_n: int = 15) -> List[str]:
     """Ekstrahuje najczęściej występujące rzeczowniki i frazy."""
     if not text.strip():
         return []
-
     doc = nlp(text.lower())
     words = [t.lemma_ for t in doc if t.pos_ in {"NOUN", "PROPN"} and len(t.text) > 2]
     freq = Counter(words)
@@ -99,11 +104,7 @@ def assess_readability(text: str) -> Dict[str, float]:
         score = textstat.flesch_reading_ease(text)
         grade = textstat.flesch_kincaid_grade(text)
         smog = textstat.smog_index(text)
-        return {
-            "readability_score": score, 
-            "grade_level": grade,
-            "smog": smog
-        }
+        return {"readability_score": score, "grade_level": grade, "smog": smog}
     except Exception as e:
         print(f"[SEO_OPT] ⚠️ Readability error: {e}")
         return {"readability_score": 0, "grade_level": 0, "smog": 0}
@@ -115,7 +116,6 @@ def generate_semantic_outline(topic: str, keywords: List[str]) -> str:
     """Tworzy szkic SEO na podstawie tematu i słów kluczowych."""
     if not GEMINI_API_KEY:
         return "Brak API KEY – tryb offline."
-
     try:
         model = genai.GenerativeModel("gemini-2.5-flash")
         prompt = f"""
@@ -123,7 +123,6 @@ def generate_semantic_outline(topic: str, keywords: List[str]) -> str:
         "{topic}".
         Wykorzystaj możliwie dużo z tych fraz kluczowych:
         {', '.join(keywords)}
-
         Format:
         - H2: ...
         - H3: ...
@@ -139,7 +138,6 @@ def generate_semantic_outline(topic: str, keywords: List[str]) -> str:
 # ================================================================
 def validate_batch_keywords(text: str, required_keywords: List[str]) -> Dict[str, int]:
     """Sprawdza, ile słów kluczowych z listy występuje w tekście."""
-    # v24.2: Unified counting
     if UNIFIED_COUNTER:
         return count_multiple_keywords(text, required_keywords)
     else:
@@ -156,18 +154,14 @@ def optimize_text(text: str) -> Dict[str, any]:
     """Wykonuje kompleksową optymalizację SEO tekstu."""
     if not text.strip():
         return {"optimized_text": "", "readability_score": 0, "keywords_found": []}
-
     keywords = extract_keywords(text)
     readability = assess_readability(text)
-
     optimized_text = text
     try:
-        # Dodaj przecinki, popraw kapitalizację (prosta heurystyka)
         optimized_text = re.sub(r"\s+", " ", optimized_text).strip()
         optimized_text = optimized_text[0].upper() + optimized_text[1:]
     except Exception as e:
         print(f"[SEO_OPT] ⚠️ Text cleanup failed: {e}")
-
     return {
         "optimized_text": optimized_text,
         "keywords_found": keywords,
@@ -182,17 +176,14 @@ def ai_validate_text(text: str, topic: str = "") -> Dict[str, any]:
     """Używa Gemini do walidacji SEO tekstu pod kątem kompletności."""
     if not GEMINI_API_KEY:
         return {"status": "skipped", "reason": "Brak klucza Gemini"}
-
     try:
         model = genai.GenerativeModel("gemini-2.5-flash")
         prompt = f"""
         Oceń, czy poniższy tekst dobrze pokrywa temat "{topic}".
         Zwróć ocenę od 0 do 100 i listę brakujących elementów.
-
         Tekst:
         {text[:25000]} 
         """
-        # Używamy safe_generate_content zamiast bezpośredniego wywołania
         response = safe_generate_content(model, prompt)
         return {"status": "ok", "validation_result": response.text}
     except Exception as e:
@@ -209,9 +200,9 @@ def enrich_with_semantics(project_data: dict, text: str) -> dict:
         outline = generate_semantic_outline(project_data.get("topic", ""), keywords)
         return {
             **project_data,
-            "semantic_enrichment": {
-                "keywords": keywords,
-                "outline": outline,
+            "semantic_data": {
+                "extracted_keywords": keywords,
+                "suggested_outline": outline,
             },
         }
     except Exception as e:
@@ -219,53 +210,54 @@ def enrich_with_semantics(project_data: dict, text: str) -> dict:
         return project_data
 
 # ================================================================
-# 🆕 Funkcja: Analiza rytmu akapitów (Essential for S1/S2)
+# 🆕 Funkcja: Analiza rytmu akapitów
 # ================================================================
 def detect_paragraph_rhythm(text: str) -> str:
-    """
-    Analizuje strukturę akapitów w tekście.
-    Zwraca prosty opis rytmu (np. 'Dynamiczny', 'Monotonny', 'Zbyt długie bloki').
-    """
+    """Analizuje strukturę akapitów w tekście."""
     if not text:
         return "Brak tekstu"
-
     paragraphs = [p.strip() for p in text.split('\n') if p.strip()]
     if not paragraphs:
         return "Brak akapitów"
-
-    # Liczba słów w każdym akapicie
     lengths = [len(p.split()) for p in paragraphs]
-    
     if not lengths:
         return "Pusty tekst"
-
     avg_len = sum(lengths) / len(lengths)
     max_len = max(lengths)
-
-    # Prosta logika oceny rytmu SEO
     if max_len > 300:
         return "🚨 Zbyt długie bloki tekstu (SEO Warning)"
-    
     if avg_len < 20:
         return "Dynamiczny (krótkie akapity)"
-    
     if avg_len > 80:
         return "Ciężki / Akademicki"
-    
-    # Sprawdzenie wariancji (czy akapity są różnej długości)
     variance = max(lengths) - min(lengths)
     if variance < 10 and len(paragraphs) > 3:
         return "Monotonny (powtarzalna długość)"
-
     return "Zbalansowany"
 
 # ================================================================
-# 🧩 Funkcja: analiza gęstości słów kluczowych
+# v25.0: NAPRAWIONE obliczanie gęstości słów kluczowych
 # ================================================================
 def calculate_keyword_density(text: str, keywords_state: dict) -> float:
     """
-    Oblicza gęstość słów kluczowych w tekście.
-    Zwraca procent (0-100).
+    v25.0: Używa EXCLUSIVE counts żeby uniknąć podwójnego liczenia.
+    
+    PROBLEM (przed v25.0):
+    - "bezdech senny" = 5x w tekście
+    - "bezdech" = 5x (ale to te same wystąpienia!)
+    - Suma overlapping: 10 → zawyżona density 9.9%
+    
+    ROZWIĄZANIE (v25.0):
+    - Używa exclusive counts (longest-match-first)
+    - "bezdech senny" = 5x (konsumuje tokeny)
+    - "bezdech" = 0x (wszystkie już policzone w dłuższej frazie)
+    - Suma exclusive: 5 → poprawna density ~1.3%
+    
+    UWAGA: actual_uses nadal używa OVERLAPPING (w firestore_tracker_routes.py)
+    żeby każda fraza miała swoje własne zliczenie.
+    
+    Returns:
+        Density jako procent (0-100)
     """
     if not text or not keywords_state:
         return 0.0
@@ -274,119 +266,129 @@ def calculate_keyword_density(text: str, keywords_state: dict) -> float:
     if total_words == 0:
         return 0.0
     
-    # v24.2: Unified counting
+    # v25.0: Unified counting z EXCLUSIVE (bez duplikatów!)
     if UNIFIED_COUNTER:
         keywords = [meta.get("keyword", "") for meta in keywords_state.values() if meta.get("keyword")]
-        keyword_counts = count_multiple_keywords(text, keywords)
-        keyword_count = sum(keyword_counts.values())
+        
+        # Użyj count_keywords z exclusive zamiast overlapping
+        result = count_keywords(text, keywords, return_per_segment=False, return_paragraph_stuffing=False)
+        exclusive_counts = result.get("exclusive", {})
+        
+        # Policz tokeny (każda fraza * liczba słów w frazie)
+        keyword_tokens = 0
+        for kw in keywords:
+            kw_clean = kw.strip()
+            if not kw_clean:
+                continue
+            count = exclusive_counts.get(kw_clean, 0)
+            kw_words = len(kw_clean.split())
+            keyword_tokens += count * kw_words
     else:
+        # LEGACY FALLBACK - z deduplikacją pozycji
         text_lower = text.lower()
-        keyword_count = 0
-        for rid, meta in keywords_state.items():
-            keyword = meta.get("keyword", "").lower()
-            if keyword:
-                keyword_count += len(re.findall(rf"\b{re.escape(keyword)}\b", text_lower))
+        keyword_tokens = 0
+        
+        # Sortuj od najdłuższych żeby najpierw policzyć dłuższe frazy
+        sorted_keywords = sorted(
+            [meta.get("keyword", "") for meta in keywords_state.values() if meta.get("keyword")],
+            key=len,
+            reverse=True
+        )
+        
+        counted_positions = set()  # Śledź które pozycje już policzone
+        
+        for keyword in sorted_keywords:
+            if not keyword:
+                continue
+            keyword_lower = keyword.lower()
+            kw_words = len(keyword.split())
+            
+            # Znajdź wszystkie wystąpienia
+            for match in re.finditer(rf"\b{re.escape(keyword_lower)}\b", text_lower):
+                start, end = match.start(), match.end()
+                
+                # Sprawdź czy ta pozycja już nie była policzona przez dłuższą frazę
+                position_range = set(range(start, end))
+                if not position_range.intersection(counted_positions):
+                    keyword_tokens += kw_words
+                    counted_positions.update(position_range)
     
-    density = (keyword_count / total_words) * 100
+    density = (keyword_tokens / total_words) * 100
     return round(density, 2)
 
+
 # ================================================================
-# 🧩 Funkcja: Semantic Keyword Coverage (obok n-gramów)
+# 🧩 Funkcja: Semantic Keyword Coverage
 # ================================================================
 def semantic_keyword_coverage(text: str, keywords_state: dict) -> dict:
-    """
-    Analizuje pokrycie słów kluczowych semantycznie (obok count_robust).
-    Zwraca dict z semantic similarity scores dla każdego keyword.
-    """
+    """Analizuje pokrycie słów kluczowych semantycznie."""
     if not SEMANTIC_ENABLED or not keywords_state:
         return {"semantic_enabled": False, "coverage": {}}
     
     try:
-        # Embedding całego tekstu
         text_embedding = semantic_model.encode(text)
-        
         coverage = {}
         for rid, meta in keywords_state.items():
             keyword = meta.get("keyword", "")
             if not keyword:
                 continue
-            
-            # Embedding słowa kluczowego
             keyword_embedding = semantic_model.encode(keyword)
-            
-            # Cosine similarity
-            similarity = cosine_similarity(
-                [text_embedding],
-                [keyword_embedding]
-            )[0][0]
-            
+            similarity = cosine_similarity([text_embedding], [keyword_embedding])[0][0]
             coverage[keyword] = {
                 "semantic_similarity": round(float(similarity), 3),
                 "status": "COVERED" if similarity > 0.50 else "WEAK",
                 "actual_uses": meta.get("actual_uses", 0),
                 "type": meta.get("type", "BASIC")
             }
-        
         return {
             "semantic_enabled": True,
             "coverage": coverage,
             "avg_similarity": round(
-                sum(c["semantic_similarity"] for c in coverage.values()) / len(coverage),
-                3
+                sum(c["semantic_similarity"] for c in coverage.values()) / len(coverage), 3
             ) if coverage else 0.0
         }
-        
     except Exception as e:
         print(f"[SEO_OPT] ⚠️ Semantic coverage error: {e}")
         return {"semantic_enabled": False, "error": str(e), "coverage": {}}
 
+
 # ================================================================
-# 🧩 Backward Compatibility Layer – unified_prevalidation()
+# 🧩 unified_prevalidation() - główna funkcja walidacji
 # ================================================================
 def unified_prevalidation(text: str, keywords_state: dict = None) -> dict:
     """
-    POPRAWIONA implementacja unified_prevalidation – zgodna z v19.x API.
-    + NOWE: Semantic keyword coverage analysis
+    v25.0: Wykonuje wstępną walidację batcha SEO.
     
-    Wykonuje wstępną walidację i optymalizację batcha SEO przed analizą w Firestore.
-    
-    Args:
-        text: Tekst do walidacji
-        keywords_state: Słownik ze słowami kluczowymi (opcjonalny dla backward compatibility)
-    
-    Returns:
-        Dict z wynikami walidacji
+    WAŻNE: Density obliczana z EXCLUSIVE (bez duplikatów zagnieżdżonych fraz).
     """
     try:
-        # Podstawowa optymalizacja tekstu
         result = optimize_text(text)
-        
-        # Wywołujemy funkcję rytmu
         rhythm = detect_paragraph_rhythm(text)
-        
-        # Ocena czytelności
         readability = assess_readability(text)
         
-        # Obliczenie gęstości słów kluczowych (jeśli podano)
+        # v25.0: EXCLUSIVE density
         density = 0.0
         if keywords_state:
             density = calculate_keyword_density(text, keywords_state)
         
-        # ⭐ NOWE: Semantic coverage analysis
+        # Semantic coverage
         semantic_coverage = {}
         if keywords_state and SEMANTIC_ENABLED:
             semantic_coverage = semantic_keyword_coverage(text, keywords_state)
         
-        # Sprawdzenie ostrzeżeń
+        # Warnings
         warnings = []
         if "Warning" in rhythm or "🚨" in rhythm:
             warnings.append(rhythm)
         
-        # Ostrzeżenie o zbyt wysokiej gęstości
-        if density > 5.0:
-            warnings.append(f"⚠️ Zbyt wysoka gęstość słów kluczowych: {density}%")
+        # v25.0: Nowe progi density
+        if density > 3.0:
+            warnings.append(f"🔴 KEYWORD STUFFING: {density:.1f}% (max 3%)")
+        elif density > 2.5:
+            warnings.append(f"🟠 Density za wysoka: {density:.1f}% (zalecane < 2%)")
+        elif density > 2.0:
+            warnings.append(f"🟡 Density wysoka: {density:.1f}% (optymalne: 0.5-1.5%)")
         
-        # Mock semantic scores (dla backward compatibility)
         semantic_score = 0.85
         transition_score = 0.80
         
@@ -399,7 +401,7 @@ def unified_prevalidation(text: str, keywords_state: dict = None) -> dict:
             "readability": readability.get("readability_score", 0),
             "optimized_text": result.get("optimized_text", text),
             "warnings": warnings,
-            "semantic_coverage": semantic_coverage,  # ⭐ NOWE
+            "semantic_coverage": semantic_coverage,
             "meta": {
                 "readability_score": readability.get("readability_score"),
                 "grade_level": readability.get("grade_level"),
@@ -419,5 +421,5 @@ def unified_prevalidation(text: str, keywords_state: dict = None) -> dict:
             "error": str(e),
             "warnings": [str(e)],
             "optimized_text": text,
-            "semantic_coverage": {"semantic_enabled": False}  # ⭐ NOWE
+            "semantic_coverage": {"semantic_enabled": False}
         }
