@@ -1,10 +1,12 @@
 """
-SEO Content Tracker Routes - v23.9.2 BRAJEN SEO Engine
+SEO Content Tracker Routes - v24.0 BRAJEN SEO Engine
 + Minimal approve_batch response (~500B instead of 220KB)
 + Morfeusz2 lemmatization (with spaCy fallback)
 + Burstiness validation (3.2-3.8)
 + Transition words validation (25-50%)
-+ Hierarchical keyword deduplication (v23.9.2)
++ v24.0: Per-batch keyword validation
++ v24.0: Fixed density limit (3.0% from seo_rules.json)
++ v24.0: Rozróżnienie EXCEEDED TOTAL vs per-batch warnings
 """
 
 from flask import Blueprint, request, jsonify
@@ -18,9 +20,18 @@ from google.api_core.exceptions import InvalidArgument
 import google.generativeai as genai
 import os
 
-# v23.9: Współdzielony model spaCy (oszczędność RAM)
-from shared_nlp import get_nlp
-nlp = get_nlp()
+# v24.0: Współdzielony model spaCy (oszczędność RAM)
+try:
+    from shared_nlp import get_nlp
+    nlp = get_nlp()
+except ImportError:
+    import spacy
+    try:
+        nlp = spacy.load("pl_core_news_md")
+    except OSError:
+        from spacy.cli import download
+        download("pl_core_news_md")
+        nlp = spacy.load("pl_core_news_md")
 
 # v23.8: Import polish_lemmatizer (Morfeusz2 + spaCy fallback)
 try:
@@ -33,33 +44,28 @@ except ImportError as e:
     LEMMATIZER_BACKEND = "PREFIX"
     print(f"[TRACKER] Lemmatizer not available, using prefix matching: {e}")
 
-# Semantic analyzer
+# v24.0: Hierarchical keyword deduplication
 try:
-    from semantic_analyzer import semantic_validation, find_semantic_gaps
-    SEMANTIC_ANALYZER_ENABLED = True
-    print("[TRACKER] Semantic Analyzer loaded")
-except ImportError as e:
-    SEMANTIC_ANALYZER_ENABLED = False
-    print(f"[TRACKER] Semantic Analyzer not available: {e}")
-
-# Keyword limiter
-try:
-    from keyword_limiter import validate_keyword_limits, check_header_variation
-    KEYWORD_LIMITER_ENABLED = True
-    print("[TRACKER] Keyword Limiter loaded")
-except ImportError as e:
-    KEYWORD_LIMITER_ENABLED = False
-    print(f"[TRACKER] Keyword Limiter not available: {e}")
-# v23.9.2: Hierarchical keyword deduplication
-try:
-    from hierarchical_keyword_dedup import deduplicate_batch_counts
+    from hierarchical_keyword_dedup import deduplicate_keyword_counts
     DEDUP_ENABLED = True
-    print("[TRACKER] ✅ Hierarchical Keyword Deduplication loaded")
+    print("[TRACKER] Hierarchical keyword dedup loaded")
 except ImportError as e:
     DEDUP_ENABLED = False
-    print(f"[TRACKER] ⚠️ Deduplication not available: {e}")
+    print(f"[TRACKER] Hierarchical dedup not available: {e}")
+
+# v24.1: Semantic analyzer - wykrywa semantyczne pokrycie fraz
+try:
+    from semantic_analyzer import semantic_validation, find_semantic_gaps
+    SEMANTIC_ENABLED = True
+    print("[TRACKER] Semantic Analyzer loaded")
+except ImportError as e:
+    SEMANTIC_ENABLED = False
+    print(f"[TRACKER] Semantic Analyzer not available: {e}")
 
 tracker_routes = Blueprint("tracker_routes", __name__)
+
+# v24.0: Density limit from seo_rules.json (was hardcoded 1.5%)
+DENSITY_MAX = 3.0
 
 # --- Gemini Config ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -173,8 +179,9 @@ def validate_metrics(burstiness: float, transition_data: dict, density: float) -
     elif burstiness > 3.8:
         warnings.append(f"⚠️ Burstiness za wysoki: {burstiness} (max 3.8)")
     
-    if density > 1.5:
-        warnings.append(f"⚠️ Keyword density za wysoka: {density}% (max 1.5%)")
+    # v24.0: Fixed density limit (was 1.5%, now 3.0% from seo_rules.json)
+    if density > DENSITY_MAX:
+        warnings.append(f"⚠️ Keyword density za wysoka: {density}% (max {DENSITY_MAX}%)")
     
     warnings.extend(transition_data.get("warnings", []))
     return warnings
@@ -197,24 +204,92 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
     clean_text_original = re.sub(r"<[^>]+>", " ", batch_text)
     clean_text_original = re.sub(r"\s+", " ", clean_text_original)
     
-# Count keywords in batch - v23.9.2: z deduplikacją hierarchiczną
+    # Count keywords in batch
+    batch_counts = {}
+    for rid, meta in keywords_state.items():
+        keyword = meta.get("keyword", "").strip()
+        if not keyword:
+            batch_counts[rid] = 0
+            continue
+        batch_counts[rid] = count_all_forms(clean_text_original, keyword)
+    
+    # v24.0: Deduplikacja fraz zagnieżdżonych
+    # "renta" w "renta rodzinna" - odejmij żeby nie liczyć podwójnie
     if DEDUP_ENABLED:
-        # "renta rodzinna" nie liczy się podwójnie jako "renta"
-        batch_counts = deduplicate_batch_counts(clean_text_original, keywords_state)
-    else:
-        # Fallback - stara metoda bez deduplikacji
-        batch_counts = {}
+        raw_counts = {meta.get("keyword", ""): batch_counts.get(rid, 0) 
+                      for rid, meta in keywords_state.items() if meta.get("keyword")}
+        adjusted = deduplicate_keyword_counts(raw_counts)
+        # Przepisz adjusted z powrotem do batch_counts
         for rid, meta in keywords_state.items():
-            keyword = meta.get("keyword", "").strip()
-            if not keyword:
-                batch_counts[rid] = 0
-                continue
-            batch_counts[rid] = count_all_forms(clean_text_original, keyword)
-    # Check exceeded
+            kw = meta.get("keyword", "")
+            if kw in adjusted:
+                batch_counts[rid] = adjusted[kw]
+    
+    # v24.0: Walidacja pierwszego zdania (dla INTRO batcha)
+    batches_done = len(project_data.get("batches", []))
+    main_keyword = project_data.get("main_keyword", project_data.get("topic", ""))
+    first_sentence_warning = None
+    
+    if batches_done == 0 and main_keyword:  # To jest INTRO
+        first_sentence = batch_text.split('.')[0] if batch_text else ""
+        if main_keyword.lower() not in first_sentence.lower():
+            first_sentence_warning = f"⚠️ Pierwsze zdanie nie zawiera głównej frazy '{main_keyword}' - kluczowe dla featured snippet!"
+    
+    # v24.0: Wykrywanie keyword stuffing per paragraf
+    stuffing_warnings = []
+    paragraphs = batch_text.split('\n\n')
+    for rid, meta in keywords_state.items():
+        if meta.get("type", "BASIC").upper() not in ["BASIC", "MAIN"]:
+            continue
+        keyword = meta.get("keyword", "").lower()
+        if not keyword:
+            continue
+        for i, para in enumerate(paragraphs):
+            para_lower = para.lower()
+            count_in_para = para_lower.count(keyword)
+            if count_in_para > 3:
+                stuffing_warnings.append(
+                    f"⚠️ '{meta.get('keyword')}' występuje {count_in_para}x w jednym akapicie - rozłóż równomiernie"
+                )
+                break  # Jeden warning per keyword wystarczy
+    
+    # v24.0: Pobierz info o batchach do walidacji per-batch
+    total_batches = project_data.get("total_planned_batches", 4)
+    remaining_batches = max(1, total_batches - batches_done)
+    
+    # v24.0: Per-batch warnings (informacyjne, nie blokują)
+    per_batch_warnings = []
+    for rid, batch_count in batch_counts.items():
+        if batch_count == 0:
+            continue
+        meta = keywords_state[rid]
+        kw_type = meta.get("type", "BASIC").upper()
+        if kw_type not in ["BASIC", "MAIN"]:
+            continue
+        
+        keyword = meta.get("keyword", "")
+        target_max = meta.get("target_max", 999)
+        actual = meta.get("actual_uses", 0)
+        remaining_to_max = max(0, target_max - actual)
+        
+        # Oblicz suggested per batch
+        if remaining_to_max > 0 and remaining_batches > 0:
+            suggested = math.ceil(remaining_to_max / remaining_batches)
+        else:
+            suggested = 0
+        
+        # Warning jeśli batch_count > suggested * 1.5 (ale nie blokuje)
+        if suggested > 0 and batch_count > suggested * 1.5:
+            per_batch_warnings.append(
+                f"ℹ️ '{keyword}': użyto {batch_count}x w batchu (sugerowano ~{suggested}x). "
+                f"Zostało {max(0, remaining_to_max - batch_count)}/{target_max} dla artykułu."
+            )
+    
+    # Check EXCEEDED TOTAL (całkowity limit artykułu - to jest KRYTYCZNE)
     exceeded_keywords = []
     for rid, batch_count in batch_counts.items():
         meta = keywords_state[rid]
-        if meta.get("type", "BASIC").upper() != "BASIC":
+        if meta.get("type", "BASIC").upper() not in ["BASIC", "MAIN"]:
             continue
         current = meta.get("actual_uses", 0)
         target_max = meta.get("target_max", 999)
@@ -258,9 +333,32 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
     semantic_score = precheck.get("semantic_score", 1.0)
     density = precheck.get("density", 0.0)
     
-    # Exceeded warnings
+    # v24.1: Semantic validation - czy frazy są semantycznie pokryte
+    semantic_gaps = []
+    if SEMANTIC_ENABLED:
+        try:
+            sem_result = semantic_validation(batch_text, keywords_state, min_coverage=0.4)
+            if sem_result.get("semantic_enabled"):
+                semantic_gaps = sem_result.get("gaps", [])
+                overall_coverage = sem_result.get("overall_coverage", 1.0)
+                if overall_coverage < 0.4:
+                    warnings.append(f"⚠️ Semantyczne pokrycie {overall_coverage:.0%} < 40% - rozwiń tematy: {', '.join(semantic_gaps[:3])}")
+                elif semantic_gaps:
+                    # Info, nie warning - są luki ale ogólne pokrycie OK
+                    pass
+        except Exception as e:
+            print(f"[TRACKER] Semantic validation error: {e}")
+    
+    # v24.0: Walidacja pierwszego zdania (WAŻNE dla SEO)
+    if first_sentence_warning:
+        warnings.insert(0, first_sentence_warning)  # Na początku - ważne!
+    
+    # v24.0: Keyword stuffing warnings
+    warnings.extend(stuffing_warnings)
+    
+    # v24.0: EXCEEDED TOTAL warnings (KRYTYCZNE - przekroczono limit całkowity)
     for ek in exceeded_keywords:
-        warnings.append(f"⚠️ EXCEEDED: '{ek['keyword']}' będzie {ek['would_be']}x (max {ek['target_max']}x)")
+        warnings.append(f"❌ EXCEEDED TOTAL: '{ek['keyword']}' = {ek['would_be']}x (limit {ek['target_max']}x dla CAŁEGO artykułu)")
     
     # Metrics
     burstiness = calculate_burstiness(batch_text)
@@ -276,6 +374,12 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         status = "WARN"
     if forced:
         status = "FORCED"
+    
+    # v24.0: Jeśli tylko per_batch warnings (nie EXCEEDED TOTAL) - status APPROVED
+    has_critical = any("EXCEEDED TOTAL" in w for w in warnings)
+    has_density_issue = any("density" in w.lower() and density > DENSITY_MAX for w in warnings)
+    if not has_critical and not has_density_issue and not exceeded_keywords:
+        status = "APPROVED"
 
     # Save batch
     batch_entry = {
@@ -284,6 +388,9 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         "timestamp": datetime.datetime.now(datetime.timezone.utc),
         "burstiness": burstiness,
         "transition_ratio": transition_data.get("ratio", 0),
+        "batch_counts": batch_counts,  # v24.0: zapisuj counts dla debug
+        "per_batch_info": per_batch_warnings,  # v24.0: info per batch
+        "semantic_gaps": semantic_gaps,  # v24.1: luki semantyczne
         "language_audit": {
             "semantic_score": semantic_score,
             "density": density,
@@ -307,6 +414,8 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         "density": density,
         "burstiness": burstiness,
         "warnings": warnings,
+        "per_batch_warnings": per_batch_warnings,  # v24.0: osobno
+        "semantic_gaps": semantic_gaps,  # v24.1: frazy bez pokrycia
         "exceeded_keywords": exceeded_keywords,
         "batch_counts": batch_counts,
         "status_code": 200
@@ -314,26 +423,31 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
 
 
 # ============================================================================
-# 4. MINIMAL RESPONSE (v23.9 - ~500B instead of 220KB)
+# 4. MINIMAL RESPONSE (v24.0 - rozróżnia EXCEEDED TOTAL vs per-batch)
 # ============================================================================
 def _minimal_batch_response(result: dict, project_data: dict = None) -> dict:
     """
-    Minimalna odpowiedź po zapisie batcha.
-    GPT potrzebuje tylko: saved, status, problems, next
-    Pełne dane są w pre_batch_info i editorial_review.
+    v24.0: Rozróżnia EXCEEDED TOTAL (blokuje) vs per-batch warnings (info).
     """
-    problems = []
+    problems = []  # Krytyczne - wymagają reakcji
+    info = []  # Informacyjne - można zignorować
     
-    # Exceeded keywords - critical
+    # EXCEEDED TOTAL - KRYTYCZNE
     exceeded = result.get("exceeded_keywords", [])
     for ex in exceeded:
-        problems.append(f"⚠️ '{ex['keyword']}' przekroczyła limit ({ex['would_be']}/{ex['target_max']})")
+        problems.append(f"❌ '{ex['keyword']}' PRZEKROCZYŁA CAŁKOWITY LIMIT ({ex['would_be']}/{ex['target_max']})")
     
-    # Important warnings
+    # Per-batch warnings - tylko INFO
+    for w in result.get("per_batch_warnings", []):
+        info.append(w)
+    
+    # Inne ważne warnings (density)
     for w in result.get("warnings", []):
-        if "EXCEEDED" in str(w) or "density" in str(w).lower():
+        if "EXCEEDED TOTAL" in str(w):
             if w not in problems:
                 problems.append(w)
+        elif "density" in str(w).lower():
+            problems.append(w)
     
     # Status
     status = "OK"
@@ -341,6 +455,9 @@ def _minimal_batch_response(result: dict, project_data: dict = None) -> dict:
         status = "WARN"
     if result.get("status") == "FORCED":
         status = "FORCED"
+    # v24.0: Jeśli status APPROVED z process_batch - zachowaj
+    if result.get("status") == "APPROVED":
+        status = "OK"
     
     # Batch info
     batch_number = 1
@@ -355,7 +472,7 @@ def _minimal_batch_response(result: dict, project_data: dict = None) -> dict:
     if exceeded:
         next_action = {
             "action": "ask_user",
-            "question": "Przekroczono limit fraz. A) Przepisać batch B) Kontynuować?"
+            "question": f"Przekroczono CAŁKOWITY limit dla {len(exceeded)} fraz. A) Przepisać batch B) Kontynuować (forced)?"
         }
     elif remaining_batches > 0:
         next_action = {
@@ -368,14 +485,21 @@ def _minimal_batch_response(result: dict, project_data: dict = None) -> dict:
             "call": "POST /editorial_review → oceń całość"
         }
     
-    return {
+    response = {
         "saved": True,
         "batch": batch_number,
         "status": status,
-        "problems": problems if problems else None,
         "next": next_action,
         "remaining_batches": remaining_batches
     }
+    
+    # v24.0: Osobno problems (krytyczne) i info (per-batch)
+    if problems:
+        response["problems"] = problems
+    if info:
+        response["info"] = info  # Per-batch to tylko info
+    
+    return response
 
 
 # ============================================================================
