@@ -208,17 +208,26 @@ def validate_h2_keywords(text, main_keyword):
         
         main_lower = main_keyword.lower()
         h2_with_main = sum(1 for h2 in h2_list if main_lower in h2.lower())
-        coverage = h2_with_main / len(h2_list) if h2_list else 1.0
         
-        issues = [{"h2": h2, "suggestion": f"Dodaj '{main_keyword}'"} 
-                  for h2 in h2_list if main_lower not in h2.lower()]
+        # v26.1: Max 1 H2 z frazą główną (unikamy przeoptymalizowania)
+        # Stara reguła: coverage >= 0.2 (20% H2 z keyword)
+        # Nowa reguła: max 1 H2 z keyword, reszta synonimy
+        overoptimized = h2_with_main > 1
+        
+        issues = []
+        if overoptimized:
+            issues.append({
+                "issue": f"Za dużo H2 z frazą główną ({h2_with_main})",
+                "suggestion": f"Max 1 H2 powinno zawierać '{main_keyword}'. Reszta: synonimy lub naturalne tytuły."
+            })
         
         return {
-            "valid": coverage >= 0.2,
+            "valid": not overoptimized,  # v26.1: valid gdy max 1 H2 z keyword
             "h2_count": len(h2_list),
             "h2_with_main": h2_with_main,
-            "coverage": round(coverage, 2),
-            "issues": issues[:3]
+            "max_recommended": 1,
+            "overoptimized": overoptimized,
+            "issues": issues
         }
     except Exception as e:
         print(f"[FINAL_REVIEW] ❌ validate_h2_keywords error: {e}")
