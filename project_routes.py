@@ -1,5 +1,10 @@
 """
-PROJECT ROUTES - v25.0 BRAJEN SEO Engine
+PROJECT ROUTES - v26.1 BRAJEN SEO Engine
+
+ZMIANY v26.1:
+- Best-of-N batch selection (generuje 3 wersje, wybiera najlepszą)
+- Intro excluded from density calculation
+- Polish quality validation integrated
 
 ZMIANY v25.0:
 - BASIC keywords: twarde min 1x, target z inputu użytkownika
@@ -20,6 +25,15 @@ from firebase_admin import firestore
 from firestore_tracker_routes import process_batch_in_firestore
 import google.generativeai as genai
 from seo_optimizer import unified_prevalidation
+
+# v26.1: Best-of-N batch selection
+try:
+    from batch_best_of_n import select_best_batch, BestOfNConfig
+    BEST_OF_N_ENABLED = True
+    print("[PROJECT] Best-of-N module loaded")
+except ImportError as e:
+    BEST_OF_N_ENABLED = False
+    print(f"[PROJECT] Best-of-N not available: {e}")
 
 # v24.0: Batch planner integration
 try:
@@ -1157,6 +1171,217 @@ def preview_batch(project_id):
             "density": {"value": density, "status": density_status, "message": density_msg}
         },
         "version": "v25.0"
+    }), 200
+
+
+# ================================================================
+# v26.1: BEST-OF-N BATCH GENERATION
+# ================================================================
+@project_routes.post("/api/project/<project_id>/generate_best_batch")
+def generate_best_batch(project_id):
+    """
+    v26.1: Generuje N wersji batcha i zwraca najlepszą.
+    
+    Request body:
+    {
+        "prompt": "Treść promptu do generowania batcha",
+        "n_candidates": 3,  // opcjonalne, default 3
+        "min_score": 60     // opcjonalne, minimalny akceptowalny score
+    }
+    
+    Response:
+    {
+        "status": "OK" | "WARN",
+        "selected_content": "...",
+        "selected_score": 85.2,
+        "selected_variant": 2,
+        "all_candidates": [...],
+        "meets_minimum": true,
+        "selection_reason": "..."
+    }
+    """
+    if not BEST_OF_N_ENABLED:
+        return jsonify({
+            "error": "Best-of-N module not available",
+            "fallback": "Use standard preview_batch endpoint"
+        }), 501
+    
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No JSON data provided"}), 400
+    
+    prompt = data.get("prompt")
+    if not prompt:
+        return jsonify({"error": "Field 'prompt' required"}), 400
+    
+    n_candidates = data.get("n_candidates", 3)
+    min_score = data.get("min_score", 60)
+    
+    # Pobierz dane projektu
+    db = firestore.client()
+    doc = db.collection("seo_projects").document(project_id).get()
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+    
+    project_data = doc.to_dict()
+    keywords_state = project_data.get("keywords_state", {})
+    main_keyword = project_data.get("main_keyword", project_data.get("topic", ""))
+    
+    # Wywołaj Best-of-N selection
+    try:
+        result = select_best_batch(
+            base_prompt=prompt,
+            keywords_state=keywords_state,
+            main_keyword=main_keyword,
+            n_candidates=n_candidates
+        )
+    except Exception as e:
+        return jsonify({
+            "error": f"Generation failed: {str(e)}",
+            "status": "ERROR"
+        }), 500
+    
+    if result.get("error"):
+        return jsonify({
+            "error": result.get("error"),
+            "status": "ERROR"
+        }), 500
+    
+    # Określ status
+    meets_minimum = result.get("meets_minimum", False)
+    status = "OK" if meets_minimum else "WARN"
+    
+    return jsonify({
+        "status": status,
+        "selected_content": result.get("selected_content"),
+        "selected_score": result.get("selected_score"),
+        "selected_variant": result.get("selected_variant"),
+        "all_candidates": result.get("all_candidates", []),
+        "meets_minimum": meets_minimum,
+        "selection_reason": result.get("selection_reason"),
+        "component_scores": result.get("component_scores", {}),
+        "issues": result.get("issues", []),
+        "warnings": result.get("warnings", []),
+        "version": "v26.1"
+    }), 200
+
+
+@project_routes.post("/api/project/<project_id>/preview_batch_v2")
+def preview_batch_v2(project_id):
+    """
+    v26.1: Preview batch z opcjonalnym Best-of-N.
+    
+    Jeśli use_best_of_n=true i podano prompt, generuje 3 wersje.
+    Jeśli podano text, waliduje jak dotychczas.
+    
+    Request body:
+    {
+        "text": "...",           // opcjonalne - do walidacji istniejącego tekstu
+        "prompt": "...",         // opcjonalne - do generowania Best-of-N
+        "use_best_of_n": true,   // opcjonalne, default false
+        "n_candidates": 3        // opcjonalne
+    }
+    """
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No JSON data provided"}), 400
+    
+    use_best_of_n = data.get("use_best_of_n", False)
+    prompt = data.get("prompt")
+    batch_text = data.get("text") or data.get("batch_text")
+    
+    # Jeśli Best-of-N i mamy prompt
+    if use_best_of_n and prompt and BEST_OF_N_ENABLED:
+        # Przekieruj do generate_best_batch
+        db = firestore.client()
+        doc = db.collection("seo_projects").document(project_id).get()
+        if not doc.exists:
+            return jsonify({"error": "Project not found"}), 404
+        
+        project_data = doc.to_dict()
+        keywords_state = project_data.get("keywords_state", {})
+        main_keyword = project_data.get("main_keyword", project_data.get("topic", ""))
+        
+        n_candidates = data.get("n_candidates", 3)
+        
+        try:
+            result = select_best_batch(
+                base_prompt=prompt,
+                keywords_state=keywords_state,
+                main_keyword=main_keyword,
+                n_candidates=n_candidates
+            )
+            
+            # Zwróć w formacie kompatybilnym z preview_batch
+            return jsonify({
+                "status": "OK" if result.get("meets_minimum") else "WARN",
+                "method": "best_of_n",
+                "selected_content": result.get("selected_content"),
+                "selected_score": result.get("selected_score"),
+                "all_candidates": result.get("all_candidates", []),
+                "selection_reason": result.get("selection_reason"),
+                "warnings": [{"type": "INFO", "message": result.get("selection_reason")}],
+                "errors": [],
+                "version": "v26.1"
+            }), 200
+            
+        except Exception as e:
+            return jsonify({
+                "error": f"Best-of-N failed: {str(e)}",
+                "fallback": "Provide 'text' for standard validation"
+            }), 500
+    
+    # Standardowa walidacja (jak w preview_batch)
+    if not batch_text:
+        return jsonify({"error": "Field 'text' or 'prompt' with use_best_of_n required"}), 400
+    
+    db = firestore.client()
+    doc = db.collection("seo_projects").document(project_id).get()
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+
+    project_data = doc.to_dict()
+    keywords_state = project_data.get("keywords_state", {})
+    main_keyword = project_data.get("main_keyword", project_data.get("topic", ""))
+    s1_data = project_data.get("s1_data", {})
+
+    report = unified_prevalidation(batch_text, keywords_state)
+    
+    warnings = report.get("warnings", [])
+    errors = []
+    
+    density = report.get("density", 0)
+    density_status, density_msg = get_density_status(density)
+    if density_status in ["HIGH", "STUFFING"]:
+        warnings.append({
+            "type": "DENSITY_HIGH",
+            "density": density,
+            "status": density_status,
+            "message": density_msg
+        })
+    
+    list_count = count_bullet_lists(batch_text)
+    if list_count > 1:
+        warnings.append({
+            "type": "TOO_MANY_LISTS",
+            "count": list_count,
+            "message": f"Za dużo list ({list_count}). Max 1!"
+        })
+    
+    status = "OK"
+    if errors:
+        status = "ERROR"
+    elif len(warnings) > 2:
+        status = "WARN"
+    
+    return jsonify({
+        "status": status,
+        "method": "standard",
+        "density": density,
+        "density_status": density_status,
+        "warnings": warnings,
+        "errors": errors,
+        "version": "v26.1"
     }), 200
 
 
