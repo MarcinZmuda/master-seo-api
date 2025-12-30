@@ -75,6 +75,66 @@ DENSITY_ACCEPTABLE_MAX = 2.0
 DENSITY_WARNING_MAX = 2.5
 DENSITY_MAX = 3.0
 
+# ============================================================================
+# v26.1: SOFT CAP & SHORT KEYWORD CONFIGURATION
+# ============================================================================
+# Soft cap - ostrzegaj PRZED osiągnięciem max (np. 75% = ostrzeżenie przy 75% max)
+SOFT_CAP_THRESHOLD = 0.75  # 75% max = WARNING "zbliżasz się do limitu"
+
+# Krótkie frazy (1-2 słowa) mają automatycznie niższy max
+# Bo są częściej używane naturalnie i łatwo je przeoptymalizować
+SHORT_KEYWORD_MAX_WORDS = 2  # Frazy <= 2 słów = "krótkie"
+SHORT_KEYWORD_MAX_REDUCTION = 0.6  # Krótkie frazy mają 60% normalnego max
+SHORT_KEYWORD_ABSOLUTE_MAX = 8  # Absolutny max dla krótkich fraz
+
+def get_adjusted_target_max(keyword: str, original_max: int, word_count: int = None) -> int:
+    """
+    v26.1: Zwraca skorygowany target_max dla frazy.
+    Krótkie frazy (1-2 słowa) mają niższy max żeby uniknąć przeoptymalizowania.
+    """
+    if word_count is None:
+        word_count = len(keyword.split())
+    
+    if word_count <= SHORT_KEYWORD_MAX_WORDS:
+        # Krótka fraza - zmniejsz max
+        reduced_max = int(original_max * SHORT_KEYWORD_MAX_REDUCTION)
+        return min(reduced_max, SHORT_KEYWORD_ABSOLUTE_MAX)
+    
+    return original_max
+
+def check_soft_cap(actual: int, target_max: int, keyword: str) -> dict:
+    """
+    v26.1: Sprawdza czy fraza zbliża się do limitu (soft cap).
+    Zwraca warning jeśli actual >= 75% target_max.
+    """
+    if target_max <= 0:
+        return None
+    
+    usage_ratio = actual / target_max
+    
+    if usage_ratio >= 1.0:
+        return {
+            "type": "EXCEEDED",
+            "keyword": keyword,
+            "actual": actual,
+            "max": target_max,
+            "percent": round(usage_ratio * 100),
+            "message": f"❌ PRZEKROCZONO! '{keyword}' użyta {actual}x (max: {target_max})"
+        }
+    elif usage_ratio >= SOFT_CAP_THRESHOLD:
+        remaining = target_max - actual
+        return {
+            "type": "SOFT_CAP_WARNING",
+            "keyword": keyword,
+            "actual": actual,
+            "max": target_max,
+            "remaining": remaining,
+            "percent": round(usage_ratio * 100),
+            "message": f"⚠️ UWAGA: '{keyword}' zbliża się do limitu ({actual}/{target_max} = {round(usage_ratio*100)}%). Zostało: {remaining}x"
+        }
+    
+    return None
+
 def get_density_status(density: float) -> tuple:
     """v25.0: Zwraca status density z kolorowym oznaczeniem."""
     if density < DENSITY_OPTIMAL_MIN:
@@ -198,13 +258,25 @@ def calculate_suggested_v25(
     is_main: bool = False
 ) -> dict:
     """
-    v25.0: Nowa logika suggested:
-    - BASIC: twarde min 1x, target z inputu
+    v26.1: Nowa logika suggested z soft cap i adjusted max dla krótkich fraz.
+    - BASIC: twarde min 1x, target z inputu, soft cap warning
     - EXTENDED: dokładnie 1x, potem DONE
+    - Krótkie frazy: automatycznie niższy max
     """
+    
+    # v26.1: Skoryguj max dla krótkich fraz (nie dla EXTENDED)
+    word_count = len(keyword.split())
+    if kw_type != "EXTENDED" and word_count <= SHORT_KEYWORD_MAX_WORDS:
+        adjusted_max = get_adjusted_target_max(keyword, target_max, word_count)
+        if adjusted_max < target_max:
+            target_max = adjusted_max
     
     remaining_to_max = max(0, target_max - actual)
     remaining_to_min = max(0, target_min - actual)
+    
+    # v26.1: Sprawdź soft cap
+    soft_cap_info = check_soft_cap(actual, target_max, keyword)
+    soft_cap_warning = soft_cap_info.get("message") if soft_cap_info else None
     
     # === EXTENDED: dokładnie 1x ===
     if kw_type == "EXTENDED":
@@ -214,7 +286,8 @@ def calculate_suggested_v25(
                 "priority": "DONE",
                 "instruction": f"✅ DONE - już użyta ({actual}x)",
                 "hard_max_this_batch": 0,
-                "flexibility": "NONE"
+                "flexibility": "NONE",
+                "adjusted_max": target_max
             }
         else:
             should_use = (hash(keyword) % total_batches) == (current_batch - 1)
@@ -227,7 +300,8 @@ def calculate_suggested_v25(
                     "priority": "HIGH",
                     "instruction": f"📌 WPLEĆ 1x (extended - użyj raz naturalnie)",
                     "hard_max_this_batch": 1,
-                    "flexibility": "LOW"
+                    "flexibility": "LOW",
+                    "adjusted_max": 1
                 }
             else:
                 return {
@@ -235,27 +309,45 @@ def calculate_suggested_v25(
                     "priority": "SCHEDULED",
                     "instruction": f"⏳ Zaplanowana na późniejszy batch",
                     "hard_max_this_batch": 1,
-                    "flexibility": "MEDIUM"
+                    "flexibility": "MEDIUM",
+                    "adjusted_max": 1
                 }
     
     # === BASIC / MAIN ===
     
+    # v26.1: EXCEEDED
     if actual > target_max:
         return {
             "suggested": 0,
             "priority": "EXCEEDED",
             "instruction": f"❌ EXCEEDED ({actual}/{target_max}) - NIE UŻYWAJ!",
             "hard_max_this_batch": 0,
-            "flexibility": "NONE"
+            "flexibility": "NONE",
+            "adjusted_max": target_max,
+            "short_keyword": word_count <= SHORT_KEYWORD_MAX_WORDS
         }
     
+    # v26.1: LOCKED (osiągnięto max)
     if remaining_to_max == 0:
         return {
             "suggested": 0,
             "priority": "LOCKED",
             "instruction": f"🔒 LOCKED - limit osiągnięty ({target_max}x)",
             "hard_max_this_batch": 0,
-            "flexibility": "NONE"
+            "flexibility": "NONE",
+            "adjusted_max": target_max
+        }
+    
+    # v26.1: SOFT CAP WARNING (zbliża się do limitu)
+    if soft_cap_info and soft_cap_info["type"] == "SOFT_CAP_WARNING":
+        return {
+            "suggested": 0,
+            "priority": "SOFT_CAP",
+            "instruction": soft_cap_warning,
+            "hard_max_this_batch": remaining_to_max,
+            "flexibility": "LOW",
+            "adjusted_max": target_max,
+            "remaining": remaining_to_max
         }
     
     if remaining_batches > 0:
@@ -276,7 +368,8 @@ def calculate_suggested_v25(
                 "priority": "CRITICAL",
                 "instruction": f"🔴 FRAZA GŁÓWNA - użyj {suggested}-{suggested+1}x (brakuje {remaining_to_min} do target)",
                 "hard_max_this_batch": suggested + 2,
-                "flexibility": "LOW"
+                "flexibility": "LOW",
+                "adjusted_max": target_max
             }
         else:
             return {
@@ -284,7 +377,8 @@ def calculate_suggested_v25(
                 "priority": "HIGH",
                 "instruction": f"🔴 FRAZA GŁÓWNA - użyj {max(1, suggested)}x (target OK, używaj częściej niż synonimy!)",
                 "hard_max_this_batch": suggested + 2,
-                "flexibility": "MEDIUM"
+                "flexibility": "MEDIUM",
+                "adjusted_max": target_max
             }
     
     # === BASIC - COVERAGE CHECK ===
@@ -295,7 +389,8 @@ def calculate_suggested_v25(
                 "priority": "CRITICAL",
                 "instruction": f"🔴 BRAK COVERAGE! Użyj min 1x (cel: {target_min}-{target_max})",
                 "hard_max_this_batch": max(2, suggested + 1),
-                "flexibility": "LOW"
+                "flexibility": "LOW",
+                "adjusted_max": target_max
             }
         else:
             return {
@@ -303,7 +398,8 @@ def calculate_suggested_v25(
                 "priority": "HIGH",
                 "instruction": f"🟠 Użyj min 1x (cel: {target_min}-{target_max})",
                 "hard_max_this_batch": max(2, suggested + 1),
-                "flexibility": "MEDIUM"
+                "flexibility": "MEDIUM",
+                "adjusted_max": target_max
             }
     
     if actual < target_min:
@@ -313,7 +409,8 @@ def calculate_suggested_v25(
                 "priority": "CRITICAL",
                 "instruction": f"🔴 OSTATNI BATCH! Potrzeba jeszcze {remaining_to_min}x (actual: {actual}/{target_min})",
                 "hard_max_this_batch": remaining_to_max,
-                "flexibility": "LOW"
+                "flexibility": "LOW",
+                "adjusted_max": target_max
             }
         else:
             return {
@@ -321,7 +418,8 @@ def calculate_suggested_v25(
                 "priority": "HIGH",
                 "instruction": f"🟠 Dąż do target: użyj ~{suggested}x (actual: {actual}, cel: {target_min}-{target_max})",
                 "hard_max_this_batch": suggested + 2,
-                "flexibility": "MEDIUM"
+                "flexibility": "MEDIUM",
+                "adjusted_max": target_max
             }
     
     return {
@@ -329,7 +427,8 @@ def calculate_suggested_v25(
         "priority": "NORMAL",
         "instruction": f"🟢 OK ({actual}x, cel: {target_min}-{target_max}) - opcjonalnie więcej",
         "hard_max_this_batch": min(2, remaining_to_max),
-        "flexibility": "HIGH"
+        "flexibility": "HIGH",
+        "adjusted_max": target_max
     }
 
 
@@ -413,9 +512,12 @@ FORMAT: Zwróć TYLKO listę {target_count} H2, każdy w nowej linii.
         
         topic_lower = topic.lower()
         h2_with_main = sum(1 for h2 in suggestions if topic_lower in h2.lower())
-        coverage = h2_with_main / len(suggestions) if suggestions else 0
         
-        print(f"[H2_SUGGESTIONS]  Generated {len(suggestions)} H2, {h2_with_main} contain main keyword ({coverage:.0%})")
+        # v26.1: Max 1 H2 z frazą główną (unikamy przeoptymalizowania)
+        if h2_with_main > 1:
+            print(f"[H2_SUGGESTIONS] ⚠️ Za dużo H2 z frazą główną ({h2_with_main}). Zalecane: max 1")
+        
+        print(f"[H2_SUGGESTIONS] Generated {len(suggestions)} H2, {h2_with_main} contain main keyword")
         
         return jsonify({
             "status": "OK",
@@ -425,9 +527,9 @@ FORMAT: Zwróć TYLKO listę {target_count} H2, każdy w nowej linii.
             "count": len(suggestions),
             "main_keyword_in_h2": {
                 "count": h2_with_main,
-                "total": len(suggestions),
-                "percent": round(coverage * 100, 1),
-                "note": "Informacja statystyczna - brak wymogu"
+                "max_recommended": 1,
+                "overoptimized": h2_with_main > 1,
+                "note": "Max 1 H2 z frazą główną. Reszta: synonimy lub naturalne tytuły."
             },
             "action_required": "USER_H2_INPUT_NEEDED"
         }), 200
@@ -1630,6 +1732,282 @@ Zwróć TYLKO poprawiony tekst.
         
     except Exception as e:
         return jsonify({"status": "ERROR", "error": str(e)}), 500
+
+
+# ================================================================
+# 📄 GET FULL ARTICLE (przed eksportem)
+# ================================================================
+@project_routes.get("/api/project/<project_id>/full_article")
+def get_full_article(project_id):
+    """
+    v26.1: Zwraca pełną treść artykułu przed eksportem.
+    GPT używa tego do przeglądu całości.
+    """
+    db = firestore.client()
+    doc = db.collection("seo_projects").document(project_id).get()
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+    
+    data = doc.to_dict()
+    batches = data.get("batches", [])
+    keywords_state = data.get("keywords_state", {})
+    
+    # Złóż pełny tekst
+    full_text = "\n\n".join(b.get("text", "") for b in batches)
+    
+    # Walidacja końcowa
+    coverage = validate_coverage(keywords_state)
+    
+    # Density
+    density = 0
+    density_status = "UNKNOWN"
+    if full_text:
+        prevalidation = unified_prevalidation(full_text, keywords_state)
+        density = prevalidation.get("density", 0)
+        density_status, _ = get_density_status(density)
+    
+    # Statystyki
+    word_count = len(full_text.split())
+    h2_count = full_text.lower().count("h2:")
+    h3_count = full_text.lower().count("h3:")
+    
+    return jsonify({
+        "status": "OK",
+        "full_article": full_text,
+        "stats": {
+            "word_count": word_count,
+            "batch_count": len(batches),
+            "h2_count": h2_count,
+            "h3_count": h3_count
+        },
+        "coverage": coverage,
+        "density": {
+            "value": round(density, 2),
+            "status": density_status
+        },
+        "topic": data.get("topic"),
+        "main_keyword": data.get("main_keyword"),
+        "version": "v26.1"
+    }), 200
+
+
+# ================================================================
+# 🤖 GEMINI REVIEW (S5)
+# ================================================================
+@project_routes.post("/api/project/<project_id>/gemini_review")
+def gemini_review(project_id):
+    """
+    v26.1: Wysyła artykuł do Gemini do analizy jakości.
+    
+    Request body (opcjonalne):
+    {
+        "focus": ["readability", "seo", "polish_quality"]  // na czym się skupić
+    }
+    
+    Response:
+    {
+        "status": "APPROVED" | "NEEDS_REVISION",
+        "score": 85,
+        "recommendations": [...],
+        "analysis": {...}
+    }
+    """
+    db = firestore.client()
+    doc = db.collection("seo_projects").document(project_id).get()
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+    
+    data = doc.to_dict()
+    batches = data.get("batches", [])
+    full_text = "\n\n".join(b.get("text", "") for b in batches)
+    topic = data.get("topic", "")
+    main_keyword = data.get("main_keyword", topic)
+    
+    if not full_text or len(full_text) < 500:
+        return jsonify({
+            "error": "Article too short for review",
+            "min_length": 500,
+            "current_length": len(full_text)
+        }), 400
+    
+    # Request body
+    request_data = request.get_json() or {}
+    focus_areas = request_data.get("focus", ["readability", "seo", "polish_quality"])
+    
+    # Prompt do Gemini
+    review_prompt = f"""Przeanalizuj poniższy artykuł SEO i oceń jego jakość.
+
+TEMAT: {topic}
+GŁÓWNA FRAZA: {main_keyword}
+
+ARTYKUŁ:
+{full_text[:8000]}
+
+OCEŃ (skala 1-100) i podaj rekomendacje dla:
+1. CZYTELNOŚĆ - czy tekst jest płynny, zrozumiały, dobrze sformatowany?
+2. SEO - czy struktura H2/H3 jest logiczna, czy frazy są naturalnie wplecione?
+3. JAKOŚĆ JĘZYKA - czy nie ma błędów, sztucznych fraz AI, powtórzeń?
+4. WARTOŚĆ MERYTORYCZNA - czy artykuł odpowiada na pytania użytkownika?
+
+Odpowiedz w formacie JSON:
+{{
+    "overall_score": <1-100>,
+    "scores": {{
+        "readability": <1-100>,
+        "seo": <1-100>,
+        "polish_quality": <1-100>,
+        "content_value": <1-100>
+    }},
+    "status": "APPROVED" lub "NEEDS_REVISION",
+    "recommendations": [
+        {{"area": "...", "issue": "...", "suggestion": "..."}}
+    ],
+    "strengths": ["...", "..."],
+    "critical_issues": ["..."] 
+}}
+"""
+    
+    try:
+        model = genai.GenerativeModel(GEMINI_MODEL)
+        response = model.generate_content(
+            review_prompt,
+            generation_config=genai.GenerationConfig(
+                temperature=0.3,
+                max_output_tokens=2048
+            )
+        )
+        
+        if not response or not response.text:
+            return jsonify({
+                "error": "Empty response from Gemini",
+                "status": "ERROR"
+            }), 500
+        
+        # Parsuj JSON z odpowiedzi
+        response_text = response.text.strip()
+        
+        # Usuń markdown code blocks jeśli są
+        if response_text.startswith("```"):
+            response_text = response_text.split("```")[1]
+            if response_text.startswith("json"):
+                response_text = response_text[4:]
+        response_text = response_text.strip()
+        
+        try:
+            analysis = json.loads(response_text)
+        except json.JSONDecodeError:
+            # Fallback - zwróć surową odpowiedź
+            analysis = {
+                "overall_score": 70,
+                "status": "NEEDS_REVISION",
+                "raw_response": response.text[:1000],
+                "parse_error": True
+            }
+        
+        # Zapisz wynik review do projektu
+        doc.reference.update({
+            "gemini_review": {
+                "timestamp": firestore.SERVER_TIMESTAMP,
+                "analysis": analysis,
+                "status": analysis.get("status", "UNKNOWN")
+            }
+        })
+        
+        return jsonify({
+            "status": analysis.get("status", "UNKNOWN"),
+            "overall_score": analysis.get("overall_score", 0),
+            "scores": analysis.get("scores", {}),
+            "recommendations": analysis.get("recommendations", []),
+            "strengths": analysis.get("strengths", []),
+            "critical_issues": analysis.get("critical_issues", []),
+            "version": "v26.1"
+        }), 200
+        
+    except Exception as e:
+        print(f"[GEMINI_REVIEW] Error: {e}")
+        return jsonify({
+            "error": f"Gemini review failed: {str(e)}",
+            "status": "ERROR"
+        }), 500
+
+
+# ================================================================
+# 💾 SAVE FINAL ARTICLE (przed eksportem)
+# ================================================================
+@project_routes.post("/api/project/<project_id>/save_final")
+def save_final_article(project_id):
+    """
+    v26.1: Zapisuje finalną wersję artykułu do bazy.
+    Wywoływane po przejściu wszystkich review.
+    """
+    db = firestore.client()
+    doc = db.collection("seo_projects").document(project_id).get()
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+    
+    data = doc.to_dict()
+    batches = data.get("batches", [])
+    keywords_state = data.get("keywords_state", {})
+    
+    # Złóż pełny tekst
+    full_text = "\n\n".join(b.get("text", "") for b in batches)
+    
+    # Konwertuj na HTML
+    def convert_markers_to_html(text):
+        lines = text.split('\n')
+        result = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.lower().startswith('h2:'):
+                title = stripped[3:].strip()
+                result.append(f'<h2>{title}</h2>')
+            elif stripped.lower().startswith('h3:'):
+                title = stripped[3:].strip()
+                result.append(f'<h3>{title}</h3>')
+            elif stripped.startswith('- ') or stripped.startswith('• '):
+                result.append(f'<li>{stripped[2:]}</li>')
+            elif stripped:
+                result.append(f'<p>{stripped}</p>')
+        return '\n'.join(result)
+    
+    article_html = convert_markers_to_html(full_text)
+    
+    # Walidacja końcowa
+    coverage = validate_coverage(keywords_state)
+    
+    # Density
+    density = 0
+    if full_text:
+        prevalidation = unified_prevalidation(full_text, keywords_state)
+        density = prevalidation.get("density", 0)
+    
+    # Zapisz do bazy
+    final_data = {
+        "final_article": {
+            "text": full_text,
+            "html": article_html,
+            "word_count": len(full_text.split()),
+            "saved_at": firestore.SERVER_TIMESTAMP
+        },
+        "final_stats": {
+            "coverage": coverage,
+            "density": round(density, 2),
+            "batch_count": len(batches)
+        },
+        "status": "FINAL_SAVED"
+    }
+    
+    doc.reference.update(final_data)
+    
+    return jsonify({
+        "status": "SAVED",
+        "message": "Final article saved to database",
+        "word_count": len(full_text.split()),
+        "coverage": coverage,
+        "density": round(density, 2),
+        "ready_for_export": True,
+        "version": "v26.1"
+    }), 200
 
 
 # ================================================================
