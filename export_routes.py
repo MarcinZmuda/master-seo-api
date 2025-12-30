@@ -1,12 +1,17 @@
 """
-Export Routes - v23.8 (Simple)
-Eksport artykułów do DOCX/HTML/TXT - bezpośredni download bez Storage
-+ Editorial Review (Gemini jako redaktor naczelny)
+Export Routes - v26.1 
+Eksport artykułów do DOCX/HTML/TXT + Editorial Review (Gemini)
+
+ZMIANY v26.1:
+- Naprawiony editorial_review - lepsze składanie treści z batchów
+- Debug info gdy batche są puste
+- Obsługa różnych formatów batch.text
 """
 
 import os
 import re
 import io
+import json
 from datetime import datetime
 from flask import Blueprint, request, jsonify, Response
 
@@ -49,132 +54,79 @@ def parse_article_structure(text: str) -> list:
     text = re.sub(r'^h2:\s*(.+)$', r'<h2>\1</h2>', text, flags=re.MULTILINE)
     text = re.sub(r'^h3:\s*(.+)$', r'<h3>\1</h3>', text, flags=re.MULTILINE)
     
-    pattern = r'(<h2[^>]*>.*?</h2>|<h3[^>]*>.*?</h3>|[^<]+)'
-    matches = re.findall(pattern, text, re.IGNORECASE | re.DOTALL)
+    parts = re.split(r'(<h[23][^>]*>.*?</h[23]>)', text, flags=re.IGNORECASE | re.DOTALL)
     
-    for match in matches:
-        match = match.strip()
-        if not match:
+    for part in parts:
+        part = part.strip()
+        if not part:
             continue
             
-        if re.match(r'<h2[^>]*>', match, re.IGNORECASE):
-            title = re.sub(r'</?h2[^>]*>', '', match, flags=re.IGNORECASE).strip()
-            if title:
-                elements.append({"type": "h2", "content": title})
-        elif re.match(r'<h3[^>]*>', match, re.IGNORECASE):
-            title = re.sub(r'</?h3[^>]*>', '', match, flags=re.IGNORECASE).strip()
-            if title:
-                elements.append({"type": "h3", "content": title})
+        h2_match = re.match(r'<h2[^>]*>(.*?)</h2>', part, re.IGNORECASE | re.DOTALL)
+        h3_match = re.match(r'<h3[^>]*>(.*?)</h3>', part, re.IGNORECASE | re.DOTALL)
+        
+        if h2_match:
+            elements.append({"type": "h2", "content": h2_match.group(1).strip()})
+        elif h3_match:
+            elements.append({"type": "h3", "content": h3_match.group(1).strip()})
         else:
-            clean = re.sub(r'<[^>]+>', '', match).strip()
-            if clean and len(clean) > 10:
-                elements.append({"type": "p", "content": clean})
+            clean_text = html_to_text(part)
+            if clean_text:
+                elements.append({"type": "paragraph", "content": clean_text})
     
     return elements
 
 
-def generate_docx(project_data: dict) -> io.BytesIO:
-    """Generuje plik DOCX."""
-    doc = Document()
+# ================================================================
+# v26.1: HELPER - Składanie treści z batchów
+# ================================================================
+def extract_text_from_batches(batches: list) -> tuple:
+    """
+    v26.1: Bezpieczne składanie treści z batchów.
+    Obsługuje różne formaty: batch.text, batch.content, batch.html
     
-    topic = project_data.get("topic") or project_data.get("main_keyword", "Artykuł")
+    Returns:
+        (full_text, debug_info)
+    """
+    texts = []
+    debug_info = {
+        "total_batches": len(batches),
+        "batches_with_text": 0,
+        "batches_empty": 0,
+        "fields_found": set()
+    }
     
-    # Tytuł
-    title = doc.add_heading(topic, 0)
-    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    for i, batch in enumerate(batches):
+        # Próbuj różne pola
+        text = None
+        
+        # Kolejność priorytetów
+        for field in ["text", "content", "html", "batch_text", "raw_text"]:
+            if field in batch and batch[field]:
+                text = str(batch[field]).strip()
+                debug_info["fields_found"].add(field)
+                break
+        
+        if text:
+            texts.append(text)
+            debug_info["batches_with_text"] += 1
+        else:
+            debug_info["batches_empty"] += 1
+            print(f"[EXPORT] ⚠️ Batch {i} jest pusty. Klucze: {list(batch.keys())}")
     
-    doc.add_paragraph(f"Wygenerowano: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    doc.add_paragraph("─" * 50)
+    debug_info["fields_found"] = list(debug_info["fields_found"])
+    full_text = "\n\n".join(texts)
     
-    # Treść
-    batches = project_data.get("batches", [])
-    full_text = "\n\n".join([b.get("text", "") for b in batches])
-    elements = parse_article_structure(full_text)
-    
-    for elem in elements:
-        if elem["type"] == "h2":
-            doc.add_heading(elem["content"], level=1)
-        elif elem["type"] == "h3":
-            doc.add_heading(elem["content"], level=2)
-        elif elem["type"] == "p":
-            p = doc.add_paragraph(elem["content"])
-            p.paragraph_format.space_after = Pt(12)
-    
-    # FAQ
-    paa_data = project_data.get("paa_section", {})
-    questions = paa_data.get("questions", [])
-    if questions:
-        doc.add_page_break()
-        doc.add_heading("FAQ - Najczęściej zadawane pytania", level=1)
-        for q in questions:
-            doc.add_heading(q.get("question", ""), level=2)
-            doc.add_paragraph(q.get("answer", ""))
-    
-    buffer = io.BytesIO()
-    doc.save(buffer)
-    buffer.seek(0)
-    return buffer
+    return full_text, debug_info
 
 
-def generate_html(project_data: dict) -> str:
-    """Generuje HTML."""
-    topic = project_data.get("topic") or project_data.get("main_keyword", "Artykuł")
-    
-    batches = project_data.get("batches", [])
-    full_text = "\n\n".join([b.get("text", "") for b in batches])
-    elements = parse_article_structure(full_text)
-    
-    html = f'''<!DOCTYPE html>
-<html lang="pl">
-<head>
-<meta charset="UTF-8">
-<title>{topic}</title>
-<style>
-body {{ font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 40px; line-height: 1.6; }}
-h1 {{ color: #1a1a2e; border-bottom: 2px solid #4a4a8a; padding-bottom: 10px; }}
-h2 {{ color: #16213e; margin-top: 30px; }}
-h3 {{ color: #0f3460; }}
-p {{ text-align: justify; }}
-.meta {{ color: #666; font-size: 12px; }}
-.faq {{ background: #f5f5f5; padding: 20px; margin-top: 40px; border-radius: 8px; }}
-</style>
-</head>
-<body>
-<h1>{topic}</h1>
-<p class="meta">Wygenerowano: {datetime.now().strftime("%Y-%m-%d %H:%M")}</p>
-'''
-    
-    for elem in elements:
-        if elem["type"] == "h2":
-            html += f'<h2>{elem["content"]}</h2>\n'
-        elif elem["type"] == "h3":
-            html += f'<h3>{elem["content"]}</h3>\n'
-        elif elem["type"] == "p":
-            html += f'<p>{elem["content"]}</p>\n'
-    
-    # FAQ
-    paa_data = project_data.get("paa_section", {})
-    questions = paa_data.get("questions", [])
-    if questions:
-        html += '<div class="faq"><h2>FAQ</h2>'
-        for q in questions:
-            html += f'<h3>{q.get("question", "")}</h3>'
-            html += f'<p>{q.get("answer", "")}</p>'
-        html += '</div>'
-    
-    html += '</body></html>'
-    return html
-
-
-# ============================================================================
-# 🆕 EDITORIAL REVIEW - Gemini jako redaktor naczelny
-# ============================================================================
-
+# ================================================================
+# EDITORIAL REVIEW - v26.1 (naprawiony)
+# ================================================================
 @export_routes.post("/api/project/<project_id>/editorial_review")
 def editorial_review(project_id):
     """
-    v23.8: Weryfikacja przez Gemini jako redaktora naczelnego.
-    Zwraca ocenę i sugestie poprawek do przedstawienia użytkownikowi.
+    v26.1: Weryfikacja przez Gemini jako redaktora naczelnego.
+    NAPRAWIONE: Lepsze składanie treści z batchów + debug info.
     """
     db = firestore.client()
     doc = db.collection("seo_projects").document(project_id).get()
@@ -186,22 +138,36 @@ def editorial_review(project_id):
     batches = project_data.get("batches", [])
     
     if not batches:
-        return jsonify({"error": "No content to review"}), 400
+        return jsonify({
+            "error": "No batches found",
+            "hint": "Artykuł nie ma zapisanych batchów. Użyj addBatch aby zapisać treść.",
+            "project_keys": list(project_data.keys())
+        }), 400
     
     if not GEMINI_API_KEY:
         return jsonify({"error": "Gemini API not configured"}), 500
     
+    # v26.1: Bezpieczne składanie treści
+    full_text, debug_info = extract_text_from_batches(batches)
+    
+    # Sprawdź czy mamy treść
+    word_count = len(full_text.split()) if full_text else 0
+    
+    if word_count < 50:
+        return jsonify({
+            "error": f"Article too short for review ({word_count} words)",
+            "debug": debug_info,
+            "hint": "Batche istnieją ale nie zawierają tekstu w polu 'text'. Sprawdź strukturę batchów.",
+            "sample_batch_keys": list(batches[0].keys()) if batches else []
+        }), 400
+    
     # Pobierz kategorię z requestu lub z projektu
     data = request.get_json(force=True) if request.is_json else {}
     category = data.get("category") or project_data.get("category") or "prawo"
-    
-    # Połącz batche
-    full_text = "\n\n".join([b.get("text", "") for b in batches])
     topic = project_data.get("topic") or project_data.get("main_keyword", "")
-    word_count = len(full_text.split())
     
     try:
-        model = genai.GenerativeModel("gemini-2.5-flash")
+        model = genai.GenerativeModel("gemini-2.0-flash")
         
         prompt = f"""Jesteś redaktorem naczelnym portalu internetowego oraz specjalistą od tematyki: {category}.
 
@@ -262,7 +228,6 @@ Odpowiedz w formacie JSON:
             # Wyciągnij JSON z odpowiedzi (może być otoczony markdown)
             json_match = re.search(r'\{[\s\S]*\}', review_text)
             if json_match:
-                import json
                 review_data = json.loads(json_match.group())
             else:
                 review_data = {"raw_response": review_text}
@@ -280,30 +245,75 @@ Odpowiedz w formacie JSON:
         })
         
         return jsonify({
-            "status": "REVIEW_COMPLETE",
-            "project_id": project_id,
-            "topic": topic,
+            "status": review_data.get("recommendation", "UNKNOWN"),
+            "overall_score": review_data.get("overall_score"),
+            "scores": review_data.get("scores", {}),
+            "summary": review_data.get("summary", ""),
+            "corrections": review_data.get("corrections", []),
             "word_count": word_count,
-            "category": category,
-            "review": review_data,
-            "next_steps": {
-                "if_approved": f"GET /api/project/{project_id}/export/docx",
-                "if_needs_revision": "Popraw artykuł i wywołaj POST /api/project/{project_id}/editorial_review ponownie"
-            }
+            "debug": debug_info,
+            "version": "v26.1"
         }), 200
         
     except Exception as e:
-        print(f"[EDITORIAL] ❌ Error: {e}")
-        return jsonify({"error": str(e)}), 500
+        print(f"[EDITORIAL_REVIEW] Error: {e}")
+        return jsonify({
+            "error": f"Review failed: {str(e)}",
+            "word_count": word_count,
+            "debug": debug_info
+        }), 500
 
 
-# ============================================================================
-# EXPORT ROUTES
-# ============================================================================
+# ================================================================
+# EXPORT STATUS
+# ================================================================
+@export_routes.get("/api/project/<project_id>/export_status")
+def export_status(project_id):
+    """Sprawdza status projektu przed eksportem."""
+    db = firestore.client()
+    doc = db.collection("seo_projects").document(project_id).get()
+    
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+    
+    project_data = doc.to_dict()
+    batches = project_data.get("batches", [])
+    
+    # v26.1: Użyj nowej funkcji
+    full_text, debug_info = extract_text_from_batches(batches)
+    word_count = len(full_text.split()) if full_text else 0
+    
+    editorial = project_data.get("editorial_review", {})
+    
+    return jsonify({
+        "project_id": project_id,
+        "topic": project_data.get("topic"),
+        "status": project_data.get("status", "UNKNOWN"),
+        "batches_count": len(batches),
+        "word_count": word_count,
+        "debug": debug_info,
+        "editorial_review": {
+            "done": bool(editorial),
+            "score": editorial.get("review", {}).get("overall_score"),
+            "recommendation": editorial.get("review", {}).get("recommendation")
+        },
+        "ready_for_export": word_count >= 500 and debug_info["batches_with_text"] > 0,
+        "actions": {
+            "editorial_review": f"POST /api/project/{project_id}/editorial_review",
+            "export_docx": f"GET /api/project/{project_id}/export/docx",
+            "export_html": f"GET /api/project/{project_id}/export/html",
+            "export_txt": f"GET /api/project/{project_id}/export/txt"
+        },
+        "version": "v26.1"
+    }), 200
 
+
+# ================================================================
+# EXPORT DOCX
+# ================================================================
 @export_routes.get("/api/project/<project_id>/export/docx")
 def export_docx(project_id):
-    """Eksport do DOCX - bezpośredni download."""
+    """Eksportuje artykuł do formatu DOCX."""
     db = firestore.client()
     doc = db.collection("seo_projects").document(project_id).get()
     
@@ -311,135 +321,155 @@ def export_docx(project_id):
         return jsonify({"error": "Project not found"}), 404
     
     project_data = doc.to_dict()
-    
-    if not project_data.get("batches"):
-        return jsonify({"error": "No content to export"}), 400
-    
-    try:
-        docx_buffer = generate_docx(project_data)
-        
-        topic = project_data.get("topic") or project_data.get("main_keyword", "article")
-        safe_topic = re.sub(r'[^\w\s-]', '', topic)[:30].strip().replace(' ', '_')
-        filename = f"{safe_topic}_{project_id[:8]}.docx"
-        
-        return Response(
-            docx_buffer.getvalue(),
-            mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
-        )
-    except Exception as e:
-        print(f"[EXPORT] ❌ DOCX error: {e}")
-        return jsonify({"error": str(e)}), 500
-
-
-@export_routes.get("/api/project/<project_id>/export/html")
-def export_html(project_id):
-    """Eksport do HTML - bezpośredni download."""
-    db = firestore.client()
-    doc = db.collection("seo_projects").document(project_id).get()
-    
-    if not doc.exists:
-        return jsonify({"error": "Project not found"}), 404
-    
-    project_data = doc.to_dict()
-    
-    if not project_data.get("batches"):
-        return jsonify({"error": "No content to export"}), 400
-    
-    try:
-        html_content = generate_html(project_data)
-        
-        topic = project_data.get("topic") or project_data.get("main_keyword", "article")
-        safe_topic = re.sub(r'[^\w\s-]', '', topic)[:30].strip().replace(' ', '_')
-        filename = f"{safe_topic}_{project_id[:8]}.html"
-        
-        return Response(
-            html_content,
-            mimetype="text/html; charset=utf-8",
-            headers={"Content-Disposition": f"attachment; filename={filename}"}
-        )
-    except Exception as e:
-        print(f"[EXPORT] ❌ HTML error: {e}")
-        return jsonify({"error": str(e)}), 500
-
-
-@export_routes.get("/api/project/<project_id>/export/txt")
-def export_txt(project_id):
-    """Eksport do TXT."""
-    db = firestore.client()
-    doc = db.collection("seo_projects").document(project_id).get()
-    
-    if not doc.exists:
-        return jsonify({"error": "Project not found"}), 404
-    
-    project_data = doc.to_dict()
-    
-    if not project_data.get("batches"):
-        return jsonify({"error": "No content to export"}), 400
-    
     batches = project_data.get("batches", [])
-    full_text = "\n\n".join([b.get("text", "") for b in batches])
-    clean_text = html_to_text(full_text)
     
-    topic = project_data.get("topic") or project_data.get("main_keyword", "Artykuł")
+    full_text, _ = extract_text_from_batches(batches)
     
-    output = f"""{'='*60}
-{topic.upper()}
-{'='*60}
-Wygenerowano: {datetime.now().strftime('%Y-%m-%d %H:%M')}
-{'='*60}
-
-{clean_text}
-"""
+    if not full_text:
+        return jsonify({"error": "No content to export"}), 400
     
-    # FAQ
-    paa_data = project_data.get("paa_section", {})
-    questions = paa_data.get("questions", [])
-    if questions:
-        output += f"\n\n{'='*60}\nFAQ\n{'='*60}\n\n"
-        for q in questions:
-            output += f"P: {q.get('question', '')}\nO: {q.get('answer', '')}\n\n"
+    topic = project_data.get("topic", "Artykuł")
+    elements = parse_article_structure(full_text)
     
-    topic = project_data.get("topic") or "article"
-    safe_topic = re.sub(r'[^\w\s-]', '', topic)[:30].strip().replace(' ', '_')
-    filename = f"{safe_topic}_{project_id[:8]}.txt"
+    # Twórz dokument
+    document = Document()
+    
+    # Tytuł
+    title = document.add_heading(topic, 0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    
+    # Treść
+    for el in elements:
+        if el["type"] == "h2":
+            document.add_heading(el["content"], level=2)
+        elif el["type"] == "h3":
+            document.add_heading(el["content"], level=3)
+        elif el["type"] == "paragraph":
+            p = document.add_paragraph(el["content"])
+            p.style.font.size = Pt(11)
+    
+    # Zapisz do bufora
+    buffer = io.BytesIO()
+    document.save(buffer)
+    buffer.seek(0)
+    
+    filename = re.sub(r'[^\w\s-]', '', topic)[:50] + ".docx"
     
     return Response(
-        output,
+        buffer.getvalue(),
+        mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
+# ================================================================
+# EXPORT HTML
+# ================================================================
+@export_routes.get("/api/project/<project_id>/export/html")
+def export_html(project_id):
+    """Eksportuje artykuł do formatu HTML."""
+    db = firestore.client()
+    doc = db.collection("seo_projects").document(project_id).get()
+    
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+    
+    project_data = doc.to_dict()
+    batches = project_data.get("batches", [])
+    
+    full_text, _ = extract_text_from_batches(batches)
+    
+    if not full_text:
+        return jsonify({"error": "No content to export"}), 400
+    
+    topic = project_data.get("topic", "Artykuł")
+    
+    # Konwertuj markery na HTML
+    html = full_text
+    html = re.sub(r'^h2:\s*(.+)$', r'<h2>\1</h2>', html, flags=re.MULTILINE)
+    html = re.sub(r'^h3:\s*(.+)$', r'<h3>\1</h3>', html, flags=re.MULTILINE)
+    
+    # Paragrafy
+    lines = html.split('\n')
+    processed = []
+    for line in lines:
+        line = line.strip()
+        if line and not line.startswith('<h'):
+            if line.startswith('- ') or line.startswith('• '):
+                processed.append(f'<li>{line[2:]}</li>')
+            else:
+                processed.append(f'<p>{line}</p>')
+        else:
+            processed.append(line)
+    
+    html_content = f"""<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <title>{topic}</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; line-height: 1.6; }}
+        h1 {{ color: #333; }}
+        h2 {{ color: #444; margin-top: 30px; }}
+        h3 {{ color: #555; }}
+        p {{ margin: 15px 0; }}
+    </style>
+</head>
+<body>
+    <h1>{topic}</h1>
+    {''.join(processed)}
+</body>
+</html>"""
+    
+    filename = re.sub(r'[^\w\s-]', '', topic)[:50] + ".html"
+    
+    return Response(
+        html_content,
+        mimetype="text/html",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
+# ================================================================
+# EXPORT TXT
+# ================================================================
+@export_routes.get("/api/project/<project_id>/export/txt")
+def export_txt(project_id):
+    """Eksportuje artykuł do formatu TXT."""
+    db = firestore.client()
+    doc = db.collection("seo_projects").document(project_id).get()
+    
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+    
+    project_data = doc.to_dict()
+    batches = project_data.get("batches", [])
+    
+    full_text, _ = extract_text_from_batches(batches)
+    
+    if not full_text:
+        return jsonify({"error": "No content to export"}), 400
+    
+    topic = project_data.get("topic", "Artykuł")
+    
+    # Konwertuj do czytelnego tekstu
+    txt = f"{topic}\n{'='*len(topic)}\n\n"
+    txt += re.sub(r'^h2:\s*(.+)$', r'\n## \1\n', full_text, flags=re.MULTILINE)
+    txt = re.sub(r'^h3:\s*(.+)$', r'\n### \1\n', txt, flags=re.MULTILINE)
+    
+    filename = re.sub(r'[^\w\s-]', '', topic)[:50] + ".txt"
+    
+    return Response(
+        txt,
         mimetype="text/plain; charset=utf-8",
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
 
 
-@export_routes.get("/api/project/<project_id>/export")
-def export_info(project_id):
-    """Lista dostępnych formatów eksportu + status editorial review."""
-    db = firestore.client()
-    doc = db.collection("seo_projects").document(project_id).get()
-    
-    if not doc.exists:
-        return jsonify({"error": "Project not found"}), 404
-    
-    project_data = doc.to_dict()
-    batches = project_data.get("batches", [])
-    editorial = project_data.get("editorial_review", {})
-    
-    return jsonify({
-        "project_id": project_id,
-        "topic": project_data.get("topic") or project_data.get("main_keyword"),
-        "batches_count": len(batches),
-        "has_faq": bool(project_data.get("paa_section", {}).get("questions")),
-        "editorial_review": {
-            "completed": bool(editorial),
-            "recommendation": editorial.get("review", {}).get("recommendation") if editorial else None,
-            "overall_score": editorial.get("review", {}).get("overall_score") if editorial else None
-        },
-        "export_formats": {
-            "docx": f"/api/project/{project_id}/export/docx",
-            "html": f"/api/project/{project_id}/export/html",
-            "txt": f"/api/project/{project_id}/export/txt"
-        },
-        "actions": {
-            "editorial_review": f"POST /api/project/{project_id}/editorial_review"
-        }
-    }), 200
+# ================================================================
+# ALIAS dla kompatybilności
+# ================================================================
+@export_routes.post("/api/project/<project_id>/gemini_review")
+def gemini_review_alias(project_id):
+    """Alias do editorial_review dla kompatybilności z v26.1"""
+    return editorial_review(project_id)
