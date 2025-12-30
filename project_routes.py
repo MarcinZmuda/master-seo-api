@@ -423,11 +423,11 @@ FORMAT: Zwróć TYLKO listę {target_count} H2, każdy w nowej linii.
             "topic": topic,
             "model": GEMINI_MODEL,
             "count": len(suggestions),
-            "main_keyword_coverage": {
-                "h2_with_main_keyword": h2_with_main,
-                "total_h2": len(suggestions),
-                "coverage_percent": round(coverage * 100, 1),
-                "valid": coverage >= 0.2
+            "main_keyword_in_h2": {
+                "count": h2_with_main,
+                "total": len(suggestions),
+                "percent": round(coverage * 100, 1),
+                "note": "Informacja statystyczna - brak wymogu"
             },
             "action_required": "USER_H2_INPUT_NEEDED"
         }), 200
