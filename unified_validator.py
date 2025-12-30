@@ -48,8 +48,9 @@ class ValidationConfig:
     """Centralna konfiguracja wszystkich progów walidacji."""
     
     # Metryki jakości tekstu
-    BURSTINESS_MIN = 3.2
-    BURSTINESS_MAX = 3.8
+    # v25.2: Rozszerzone zakresy burstiness (bardziej elastyczne dla blogów)
+    BURSTINESS_MIN = 2.5
+    BURSTINESS_MAX = 4.5
     BURSTINESS_OPTIMAL = 3.5
     
     TRANSITION_RATIO_MIN = 0.25
