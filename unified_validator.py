@@ -70,7 +70,7 @@ class ValidationConfig:
     
     # Fraza główna
     MAIN_KEYWORD_RATIO_MIN = 0.30
-    H2_MAIN_KEYWORD_COVERAGE_MIN = 0.20
+    H2_MAIN_KEYWORD_MAX = 1  # v26.1: Max 1 H2 z frazą główną (unikamy przeoptymalizowania)
     
     # N-gramy
     NGRAM_COVERAGE_MIN = 0.60
@@ -487,22 +487,24 @@ def validate_content(
     structure_analysis["h2_count"] = len(h2_titles)
     structure_analysis["h2_titles"] = h2_titles
     
-    # Sprawdź coverage H2 z main keyword
+    # Sprawdź coverage H2 z main keyword - v26.1: max 1 H2 z keyword
     if main_keyword and h2_titles:
         main_lower = main_keyword.lower()
         h2_with_main = sum(1 for h2 in h2_titles if main_lower in h2.lower())
-        h2_coverage = h2_with_main / len(h2_titles)
-        structure_analysis["h2_main_keyword_coverage"] = round(h2_coverage, 2)
+        structure_analysis["h2_with_main_keyword"] = h2_with_main
+        structure_analysis["h2_main_keyword_max"] = ValidationConfig.H2_MAIN_KEYWORD_MAX
         
-        if h2_coverage < ValidationConfig.H2_MAIN_KEYWORD_COVERAGE_MIN:
+        # v26.1: Ostrzegaj gdy ZA DUŻO H2 z keyword (przeoptymalizowanie)
+        if h2_with_main > ValidationConfig.H2_MAIN_KEYWORD_MAX:
             issues.append(ValidationIssue(
-                code="LOW_H2_KEYWORD_COVERAGE",
-                message=f"Tylko {h2_coverage:.0%} H2 zawiera frazę główną (min {ValidationConfig.H2_MAIN_KEYWORD_COVERAGE_MIN:.0%})",
+                code="OVEROPTIMIZED_H2_KEYWORDS",
+                message=f"Za dużo H2 z frazą główną: {h2_with_main} (max {ValidationConfig.H2_MAIN_KEYWORD_MAX}). Użyj synonimów w pozostałych.",
                 severity=Severity.WARNING,
                 details={
                     "h2_with_main": h2_with_main,
+                    "max_recommended": ValidationConfig.H2_MAIN_KEYWORD_MAX,
                     "total_h2": len(h2_titles),
-                    "coverage": h2_coverage
+                    "suggestion": "Max 1 H2 z frazą główną. Reszta: synonimy lub naturalne tytuły."
                 }
             ))
     
