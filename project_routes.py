@@ -5,6 +5,9 @@ ZMIANY v26.1:
 - Best-of-N batch selection (generuje 3 wersje, wybiera najlepszą)
 - Intro excluded from density calculation
 - Polish quality validation integrated
+- EXCLUSIVE counting dla actual_uses (nie overlapping)
+- Soft cap + short keyword protection
+- Synonimy przy przekroczeniu fraz
 
 ZMIANY v25.0:
 - BASIC keywords: twarde min 1x, target z inputu użytkownika
@@ -25,6 +28,20 @@ from firebase_admin import firestore
 from firestore_tracker_routes import process_batch_in_firestore
 import google.generativeai as genai
 from seo_optimizer import unified_prevalidation
+
+# v26.1: Keyword synonyms for exceeded keywords
+try:
+    from keyword_synonyms import (
+        generate_exceeded_warning, 
+        generate_softcap_warning,
+        generate_synonyms_prompt_section,
+        get_synonyms
+    )
+    SYNONYMS_ENABLED = True
+    print("[PROJECT] Keyword synonyms module loaded")
+except ImportError as e:
+    SYNONYMS_ENABLED = False
+    print(f"[PROJECT] Keyword synonyms not available: {e}")
 
 # v26.1: Best-of-N batch selection
 try:
@@ -700,6 +717,63 @@ def create_project():
             "optimal_target": main_max
         }
         print(f"[PROJECT]  Auto-added main keyword '{topic}' with min={main_min}, max={main_max}")
+
+    # ================================================================
+    # v26.1: AUTO-REDUKCJA target_max dla NESTED KEYWORDS (INCLUSIVE)
+    # W stylu NeuronWriter: "radca prawny" liczy się jako:
+    #   - "radca prawny" → 1
+    #   - "radca" → 1 (bo słowo "radca" jest w środku)
+    #   - "prawny" → 1 (bo słowo "prawny" jest w środku)
+    # 
+    # Musimy obniżyć target_max krótszej frazy proporcjonalnie do tego
+    # ile razy będzie "dziedziczona" z dłuższych fraz.
+    # ================================================================
+    all_keywords = [(rid, meta.get("keyword", "").lower(), meta.get("keyword", "").lower().split()) 
+                    for rid, meta in firestore_keywords.items()]
+    
+    for rid, meta in firestore_keywords.items():
+        keyword_lower = meta.get("keyword", "").lower()
+        keyword_words = set(keyword_lower.split())  # słowa z tej frazy
+        original_max = meta.get("target_max", 5)
+        
+        # Znajdź dłuższe frazy które zawierają WSZYSTKIE słowa z tej frazy
+        # (lub tę frazę jako substring)
+        containing_keywords = []
+        for other_rid, other_kw, other_words in all_keywords:
+            if other_rid == rid:
+                continue
+            if len(other_words) <= len(keyword_words):
+                continue  # Dłuższa fraza musi mieć więcej słów
+            
+            # Sprawdź czy wszystkie słowa z krótkiej frazy są w dłuższej
+            # LUB czy krótka fraza jest substringiem dłuższej
+            words_match = keyword_words.issubset(set(other_words))
+            substring_match = keyword_lower in other_kw
+            
+            if words_match or substring_match:
+                other_meta = firestore_keywords[other_rid]
+                containing_keywords.append({
+                    "keyword": other_kw,
+                    "max": other_meta.get("target_max", 1),
+                    "match_type": "words" if words_match else "substring"
+                })
+        
+        if containing_keywords:
+            # Oblicz ile razy ta fraza będzie liczona przez dłuższe frazy
+            inherited_count = sum(kw["max"] for kw in containing_keywords)
+            
+            # Obniż target_max o inherited_count (ale min 2)
+            adjusted_max = max(2, original_max - inherited_count)
+            
+            if adjusted_max < original_max:
+                firestore_keywords[rid]["target_max"] = adjusted_max
+                firestore_keywords[rid]["remaining_max"] = adjusted_max
+                firestore_keywords[rid]["original_max"] = original_max
+                firestore_keywords[rid]["nested_in"] = [kw["keyword"] for kw in containing_keywords]
+                firestore_keywords[rid]["inherited_reduction"] = inherited_count
+                
+                print(f"[PROJECT] ⚠️ NESTED: '{meta.get('keyword')}' max {original_max}→{adjusted_max} "
+                      f"(zawarta w: {[kw['keyword'] for kw in containing_keywords]})")
 
     db = firestore.client()
     doc_ref = db.collection("seo_projects").document()
