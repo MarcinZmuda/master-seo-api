@@ -208,8 +208,11 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         # Zbierz keywordy do analizy szczegółowej
         keywords = [meta.get("keyword", "").strip() for meta in keywords_state.values() if meta.get("keyword")]
         
-        # v25.0: Policz z OVERLAPPING dla actual_uses (każda fraza osobno)
-        # Density używa EXCLUSIVE (w seo_optimizer.py), ale actual_uses = overlapping
+        # v26.1: Policz z OVERLAPPING dla actual_uses (każda fraza osobno)
+        # "uzależnienie od narkotyków" liczy się jako:
+        #   +1 dla "uzależnienie od narkotyków"
+        #   +1 dla "uzależnienie" (bo jest zawarte)
+        # To jest zgodne z tym jak Google/Surfer/Neuron liczą frazy
         batch_counts = count_keywords_for_state(batch_text, keywords_state, use_exclusive_for_nested=False)
         
         # Stuffing warnings (zintegrowane z tym samym licznikiem)
