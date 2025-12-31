@@ -531,10 +531,26 @@ def _minimal_batch_response(result: dict, project_data: dict = None) -> dict:
 @tracker_routes.post("/api/project/<project_id>/approve_batch")
 def approve_batch(project_id):
     """
-    v23.9: MINIMALNA ODPOWIEDŹ (~500B zamiast 220KB)
+    v26.1: NAPRAWIONE - akceptuje różne nazwy pól tekstu.
+    Obsługuje: corrected_text, text, content, batch_text
     """
     data = request.get_json(force=True)
-    text = data.get("corrected_text", "")
+    
+    # v26.1: Próbuj różne nazwy pól
+    text = None
+    for field in ["corrected_text", "text", "content", "batch_text"]:
+        if field in data and data[field]:
+            text = data[field].strip()
+            print(f"[APPROVE_BATCH] Znaleziono tekst w polu '{field}' ({len(text)} znaków)")
+            break
+    
+    if not text:
+        return jsonify({
+            "error": "No text provided",
+            "hint": "Wyślij tekst w polu 'corrected_text' lub 'text'",
+            "received_fields": list(data.keys())
+        }), 400
+    
     meta_trace = data.get("meta_trace", {})
     forced = data.get("forced", False)
 
