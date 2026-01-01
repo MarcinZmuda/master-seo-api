@@ -169,32 +169,45 @@ def editorial_review(project_id):
     try:
         model = genai.GenerativeModel("gemini-2.0-flash")
         
-        prompt = f"""Jesteś redaktorem naczelnym portalu internetowego oraz specjalistą od tematyki: {category}.
+        prompt = f"""Jesteś REDAKTOREM NACZELNYM portalu internetowego oraz specjalistą od tematyki: {category}.
 
-Oceń poniższy artykuł pt. "{topic}" pod kątem:
+Twoim zadaniem jest KRYTYCZNA weryfikacja artykułu pt. "{topic}".
 
-1. **MERYTORYKA** (0-10): 
-   - Czy informacje są poprawne i aktualne?
-   - Czy są błędy rzeczowe?
-   - Czy brakuje ważnych informacji?
+=== 5 NAJWAŻNIEJSZYCH BŁĘDÓW DO WYKRYCIA ===
 
-2. **STRUKTURA** (0-10):
-   - Czy artykuł jest logicznie zorganizowany?
-   - Czy nagłówki dobrze odzwierciedlają treść?
-   - Czy jest odpowiednia długość akapitów?
+1. **HALUCYNACJE DANYCH** (Zasada "Zero Zaufania")
+   - Czy są zmyślone statystyki, daty, cytaty, nazwy raportów?
+   - Czy podane liczby/fakty można zweryfikować?
+   - ZASADA: Każda konkretna liczba, data, nazwisko musi być sprawdzalna. Jeśli nie - BŁĄD!
 
-3. **STYL I JĘZYK** (0-10):
-   - Czy tekst jest czytelny i płynny?
-   - Czy nie ma powtórzeń?
-   - Czy język jest odpowiedni dla grupy docelowej?
+2. **FAŁSZYWA RÓWNOWAŻNOŚĆ** (Błąd kontekstu)
+   - Czy autor kopiuje rozwiązania z jednej sytuacji do innej bez uwzględnienia różnic?
+   - Czy analogie są prawidłowe?
+   - ZASADA: Czy zmiana kontekstu nie zmienia fundamentalnych zasad?
 
-4. **SEO** (0-10):
-   - Czy fraza główna jest odpowiednio użyta?
-   - Czy nagłówki są przyjazne dla SEO?
-   - Czy są linki wewnętrzne/zewnętrzne (lub ich brak)?
+3. **NIECHLUJSTWO TERMINOLOGICZNE** (Język potoczny vs fachowy)
+   - Czy słowa specjalistyczne są użyte poprawnie?
+   - Czy autor myli pojęcia które brzmią podobnie ale znaczą co innego?
+   - PRZYKŁADY: "remont" vs "przebudowa", "alergia" vs "nietolerancja", "Java" vs "JavaScript"
 
-5. **KONKRETNE POPRAWKI**:
-   Wymień 3-5 konkretnych miejsc do poprawy z cytatem i sugestią.
+4. **ZABURZONA CHRONOLOGIA** (Błąd "podróży w czasie")
+   - Czy instrukcje/porady są w logicznej kolejności?
+   - Czy użytkownik może wykonać kroki dokładnie w tej kolejności?
+   - ZASADA: Symuluj ścieżkę totalnego laika - czy dojdzie do celu?
+
+5. **NADMIERNE UPROSZCZENIA** (Generalizacja → fałsz)
+   - Czy są słowa absolutne: "zawsze", "każdy", "nigdy", "wszyscy"?
+   - Czy pominięto kluczowe wyjątki które czynią poradę szkodliwą?
+   - ZASADA: Zamiast "zawsze" → "zazwyczaj", "w większości przypadków"
+
+=== OCENA STANDARDOWA ===
+
+6. **MERYTORYKA** (0-10): Poprawność informacji
+7. **STRUKTURA** (0-10): Logiczna organizacja, nagłówki
+8. **STYL** (0-10): Czytelność, płynność, brak powtórzeń
+9. **SEO** (0-10): Użycie fraz kluczowych, nagłówki
+
+**WAŻNE: NIE wymagamy linków zewnętrznych ani wewnętrznych w artykule!**
 
 ---
 ARTYKUŁ ({word_count} słów):
@@ -211,13 +224,25 @@ Odpowiedz w formacie JSON:
     "styl": <0-10>,
     "seo": <0-10>
   }},
-  "summary": "<2-3 zdania podsumowania>",
-  "corrections": [
-    {{"issue": "<problem>", "quote": "<cytat z artykułu>", "suggestion": "<jak poprawić>"}},
-    ...
+  "critical_errors": [
+    {{
+      "type": "HALUCYNACJA|FAŁSZYWA_RÓWNOWAŻNOŚĆ|TERMINOLOGIA|CHRONOLOGIA|GENERALIZACJA",
+      "quote": "<cytat z artykułu>",
+      "problem": "<opis problemu>",
+      "suggestion": "<jak naprawić>"
+    }}
   ],
+  "minor_corrections": [
+    {{"issue": "<drobny problem>", "quote": "<cytat>", "suggestion": "<poprawka>"}}
+  ],
+  "summary": "<2-3 zdania: główne problemy i mocne strony>",
   "recommendation": "APPROVE" | "NEEDS_REVISION" | "MAJOR_REWRITE"
 }}
+
+WAŻNE: 
+- Jeśli znajdziesz HALUCYNACJĘ DANYCH (zmyślone fakty) → automatycznie NEEDS_REVISION
+- Jeśli znajdziesz >2 błędy krytyczne → MAJOR_REWRITE
+- Bądź SUROWY ale konstruktywny
 """
         
         response = model.generate_content(prompt)
