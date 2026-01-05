@@ -36,7 +36,7 @@ app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024  # 32 MB
 CORS(app)
 
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-VERSION = "v23.9-optimized"
+VERSION = "v27.0"
 
 # ================================================================
 # 🧠 Check if semantic analysis is available
@@ -117,6 +117,73 @@ def s1_analysis_proxy():
         if response.status_code == 200:
             result = response.json()
             print(f"[S1_PROXY] ✅ S1 analysis completed successfully")
+            
+            # =============================================================
+            # v27.0: AUTOMATYCZNE OBLICZANIE recommended_length
+            # =============================================================
+            word_counts = []
+            
+            # Szukaj word_count w danych konkurencji
+            serp_data = result.get("serp_analysis", {}) or {}
+            competitors = serp_data.get("competitors", []) or result.get("competitors", []) or []
+            
+            for comp in competitors:
+                if isinstance(comp, dict):
+                    wc = comp.get("word_count") or comp.get("wordCount") or comp.get("content_length", 0)
+                    if wc and wc > 100:
+                        word_counts.append(wc)
+            
+            # Heurystyka jeśli brak danych word_count
+            if not word_counts:
+                ngrams_count = len(result.get("ngrams", []) or result.get("hybrid_ngrams", []) or [])
+                h2_count = len(serp_data.get("competitor_h2_patterns", []) or [])
+                
+                # Szacowanie na podstawie ilości n-gramów i H2
+                if ngrams_count > 50 or h2_count > 15:
+                    estimated = 4000  # Długi artykuł
+                elif ngrams_count > 30 or h2_count > 10:
+                    estimated = 3000  # Średni artykuł
+                elif ngrams_count > 15 or h2_count > 5:
+                    estimated = 2000  # Krótki artykuł
+                else:
+                    estimated = 1500  # Bardzo krótki
+                
+                word_counts = [estimated]
+                print(f"[S1_PROXY] ℹ️ No word_count data, estimated: {estimated} (ngrams={ngrams_count}, h2={h2_count})")
+            
+            # Oblicz statystyki
+            word_counts.sort()
+            n = len(word_counts)
+            
+            if n > 0:
+                median = word_counts[n // 2] if n % 2 == 1 else (word_counts[n // 2 - 1] + word_counts[n // 2]) // 2
+                avg = sum(word_counts) // n
+                
+                # Rekomendacja: mediana + 10% (żeby być lepszym od konkurencji)
+                recommended = int(median * 1.1)
+                
+                # Zaokrąglij do setki
+                recommended = round(recommended / 100) * 100
+                
+                # Granice: min 1000, max 6000
+                recommended = max(1000, min(6000, recommended))
+            else:
+                median = 3000
+                avg = 3000
+                recommended = 3000
+            
+            # Dodaj do wyniku
+            result["recommended_length"] = recommended
+            result["length_analysis"] = {
+                "word_counts": word_counts,
+                "median": median,
+                "average": avg,
+                "recommended": recommended,
+                "analyzed_urls": len(word_counts),
+                "note": "Rekomendacja = mediana + 10%, zaokrąglone do 100"
+            }
+            
+            print(f"[S1_PROXY] 📏 Length analysis: median={median}, recommended={recommended} words")
             
             # Dodaj semantic analysis do S1 wyniku
             if SEMANTIC_ENABLED:
