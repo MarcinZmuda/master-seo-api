@@ -1,5 +1,10 @@
 """
-PROJECT ROUTES - v26.1 BRAJEN SEO Engine
+PROJECT ROUTES - v27.0 BRAJEN SEO Engine
+
+ZMIANY v27.0:
+- Claude jako primary AI dla H2 suggestions (Gemini jako fallback)
+- recommended_length z S1 analysis (dynamiczna długość artykułu)
+- Uniwersalne prompty (bez branżowych przykładów)
 
 ZMIANY v26.1:
 - Best-of-N batch selection (generuje 3 wersje, wybiera najlepszą)
@@ -454,7 +459,7 @@ def calculate_suggested_v25(
 # ================================================================
 @project_routes.post("/api/project/s1_h2_suggestions")
 def generate_h2_suggestions():
-    """Generuje sugestie H2 używając Gemini."""
+    """Generuje sugestie H2 używając Claude (primary) lub Gemini (fallback)."""
     data = request.get_json()
     if not data:
         return jsonify({"error": "No JSON data provided"}), 400
@@ -467,93 +472,123 @@ def generate_h2_suggestions():
     target_keywords = data.get("target_keywords", [])
     target_count = min(data.get("target_count", 6), 6)
     
-    if not GEMINI_API_KEY:
-        fallback_suggestions = [
+    # Build prompt (shared between Claude and Gemini)
+    competitor_context = ""
+    if serp_h2_patterns:
+        competitor_context = f"""
+WZORCE H2 Z KONKURENCJI (TOP 10 SERP):
+{chr(10).join(f"- {h2}" for h2 in serp_h2_patterns[:20])}
+"""
+    
+    keywords_context = ""
+    if target_keywords:
+        keywords_context = f"""
+FRAZY KLUCZOWE DO WPLECENIA W H2:
+{', '.join(target_keywords[:10])}
+"""
+    
+    prompt = f"""Wygeneruj DOKŁADNIE {target_count} nagłówków H2 dla artykułu SEO o temacie: "{topic}"
+
+{competitor_context}
+{keywords_context}
+
+KRYTYCZNE ZASADY:
+1. MAX 1 H2 z frazą główną "{topic}"! Reszta: synonimy lub naturalne tytuły
+2. NIE UŻYWAJ ogólników: "dokument", "wniosek", "sprawa", "proces"
+3. Każdy H2 powinien mieć 5-8 słów (max 70 znaków)
+4. Minimum 30% H2 w formie pytania (Jak...?, Ile...?, Gdzie...?)
+5. NIE używaj: "Wstęp", "Podsumowanie", "Zakończenie", "FAQ"
+
+FORMAT: Zwróć TYLKO listę {target_count} H2, każdy w nowej linii, bez numeracji."""
+    
+    suggestions = []
+    model_used = "fallback"
+    
+    # === TRY CLAUDE FIRST ===
+    ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+    if ANTHROPIC_API_KEY:
+        try:
+            import anthropic
+            client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+            
+            print(f"[H2_SUGGESTIONS] Trying Claude for: {topic}")
+            response = client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=1000,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            
+            raw_text = response.content[0].text.strip()
+            raw_suggestions = raw_text.split('\n')
+            suggestions = [
+                h2.strip().lstrip('•-–—0123456789.). ')
+                for h2 in raw_suggestions 
+                if h2.strip() and len(h2.strip()) > 5
+            ][:target_count]
+            
+            model_used = "claude-sonnet-4-20250514"
+            print(f"[H2_SUGGESTIONS] ✅ Claude generated {len(suggestions)} H2")
+            
+        except Exception as e:
+            print(f"[H2_SUGGESTIONS] ⚠️ Claude failed: {e}, trying Gemini...")
+            suggestions = []
+    
+    # === FALLBACK TO GEMINI ===
+    if not suggestions and GEMINI_API_KEY:
+        try:
+            model = genai.GenerativeModel(GEMINI_MODEL)
+            
+            print(f"[H2_SUGGESTIONS] Trying Gemini for: {topic}")
+            response = model.generate_content(prompt)
+            
+            raw_suggestions = response.text.strip().split('\n')
+            suggestions = [
+                h2.strip().lstrip('•-–—0123456789.). ')
+                for h2 in raw_suggestions 
+                if h2.strip() and len(h2.strip()) > 5
+            ][:target_count]
+            
+            model_used = GEMINI_MODEL
+            print(f"[H2_SUGGESTIONS] ✅ Gemini generated {len(suggestions)} H2")
+            
+        except Exception as e:
+            print(f"[H2_SUGGESTIONS] ⚠️ Gemini failed: {e}")
+            suggestions = []
+    
+    # === STATIC FALLBACK ===
+    if not suggestions:
+        suggestions = [
             f"Czym jest {topic}?",
             f"Jak działa {topic}?",
             f"Korzyści z {topic}",
             f"Kiedy warto skorzystać z {topic}?",
             f"Ile kosztuje {topic}?",
             f"Najczęstsze pytania o {topic}"
-        ]
-        return jsonify({
-            "status": "FALLBACK",
-            "suggestions": fallback_suggestions[:target_count],
-            "message": "Gemini unavailable - basic suggestions generated",
-            "model": "fallback"
-        }), 200
-    
-    try:
-        model = genai.GenerativeModel(GEMINI_MODEL)
-        
-        competitor_context = ""
-        if serp_h2_patterns:
-            competitor_context = f"""
-WZORCE H2 Z KONKURENCJI (TOP 10 SERP):
-{chr(10).join(f"- {h2}" for h2 in serp_h2_patterns[:20])}
-"""
-        
-        keywords_context = ""
-        if target_keywords:
-            keywords_context = f"""
-FRAZY KLUCZOWE DO WPLECENIA W H2:
-{', '.join(target_keywords[:10])}
-"""
-        
-        prompt = f"""
-Wygeneruj DOKŁADNIE {target_count} nagłówków H2 dla artykułu SEO o temacie: "{topic}"
-
-{competitor_context}
-{keywords_context}
-
- KRYTYCZNE ZASADY:
-1. Minimum {max(2, target_count // 2)} z {target_count} H2 MUSI zawierać frazę "{topic}" lub jej wariant!
-2. NIE UŻYWAJ ogólników: "dokument", "wniosek", "sprawa", "proces"
-3. UŻYWAJ konkretnej frazy głównej: "{topic}"
-4. Każdy H2 powinien mieć 6-12 słów
-5. Minimum 30% H2 w formie pytania (Jak...?, Ile...?, Gdzie...?)
-6. NIE używaj: "Wstęp", "Podsumowanie", "Zakończenie", "FAQ"
-
-FORMAT: Zwróć TYLKO listę {target_count} H2, każdy w nowej linii.
-"""
-        
-        print(f"[H2_SUGGESTIONS] Generating {target_count} H2 for: {topic}")
-        response = model.generate_content(prompt)
-        
-        raw_suggestions = response.text.strip().split('\n')
-        suggestions = [
-            h2.strip().lstrip('•-–—0123456789.). ')
-            for h2 in raw_suggestions 
-            if h2.strip() and len(h2.strip()) > 5
         ][:target_count]
-        
-        topic_lower = topic.lower()
-        h2_with_main = sum(1 for h2 in suggestions if topic_lower in h2.lower())
-        
-        # v26.1: Max 1 H2 z frazą główną (unikamy przeoptymalizowania)
-        if h2_with_main > 1:
-            print(f"[H2_SUGGESTIONS] ⚠️ Za dużo H2 z frazą główną ({h2_with_main}). Zalecane: max 1")
-        
-        print(f"[H2_SUGGESTIONS] Generated {len(suggestions)} H2, {h2_with_main} contain main keyword")
-        
-        return jsonify({
-            "status": "OK",
-            "suggestions": suggestions,
-            "topic": topic,
-            "model": GEMINI_MODEL,
-            "count": len(suggestions),
-            "main_keyword_in_h2": {
-                "count": h2_with_main,
-                "max_recommended": 1,
-                "overoptimized": h2_with_main > 1,
-                "note": "Max 1 H2 z frazą główną. Reszta: synonimy lub naturalne tytuły."
-            },
-            "action_required": "USER_H2_INPUT_NEEDED"
-        }), 200
-        
-    except Exception as e:
-        print(f"[H2_SUGGESTIONS]  Error: {e}")
-        return jsonify({"status": "ERROR", "error": str(e), "suggestions": []}), 500
+        model_used = "static_fallback"
+        print(f"[H2_SUGGESTIONS] ⚠️ Using static fallback")
+    
+    # Analyze main keyword coverage
+    topic_lower = topic.lower()
+    h2_with_main = sum(1 for h2 in suggestions if topic_lower in h2.lower())
+    
+    if h2_with_main > 1:
+        print(f"[H2_SUGGESTIONS] ⚠️ Za dużo H2 z frazą główną ({h2_with_main}). Zalecane: max 1")
+    
+    return jsonify({
+        "status": "OK" if model_used != "static_fallback" else "FALLBACK",
+        "suggestions": suggestions,
+        "topic": topic,
+        "model": model_used,
+        "count": len(suggestions),
+        "main_keyword_in_h2": {
+            "count": h2_with_main,
+            "max_recommended": 1,
+            "overoptimized": h2_with_main > 1,
+            "note": "Max 1 H2 z frazą główną. Reszta: synonimy lub naturalne tytuły."
+        },
+        "action_required": "USER_H2_INPUT_NEEDED"
+    }), 200
 
 
 # ================================================================
