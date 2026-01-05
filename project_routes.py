@@ -1332,6 +1332,19 @@ def preview_batch(project_id):
     elif len(warnings) > 2:
         status = "WARN"
     
+    # v27.0: Zapisz tekst do last_preview (fallback dla approve_batch)
+    try:
+        db.collection("seo_projects").document(project_id).update({
+            "last_preview": {
+                "text": batch_text,
+                "status": status,
+                "timestamp": firestore.SERVER_TIMESTAMP
+            }
+        })
+        print(f"[PREVIEW_BATCH] ✅ Zapisano last_preview ({len(batch_text)} znaków)")
+    except Exception as e:
+        print(f"[PREVIEW_BATCH] ⚠️ Nie udało się zapisać last_preview: {e}")
+    
     return jsonify({
         "status": status,
         "semantic_score": report.get("semantic_score", 0),
@@ -1346,7 +1359,8 @@ def preview_batch(project_id):
             "ngram_coverage": ngram_check,
             "density": {"value": density, "status": density_status, "message": density_msg}
         },
-        "version": "v25.0"
+        "last_preview_saved": True,
+        "version": "v27.0"
     }), 200
 
 
