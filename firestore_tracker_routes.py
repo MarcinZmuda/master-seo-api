@@ -1,5 +1,6 @@
 """
-SEO Content Tracker Routes - v24.0 BRAJEN SEO Engine
+SEO Content Tracker Routes - v27.0 BRAJEN SEO Engine
++ v27.0: approve_batch fallback z last_preview
 + Minimal approve_batch response (~500B instead of 220KB)
 + Morfeusz2 lemmatization (with spaCy fallback)
 + Burstiness validation (3.2-3.8)
@@ -531,27 +532,59 @@ def _minimal_batch_response(result: dict, project_data: dict = None) -> dict:
 @tracker_routes.post("/api/project/<project_id>/approve_batch")
 def approve_batch(project_id):
     """
-    v26.1: NAPRAWIONE - akceptuje różne nazwy pól tekstu.
+    v27.0: NAPRAWIONE - akceptuje różne nazwy pól tekstu + fallback z ostatniego preview.
     Obsługuje: corrected_text, text, content, batch_text
+    Fallback: Pobiera tekst z ostatniego preview jeśli nie wysłano w body.
     """
-    data = request.get_json(force=True)
+    data = request.get_json(force=True) if request.is_json else {}
     
-    # v26.1: Próbuj różne nazwy pól
+    # v27.0: Próbuj różne nazwy pól
     text = None
+    source = None
     for field in ["corrected_text", "text", "content", "batch_text"]:
         if field in data and data[field]:
             text = data[field].strip()
+            source = f"body.{field}"
             print(f"[APPROVE_BATCH] Znaleziono tekst w polu '{field}' ({len(text)} znaków)")
             break
+    
+    # v27.0: FALLBACK - pobierz z ostatniego preview jeśli brak tekstu
+    if not text:
+        print(f"[APPROVE_BATCH] ⚠️ Brak tekstu w body, próbuję fallback z last_preview...")
+        db = firestore.client()
+        doc = db.collection("seo_projects").document(project_id).get()
+        
+        if doc.exists:
+            project_data = doc.to_dict()
+            last_preview = project_data.get("last_preview", {})
+            preview_text = last_preview.get("text", "")
+            
+            if preview_text:
+                text = preview_text.strip()
+                source = "fallback.last_preview"
+                print(f"[APPROVE_BATCH] ✅ Fallback OK - użyto tekstu z last_preview ({len(text)} znaków)")
+            else:
+                # Próbuj też z ostatniego batcha w trybie "approve again"
+                batches = project_data.get("batches", [])
+                if batches:
+                    last_batch_text = batches[-1].get("text", "")
+                    if last_batch_text:
+                        text = last_batch_text.strip()
+                        source = "fallback.last_batch"
+                        print(f"[APPROVE_BATCH] ✅ Fallback OK - użyto tekstu z ostatniego batcha ({len(text)} znaków)")
     
     if not text:
         return jsonify({
             "error": "No text provided",
-            "hint": "Wyślij tekst w polu 'corrected_text' lub 'text'",
-            "received_fields": list(data.keys())
+            "hint": "Wyślij tekst w polu 'corrected_text' lub 'text'. Możesz też najpierw wywołać preview_batch.",
+            "received_fields": list(data.keys()),
+            "fallback_tried": True,
+            "fallback_failed": "Brak last_preview w projekcie"
         }), 400
     
     meta_trace = data.get("meta_trace", {})
+    if source:
+        meta_trace["text_source"] = source
     forced = data.get("forced", False)
 
     result = process_batch_in_firestore(project_id, text, meta_trace, forced)
@@ -560,7 +593,10 @@ def approve_batch(project_id):
     doc = db.collection("seo_projects").document(project_id).get()
     project_data = doc.to_dict() if doc.exists else None
     
-    return jsonify(_minimal_batch_response(result, project_data)), 200
+    response = _minimal_batch_response(result, project_data)
+    response["text_source"] = source
+    
+    return jsonify(response), 200
 
 
 @tracker_routes.get("/api/debug/<project_id>")
