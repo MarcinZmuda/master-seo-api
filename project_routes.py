@@ -1,11 +1,6 @@
 """
 PROJECT ROUTES - v27.0 BRAJEN SEO Engine
 
-ZMIANY v27.0:
-- Claude jako primary AI dla H2 suggestions (Gemini jako fallback)
-- recommended_length z S1 analysis (dynamiczna długość artykułu)
-- Uniwersalne prompty (bez branżowych przykładów)
-
 ZMIANY v26.1:
 - Best-of-N batch selection (generuje 3 wersje, wybiera najlepszą)
 - Intro excluded from density calculation
@@ -455,7 +450,7 @@ def calculate_suggested_v25(
 
 
 # ================================================================
-# 🧠 H2 SUGGESTIONS (Gemini-powered)
+# 🧠 H2 SUGGESTIONS (Claude primary, Gemini fallback) v27.0
 # ================================================================
 @project_routes.post("/api/project/s1_h2_suggestions")
 def generate_h2_suggestions():
@@ -589,7 +584,6 @@ FORMAT: Zwróć TYLKO listę {target_count} H2, każdy w nowej linii, bez numera
         },
         "action_required": "USER_H2_INPUT_NEEDED"
     }), 200
-
 
 # ================================================================
 # FINALIZE H2
