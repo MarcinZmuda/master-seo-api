@@ -96,9 +96,11 @@ def s1_analysis_proxy():
     """
     data = request.get_json(force=True)
     
-    # v27.0: Normalizuj nazwę parametru keyword
-    if "main_keyword" in data and "keyword" not in data:
-        data["keyword"] = data["main_keyword"]
+    # v27.0: Normalizuj nazwę parametru - N-gram API oczekuje "main_keyword"
+    if "keyword" in data and "main_keyword" not in data:
+        data["main_keyword"] = data["keyword"]
+    if "main_keyword" not in data:
+        return jsonify({"error": "Required: keyword or main_keyword"}), 400
     
     # v23.9: Domyślnie 6 stron zamiast 30
     if "max_urls" not in data:
@@ -106,9 +108,9 @@ def s1_analysis_proxy():
     if "top_results" not in data:
         data["top_results"] = 6
     
-    keyword = data.get("keyword", "")
+    keyword = data.get("main_keyword", "")
     print(f"[S1_PROXY] 📡 Forwarding S1 analysis for '{keyword}' to {NGRAM_ANALYSIS_ENDPOINT}")
-    print(f"[S1_PROXY] 📦 Request body keys: {list(data.keys())}")
+    print(f"[S1_PROXY] 📦 Request body: main_keyword='{keyword}', keys={list(data.keys())}")
     
     try:
         # v27.0: Explicit UTF-8 encoding
