@@ -1,4 +1,4 @@
-# Master SEO API v24.0 - Dependencies (Memory Optimized)
+# Master SEO API v27.0 - Dependencies (Memory Optimized)
 
 # Web Framework
 flask>=3.0.0
@@ -20,11 +20,8 @@ rapidfuzz>=3.5.0
 # Text statistics (readability, SMOG index)
 textstat>=0.7.3
 
-# Semantic analysis - DISABLED to save ~400MB RAM
-# sentence-transformers>=2.2.0
-# scikit-learn>=1.3.0
-
-# Google AI (Gemini dla Final Review)
+# AI APIs
+anthropic>=0.40.0
 google-generativeai>=0.3.0
 
 # Document generation
@@ -37,6 +34,3 @@ requests>=2.31.0
 
 # Rich console output
 rich>=13.0.0
-
-# Opcjonalnie: Morfeusz2 (wymaga libmorfeusz2-dev w systemie)
-# morfeusz2>=1.0.0
