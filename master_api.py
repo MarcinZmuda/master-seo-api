@@ -92,11 +92,13 @@ app.register_blueprint(export_routes)  # v23.9: Eksport + Editorial Review
 def s1_analysis_proxy():
     """
     Proxy endpoint dla S1 analysis.
-    Przekierowuje request do N-gram API service.
-    
-    v23.9: Domyślnie 6 stron zamiast 30 (szybszy response)
+    v27.0: UTF-8 encoding fix + keyword normalization + recommended_length
     """
     data = request.get_json(force=True)
+    
+    # v27.0: Normalizuj nazwę parametru keyword
+    if "main_keyword" in data and "keyword" not in data:
+        data["keyword"] = data["main_keyword"]
     
     # v23.9: Domyślnie 6 stron zamiast 30
     if "max_urls" not in data:
@@ -104,167 +106,148 @@ def s1_analysis_proxy():
     if "top_results" not in data:
         data["top_results"] = 6
     
-    print(f"[S1_PROXY] 📡 Forwarding S1 analysis to {NGRAM_ANALYSIS_ENDPOINT}")
+    keyword = data.get("keyword", "")
+    print(f"[S1_PROXY] 📡 Forwarding S1 analysis for '{keyword}' to {NGRAM_ANALYSIS_ENDPOINT}")
+    print(f"[S1_PROXY] 📦 Request body keys: {list(data.keys())}")
     
     try:
+        # v27.0: Explicit UTF-8 encoding
         response = requests.post(
             NGRAM_ANALYSIS_ENDPOINT,
             json=data,
             timeout=90,
-            headers={'Content-Type': 'application/json'}
+            headers={
+                'Content-Type': 'application/json; charset=utf-8',
+                'Accept': 'application/json'
+            }
         )
         
-        if response.status_code == 200:
-            result = response.json()
-            print(f"[S1_PROXY] ✅ S1 analysis completed successfully")
+        print(f"[S1_PROXY] 📬 Response status: {response.status_code}")
+        
+        if response.status_code != 200:
+            error_text = response.text[:500] if response.text else "No error message"
+            print(f"[S1_PROXY] ❌ N-gram API error {response.status_code}: {error_text}")
+            return jsonify({
+                "error": "N-gram API error",
+                "status_code": response.status_code,
+                "details": error_text,
+                "sent_keyword": keyword,
+                "sent_keys": list(data.keys())
+            }), response.status_code
+        
+        result = response.json()
+        print(f"[S1_PROXY] ✅ S1 analysis completed successfully")
+        
+        # =============================================================
+        # v27.0: AUTOMATYCZNE OBLICZANIE recommended_length
+        # =============================================================
+        word_counts = []
+        
+        # Szukaj word_count w danych konkurencji
+        serp_data = result.get("serp_analysis", {}) or {}
+        competitors = serp_data.get("competitors", []) or result.get("competitors", []) or []
+        
+        for comp in competitors:
+            if isinstance(comp, dict):
+                wc = comp.get("word_count") or comp.get("wordCount") or comp.get("content_length", 0)
+                if wc and wc > 100:
+                    word_counts.append(wc)
+        
+        # Heurystyka jeśli brak danych word_count
+        if not word_counts:
+            ngrams_count = len(result.get("ngrams", []) or result.get("hybrid_ngrams", []) or [])
+            h2_count = len(serp_data.get("competitor_h2_patterns", []) or [])
             
-            # =============================================================
-            # v27.0: AUTOMATYCZNE OBLICZANIE recommended_length
-            # =============================================================
-            word_counts = []
-            
-            # Szukaj word_count w danych konkurencji
-            serp_data = result.get("serp_analysis", {}) or {}
-            competitors = serp_data.get("competitors", []) or result.get("competitors", []) or []
-            
-            for comp in competitors:
-                if isinstance(comp, dict):
-                    wc = comp.get("word_count") or comp.get("wordCount") or comp.get("content_length", 0)
-                    if wc and wc > 100:
-                        word_counts.append(wc)
-            
-            # Heurystyka jeśli brak danych word_count
-            if not word_counts:
-                ngrams_count = len(result.get("ngrams", []) or result.get("hybrid_ngrams", []) or [])
-                h2_count = len(serp_data.get("competitor_h2_patterns", []) or [])
-                
-                # Szacowanie na podstawie ilości n-gramów i H2
-                if ngrams_count > 50 or h2_count > 15:
-                    estimated = 4000  # Długi artykuł
-                elif ngrams_count > 30 or h2_count > 10:
-                    estimated = 3000  # Średni artykuł
-                elif ngrams_count > 15 or h2_count > 5:
-                    estimated = 2000  # Krótki artykuł
-                else:
-                    estimated = 1500  # Bardzo krótki
-                
-                word_counts = [estimated]
-                print(f"[S1_PROXY] ℹ️ No word_count data, estimated: {estimated} (ngrams={ngrams_count}, h2={h2_count})")
-            
-            # Oblicz statystyki
-            word_counts.sort()
-            n = len(word_counts)
-            
-            if n > 0:
-                median = word_counts[n // 2] if n % 2 == 1 else (word_counts[n // 2 - 1] + word_counts[n // 2]) // 2
-                avg = sum(word_counts) // n
-                
-                # Rekomendacja: mediana + 10% (żeby być lepszym od konkurencji)
-                recommended = int(median * 1.1)
-                
-                # Zaokrąglij do setki
-                recommended = round(recommended / 100) * 100
-                
-                # Granice: min 1000, max 6000
-                recommended = max(1000, min(6000, recommended))
+            if ngrams_count > 50 or h2_count > 15:
+                estimated = 4000
+            elif ngrams_count > 30 or h2_count > 10:
+                estimated = 3000
+            elif ngrams_count > 15 or h2_count > 5:
+                estimated = 2000
             else:
-                median = 3000
-                avg = 3000
-                recommended = 3000
+                estimated = 1500
             
-            # Dodaj do wyniku
-            result["recommended_length"] = recommended
-            result["length_analysis"] = {
-                "word_counts": word_counts,
-                "median": median,
-                "average": avg,
-                "recommended": recommended,
-                "analyzed_urls": len(word_counts),
-                "note": "Rekomendacja = mediana + 10%, zaokrąglone do 100"
-            }
-            
-            print(f"[S1_PROXY] 📏 Length analysis: median={median}, recommended={recommended} words")
-            
-            # Dodaj semantic analysis do S1 wyniku
-            if SEMANTIC_ENABLED:
-                try:
-                    from seo_optimizer import semantic_keyword_coverage
-                    
-                    if "keywords" in result:
-                        sample_text = ""
-                        if isinstance(result, dict):
-                            ft = result.get("full_text_sample") or result.get("full_text_content") or ""
-                            if isinstance(ft, str) and ft.strip():
-                                sample_text = ft
-                            else:
-                                serp_analysis = result.get("serp_analysis", {}) or {}
-                                parts = []
-
-                                fs = serp_analysis.get("featured_snippet")
-                                if isinstance(fs, dict):
-                                    for k in ("snippet", "text", "answer"):
-                                        v = fs.get(k)
-                                        if isinstance(v, str) and v.strip():
-                                            parts.append(v.strip())
-                                elif isinstance(fs, str) and fs.strip():
-                                    parts.append(fs.strip())
-
-                                paa = serp_analysis.get("paa_questions", [])
-                                if isinstance(paa, list):
-                                    for item in paa:
-                                        if isinstance(item, dict):
-                                            q = item.get("question") or item.get("q")
-                                            a = item.get("answer") or item.get("snippet") or item.get("a")
-                                            if isinstance(q, str) and q.strip():
-                                                parts.append(q.strip())
-                                            if isinstance(a, str) and a.strip():
-                                                parts.append(a.strip())
-                                        elif isinstance(item, str) and item.strip():
-                                            parts.append(item.strip())
-
-                                snips = serp_analysis.get("competitor_snippets", [])
-                                if isinstance(snips, list):
-                                    for s in snips:
-                                        if isinstance(s, str) and s.strip():
-                                            parts.append(s.strip())
-
-                                related = serp_analysis.get("related_searches", [])
-                                if isinstance(related, list):
-                                    for r in related:
-                                        if isinstance(r, str) and r.strip():
-                                            parts.append(r.strip())
-
-                                h2p = serp_analysis.get("competitor_h2_patterns", [])
-                                if isinstance(h2p, list):
-                                    for h in h2p:
-                                        if isinstance(h, str) and h.strip():
-                                            parts.append(h.strip())
-
-                                sample_text = "\n".join(parts)
-
-                        sample_text = (sample_text or "")[:5000]
+            word_counts = [estimated]
+            print(f"[S1_PROXY] ℹ️ No word_count data, estimated: {estimated} (ngrams={ngrams_count}, h2={h2_count})")
+        
+        # Oblicz statystyki
+        word_counts.sort()
+        n = len(word_counts)
+        
+        if n > 0:
+            median = word_counts[n // 2] if n % 2 == 1 else (word_counts[n // 2 - 1] + word_counts[n // 2]) // 2
+            avg = sum(word_counts) // n
+            recommended = int(median * 1.1)
+            recommended = round(recommended / 100) * 100
+            recommended = max(1000, min(6000, recommended))
+        else:
+            median = 3000
+            avg = 3000
+            recommended = 3000
+        
+        result["recommended_length"] = recommended
+        result["length_analysis"] = {
+            "word_counts": word_counts,
+            "median": median,
+            "average": avg,
+            "recommended": recommended,
+            "analyzed_urls": len(word_counts),
+            "note": "Rekomendacja = mediana + 10%, zaokrąglone do 100"
+        }
+        
+        print(f"[S1_PROXY] 📏 Length analysis: median={median}, recommended={recommended} words")
+        
+        # Semantic analysis
+        if SEMANTIC_ENABLED:
+            try:
+                from seo_optimizer import semantic_keyword_coverage
+                
+                if "keywords" in result:
+                    sample_text = ""
+                    ft = result.get("full_text_sample") or result.get("full_text_content") or ""
+                    if isinstance(ft, str) and ft.strip():
+                        sample_text = ft
+                    else:
+                        parts = []
+                        fs = serp_data.get("featured_snippet")
+                        if isinstance(fs, dict):
+                            for k in ("snippet", "text", "answer"):
+                                v = fs.get(k)
+                                if isinstance(v, str) and v.strip():
+                                    parts.append(v.strip())
+                        elif isinstance(fs, str) and fs.strip():
+                            parts.append(fs.strip())
                         
+                        paa = serp_data.get("paa_questions", [])
+                        if isinstance(paa, list):
+                            for item in paa:
+                                if isinstance(item, dict):
+                                    q = item.get("question") or item.get("q")
+                                    a = item.get("answer") or item.get("snippet") or item.get("a")
+                                    if isinstance(q, str) and q.strip():
+                                        parts.append(q.strip())
+                                    if isinstance(a, str) and a.strip():
+                                        parts.append(a.strip())
+                                elif isinstance(item, str) and item.strip():
+                                    parts.append(item.strip())
+                        
+                        sample_text = "\n".join(parts)
+                    
+                    sample_text = (sample_text or "")[:5000]
+                    
+                    if sample_text.strip():
                         dummy_kw_state = {
                             str(i): {"keyword": kw, "actual_uses": 0}
                             for i, kw in enumerate(result.get("keywords", []))
                         }
-                        
-                        if sample_text.strip():
-                            semantic_cov = semantic_keyword_coverage(sample_text, dummy_kw_state)
-                            result["semantic_analysis"] = semantic_cov
-                            print(f"[S1_PROXY] ✅ Added semantic analysis to S1 result")
-                except Exception as e:
-                    print(f"[S1_PROXY] ⚠️ Semantic analysis failed: {e}")
-            
-            return jsonify(result), 200
-        else:
-            print(f"[S1_PROXY] ❌ N-gram API error: {response.status_code}")
-            return jsonify({
-                "error": "N-gram API error",
-                "status_code": response.status_code,
-                "details": response.text[:500]
-            }), response.status_code
-            
+                        semantic_cov = semantic_keyword_coverage(sample_text, dummy_kw_state)
+                        result["semantic_analysis"] = semantic_cov
+                        print(f"[S1_PROXY] ✅ Added semantic analysis to S1 result")
+            except Exception as e:
+                print(f"[S1_PROXY] ⚠️ Semantic analysis failed: {e}")
+        
+        return jsonify(result), 200
+        
     except requests.exceptions.Timeout:
         print(f"[S1_PROXY] ⏱️ Timeout after 90s")
         return jsonify({
@@ -286,7 +269,6 @@ def s1_analysis_proxy():
             "error": "S1 proxy error",
             "message": str(e)
         }), 500
-
 
 @app.post("/api/synthesize_topics")
 def synthesize_topics_proxy():
