@@ -453,6 +453,12 @@ Otrzymujesz artykuł pt. "{topic}" do weryfikacji i korekty.
 """
             print(f"[EDITORIAL_REVIEW] Using built-in prompt")
         
+        # v27.1: DEBUG - loguj prompt i odpowiedź
+        print(f"[EDITORIAL_REVIEW] ========== PROMPT START ==========")
+        print(f"[EDITORIAL_REVIEW] Prompt length: {len(prompt)} chars")
+        print(f"[EDITORIAL_REVIEW] First 500 chars: {prompt[:500]}")
+        print(f"[EDITORIAL_REVIEW] ========== PROMPT END ==========")
+        
         # v27.0: Użyj Claude API (preferowany) lub Gemini (fallback)
         if claude_client:
             print(f"[EDITORIAL_REVIEW] Using Claude API for project {project_id} ({word_count} words)")
@@ -465,6 +471,13 @@ Otrzymujesz artykuł pt. "{topic}" do weryfikacji i korekty.
             )
             review_text = response.content[0].text.strip()
             ai_model = "claude"
+            
+            # v27.1: DEBUG - loguj odpowiedź
+            print(f"[EDITORIAL_REVIEW] ========== RESPONSE START ==========")
+            print(f"[EDITORIAL_REVIEW] Response length: {len(review_text)} chars")
+            print(f"[EDITORIAL_REVIEW] First 1000 chars: {review_text[:1000]}")
+            print(f"[EDITORIAL_REVIEW] ========== RESPONSE END ==========")
+            
         elif genai:
             print(f"[EDITORIAL_REVIEW] Using Gemini (fallback) for project {project_id}")
             model = genai.GenerativeModel("gemini-2.0-flash")
