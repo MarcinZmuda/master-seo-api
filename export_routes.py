@@ -1,6 +1,11 @@
 """
-Export Routes - v27.0
+Export Routes - v27.1
 Eksport artykułów do DOCX/HTML/TXT + Editorial Review (Claude API)
+
+ZMIANY v27.1:
+- NOWE: rescan_keywords_after_editorial() - przelicza frazy po Claude review
+- Naprawia bug gdzie keywords_state nie był aktualizowany po edycji Claude
+- Teraz raport pokazuje RZECZYWISTE pokrycie fraz, nie stare dane
 
 ZMIANY v27.0:
 - Zmiana z Gemini na Claude API (dokładniejsza analiza)
@@ -27,6 +32,28 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 # Claude API for Editorial Review
 import anthropic
+
+# v27.1: Import keyword counter do rescan
+try:
+    from keyword_counter import count_keywords, count_keywords_for_state
+    KEYWORD_COUNTER_OK = True
+    print("[EXPORT] ✅ keyword_counter imported for rescan")
+except ImportError:
+    KEYWORD_COUNTER_OK = False
+    print("[EXPORT] ⚠️ keyword_counter not available - rescan will use fallback")
+
+# v27.1: Ładowanie promptu z pliku (opcjonalne)
+EDITORIAL_PROMPT_TEMPLATE = None
+try:
+    import os
+    prompt_path = os.path.join(os.path.dirname(__file__), "editorial_prompt.json")
+    if os.path.exists(prompt_path):
+        with open(prompt_path, "r", encoding="utf-8") as f:
+            prompt_data = json.load(f)
+            EDITORIAL_PROMPT_TEMPLATE = prompt_data.get("full_prompt_assembled")
+            print(f"[EXPORT] ✅ Loaded editorial prompt from file (v{prompt_data.get('version', '?')})")
+except Exception as e:
+    print(f"[EXPORT] ℹ️ Using built-in prompt (file load failed: {e})")
 
 export_routes = Blueprint("export_routes", __name__)
 
@@ -133,6 +160,161 @@ def extract_text_from_batches(batches: list) -> tuple:
 
 
 # ================================================================
+# v27.1: RESCAN KEYWORDS AFTER EDITORIAL
+# ================================================================
+def rescan_keywords_after_editorial(project_id: str, corrected_article: str) -> dict:
+    """
+    v27.1: Przelicza frazy od ZERA po edycji Claude.
+    
+    PROBLEM który to rozwiązuje:
+    - S3 (approve_batch) zlicza frazy → actual_uses = X
+    - S5 (Claude) może USUNĄĆ frazy z tekstu
+    - ALE keywords_state nie był aktualizowany!
+    - Raport pokazywał "100% coverage" mimo że frazy zniknęły
+    
+    ROZWIĄZANIE:
+    - Po Claude review przeliczamy WSZYSTKIE frazy od zera
+    - Nadpisujemy actual_uses RZECZYWISTYMI wartościami
+    - Teraz raport i NeuronWriter się zgadzają!
+    
+    Returns:
+        dict z wynikami rescanu i listą zmian
+    """
+    db = firestore.client()
+    doc = db.collection("seo_projects").document(project_id).get()
+    
+    if not doc.exists:
+        return {"error": "Project not found", "rescanned": False}
+    
+    project_data = doc.to_dict()
+    keywords_state = project_data.get("keywords_state", {})
+    
+    if not keywords_state:
+        return {"error": "No keywords_state", "rescanned": False}
+    
+    if not corrected_article or len(corrected_article.strip()) < 50:
+        return {"error": "No corrected_article to scan", "rescanned": False}
+    
+    # Zbierz wszystkie keywordy
+    keywords = []
+    rid_to_keyword = {}
+    for rid, meta in keywords_state.items():
+        kw = (meta.get("keyword") or "").strip()
+        if kw:
+            keywords.append(kw)
+            rid_to_keyword[rid] = kw
+    
+    if not keywords:
+        return {"error": "No keywords to scan", "rescanned": False}
+    
+    # Przelicz frazy
+    changes = []
+    new_counts = {}
+    
+    if KEYWORD_COUNTER_OK:
+        # Użyj keyword_counter (z lemmatyzacją)
+        new_counts = count_keywords_for_state(corrected_article, keywords_state, use_exclusive_for_nested=False)
+        print(f"[RESCAN] Using keyword_counter for {len(keywords)} keywords")
+    else:
+        # Fallback - proste liczenie
+        clean_text = re.sub(r'<[^>]+>', ' ', corrected_article.lower())
+        clean_text = re.sub(r'\s+', ' ', clean_text)
+        
+        for rid, kw in rid_to_keyword.items():
+            kw_lower = kw.lower()
+            count = clean_text.count(kw_lower)
+            new_counts[rid] = count
+        print(f"[RESCAN] Using fallback counter for {len(keywords)} keywords")
+    
+    # Porównaj i zaktualizuj
+    for rid, meta in keywords_state.items():
+        old_actual = meta.get("actual_uses", 0)
+        new_actual = new_counts.get(rid, 0)
+        
+        if old_actual != new_actual:
+            kw = meta.get("keyword", "?")
+            kw_type = meta.get("type", "BASIC")
+            changes.append({
+                "keyword": kw,
+                "type": kw_type,
+                "old": old_actual,
+                "new": new_actual,
+                "diff": new_actual - old_actual
+            })
+            print(f"[RESCAN] '{kw}' ({kw_type}): {old_actual} → {new_actual}")
+        
+        # NADPISZ actual_uses
+        meta["actual_uses"] = new_actual
+        
+        # Przelicz status
+        min_t = meta.get("target_min", 1 if meta.get("type", "").upper() == "BASIC" else 1)
+        max_t = meta.get("target_max", 999)
+        
+        if new_actual < min_t:
+            meta["status"] = "UNDER"
+        elif new_actual == max_t:
+            meta["status"] = "OPTIMAL"
+        elif min_t <= new_actual < max_t:
+            meta["status"] = "OK"
+        else:
+            meta["status"] = "OVER"
+        
+        meta["remaining_max"] = max(0, max_t - new_actual)
+        keywords_state[rid] = meta
+    
+    # Zapisz do Firebase
+    try:
+        db.collection("seo_projects").document(project_id).update({
+            "keywords_state": keywords_state,
+            "last_rescan": {
+                "timestamp": firestore.SERVER_TIMESTAMP,
+                "changes_count": len(changes),
+                "trigger": "editorial_review"
+            }
+        })
+        print(f"[RESCAN] ✅ Saved {len(changes)} changes to Firebase")
+    except Exception as e:
+        print(f"[RESCAN] ❌ Firebase save error: {e}")
+        return {"error": str(e), "rescanned": False, "changes": changes}
+    
+    # Policz nowe coverage
+    basic_total = 0
+    basic_covered = 0
+    extended_total = 0
+    extended_covered = 0
+    
+    for rid, meta in keywords_state.items():
+        kw_type = meta.get("type", "BASIC").upper()
+        actual = meta.get("actual_uses", 0)
+        
+        if kw_type == "BASIC" or kw_type == "MAIN":
+            basic_total += 1
+            if actual >= 1:
+                basic_covered += 1
+        elif kw_type == "EXTENDED":
+            extended_total += 1
+            if actual >= 1:
+                extended_covered += 1
+    
+    basic_pct = round(100 * basic_covered / basic_total, 1) if basic_total > 0 else 100
+    extended_pct = round(100 * extended_covered / extended_total, 1) if extended_total > 0 else 100
+    
+    return {
+        "rescanned": True,
+        "changes_count": len(changes),
+        "changes": changes,
+        "coverage_after_rescan": {
+            "basic": f"{basic_covered}/{basic_total} ({basic_pct}%)",
+            "extended": f"{extended_covered}/{extended_total} ({extended_pct}%)"
+        },
+        "missing_after_rescan": {
+            "basic": [c["keyword"] for c in changes if c["type"].upper() in ["BASIC", "MAIN"] and c["new"] == 0],
+            "extended": [c["keyword"] for c in changes if c["type"].upper() == "EXTENDED" and c["new"] == 0]
+        }
+    }
+
+
+# ================================================================
 # EDITORIAL REVIEW - v27.0 (Claude API + poprawiony tekst)
 # ================================================================
 @export_routes.post("/api/project/<project_id>/editorial_review")
@@ -210,9 +392,20 @@ def editorial_review(project_id):
     
     try:
         # ============================================================
-        # UNIWERSALNY PROMPT DO CLAUDE
+        # v27.1: PROMPT Z PLIKU LUB WBUDOWANY
         # ============================================================
-        prompt = f"""Jesteś REDAKTOREM NACZELNYM i EKSPERTEM MERYTORYCZNYM w tematyce artykułu.
+        if EDITORIAL_PROMPT_TEMPLATE:
+            # Użyj promptu z pliku editorial_prompt.json
+            prompt = EDITORIAL_PROMPT_TEMPLATE.format(
+                topic=topic,
+                word_count=word_count,
+                full_text=full_text,
+                unused_keywords_section=unused_keywords_section
+            )
+            print(f"[EDITORIAL_REVIEW] Using prompt from file")
+        else:
+            # Fallback - wbudowany prompt
+            prompt = f"""Jesteś REDAKTOREM NACZELNYM i EKSPERTEM MERYTORYCZNYM w tematyce artykułu.
 
 Otrzymujesz artykuł pt. "{topic}" do weryfikacji i korekty.
 {unused_keywords_section}
@@ -258,6 +451,7 @@ Otrzymujesz artykuł pt. "{topic}" do weryfikacji i korekty.
 
 {full_text}
 """
+            print(f"[EDITORIAL_REVIEW] Using built-in prompt")
         
         # v27.0: Użyj Claude API (preferowany) lub Gemini (fallback)
         if claude_client:
@@ -314,6 +508,13 @@ Otrzymujesz artykuł pt. "{topic}" do weryfikacji i korekty.
             }
         })
         
+        # v27.1: RESCAN KEYWORDS - przelicz frazy od zera po edycji Claude!
+        rescan_result = {"rescanned": False, "reason": "no_corrected_article"}
+        if corrected_article and len(corrected_article.strip()) > 50:
+            print(f"[EDITORIAL_REVIEW] Running rescan_keywords for project {project_id}...")
+            rescan_result = rescan_keywords_after_editorial(project_id, corrected_article)
+            print(f"[EDITORIAL_REVIEW] Rescan result: {rescan_result.get('changes_count', 0)} changes")
+        
         return jsonify({
             "status": analysis.get("recommendation", "REVIEWED"),
             "overall_score": analysis.get("overall_score"),
@@ -332,7 +533,8 @@ Otrzymujesz artykuł pt. "{topic}" do weryfikacji i korekty.
                 "extended": unused_extended
             },
             "ai_model": ai_model,
-            "version": "v27.0"
+            "version": "v27.1",
+            "rescan_result": rescan_result  # v27.1: wynik przeliczenia fraz
         }), 200
         
     except Exception as e:
