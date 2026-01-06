@@ -477,19 +477,76 @@ Otrzymujesz artykuł pt. "{topic}" do weryfikacji i korekty.
                 "hint": "Set ANTHROPIC_API_KEY or GEMINI_API_KEY"
             }), 500
         
-        # Parsuj JSON z odpowiedzi
+        # v27.1: Ulepszone parsowanie JSON z odpowiedzi
+        review_data = None
+        parse_error = None
+        
         try:
-            json_match = re.search(r'\{[\s\S]*\}', review_text)
-            if json_match:
-                review_data = json.loads(json_match.group())
+            # 1. Usuń markdown code blocks jeśli są
+            clean_text = review_text
+            if "```json" in clean_text:
+                clean_text = re.sub(r'```json\s*', '', clean_text)
+                clean_text = re.sub(r'```\s*$', '', clean_text)
+            elif "```" in clean_text:
+                clean_text = re.sub(r'```\s*', '', clean_text)
+            
+            # 2. Znajdź JSON - szukaj od pierwszego { do ostatniego }
+            first_brace = clean_text.find('{')
+            last_brace = clean_text.rfind('}')
+            
+            if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+                json_str = clean_text[first_brace:last_brace + 1]
+                review_data = json.loads(json_str)
+                print(f"[EDITORIAL_REVIEW] ✅ JSON parsed successfully")
             else:
-                review_data = {"raw_response": review_text}
-        except:
-            review_data = {"raw_response": review_text}
+                parse_error = "No valid JSON braces found"
+                print(f"[EDITORIAL_REVIEW] ⚠️ {parse_error}")
+                
+        except json.JSONDecodeError as e:
+            parse_error = f"JSON decode error: {str(e)}"
+            print(f"[EDITORIAL_REVIEW] ⚠️ {parse_error}")
+            # Próba naprawy - czasem Claude dodaje przecinek na końcu
+            try:
+                # Usuń trailing comma przed }
+                fixed_json = re.sub(r',\s*}', '}', json_str)
+                fixed_json = re.sub(r',\s*]', ']', fixed_json)
+                review_data = json.loads(fixed_json)
+                print(f"[EDITORIAL_REVIEW] ✅ JSON parsed after fix")
+                parse_error = None
+            except:
+                pass
+        except Exception as e:
+            parse_error = f"Parse error: {str(e)}"
+            print(f"[EDITORIAL_REVIEW] ⚠️ {parse_error}")
+        
+        # Fallback jeśli parsowanie nie powiodło się
+        if review_data is None:
+            review_data = {
+                "raw_response": review_text[:2000],
+                "parse_error": parse_error
+            }
+            print(f"[EDITORIAL_REVIEW] Using raw response fallback")
         
         # Wyciągnij analysis i corrected_article
-        analysis = review_data.get("analysis", review_data)
+        analysis = review_data.get("analysis", {})
+        if not analysis and "raw_response" in review_data:
+            analysis = {
+                "overall_score": 0,
+                "summary": "Parsowanie odpowiedzi nie powiodło się",
+                "parse_error": review_data.get("parse_error")
+            }
+        
         corrected_article = review_data.get("corrected_article", "")
+        
+        # v27.1: Jeśli nie ma corrected_article, spróbuj wyciągnąć z raw_response
+        if not corrected_article and "raw_response" in review_data:
+            raw = review_data.get("raw_response", "")
+            if "corrected_article" in raw:
+                match = re.search(r'"corrected_article"\s*:\s*"([\s\S]*?)"(?=\s*})', raw)
+                if match:
+                    corrected_article = match.group(1)
+                    print(f"[EDITORIAL_REVIEW] Extracted corrected_article from raw ({len(corrected_article)} chars)")
+        
         corrected_word_count = len(corrected_article.split()) if corrected_article else 0
         
         # Zapisz w Firestore
