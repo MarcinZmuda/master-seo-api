@@ -988,17 +988,35 @@ def get_pre_batch_info(project_id):
     intro_guidance = None
     if batch_type == "INTRO":
         featured_snippet = s1_data.get("featured_snippet", {})
+        ai_overview = s1_data.get("ai_overview", {})  # v27.1: Google SGE
+        serp_analysis = s1_data.get("serp_analysis", {})
+        
+        # Fallback - ai_overview może być w serp_analysis
+        if not ai_overview:
+            ai_overview = serp_analysis.get("ai_overview", {})
+        
         intro_guidance = {
             "direct_answer_required": True,
             "direct_answer_length": "40-60 slow",
             "first_sentence_must_contain": main_keyword,
-            "featured_snippet": None
+            "featured_snippet": None,
+            "ai_overview": None  # v27.1
         }
+        
+        # Featured Snippet
         if featured_snippet and featured_snippet.get("answer"):
             intro_guidance["featured_snippet"] = {
                 "google_answer": featured_snippet.get("answer", "")[:500],
                 "source_type": featured_snippet.get("type", "unknown"),
                 "hint": "Napisz LEPSZA, pelniejsza wersje tej odpowiedzi. NIE kopiuj."
+            }
+        
+        # v27.1: AI Overview (Google SGE)
+        if ai_overview and ai_overview.get("text"):
+            intro_guidance["ai_overview"] = {
+                "google_sge_answer": ai_overview.get("text", "")[:800],
+                "sources_count": len(ai_overview.get("sources", [])),
+                "hint": "Google SGE pokazuje te informacje. Twój wstep powinien byc LEPSZY i bardziej szczegolowy."
             }
     
     # Coverage
