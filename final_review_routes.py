@@ -342,6 +342,39 @@ def check_ngrams(text, s1_data):
 # ================================================================
 # MAIN ENDPOINT: performFinalReview
 # ================================================================
+@final_review_routes.get("/api/project/<project_id>/final_review")
+def get_final_review(project_id):
+    """v27.1: GET endpoint - zwraca istniejący final_review lub wykonuje nowy."""
+    print(f"[FINAL_REVIEW] 🔍 GET request for project: {project_id}")
+    
+    try:
+        db = firestore.client()
+        doc = db.collection("seo_projects").document(project_id).get()
+        
+        if not doc.exists:
+            return jsonify({"error": "Project not found", "project_id": project_id}), 404
+        
+        data = doc.to_dict()
+        
+        # Sprawdź czy jest już zapisany final_review
+        existing_review = data.get("final_review")
+        if existing_review:
+            print(f"[FINAL_REVIEW] ✅ Returning existing review")
+            return jsonify({
+                "status": "EXISTS",
+                "final_review": existing_review,
+                "hint": "Use POST to run new review"
+            }), 200
+        
+        # Jeśli nie ma - wykonaj review (przekieruj do POST logiki)
+        print(f"[FINAL_REVIEW] ℹ️ No existing review, running new one...")
+        return perform_final_review(project_id)
+        
+    except Exception as e:
+        print(f"[FINAL_REVIEW] ❌ Error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @final_review_routes.post("/api/project/<project_id>/final_review")
 def perform_final_review(project_id):
     """Kompleksowy audyt końcowy artykułu."""
