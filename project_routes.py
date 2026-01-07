@@ -1311,9 +1311,83 @@ def get_pre_batch_info(project_id):
         prompt_sections.append(f"🔗 KONTYNUUJ OD: \"{last_sentences[:80]}...\"")
         prompt_sections.append("")
     
+    # ================================================================
+    # v27.2: DYNAMIC BATCH LENGTH - oblicz minimalną długość na podstawie fraz
+    # ================================================================
+    # Formuła: min_words = (remaining_uses * avg_phrase_length) / target_density
+    # Żeby zmieścić wszystkie frazy w dozwolonej gęstości
+    
+    # Policz ile użyć fraz pozostało w tym batchu
+    remaining_basic_uses = 0
+    remaining_extended_uses = 0
+    avg_phrase_words = 0
+    phrase_count = 0
+    
+    for kw_info in basic_must_use + basic_target:
+        remaining = kw_info.get("suggested", 0)
+        remaining_basic_uses += remaining
+        phrase_count += 1
+        avg_phrase_words += len(kw_info.get("keyword", "").split())
+    
+    for kw_info in extended_this_batch:
+        remaining_extended_uses += kw_info.get("suggested", 1)
+        phrase_count += 1
+        avg_phrase_words += len(kw_info.get("keyword", "").split())
+    
+    # Średnia długość frazy
+    if phrase_count > 0:
+        avg_phrase_words = avg_phrase_words / phrase_count
+    else:
+        avg_phrase_words = 2.0  # domyślnie 2 słowa
+    
+    total_remaining_uses = remaining_basic_uses + remaining_extended_uses
+    
+    # Oblicz minimalną długość żeby zmieścić frazy w density < 2%
+    # density = (uses * avg_phrase_words) / total_words * 100
+    # total_words = (uses * avg_phrase_words) / (density / 100)
+    TARGET_DENSITY_FOR_CALC = 1.5  # Celujemy w 1.5% żeby mieć margines
+    
+    if total_remaining_uses > 0:
+        min_words_for_density = int((total_remaining_uses * avg_phrase_words) / (TARGET_DENSITY_FOR_CALC / 100))
+    else:
+        min_words_for_density = 300  # minimum
+    
+    # Podstawowa długość zależy od typu batcha
+    if batch_type == "INTRO":
+        base_min_words = 400
+        base_max_words = 600
+    elif batch_type == "FINAL":
+        base_min_words = 350
+        base_max_words = 550
+    else:
+        base_min_words = 350
+        base_max_words = 600
+    
+    # Weź większą z: bazowej i obliczonej dla density
+    suggested_min_words = max(base_min_words, min_words_for_density)
+    suggested_max_words = max(base_max_words, suggested_min_words + 200)
+    
+    # Limit maksymalny
+    suggested_min_words = min(suggested_min_words, 800)
+    suggested_max_words = min(suggested_max_words, 1000)
+    
+    batch_length_info = {
+        "suggested_min": suggested_min_words,
+        "suggested_max": suggested_max_words,
+        "reason": f"Potrzebujesz ~{total_remaining_uses} użyć fraz (BASIC:{remaining_basic_uses}, EXT:{remaining_extended_uses})",
+        "density_note": f"Przy {suggested_min_words} słowach osiągniesz ~{TARGET_DENSITY_FOR_CALC}% density"
+    }
+    
+    prompt_sections.append("="*50)
+    prompt_sections.append(f"📏 SUGEROWANA DŁUGOŚĆ BATCHA: {suggested_min_words}-{suggested_max_words} słów")
+    prompt_sections.append(f"   (Obliczone na podstawie {total_remaining_uses} wymaganych użyć fraz)")
+    if total_remaining_uses > 15:
+        prompt_sections.append(f"   ⚠️ DUŻO FRAZ! Pisz dłuższe sekcje żeby zmieścić wszystkie.")
+    prompt_sections.append("")
+    
     prompt_sections.append("="*50)
     prompt_sections.append("✍️ STYL:")
-    prompt_sections.append("   • Sekcje H2: różna długość (200-600 słów)")
+    prompt_sections.append(f"   • Sekcje H2: różna długość (min {suggested_min_words // 2} słów na sekcję)")
     prompt_sections.append("   • Akapity: 40-150 słów")
     prompt_sections.append("   • H3: max 2-3 na artykuł")
     prompt_sections.append("   • Max 1 lista wypunktowana")
@@ -1330,6 +1404,9 @@ def get_pre_batch_info(project_id):
         "intro_guidance": intro_guidance,
         "total_planned_batches": total_planned_batches,
         "remaining_batches": remaining_batches,
+        
+        # v27.2: Dynamic batch length
+        "batch_length": batch_length_info,
         
         "coverage": {
             "basic": coverage.get("basic", {}),
