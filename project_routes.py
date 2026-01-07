@@ -885,7 +885,16 @@ def create_project():
     
     doc_ref.set(project_data)
     
-    print(f"[PROJECT] Created project {doc_ref.id}: {topic} ({len(firestore_keywords)} keywords, {total_planned_batches} planned batches)")
+    # v27.2: Policz ile BASIC vs EXTENDED
+    basic_count = sum(1 for k in firestore_keywords.values() if k.get("type", "BASIC").upper() in ["BASIC", "MAIN"])
+    extended_count = sum(1 for k in firestore_keywords.values() if k.get("type", "").upper() == "EXTENDED")
+    
+    print(f"[PROJECT] Created project {doc_ref.id}: {topic} ({len(firestore_keywords)} keywords: {basic_count} BASIC, {extended_count} EXTENDED, {total_planned_batches} planned batches)")
+    
+    # v27.2: WARNING jeśli brak EXTENDED
+    warning = None
+    if extended_count == 0 and len(firestore_keywords) > 5:
+        warning = "⚠️ BRAK FRAZ EXTENDED! Upewnij się że wysyłasz 'type': 'EXTENDED' w keywords_list"
 
     return jsonify({
         "status": "CREATED",
@@ -894,13 +903,18 @@ def create_project():
         "main_keyword": topic,
         "main_keyword_synonyms": main_keyword_synonyms,
         "keywords_count": len(firestore_keywords),
+        "keywords_breakdown": {
+            "basic": basic_count,
+            "extended": extended_count,
+            "warning": warning
+        },
         "h2_sections": len(h2_structure),
         "total_planned_batches": total_planned_batches,
         "target_length": target_length,
         "source": source,
         "batch_plan": batch_plan_dict,
         "has_featured_snippet": bool(s1_data.get("featured_snippet")),
-        "version": "v25.0"
+        "version": "v27.2"
     }), 201
 
 
