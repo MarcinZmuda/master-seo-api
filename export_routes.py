@@ -213,7 +213,7 @@ def rescan_keywords_after_editorial(project_id: str, corrected_article: str) -> 
     
     if KEYWORD_COUNTER_OK:
         # Użyj keyword_counter (z lemmatyzacją)
-        new_counts = count_keywords_for_state(corrected_article, keywords_state, use_exclusive_for_nested=False)
+        new_counts = count_keywords_for_state(corrected_article, keywords_state, use_exclusive_for_nested=True)
         print(f"[RESCAN] Using keyword_counter for {len(keywords)} keywords")
     else:
         # Fallback - proste liczenie
