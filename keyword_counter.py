@@ -446,19 +446,21 @@ def count_keywords_for_state(
         return False
     
     # Mapuj na rid
+    # v27.2: NeuronWriter-style counting
+    # WSZYSTKIE frazy używają EXCLUSIVE (longest-match-first)
+    # "spadek po rodzicach" konsumuje tokeny, więc "spadek" nie dostaje +1
     batch_counts = {}
     for rid, kw in rid_to_keyword.items():
         meta = keywords_state.get(rid, {})
         kw_type = meta.get("type", "BASIC").upper()
         
-        if kw_type == "MAIN":
-            # MAIN: overlapping (chcemy pełne pokrycie)
-            batch_counts[rid] = overlapping.get(kw, 0)
-        elif use_exclusive_for_nested and is_nested_in_main(kw):
-            # BASIC zagnieżdżona w MAIN: exclusive (tylko samodzielne)
+        if use_exclusive_for_nested:
+            # v27.2: EXCLUSIVE dla wszystkich (jak NeuronWriter)
+            # Każda fraza liczona tylko gdy występuje samodzielnie
+            # Nie liczona gdy jest częścią dłuższej frazy
             batch_counts[rid] = exclusive.get(kw, 0)
         else:
-            # BASIC niezależna: overlapping
+            # Legacy: OVERLAPPING (każda fraza osobno, nawet zagnieżdżone)
             batch_counts[rid] = overlapping.get(kw, 0)
     
     # Dla keywordów bez tekstu
