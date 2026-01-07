@@ -270,7 +270,7 @@ def save_paa_section(project_id):
         
         if keywords_state and faq_text:
             # Policz frazy w FAQ
-            faq_counts = count_keywords_for_state(faq_text, keywords_state, use_exclusive_for_nested=False)
+            faq_counts = count_keywords_for_state(faq_text, keywords_state, use_exclusive_for_nested=True)
             
             # Dodaj do actual_uses
             changes = []
