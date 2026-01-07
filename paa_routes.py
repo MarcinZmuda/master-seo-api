@@ -62,21 +62,35 @@ def analyze_for_paa(project_id):
     
     # --------------------------------------------
     # Znajdź NIEWYKORZYSTANE frazy
+    # v27.2: Używamy actual_uses (nie current_count!)
     # --------------------------------------------
     unused_extended = []
     unused_basic = []
     underused = []
+    keyword_status = []  # v27.2: Pełny status fraz dla GPT
     
     for kw_id, kw_data in keywords_state.items():
-        current = kw_data.get("current_count", 0)
+        # v27.2: actual_uses to właściwe pole!
+        current = kw_data.get("actual_uses", kw_data.get("current_count", 0))
         target_min = kw_data.get("target_min", 1)
+        target_max = kw_data.get("target_max", 999)
         keyword = kw_data.get("keyword", "")
-        kw_type = kw_data.get("type", "BASIC")
+        kw_type = kw_data.get("type", "BASIC").upper()
+        
+        # Status dla GPT
+        keyword_status.append({
+            "keyword": keyword,
+            "type": kw_type,
+            "actual": current,
+            "target_min": target_min,
+            "target_max": target_max,
+            "remaining": max(0, target_max - current)
+        })
         
         if current == 0:
             if kw_type == "EXTENDED":
                 unused_extended.append(keyword)
-            else:
+            elif kw_type in ["BASIC", "MAIN"]:
                 unused_basic.append(keyword)
         elif current < target_min:
             underused.append({
@@ -122,7 +136,7 @@ def analyze_for_paa(project_id):
                 unused_paa.append(paa_q)
     
     # --------------------------------------------
-    # Response dla Custom GPT - v23.9 WSZYSTKIE nieużyte frazy
+    # Response dla Custom GPT - v27.2 z keyword_status
     # --------------------------------------------
     return jsonify({
         "status": "READY_FOR_PAA",
@@ -140,7 +154,13 @@ def analyze_for_paa(project_id):
             "basic": unused_basic,      # WSZYSTKIE nieużyte BASIC
             "extended": unused_extended, # WSZYSTKIE nieużyte EXTENDED
             "total": len(unused_basic) + len(unused_extended),
-            "instruction": "Wpleć te frazy w odpowiedzi FAQ!"
+            "instruction": "⚠️ WPLEĆ WSZYSTKIE EXTENDED W FAQ! Każda MUSI być użyta 1x."
+        },
+        
+        # v27.2: Pełny status fraz - żeby GPT wiedział ile może użyć
+        "keyword_status": {
+            "all_keywords": keyword_status,
+            "warning": "⚠️ Nie przekraczaj target_max! Sprawdź 'remaining' przed użyciem."
         },
         
         "underused_keywords": underused,  # Frazy poniżej minimum
@@ -164,11 +184,12 @@ def analyze_for_paa(project_id):
         },
         
         "instructions": {
-            "goal": "Napisz sekcję FAQ z 3-5 pytaniami",
-            "priority_1": "Wypełnij SEMANTIC GAPS - tematy niepokryte!",
-            "priority_2": "Użyj WSZYSTKICH nieużytych fraz (basic + extended)",
+            "goal": "Napisz sekcję FAQ z 3 pytaniami",
+            "priority_1": "⚠️ UŻYJ WSZYSTKICH unused_keywords.extended! Każda fraza 1x w odpowiedzi.",
+            "priority_2": "Użyj nieużytych BASIC jeśli są",
             "priority_3": "Użyj pytań z serp_paa (prawdziwe z Google)",
             "critical": "FAQ NIE MOŻE powtarzać tematów z artykułu!",
+            "warning": "⚠️ Sprawdź keyword_status.remaining zanim użyjesz frazy - nie przekraczaj limitów!",
             "format": {
                 "question": "5-10 słów, zacznij od Jak/Czy/Co/Dlaczego",
                 "answer": "80-120 słów, pierwsze zdanie = odpowiedź"
@@ -237,6 +258,54 @@ def save_paa_section(project_id):
     # Generuj tekst z markerami (format artykułu)
     marker_output = _generate_marker_format(validated_questions)
     
+    # v27.2: Przelicz frazy w FAQ i zaktualizuj keywords_state
+    faq_text = "\n".join([f"{q['question']} {q['answer']}" for q in validated_questions])
+    
+    rescan_result = {"rescanned": False}
+    try:
+        from keyword_counter import count_keywords_for_state
+        
+        project_data = doc.to_dict() or {}
+        keywords_state = project_data.get("keywords_state", {})
+        
+        if keywords_state and faq_text:
+            # Policz frazy w FAQ
+            faq_counts = count_keywords_for_state(faq_text, keywords_state, use_exclusive_for_nested=False)
+            
+            # Dodaj do actual_uses
+            changes = []
+            for rid, faq_count in faq_counts.items():
+                if faq_count > 0:
+                    meta = keywords_state.get(rid, {})
+                    old_actual = meta.get("actual_uses", 0)
+                    new_actual = old_actual + faq_count
+                    meta["actual_uses"] = new_actual
+                    
+                    # Przelicz status
+                    min_t = meta.get("target_min", 0)
+                    max_t = meta.get("target_max", 999)
+                    if new_actual < min_t:
+                        meta["status"] = "UNDER"
+                    elif new_actual >= max_t:
+                        meta["status"] = "OVER" if new_actual > max_t else "OPTIMAL"
+                    else:
+                        meta["status"] = "OK"
+                    
+                    keywords_state[rid] = meta
+                    changes.append({
+                        "keyword": meta.get("keyword"),
+                        "added_in_faq": faq_count,
+                        "new_total": new_actual
+                    })
+            
+            if changes:
+                # Zapisz zaktualizowany keywords_state
+                doc_ref.update({"keywords_state": keywords_state})
+                print(f"[PAA_SAVE] ✅ Rescan: {len(changes)} keywords updated from FAQ")
+                rescan_result = {"rescanned": True, "changes": changes}
+    except Exception as e:
+        print(f"[PAA_SAVE] ⚠️ Rescan failed: {e}")
+    
     # Zapisz do Firestore
     paa_data = {
         "questions": validated_questions,
@@ -257,6 +326,7 @@ def save_paa_section(project_id):
         "project_id": project_id,
         "questions_saved": len(validated_questions),
         "keywords_used": list(set(all_keywords)),
+        "rescan_result": rescan_result,  # v27.2: Info o przeliczonych frazach
         "html_schema": html_output,
         "marker_format": marker_output
     }), 200
