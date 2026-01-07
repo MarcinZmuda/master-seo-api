@@ -209,12 +209,14 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         # Zbierz keywordy do analizy szczegółowej
         keywords = [meta.get("keyword", "").strip() for meta in keywords_state.values() if meta.get("keyword")]
         
-        # v26.1: Policz z OVERLAPPING dla actual_uses (każda fraza osobno)
-        # "uzależnienie od narkotyków" liczy się jako:
-        #   +1 dla "uzależnienie od narkotyków"
-        #   +1 dla "uzależnienie" (bo jest zawarte)
-        # To jest zgodne z tym jak Google/Surfer/Neuron liczą frazy
-        batch_counts = count_keywords_for_state(batch_text, keywords_state, use_exclusive_for_nested=False)
+        # v27.2: Policz z EXCLUSIVE dla actual_uses (jak NeuronWriter!)
+        # "spadek po rodzicach" liczy się TYLKO jako:
+        #   +1 dla "spadek po rodzicach"
+        # NIE liczy się jako +1 dla "spadek" (to byłoby OVERLAPPING)
+        # 
+        # EXCLUSIVE = longest-match-first, konsumuje tokeny
+        # To jest zgodne z tym jak NeuronWriter liczy frazy
+        batch_counts = count_keywords_for_state(batch_text, keywords_state, use_exclusive_for_nested=True)
         
         # Stuffing warnings (zintegrowane z tym samym licznikiem)
         stuffing_warnings = get_stuffing_warnings(batch_text, keywords_state)
