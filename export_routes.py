@@ -392,175 +392,157 @@ def editorial_review(project_id):
     
     try:
         # ============================================================
-        # v27.1: PROMPT Z PLIKU LUB WBUDOWANY
+        # v27.2: DWA WYWOŁANIA CLAUDE - osobno analiza, osobno tekst
         # ============================================================
-        if EDITORIAL_PROMPT_TEMPLATE:
-            # Użyj promptu z pliku editorial_prompt.json
-            prompt = EDITORIAL_PROMPT_TEMPLATE.format(
-                topic=topic,
-                word_count=word_count,
-                full_text=full_text,
-                unused_keywords_section=unused_keywords_section
-            )
-            print(f"[EDITORIAL_REVIEW] Using prompt from file")
-        else:
-            # Fallback - wbudowany prompt
-            prompt = f"""Jesteś REDAKTOREM NACZELNYM i EKSPERTEM MERYTORYCZNYM w tematyce artykułu.
+        
+        # WYWOŁANIE 1: ANALIZA
+        analysis_prompt = f"""Jesteś REDAKTOREM NACZELNYM i EKSPERTEM MERYTORYCZNYM.
 
-Otrzymujesz artykuł pt. "{topic}" do weryfikacji i korekty.
+Przeanalizuj artykuł pt. "{topic}" i znajdź błędy do poprawy.
 {unused_keywords_section}
-=== TWOJE ZADANIA ===
 
-**ZADANIE 1: ZNAJDŹ I NAPRAW BŁĘDY KRYTYCZNE**
+=== ZADANIA ANALIZY ===
 
-1. **HALUCYNACJE DANYCH** - Zmyślone statystyki, daty, nazwy raportów → USUŃ lub zamień na ogólne stwierdzenie
-2. **BŁĘDY TERMINOLOGICZNE** - Mylenie pojęć fachowych specyficznych dla tematu artykułu → POPRAW
-3. **ZABURZONA CHRONOLOGIA** - Nielogiczna kolejność kroków/instrukcji → PRZESTAW prawidłowo
-4. **NADMIERNE UPROSZCZENIA** - "zawsze/każdy/nigdy/wszyscy" → "zazwyczaj/często/w większości przypadków"
-5. **NIEAKTUALNE INFORMACJE** - Przestarzałe dane, przepisy, procedury → USUŃ lub zaznacz że wymaga weryfikacji
+1. **HALUCYNACJE DANYCH** - Zmyślone statystyki, daty, nazwy raportów
+2. **BŁĘDY TERMINOLOGICZNE** - Mylenie pojęć fachowych
+3. **ZABURZONA CHRONOLOGIA** - Nielogiczna kolejność kroków
+4. **NADMIERNE UPROSZCZENIA** - "zawsze/każdy/nigdy" zamiast "zazwyczaj/często"
+5. **FRAZY AI** - "w dzisiejszych czasach", "warto wiedzieć", "nie ulega wątpliwości"
+6. **BŁĘDNE KOLOKACJE** - "robić decyzję" zamiast "podejmować decyzję"
 
-**ZADANIE 2: POPRAW JAKOŚĆ TEKSTU**
-
-- Usuń typowe frazy AI: "w dzisiejszych czasach", "warto wiedzieć", "nie ulega wątpliwości", "należy pamiętać"
-- Popraw błędne kolokacje
-- Usuń powtórzenia i rozwlekłe fragmenty
-
-**ZADANIE 3: WYMAGANIA KRYTYCZNE**
-
-⚠️ DŁUGOŚĆ: Tekst MUSI mieć MINIMUM {word_count} słów! Nie skracaj - możesz tylko wydłużyć!
-⚠️ FORMAT: Zachowaj strukturę HTML/Markdown (H2, H3, paragrafy)
-⚠️ LINKI: NIE dodawaj żadnych linków
-
-=== ODPOWIEDZ W FORMACIE JSON ===
+=== ODPOWIEDZ TYLKO JSON ===
 
 {{
-  "analysis": {{
-    "overall_score": <0-10>,
-    "scores": {{"merytoryka": <0-10>, "struktura": <0-10>, "styl": <0-10>, "seo": <0-10>}},
-    "critical_errors_found": [
-      {{"type": "<TYP>", "original": "<cytat>", "fixed": "<poprawka>"}}
-    ],
-    "keywords_added": ["<wplecione frazy>"],
-    "minor_fixes": ["<drobne poprawki>"],
-    "summary": "<2-3 zdania>"
-  }},
-  "corrected_article": "<CAŁY POPRAWIONY ARTYKUŁ - MINIMUM {word_count} SŁÓW!>"
+  "overall_score": <0-10>,
+  "scores": {{"merytoryka": <0-10>, "struktura": <0-10>, "styl": <0-10>, "seo": <0-10>}},
+  "errors_to_fix": [
+    {{"type": "<TYP>", "original": "<cytat z tekstu>", "replacement": "<poprawka>"}}
+  ],
+  "keywords_to_add": {unused_basic + unused_extended if (unused_basic or unused_extended) else []},
+  "summary": "<2-3 zdania podsumowania>"
 }}
 
-=== ARTYKUŁ DO WERYFIKACJI ({word_count} słów) ===
+=== ARTYKUŁ ({word_count} słów) ===
 
-{full_text}
-"""
-            print(f"[EDITORIAL_REVIEW] Using built-in prompt")
+{full_text}"""
+
+        print(f"[EDITORIAL_REVIEW] ========== CALL 1: ANALYSIS ==========")
+        print(f"[EDITORIAL_REVIEW] Analysis prompt length: {len(analysis_prompt)} chars")
         
-        # v27.1: DEBUG - loguj prompt i odpowiedź
-        print(f"[EDITORIAL_REVIEW] ========== PROMPT START ==========")
-        print(f"[EDITORIAL_REVIEW] Prompt length: {len(prompt)} chars")
-        print(f"[EDITORIAL_REVIEW] First 500 chars: {prompt[:500]}")
-        print(f"[EDITORIAL_REVIEW] ========== PROMPT END ==========")
+        analysis = None
+        corrected_article = ""
+        ai_model = "unknown"
         
-        # v27.0: Użyj Claude API (preferowany) lub Gemini (fallback)
         if claude_client:
-            print(f"[EDITORIAL_REVIEW] Using Claude API for project {project_id} ({word_count} words)")
-            response = claude_client.messages.create(
+            # WYWOŁANIE 1: Analiza
+            print(f"[EDITORIAL_REVIEW] Calling Claude for ANALYSIS...")
+            response1 = claude_client.messages.create(
                 model="claude-sonnet-4-20250514",
-                max_tokens=16000,
-                messages=[
-                    {"role": "user", "content": prompt}
-                ]
+                max_tokens=4000,
+                messages=[{"role": "user", "content": analysis_prompt}]
             )
-            review_text = response.content[0].text.strip()
+            analysis_text = response1.content[0].text.strip()
             ai_model = "claude"
             
-            # v27.1: DEBUG - loguj odpowiedź
-            print(f"[EDITORIAL_REVIEW] ========== RESPONSE START ==========")
-            print(f"[EDITORIAL_REVIEW] Response length: {len(review_text)} chars")
-            print(f"[EDITORIAL_REVIEW] First 1000 chars: {review_text[:1000]}")
-            print(f"[EDITORIAL_REVIEW] ========== RESPONSE END ==========")
+            print(f"[EDITORIAL_REVIEW] Analysis response: {len(analysis_text)} chars")
+            print(f"[EDITORIAL_REVIEW] Analysis preview: {analysis_text[:500]}")
+            
+            # Parsuj JSON analizy
+            try:
+                clean = analysis_text
+                if "```json" in clean:
+                    clean = re.sub(r'```json\s*', '', clean)
+                    clean = re.sub(r'```\s*$', '', clean)
+                elif "```" in clean:
+                    clean = re.sub(r'```\s*', '', clean)
+                
+                first_brace = clean.find('{')
+                last_brace = clean.rfind('}')
+                if first_brace != -1 and last_brace > first_brace:
+                    analysis = json.loads(clean[first_brace:last_brace + 1])
+                    print(f"[EDITORIAL_REVIEW] ✅ Analysis parsed: score={analysis.get('overall_score')}")
+            except Exception as e:
+                print(f"[EDITORIAL_REVIEW] ⚠️ Analysis parse error: {e}")
+                analysis = {"overall_score": 5, "summary": "Analiza nie sparsowana", "raw": analysis_text[:500]}
+            
+            # WYWOŁANIE 2: Poprawiony tekst
+            errors_list = analysis.get("errors_to_fix", []) if analysis else []
+            keywords_to_add = analysis.get("keywords_to_add", []) if analysis else []
+            
+            correction_prompt = f"""Popraw poniższy artykuł pt. "{topic}".
+
+=== POPRAWKI DO WPROWADZENIA ===
+{json.dumps(errors_list, ensure_ascii=False, indent=2) if errors_list else "Brak krytycznych błędów."}
+
+=== FRAZY DO WPLECENIA ===
+{', '.join(keywords_to_add) if keywords_to_add else "Brak dodatkowych fraz."}
+
+=== WYMAGANIA ===
+- Zachowaj strukturę HTML/Markdown (H2, H3)
+- MINIMUM {word_count} słów (nie skracaj!)
+- NIE dodawaj linków
+- Wpleć brakujące frazy naturalnie
+
+=== ZWRÓĆ TYLKO POPRAWIONY TEKST (bez komentarzy, bez JSON) ===
+
+=== ORYGINALNY ARTYKUŁ ===
+
+{full_text}"""
+
+            print(f"[EDITORIAL_REVIEW] ========== CALL 2: CORRECTION ==========")
+            print(f"[EDITORIAL_REVIEW] Correction prompt length: {len(correction_prompt)} chars")
+            
+            response2 = claude_client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=16000,
+                messages=[{"role": "user", "content": correction_prompt}]
+            )
+            corrected_article = response2.content[0].text.strip()
+            
+            print(f"[EDITORIAL_REVIEW] ✅ Corrected article: {len(corrected_article)} chars, {len(corrected_article.split())} words")
             
         elif genai:
             print(f"[EDITORIAL_REVIEW] Using Gemini (fallback) for project {project_id}")
             model = genai.GenerativeModel("gemini-2.0-flash")
-            response = model.generate_content(prompt)
+            
+            # Gemini: jeden prompt (stary sposób)
+            old_prompt = f"""Jesteś REDAKTOREM. Popraw artykuł i zwróć JSON:
+{{"analysis": {{"overall_score": <0-10>, "summary": "<podsumowanie>"}}, "corrected_article": "<cały poprawiony tekst>"}}
+
+Artykuł ({word_count} słów):
+{full_text}"""
+            
+            response = model.generate_content(old_prompt)
             review_text = response.text.strip()
             ai_model = "gemini"
+            
+            # Parsuj Gemini response
+            try:
+                clean = review_text
+                if "```json" in clean:
+                    clean = re.sub(r'```json\s*', '', clean)
+                    clean = re.sub(r'```\s*$', '', clean)
+                first_brace = clean.find('{')
+                last_brace = clean.rfind('}')
+                if first_brace != -1 and last_brace > first_brace:
+                    data = json.loads(clean[first_brace:last_brace + 1])
+                    analysis = data.get("analysis", {})
+                    corrected_article = data.get("corrected_article", "")
+            except:
+                analysis = {"overall_score": 5, "summary": "Gemini parse error"}
+                corrected_article = full_text
         else:
             return jsonify({
                 "error": "No AI API configured",
                 "hint": "Set ANTHROPIC_API_KEY or GEMINI_API_KEY"
             }), 500
         
-        # v27.1: Ulepszone parsowanie JSON z odpowiedzi
-        review_data = None
-        parse_error = None
+        # Fallback jeśli brak corrected_article
+        if not corrected_article or len(corrected_article) < 100:
+            print(f"[EDITORIAL_REVIEW] ⚠️ Using original text as fallback")
+            corrected_article = full_text
         
-        try:
-            # 1. Usuń markdown code blocks jeśli są
-            clean_text = review_text
-            if "```json" in clean_text:
-                clean_text = re.sub(r'```json\s*', '', clean_text)
-                clean_text = re.sub(r'```\s*$', '', clean_text)
-            elif "```" in clean_text:
-                clean_text = re.sub(r'```\s*', '', clean_text)
-            
-            # 2. Znajdź JSON - szukaj od pierwszego { do ostatniego }
-            first_brace = clean_text.find('{')
-            last_brace = clean_text.rfind('}')
-            
-            if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
-                json_str = clean_text[first_brace:last_brace + 1]
-                review_data = json.loads(json_str)
-                print(f"[EDITORIAL_REVIEW] ✅ JSON parsed successfully")
-            else:
-                parse_error = "No valid JSON braces found"
-                print(f"[EDITORIAL_REVIEW] ⚠️ {parse_error}")
-                
-        except json.JSONDecodeError as e:
-            parse_error = f"JSON decode error: {str(e)}"
-            print(f"[EDITORIAL_REVIEW] ⚠️ {parse_error}")
-            # Próba naprawy - czasem Claude dodaje przecinek na końcu
-            try:
-                # Usuń trailing comma przed }
-                fixed_json = re.sub(r',\s*}', '}', json_str)
-                fixed_json = re.sub(r',\s*]', ']', fixed_json)
-                review_data = json.loads(fixed_json)
-                print(f"[EDITORIAL_REVIEW] ✅ JSON parsed after fix")
-                parse_error = None
-            except:
-                pass
-        except Exception as e:
-            parse_error = f"Parse error: {str(e)}"
-            print(f"[EDITORIAL_REVIEW] ⚠️ {parse_error}")
-        
-        # Fallback jeśli parsowanie nie powiodło się
-        if review_data is None:
-            review_data = {
-                "raw_response": review_text[:2000],
-                "parse_error": parse_error
-            }
-            print(f"[EDITORIAL_REVIEW] Using raw response fallback")
-        
-        # Wyciągnij analysis i corrected_article
-        analysis = review_data.get("analysis", {})
-        if not analysis and "raw_response" in review_data:
-            analysis = {
-                "overall_score": 0,
-                "summary": "Parsowanie odpowiedzi nie powiodło się",
-                "parse_error": review_data.get("parse_error")
-            }
-        
-        corrected_article = review_data.get("corrected_article", "")
-        
-        # v27.1: Jeśli nie ma corrected_article, spróbuj wyciągnąć z raw_response
-        if not corrected_article and "raw_response" in review_data:
-            raw = review_data.get("raw_response", "")
-            if "corrected_article" in raw:
-                match = re.search(r'"corrected_article"\s*:\s*"([\s\S]*?)"(?=\s*})', raw)
-                if match:
-                    corrected_article = match.group(1)
-                    print(f"[EDITORIAL_REVIEW] Extracted corrected_article from raw ({len(corrected_article)} chars)")
-        
-        corrected_word_count = len(corrected_article.split()) if corrected_article else 0
+        corrected_word_count = len(corrected_article.split())
         
         # Zapisz w Firestore
         db.collection("seo_projects").document(project_id).update({
