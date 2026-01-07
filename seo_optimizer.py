@@ -240,81 +240,162 @@ def detect_paragraph_rhythm(text: str) -> str:
 # ================================================================
 def calculate_keyword_density(text: str, keywords_state: dict) -> float:
     """
-    v25.0: Używa EXCLUSIVE counts żeby uniknąć podwójnego liczenia.
+    v27.3: Wrapper dla kompatybilności - zwraca density frazy głównej.
+    Pełne dane w calculate_keyword_density_detailed().
+    """
+    result = calculate_keyword_density_detailed(text, keywords_state)
+    return result.get("main_keyword_density", 0.0)
+
+
+def calculate_keyword_density_detailed(text: str, keywords_state: dict) -> dict:
+    """
+    v27.3: Density per keyword (jak NeuronWriter).
     
-    PROBLEM (przed v25.0):
-    - "bezdech senny" = 5x w tekście
-    - "bezdech" = 5x (ale to te same wystąpienia!)
-    - Suma overlapping: 10 → zawyżona density 9.9%
-    
-    ROZWIĄZANIE (v25.0):
-    - Używa exclusive counts (longest-match-first)
-    - "bezdech senny" = 5x (konsumuje tokeny)
-    - "bezdech" = 0x (wszystkie już policzone w dłuższej frazie)
-    - Suma exclusive: 5 → poprawna density ~1.3%
-    
-    UWAGA: actual_uses nadal używa OVERLAPPING (w firestore_tracker_routes.py)
-    żeby każda fraza miała swoje własne zliczenie.
+    Każda fraza ma SWOJE density:
+    - "spadek po rodzicach" = 2.4%
+    - "spadek" = 1.5%
+    - "zachowek" = 0.2%
     
     Returns:
-        Density jako procent (0-100)
+        {
+            "main_keyword_density": 2.4,
+            "max_density": 3.1,
+            "avg_density": 0.8,
+            "status": "OK" | "WARNING" | "STUFFING",
+            "warnings": ["fraza: X% > limit"],
+            "per_keyword": {
+                "fraza1": {"count": 8, "density": 2.4, "status": "OK"},
+                ...
+            }
+        }
     """
     if not text or not keywords_state:
-        return 0.0
+        return {
+            "main_keyword_density": 0.0,
+            "max_density": 0.0,
+            "avg_density": 0.0,
+            "status": "OK",
+            "warnings": [],
+            "per_keyword": {}
+        }
     
     total_words = len(text.split())
     if total_words == 0:
-        return 0.0
+        return {
+            "main_keyword_density": 0.0,
+            "max_density": 0.0,
+            "avg_density": 0.0,
+            "status": "OK",
+            "warnings": [],
+            "per_keyword": {}
+        }
     
-    # v25.0: Unified counting z EXCLUSIVE (bez duplikatów!)
+    # Znajdź frazę główną
+    main_keyword = None
+    for meta in keywords_state.values():
+        if meta.get("is_main_keyword") or meta.get("type", "").upper() == "MAIN":
+            main_keyword = meta.get("keyword", "")
+            break
+    
+    # Zbierz wszystkie frazy
+    keywords = []
+    kw_meta = {}
+    for rid, meta in keywords_state.items():
+        kw = (meta.get("keyword") or "").strip()
+        if kw:
+            keywords.append(kw)
+            kw_meta[kw] = {
+                "type": meta.get("type", "BASIC"),
+                "is_main": meta.get("is_main_keyword", False) or kw == main_keyword
+            }
+    
+    if not keywords:
+        return {
+            "main_keyword_density": 0.0,
+            "max_density": 0.0,
+            "avg_density": 0.0,
+            "status": "OK",
+            "warnings": [],
+            "per_keyword": {}
+        }
+    
+    # Policz wszystkie frazy naraz (wydajne!)
     if UNIFIED_COUNTER:
-        keywords = [meta.get("keyword", "") for meta in keywords_state.values() if meta.get("keyword")]
-        
-        # Użyj count_keywords z exclusive zamiast overlapping
         result = count_keywords(text, keywords, return_per_segment=False, return_paragraph_stuffing=False)
-        exclusive_counts = result.get("exclusive", {})
-        
-        # Policz tokeny (każda fraza * liczba słów w frazie)
-        keyword_tokens = 0
-        for kw in keywords:
-            kw_clean = kw.strip()
-            if not kw_clean:
-                continue
-            count = exclusive_counts.get(kw_clean, 0)
-            kw_words = len(kw_clean.split())
-            keyword_tokens += count * kw_words
+        counts = result.get("exclusive", {})  # EXCLUSIVE dla density
     else:
-        # LEGACY FALLBACK - z deduplikacją pozycji
+        # Fallback
+        counts = {}
         text_lower = text.lower()
-        keyword_tokens = 0
-        
-        # Sortuj od najdłuższych żeby najpierw policzyć dłuższe frazy
-        sorted_keywords = sorted(
-            [meta.get("keyword", "") for meta in keywords_state.values() if meta.get("keyword")],
-            key=len,
-            reverse=True
-        )
-        
-        counted_positions = set()  # Śledź które pozycje już policzone
-        
-        for keyword in sorted_keywords:
-            if not keyword:
-                continue
-            keyword_lower = keyword.lower()
-            kw_words = len(keyword.split())
-            
-            # Znajdź wszystkie wystąpienia
-            for match in re.finditer(rf"\b{re.escape(keyword_lower)}\b", text_lower):
-                start, end = match.start(), match.end()
-                
-                # Sprawdź czy ta pozycja już nie była policzona przez dłuższą frazę
-                position_range = set(range(start, end))
-                if not position_range.intersection(counted_positions):
-                    keyword_tokens += kw_words
-                    counted_positions.update(position_range)
+        for kw in keywords:
+            kw_lower = kw.lower()
+            counts[kw] = len(re.findall(rf"\b{re.escape(kw_lower)}\b", text_lower))
     
-    density = (keyword_tokens / total_words) * 100
-    return round(density, 2)
+    # Oblicz density dla każdej frazy
+    per_keyword = {}
+    densities = []
+    warnings = []
+    main_keyword_density = 0.0
+    
+    # Limity density per fraza
+    DENSITY_OK = 2.0
+    DENSITY_WARNING = 3.0
+    DENSITY_STUFFING = 4.0
+    
+    for kw in keywords:
+        count = counts.get(kw, 0)
+        kw_words = len(kw.split())
+        kw_tokens = count * kw_words
+        kw_density = round((kw_tokens / total_words) * 100, 2)
+        
+        # Status dla tej frazy
+        if kw_density > DENSITY_STUFFING:
+            status = "STUFFING"
+            warnings.append(f"🔴 {kw}: {kw_density}% (STUFFING!)")
+        elif kw_density > DENSITY_WARNING:
+            status = "WARNING"
+            warnings.append(f"🟠 {kw}: {kw_density}% (za wysoko)")
+        elif kw_density > DENSITY_OK:
+            status = "HIGH"
+        else:
+            status = "OK"
+        
+        per_keyword[kw] = {
+            "count": count,
+            "density": kw_density,
+            "status": status
+        }
+        
+        if count > 0:
+            densities.append(kw_density)
+        
+        # Zapisz density frazy głównej
+        if kw_meta.get(kw, {}).get("is_main"):
+            main_keyword_density = kw_density
+    
+    # Oblicz max i średnią
+    max_density = max(densities) if densities else 0.0
+    avg_density = round(sum(densities) / len(densities), 2) if densities else 0.0
+    
+    # Status ogólny
+    if max_density > DENSITY_STUFFING:
+        overall_status = "STUFFING"
+    elif max_density > DENSITY_WARNING:
+        overall_status = "WARNING"
+    elif max_density > DENSITY_OK:
+        overall_status = "HIGH"
+    else:
+        overall_status = "OK"
+    
+    return {
+        "main_keyword_density": main_keyword_density,
+        "max_density": max_density,
+        "avg_density": avg_density,
+        "status": overall_status,
+        "warnings": warnings[:5],  # Max 5 warnings
+        "per_keyword": per_keyword,
+        "total_words": total_words
+    }
 
 
 # ================================================================
@@ -366,10 +447,12 @@ def unified_prevalidation(text: str, keywords_state: dict = None) -> dict:
         rhythm = detect_paragraph_rhythm(text)
         readability = assess_readability(text)
         
-        # v25.0: EXCLUSIVE density
+        # v27.3: Density per keyword (jak NeuronWriter)
         density = 0.0
+        density_details = {}
         if keywords_state:
-            density = calculate_keyword_density(text, keywords_state)
+            density_details = calculate_keyword_density_detailed(text, keywords_state)
+            density = density_details.get("main_keyword_density", 0.0)
         
         # Semantic coverage
         semantic_coverage = {}
@@ -381,13 +464,16 @@ def unified_prevalidation(text: str, keywords_state: dict = None) -> dict:
         if "Warning" in rhythm or "🚨" in rhythm:
             warnings.append(rhythm)
         
-        # v25.0: Nowe progi density
-        if density > 3.0:
-            warnings.append(f"🔴 KEYWORD STUFFING: {density:.1f}% (max 3%)")
-        elif density > 2.5:
-            warnings.append(f"🟠 Density za wysoka: {density:.1f}% (zalecane < 2%)")
-        elif density > 2.0:
-            warnings.append(f"🟡 Density wysoka: {density:.1f}% (optymalne: 0.5-1.5%)")
+        # v27.3: Warnings z density_details (per keyword)
+        if density_details.get("warnings"):
+            warnings.extend(density_details["warnings"])
+        
+        # Ogólny status density (bazowany na max)
+        max_density = density_details.get("max_density", 0.0)
+        if max_density > 4.0:
+            warnings.append(f"🔴 MAX DENSITY: {max_density:.1f}% (STUFFING!)")
+        elif max_density > 3.0:
+            warnings.append(f"🟠 MAX DENSITY: {max_density:.1f}% (za wysoko)")
         
         semantic_score = 0.85
         transition_score = 0.80
@@ -396,7 +482,8 @@ def unified_prevalidation(text: str, keywords_state: dict = None) -> dict:
             "status": "success",
             "semantic_score": semantic_score,
             "transition_score": transition_score,
-            "density": density,
+            "density": density,  # Main keyword density (kompatybilność)
+            "density_details": density_details,  # v27.3: Pełne dane
             "smog": readability.get("smog", 0),
             "readability": readability.get("readability_score", 0),
             "optimized_text": result.get("optimized_text", text),
@@ -416,6 +503,7 @@ def unified_prevalidation(text: str, keywords_state: dict = None) -> dict:
             "semantic_score": 0,
             "transition_score": 0,
             "density": 0,
+            "density_details": {},
             "smog": 0,
             "readability": 0,
             "error": str(e),
