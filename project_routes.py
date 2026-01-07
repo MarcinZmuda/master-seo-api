@@ -1071,12 +1071,14 @@ def get_pre_batch_info(project_id):
     # Coverage
     coverage = validate_coverage(keywords_state)
     
-    # Density
+    # Density - v27.3: per keyword
     full_text = "\n\n".join([b.get("text", "") for b in batches])
     current_density = 0
+    density_details = {}
     if full_text:
         prevalidation = unified_prevalidation(full_text, keywords_state)
         current_density = prevalidation.get("density", 0)
+        density_details = prevalidation.get("density_details", {})
     
     density_status, density_msg = get_density_status(current_density)
     
@@ -1238,7 +1240,16 @@ def get_pre_batch_info(project_id):
     basic_cov = coverage.get("basic", {}).get("coverage_percent", 100)
     ext_cov = coverage.get("extended", {}).get("coverage_percent", 100)
     prompt_sections.append(f"📊 COVERAGE: BASIC {basic_cov:.0f}% | EXTENDED {ext_cov:.0f}%")
-    prompt_sections.append(f"📈 DENSITY: {current_density:.1f}% ({density_status})")
+    
+    # v27.3: Density per keyword
+    max_density = density_details.get("max_density", 0)
+    prompt_sections.append(f"📈 DENSITY: main={current_density:.1f}% | max={max_density:.1f}% ({density_status})")
+    
+    # Pokaż warnings jeśli są
+    density_warnings = density_details.get("warnings", [])
+    if density_warnings:
+        for warn in density_warnings[:3]:
+            prompt_sections.append(f"   {warn}")
     prompt_sections.append("")
     
     if ratio_warning:
@@ -1469,9 +1480,13 @@ def get_pre_batch_info(project_id):
         
         "density": {
             "current": current_density,
+            "max_density": density_details.get("max_density", 0),
+            "avg_density": density_details.get("avg_density", 0),
             "status": density_status,
             "message": density_msg,
-            "optimal_range": f"{DENSITY_OPTIMAL_MIN}-{DENSITY_OPTIMAL_MAX}%"
+            "optimal_range": f"{DENSITY_OPTIMAL_MIN}-{DENSITY_OPTIMAL_MAX}%",
+            "warnings": density_details.get("warnings", []),
+            "per_keyword_top5": dict(list(density_details.get("per_keyword", {}).items())[:5])
         },
         
         "main_keyword": {
