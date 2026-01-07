@@ -295,18 +295,9 @@ def calculate_suggested_v25(
     soft_cap_info = check_soft_cap(actual, target_max, keyword)
     soft_cap_warning = soft_cap_info.get("message") if soft_cap_info else None
     
-    # === EXTENDED: dokładnie 1x ===
+    # === EXTENDED: min 1x, może być więcej ===
     if kw_type == "EXTENDED":
-        if actual >= 1:
-            return {
-                "suggested": 0,
-                "priority": "DONE",
-                "instruction": f"✅ DONE - już użyta ({actual}x)",
-                "hard_max_this_batch": 0,
-                "flexibility": "NONE",
-                "adjusted_max": target_max
-            }
-        else:
+        if actual == 0:
             # v27.2: KAŻDY batch powinien użyć proporcjonalną liczbę EXTENDED
             # Nie używamy hash - rozdzielamy równomiernie
             # W ostatnich batchach wszystkie nieużyte EXTENDED muszą być użyte
@@ -316,20 +307,20 @@ def calculate_suggested_v25(
                 return {
                     "suggested": 1,
                     "priority": "CRITICAL",
-                    "instruction": f"🔴 KRYTYCZNE - MUSISZ użyć 1x (zostały {remaining_batches} batchy!)",
-                    "hard_max_this_batch": 1,
+                    "instruction": f"🔴 KRYTYCZNE - MUSISZ użyć min 1x (zostały {remaining_batches} batchy!)",
+                    "hard_max_this_batch": 2,
                     "flexibility": "NONE",
-                    "adjusted_max": 1
+                    "adjusted_max": target_max
                 }
             elif remaining_batches <= 3:
                 # Przedostatnie batchy - HIGH priority
                 return {
                     "suggested": 1,
                     "priority": "HIGH",
-                    "instruction": f"📌 WPLEĆ 1x (extended - zostały {remaining_batches} batchy)",
-                    "hard_max_this_batch": 1,
+                    "instruction": f"📌 WPLEĆ min 1x (extended - zostały {remaining_batches} batchy)",
+                    "hard_max_this_batch": 2,
                     "flexibility": "LOW",
-                    "adjusted_max": 1
+                    "adjusted_max": target_max
                 }
             else:
                 # Wczesne batchy - ale i tak zachęcaj do użycia
@@ -338,19 +329,40 @@ def calculate_suggested_v25(
                     return {
                         "suggested": 1,
                         "priority": "HIGH",
-                        "instruction": f"📌 WPLEĆ 1x w tym batchu (extended)",
-                        "hard_max_this_batch": 1,
+                        "instruction": f"📌 WPLEĆ min 1x w tym batchu (extended)",
+                        "hard_max_this_batch": 2,
                         "flexibility": "LOW",
-                        "adjusted_max": 1
+                        "adjusted_max": target_max
                     }
                 else:
                     return {
                         "suggested": 0,
                         "priority": "SCHEDULED",
                     "instruction": f"⏳ Zaplanowana na późniejszy batch",
-                    "hard_max_this_batch": 1,
+                    "hard_max_this_batch": 2,
                     "flexibility": "MEDIUM",
-                    "adjusted_max": 1
+                    "adjusted_max": target_max
+                }
+        else:
+            # v27.2: EXTENDED już użyte min 1x - OK, może być więcej
+            remaining_to_max = max(0, target_max - actual)
+            if remaining_to_max == 0:
+                return {
+                    "suggested": 0,
+                    "priority": "LOCKED",
+                    "instruction": f"🔒 LOCKED - limit osiągnięty ({actual}/{target_max})",
+                    "hard_max_this_batch": 0,
+                    "flexibility": "NONE",
+                    "adjusted_max": target_max
+                }
+            else:
+                return {
+                    "suggested": 0,
+                    "priority": "OK",
+                    "instruction": f"✅ OK ({actual}x) - możesz użyć więcej (max {target_max})",
+                    "hard_max_this_batch": min(2, remaining_to_max),
+                    "flexibility": "HIGH",
+                    "adjusted_max": target_max
                 }
     
     # === BASIC / MAIN ===
@@ -2290,3 +2302,189 @@ def auto_correct_keywords_alias(project_id):
 @project_routes.post("/api/project/<project_id>/preview_all_checks")
 def preview_all_checks(project_id):
     return preview_batch(project_id)
+
+
+# ================================================================
+# v27.2: PHRASE ANALYSIS - dokładne sprawdzenie fraz w tekście
+# ================================================================
+@project_routes.post("/api/project/<project_id>/analyze_phrases")
+def analyze_phrases(project_id):
+    """
+    Analizuje DOKŁADNE wystąpienia fraz BASIC i EXTENDED w tekście.
+    Pokazuje:
+    - Gdzie dokładnie fraza występuje (indeks znaków)
+    - W jakiej formie (oryginalna vs zlemmatyzowana)
+    - Porównanie: regex vs lemmatizer vs firestore
+    
+    Użycie: przed FAQ żeby sprawdzić które frazy trzeba jeszcze użyć.
+    """
+    import re
+    
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No JSON data provided"}), 400
+    
+    text = data.get("text", "")
+    if not text:
+        return jsonify({"error": "Field 'text' required"}), 400
+    
+    db = firestore.client()
+    doc = db.collection("seo_projects").document(project_id).get()
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+    
+    project_data = doc.to_dict()
+    keywords_state = project_data.get("keywords_state", {})
+    
+    # Import keyword_counter
+    try:
+        from keyword_counter import count_keywords, count_keywords_for_state
+        COUNTER_AVAILABLE = True
+    except ImportError:
+        COUNTER_AVAILABLE = False
+    
+    # Zbierz frazy
+    all_phrases = []
+    for rid, meta in keywords_state.items():
+        kw = meta.get("keyword", "").strip()
+        kw_type = meta.get("type", "BASIC").upper()
+        if not kw:
+            continue
+        
+        all_phrases.append({
+            "rid": rid,
+            "keyword": kw,
+            "type": kw_type,
+            "target_min": meta.get("target_min", 1),
+            "target_max": meta.get("target_max", 5),
+            "actual_in_firestore": meta.get("actual_uses", 0)
+        })
+    
+    # Funkcja szukania DOKŁADNYCH wystąpień (regex, bez lemmatyzacji)
+    def find_exact_regex(text_to_search: str, phrase: str) -> list:
+        """Znajduje wszystkie dokładne wystąpienia frazy (case-insensitive, regex)."""
+        matches = []
+        text_lower = text_to_search.lower()
+        phrase_lower = phrase.lower()
+        
+        # Szukaj z word boundaries
+        pattern = r'\b' + re.escape(phrase_lower) + r'\b'
+        for match in re.finditer(pattern, text_lower):
+            start = match.start()
+            end = match.end()
+            original_form = text_to_search[start:end]
+            
+            ctx_start = max(0, start - 25)
+            ctx_end = min(len(text_to_search), end + 25)
+            context = text_to_search[ctx_start:ctx_end]
+            
+            matches.append({
+                "pos": f"{start}-{end}",
+                "found": original_form,
+                "ctx": f"...{context}..."
+            })
+        
+        return matches
+    
+    # Policz każdą frazę na 3 sposoby
+    analysis = []
+    
+    # 1. Unified counter (jeśli dostępny)
+    if COUNTER_AVAILABLE:
+        keywords_list = [p["keyword"] for p in all_phrases]
+        unified_result = count_keywords(text, keywords_list, return_per_segment=False, return_paragraph_stuffing=False)
+        overlapping = unified_result.get("overlapping", {})
+        exclusive = unified_result.get("exclusive", {})
+    else:
+        overlapping = {}
+        exclusive = {}
+    
+    for phrase_info in all_phrases:
+        kw = phrase_info["keyword"]
+        
+        # Regex count (dokładne dopasowanie, bez lemmatyzacji)
+        regex_matches = find_exact_regex(text, kw)
+        regex_count = len(regex_matches)
+        
+        # Unified counter counts
+        overlap_count = overlapping.get(kw, 0)
+        excl_count = exclusive.get(kw, 0)
+        
+        # Firestore value
+        firestore_count = phrase_info["actual_in_firestore"]
+        
+        # Status
+        target_min = phrase_info["target_min"] if phrase_info["type"] != "EXTENDED" else 1
+        
+        # Wykryj rozbieżności
+        discrepancy = None
+        if regex_count != overlap_count:
+            discrepancy = f"REGEX({regex_count}) != LEMMA({overlap_count})"
+        
+        analysis.append({
+            "keyword": kw,
+            "type": phrase_info["type"],
+            "rid": phrase_info["rid"],
+            
+            # 3 metody liczenia
+            "count_regex": regex_count,           # Dokładne dopasowanie (bez odmian)
+            "count_overlapping": overlap_count,   # Z lemmatyzacją (Google-style)
+            "count_exclusive": excl_count,        # Bez zagnieżdżonych
+            "count_firestore": firestore_count,   # Zapisane w Firestore
+            
+            # Targety
+            "target_min": target_min,
+            "target_max": phrase_info["target_max"],
+            
+            # Status
+            "status": "✅" if overlap_count >= target_min else "❌",
+            "discrepancy": discrepancy,
+            
+            # Przykłady (max 5)
+            "examples": regex_matches[:5]
+        })
+    
+    # Podsumowanie
+    basic_analysis = [a for a in analysis if a["type"] == "BASIC"]
+    extended_analysis = [a for a in analysis if a["type"] == "EXTENDED"]
+    
+    basic_missing = [a["keyword"] for a in basic_analysis if a["count_overlapping"] < a["target_min"]]
+    extended_missing = [a["keyword"] for a in extended_analysis if a["count_overlapping"] < 1]
+    
+    # Wykryj problemy
+    problems = []
+    for a in analysis:
+        if a["discrepancy"]:
+            problems.append(f"{a['keyword']}: {a['discrepancy']}")
+        if a["count_firestore"] != a["count_overlapping"]:
+            problems.append(f"{a['keyword']}: Firestore({a['count_firestore']}) != Text({a['count_overlapping']})")
+    
+    return jsonify({
+        "project_id": project_id,
+        "text_length": len(text),
+        "word_count": len(text.split()),
+        "counter_type": "unified_lemmatizer" if COUNTER_AVAILABLE else "regex_only",
+        
+        "summary": {
+            "basic_total": len(basic_analysis),
+            "basic_covered": len(basic_analysis) - len(basic_missing),
+            "basic_missing": len(basic_missing),
+            "extended_total": len(extended_analysis),
+            "extended_covered": len(extended_analysis) - len(extended_missing),
+            "extended_missing": len(extended_missing)
+        },
+        
+        "missing_basic": basic_missing,
+        "missing_extended": extended_missing,
+        
+        "problems_detected": problems[:10],
+        
+        "analysis": analysis,
+        
+        "legend": {
+            "count_regex": "Dokładne dopasowanie (bez odmian)",
+            "count_overlapping": "Z lemmatyzacją + zagnieżdżone (Google-style)",
+            "count_exclusive": "Z lemmatyzacją, BEZ zagnieżdżonych",
+            "count_firestore": "Wartość zapisana w Firestore (może być nieaktualna)"
+        }
+    })
