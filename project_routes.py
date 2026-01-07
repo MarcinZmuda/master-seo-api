@@ -307,23 +307,46 @@ def calculate_suggested_v25(
                 "adjusted_max": target_max
             }
         else:
-            should_use = (hash(keyword) % total_batches) == (current_batch - 1)
-            if remaining_batches <= 2:
-                should_use = True
+            # v27.2: KAŻDY batch powinien użyć proporcjonalną liczbę EXTENDED
+            # Nie używamy hash - rozdzielamy równomiernie
+            # W ostatnich batchach wszystkie nieużyte EXTENDED muszą być użyte
             
-            if should_use:
+            if remaining_batches <= 2:
+                # Ostatnie 2 batchy - KRYTYCZNE, użyj wszystkie nieużyte
+                return {
+                    "suggested": 1,
+                    "priority": "CRITICAL",
+                    "instruction": f"🔴 KRYTYCZNE - MUSISZ użyć 1x (zostały {remaining_batches} batchy!)",
+                    "hard_max_this_batch": 1,
+                    "flexibility": "NONE",
+                    "adjusted_max": 1
+                }
+            elif remaining_batches <= 3:
+                # Przedostatnie batchy - HIGH priority
                 return {
                     "suggested": 1,
                     "priority": "HIGH",
-                    "instruction": f"📌 WPLEĆ 1x (extended - użyj raz naturalnie)",
+                    "instruction": f"📌 WPLEĆ 1x (extended - zostały {remaining_batches} batchy)",
                     "hard_max_this_batch": 1,
                     "flexibility": "LOW",
                     "adjusted_max": 1
                 }
             else:
-                return {
-                    "suggested": 0,
-                    "priority": "SCHEDULED",
+                # Wczesne batchy - ale i tak zachęcaj do użycia
+                should_use = (hash(keyword) % total_batches) == (current_batch - 1)
+                if should_use:
+                    return {
+                        "suggested": 1,
+                        "priority": "HIGH",
+                        "instruction": f"📌 WPLEĆ 1x w tym batchu (extended)",
+                        "hard_max_this_batch": 1,
+                        "flexibility": "LOW",
+                        "adjusted_max": 1
+                    }
+                else:
+                    return {
+                        "suggested": 0,
+                        "priority": "SCHEDULED",
                     "instruction": f"⏳ Zaplanowana na późniejszy batch",
                     "hard_max_this_batch": 1,
                     "flexibility": "MEDIUM",
@@ -1124,6 +1147,36 @@ def get_pre_batch_info(project_id):
             else:
                 basic_done.append(kw_info)
     
+    # v27.2: Wymuszenie proporcjonalnego użycia EXTENDED
+    # Jeśli jest dużo nieużytych EXTENDED, przenieś część ze SCHEDULED do this_batch
+    total_unused_extended = len(extended_this_batch) + len(extended_scheduled)
+    if total_unused_extended > 0 and remaining_batches > 0:
+        # Ile EXTENDED powinno być użyte w tym batchu?
+        extended_per_batch = math.ceil(total_unused_extended / remaining_batches)
+        
+        # Jeśli mamy za mało w this_batch, przenieś ze SCHEDULED
+        while len(extended_this_batch) < extended_per_batch and extended_scheduled:
+            kw_to_move = extended_scheduled.pop(0)
+            # Znajdź pełne info o tej frazie
+            for rid, meta in keywords_state.items():
+                if meta.get("keyword") == kw_to_move:
+                    extended_this_batch.append({
+                        "keyword": kw_to_move,
+                        "type": "EXTENDED",
+                        "actual": 0,
+                        "target": "1-1",
+                        "suggested": 1,
+                        "priority": "HIGH",
+                        "instruction": f"📌 WPLEĆ 1x (przesuniete z kolejnych batchy)",
+                        "hard_max_this_batch": 1,
+                        "flexibility": "LOW"
+                    })
+                    break
+        
+        # Dodaj info o wymaganej liczbie EXTENDED
+        if extended_per_batch > 0:
+            print(f"[PRE_BATCH] Batch {current_batch_num}: wymaga {extended_per_batch} EXTENDED, ma {len(extended_this_batch)}")
+    
     # Used H2
     used_h2 = []
     for batch in batches:
@@ -1180,10 +1233,22 @@ def get_pre_batch_info(project_id):
             prompt_sections.append(f"   • \"{kw['keyword']}\" → {kw['instruction']}")
         prompt_sections.append("")
     
-    if extended_this_batch:
+    # v27.2: Rozdziel EXTENDED na CRITICAL i HIGH
+    extended_critical = [kw for kw in extended_this_batch if kw.get('priority') == 'CRITICAL']
+    extended_high = [kw for kw in extended_this_batch if kw.get('priority') == 'HIGH']
+    
+    if extended_critical:
+        prompt_sections.append("🔴 EXTENDED - KRYTYCZNE (MUSISZ użyć!):")
+        for kw in extended_critical:  # Wszystkie, bez limitu
+            prompt_sections.append(f"   • \"{kw['keyword']}\" → {kw['instruction']}")
+        prompt_sections.append("")
+    
+    if extended_high:
         prompt_sections.append("📌 EXTENDED - WPLEĆ 1x W TYM BATCHU:")
-        for kw in extended_this_batch[:6]:
+        for kw in extended_high[:8]:  # Zwiększony limit z 6 do 8
             prompt_sections.append(f"   • \"{kw['keyword']}\"")
+        if len(extended_high) > 8:
+            prompt_sections.append(f"   ... i {len(extended_high) - 8} więcej")
         prompt_sections.append("")
     
     if batch_ngrams:
@@ -1192,13 +1257,36 @@ def get_pre_batch_info(project_id):
             prompt_sections.append(f"   • \"{ngram}\"")
         prompt_sections.append("")
     
-    if locked_exceeded:
-        blocked_names = [kw['keyword'] for kw in locked_exceeded[:5]]
-        prompt_sections.append(f"🚫 NIE UŻYWAJ: {', '.join(blocked_names)}")
-        prompt_sections.append("")
+    # v27.2: Sekcja ZABRONIONYCH fraz - rozdzielona na typy
+    # Zbierz wszystkie zabronione: locked + exceeded + extended_done
+    forbidden_basic = []
+    forbidden_extended = []
     
-    if extended_done:
-        prompt_sections.append(f"✅ EXTENDED DONE ({len(extended_done)}): {', '.join(extended_done[:5])}")
+    for kw in locked_exceeded:
+        if kw.get('type', 'BASIC').upper() == 'EXTENDED':
+            forbidden_extended.append(kw['keyword'])
+        else:
+            forbidden_basic.append(kw['keyword'])
+    
+    # EXTENDED DONE też są zabronione (już użyte 1x)
+    forbidden_extended.extend(extended_done)
+    
+    # Wyświetl zabronione
+    if forbidden_basic or forbidden_extended:
+        prompt_sections.append("=" * 50)
+        prompt_sections.append("🚫 ZABRONIONE FRAZY (NIE UŻYWAJ!):")
+        
+        if forbidden_basic:
+            prompt_sections.append(f"   BASIC (limit osiągnięty): {', '.join(forbidden_basic[:10])}")
+            if len(forbidden_basic) > 10:
+                prompt_sections.append(f"   ... i {len(forbidden_basic) - 10} więcej BASIC")
+        
+        if forbidden_extended:
+            prompt_sections.append(f"   EXTENDED (już użyte 1x): {', '.join(forbidden_extended[:10])}")
+            if len(forbidden_extended) > 10:
+                prompt_sections.append(f"   ... i {len(forbidden_extended) - 10} więcej EXTENDED")
+        
+        prompt_sections.append("=" * 50)
         prompt_sections.append("")
     
     if remaining_h2:
