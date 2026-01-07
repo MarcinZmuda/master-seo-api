@@ -1126,15 +1126,20 @@ def get_pre_batch_info(project_id):
             is_main=is_main
         )
         
+        # v27.2: Jasne instrukcje ile użyć W TYM BATCHU
+        suggested_use = suggested_info["suggested"]
+        hard_max = suggested_info["hard_max_this_batch"]
+        
         kw_info = {
             "keyword": keyword,
             "type": kw_type,
             "actual": actual,
-            "target": f"{target_min}-{target_max}",
-            "suggested": suggested_info["suggested"],
+            "target_total": f"{target_min}-{target_max}",  # cel na CAŁY artykuł
+            "use_this_batch": f"{suggested_use}-{hard_max}" if suggested_use > 0 else "0",  # użyj W TYM BATCHU
+            "suggested": suggested_use,
             "priority": suggested_info["priority"],
             "instruction": suggested_info["instruction"],
-            "hard_max_this_batch": suggested_info["hard_max_this_batch"],
+            "hard_max_this_batch": hard_max,
             "flexibility": suggested_info["flexibility"],
             "is_main": is_main,
             "is_synonym": is_synonym
@@ -1229,20 +1234,20 @@ def get_pre_batch_info(project_id):
     if main_keyword_info:
         prompt_sections.append("="*50)
         prompt_sections.append(f"🔴 FRAZA GŁÓWNA: \"{main_keyword}\"")
-        prompt_sections.append(f"   {main_keyword_info['instruction']}")
+        prompt_sections.append(f"   Użyj {main_keyword_info['use_this_batch']}x W TYM BATCHU (actual: {main_keyword_info['actual']})")
         prompt_sections.append("="*50)
         prompt_sections.append("")
     
     if basic_must_use:
         prompt_sections.append("🔴 BASIC - MUSISZ UŻYĆ (brak coverage!):")
         for kw in basic_must_use[:6]:
-            prompt_sections.append(f"   • \"{kw['keyword']}\" → min 1x (cel: {kw['target']})")
+            prompt_sections.append(f"   • \"{kw['keyword']}\" → użyj {kw['use_this_batch']}x W TYM BATCHU")
         prompt_sections.append("")
     
     if basic_target:
         prompt_sections.append("🟠 BASIC - DĄŻ DO TARGET:")
         for kw in basic_target[:5]:
-            prompt_sections.append(f"   • \"{kw['keyword']}\" → {kw['instruction']}")
+            prompt_sections.append(f"   • \"{kw['keyword']}\" → użyj {kw['use_this_batch']}x W TYM BATCHU (actual: {kw['actual']})")
         prompt_sections.append("")
     
     # v27.2: Rozdziel EXTENDED na CRITICAL i HIGH
@@ -1314,25 +1319,38 @@ def get_pre_batch_info(project_id):
     # ================================================================
     # v27.2: DYNAMIC BATCH LENGTH - oblicz minimalną długość na podstawie fraz
     # ================================================================
-    # Formuła: min_words = (remaining_uses * avg_phrase_length) / target_density
-    # Żeby zmieścić wszystkie frazy w dozwolonej gęstości
+    # Formuła: 
+    # 1. Policz WSZYSTKIE pozostałe użycia fraz (do końca artykułu)
+    # 2. Podziel przez remaining_batches = ile użyć na TEN batch
+    # 3. min_words = (uses_this_batch * avg_phrase_length) / target_density
     
-    # Policz ile użyć fraz pozostało w tym batchu
-    remaining_basic_uses = 0
-    remaining_extended_uses = 0
+    # Policz WSZYSTKIE pozostałe użycia (nie tylko ten batch)
+    total_remaining_basic = 0
+    total_remaining_extended = 0
     avg_phrase_words = 0
     phrase_count = 0
     
-    for kw_info in basic_must_use + basic_target:
-        remaining = kw_info.get("suggested", 0)
-        remaining_basic_uses += remaining
+    for rid, meta in keywords_state.items():
+        kw_type = meta.get("type", "BASIC").upper()
+        keyword = meta.get("keyword", "")
+        actual = meta.get("actual_uses", 0)
+        target_min = meta.get("target_min", 1)
+        target_max = meta.get("target_max", 5)
+        
+        if not keyword:
+            continue
+        
         phrase_count += 1
-        avg_phrase_words += len(kw_info.get("keyword", "").split())
-    
-    for kw_info in extended_this_batch:
-        remaining_extended_uses += kw_info.get("suggested", 1)
-        phrase_count += 1
-        avg_phrase_words += len(kw_info.get("keyword", "").split())
+        avg_phrase_words += len(keyword.split())
+        
+        if kw_type == "EXTENDED":
+            # EXTENDED: potrzebuje min 1x
+            if actual < 1:
+                total_remaining_extended += 1
+        else:
+            # BASIC: potrzebuje min target_min
+            remaining = max(0, target_min - actual)
+            total_remaining_basic += remaining
     
     # Średnia długość frazy
     if phrase_count > 0:
@@ -1340,15 +1358,21 @@ def get_pre_batch_info(project_id):
     else:
         avg_phrase_words = 2.0  # domyślnie 2 słowa
     
-    total_remaining_uses = remaining_basic_uses + remaining_extended_uses
+    # PODZIEL przez remaining_batches = ile na TEN batch
+    total_remaining_all = total_remaining_basic + total_remaining_extended
+    
+    if remaining_batches > 0:
+        uses_this_batch = math.ceil(total_remaining_all / remaining_batches)
+    else:
+        uses_this_batch = total_remaining_all
     
     # Oblicz minimalną długość żeby zmieścić frazy w density < 2%
     # density = (uses * avg_phrase_words) / total_words * 100
     # total_words = (uses * avg_phrase_words) / (density / 100)
     TARGET_DENSITY_FOR_CALC = 1.5  # Celujemy w 1.5% żeby mieć margines
     
-    if total_remaining_uses > 0:
-        min_words_for_density = int((total_remaining_uses * avg_phrase_words) / (TARGET_DENSITY_FOR_CALC / 100))
+    if uses_this_batch > 0:
+        min_words_for_density = int((uses_this_batch * avg_phrase_words) / (TARGET_DENSITY_FOR_CALC / 100))
     else:
         min_words_for_density = 300  # minimum
     
@@ -1374,15 +1398,30 @@ def get_pre_batch_info(project_id):
     batch_length_info = {
         "suggested_min": suggested_min_words,
         "suggested_max": suggested_max_words,
-        "reason": f"Potrzebujesz ~{total_remaining_uses} użyć fraz (BASIC:{remaining_basic_uses}, EXT:{remaining_extended_uses})",
+        "total_remaining": total_remaining_all,
+        "uses_this_batch": uses_this_batch,
+        "remaining_batches": remaining_batches,
+        "reason": f"Pozostało {total_remaining_all} użyć fraz / {remaining_batches} batchy = ~{uses_this_batch} na ten batch",
         "density_note": f"Przy {suggested_min_words} słowach osiągniesz ~{TARGET_DENSITY_FOR_CALC}% density"
     }
     
     prompt_sections.append("="*50)
     prompt_sections.append(f"📏 SUGEROWANA DŁUGOŚĆ BATCHA: {suggested_min_words}-{suggested_max_words} słów")
-    prompt_sections.append(f"   (Obliczone na podstawie {total_remaining_uses} wymaganych użyć fraz)")
-    if total_remaining_uses > 15:
+    prompt_sections.append(f"   Pozostało {total_remaining_all} użyć fraz / {remaining_batches} batchy = ~{uses_this_batch} na ten batch")
+    if uses_this_batch > 15:
         prompt_sections.append(f"   ⚠️ DUŻO FRAZ! Pisz dłuższe sekcje żeby zmieścić wszystkie.")
+    prompt_sections.append("")
+    
+    # v27.2: Podsumowanie - ile fraz użyć W TYM BATCHU
+    total_must_use = len(basic_must_use) + len([e for e in extended_this_batch if e.get('priority') in ['CRITICAL', 'HIGH']])
+    total_suggested_uses = sum(kw.get('suggested', 0) for kw in basic_must_use + basic_target + extended_this_batch)
+    
+    prompt_sections.append("="*50)
+    prompt_sections.append("📊 PODSUMOWANIE - W TYM BATCHU:")
+    prompt_sections.append(f"   • Fraz OBOWIĄZKOWYCH: {total_must_use}")
+    prompt_sections.append(f"   • Łączna liczba użyć: ~{total_suggested_uses}")
+    prompt_sections.append(f"   • Nie używaj fraz z sekcji 🚫 ZABRONIONE!")
+    prompt_sections.append("="*50)
     prompt_sections.append("")
     
     prompt_sections.append("="*50)
