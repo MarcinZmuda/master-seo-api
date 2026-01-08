@@ -1,88 +1,42 @@
 {
-  "version": "v27.1",
-  "last_updated": "2025-01-06",
-  "name": "editorial_review_prompt",
-  "description": "Prompt dla Claude do Editorial Review (S5)",
+  "version": "v28.0 - GOOGLE ALGO DOMINATION",
+  "last_updated": "2025-01-08",
+  "name": "editorial_review_prompt_v28",
+  "description": "Zoptymalizowany pod TOP 1, AI Overviews (AIO) oraz Information Gain",
   
   "prompt_template": {
-    "role": "Jesteś REDAKTOREM NACZELNYM i EKSPERTEM MERYTORYCZNYM w tematyce artykułu.",
+    "role": "Jesteś EKSPERTEM MERYTORYCZNYM i INŻYNIEREM JAKOŚCI TREŚCI w Google. Twoim celem jest przekształcenie poprawnego tekstu SEO w treść, która dominuje w wynikach wyszukiwania.",
     
-    "intro": "Otrzymujesz artykuł pt. \"{topic}\" do weryfikacji i korekty.",
-    
-    "unused_keywords_section": {
-      "header": "=== ⚠️ NIEWYKORZYSTANE FRAZY SEO - MUSISZ JE WPLEŚĆ! ===",
-      "basic_header": "**BASIC (KRYTYCZNE - muszą być w tekście min. 1x):**",
-      "extended_header": "**EXTENDED (dodaj naturalnie 1x każdą):**",
-      "instruction": "INSTRUKCJA: Wpleć te frazy NATURALNIE w poprawiony tekst. Rozbuduj istniejące akapity lub dodaj nowe zdania."
-    },
+    "intro": "Analizujesz artykuł pt. \"{topic}\". Twoim zadaniem jest nie tylko korekta, ale uzupełnienie luki informacyjnej (Information Gain) i przygotowanie tekstu pod algorytm AI Overviews.",
     
     "tasks": {
-      "task_1": {
-        "name": "ZNAJDŹ I NAPRAW BŁĘDY KRYTYCZNE",
-        "errors": [
-          {"type": "HALUCYNACJE DANYCH", "action": "Zmyślone statystyki, daty, nazwy raportów → USUŃ lub zamień na ogólne stwierdzenie"},
-          {"type": "BŁĘDY TERMINOLOGICZNE", "action": "Mylenie pojęć fachowych specyficznych dla tematu artykułu → POPRAW"},
-          {"type": "ZABURZONA CHRONOLOGIA", "action": "Nielogiczna kolejność kroków/instrukcji → PRZESTAW prawidłowo"},
-          {"type": "NADMIERNE UPROSZCZENIA", "action": "\"zawsze/każdy/nigdy/wszyscy\" → \"zazwyczaj/często/w większości przypadków\""},
-          {"type": "NIEAKTUALNE INFORMACJE", "action": "Przestarzałe dane, przepisy, procedury → USUŃ lub zaznacz że wymaga weryfikacji"}
-        ]
+      "task_0_AIO_SNIPPETS": {
+        "name": "OPTYMALIZACJA POD SNIPPETY I AIO",
+        "instruction": "Dla każdego głównego nagłówka H2, upewnij się, że pierwszy akapit (2-3 zdania) zawiera bezpośrednią odpowiedź na pytanie. Stosuj format: '[Definicja/Fakt] + [Kontekst]'. To jest kluczowe dla AI Overviews."
       },
-      "task_2": {
-        "name": "POPRAW JAKOŚĆ TEKSTU",
-        "actions": [
-          "Usuń typowe frazy AI: \"w dzisiejszych czasach\", \"warto wiedzieć\", \"nie ulega wątpliwości\", \"należy pamiętać\"",
-          "Popraw błędne kolokacje",
-          "Usuń powtórzenia i rozwlekłe fragmenty"
-        ]
+      "task_1_INFORMATION_GAIN": {
+        "name": "DODANIE WARTOŚCI DODANEJ (E-E-A-T)",
+        "instruction": "Wpleć w tekst co najmniej dwa 'spostrzeżenia eksperckie', których nie ma u konkurencji. Używaj zwrotów: 'W praktyce często zapomina się o...', 'Z naszych obserwacji wynika...', 'Kluczowym, choć rzadko omawianym aspektem jest...'."
       },
-      "task_3": {
-        "name": "WYMAGANIA KRYTYCZNE",
-        "requirements": [
-          "⚠️ DŁUGOŚĆ: Tekst MUSI mieć MINIMUM {word_count} słów! Nie skracaj - możesz tylko wydłużyć!",
-          "⚠️ FORMAT: Zachowaj strukturę HTML/Markdown (H2, H3, paragrafy)",
-          "⚠️ LINKI: NIE dodawaj żadnych linków"
-        ]
+      "task_2_STYLE_GUARD": {
+        "name": "ELIMINACJA MARKERÓW AI",
+        "banned_patterns": [
+          "W dzisiejszych czasach", "Warto zauważyć, że", "Kluczowym elementem jest", 
+          "Podsumowując", "Nie ulega wątpliwości", "Zrozumienie X jest istotne dla Y"
+        ],
+        "action": "Zastąp te frazy konkretami lub danymi."
       }
     },
     
-    "response_format": {
-      "description": "=== ODPOWIEDZ W FORMACIE JSON ===",
-      "schema": {
+    "output_format": {
+      "json_structure": {
         "analysis": {
-          "overall_score": "<0-10>",
-          "scores": {
-            "merytoryka": "<0-10>",
-            "struktura": "<0-10>",
-            "styl": "<0-10>",
-            "seo": "<0-10>"
-          },
-          "critical_errors_found": [
-            {"type": "<TYP>", "original": "<cytat>", "fixed": "<poprawka>"}
-          ],
-          "keywords_added": ["<wplecione frazy>"],
-          "minor_fixes": ["<drobne poprawki>"],
-          "summary": "<2-3 zdania>"
+          "aio_readiness_score": "Ocena 0-10",
+          "information_gain_added": ["Lista dodanych unikalnych informacji"],
+          "eeat_markers_used": ["Przykłady wstrzykniętego doświadczenia"]
         },
-        "corrected_article": "<CAŁY POPRAWIONY ARTYKUŁ - MINIMUM {word_count} SŁÓW!>"
+        "corrected_article": "PEŁNY TEKST W HTML/MARKDOWN"
       }
-    },
-    
-    "article_section": "=== ARTYKUŁ DO WERYFIKACJI ({word_count} słów) ==="
-  },
-  
-  "full_prompt_assembled": "Jesteś REDAKTOREM NACZELNYM i EKSPERTEM MERYTORYCZNYM w tematyce artykułu.\n\nOtrzymujesz artykuł pt. \"{topic}\" do weryfikacji i korekty.\n{unused_keywords_section}\n=== TWOJE ZADANIA ===\n\n**ZADANIE 1: ZNAJDŹ I NAPRAW BŁĘDY KRYTYCZNE**\n\n1. **HALUCYNACJE DANYCH** - Zmyślone statystyki, daty, nazwy raportów → USUŃ lub zamień na ogólne stwierdzenie\n2. **BŁĘDY TERMINOLOGICZNE** - Mylenie pojęć fachowych specyficznych dla tematu artykułu → POPRAW\n3. **ZABURZONA CHRONOLOGIA** - Nielogiczna kolejność kroków/instrukcji → PRZESTAW prawidłowo\n4. **NADMIERNE UPROSZCZENIA** - \"zawsze/każdy/nigdy/wszyscy\" → \"zazwyczaj/często/w większości przypadków\"\n5. **NIEAKTUALNE INFORMACJE** - Przestarzałe dane, przepisy, procedury → USUŃ lub zaznacz że wymaga weryfikacji\n\n**ZADANIE 2: POPRAW JAKOŚĆ TEKSTU**\n\n- Usuń typowe frazy AI: \"w dzisiejszych czasach\", \"warto wiedzieć\", \"nie ulega wątpliwości\", \"należy pamiętać\"\n- Popraw błędne kolokacje\n- Usuń powtórzenia i rozwlekłe fragmenty\n\n**ZADANIE 3: WYMAGANIA KRYTYCZNE**\n\n⚠️ DŁUGOŚĆ: Tekst MUSI mieć MINIMUM {word_count} słów! Nie skracaj - możesz tylko wydłużyć!\n⚠️ FORMAT: Zachowaj strukturę HTML/Markdown (H2, H3, paragrafy)\n⚠️ LINKI: NIE dodawaj żadnych linków\n\n=== ODPOWIEDZ W FORMACIE JSON ===\n\n{{{{\n  \"analysis\": {{{{\n    \"overall_score\": <0-10>,\n    \"scores\": {{{{\"merytoryka\": <0-10>, \"struktura\": <0-10>, \"styl\": <0-10>, \"seo\": <0-10>}}}},\n    \"critical_errors_found\": [\n      {{{{\"type\": \"<TYP>\", \"original\": \"<cytat>\", \"fixed\": \"<poprawka>\"}}}}\n    ],\n    \"keywords_added\": [\"<wplecione frazy>\"],\n    \"minor_fixes\": [\"<drobne poprawki>\"],\n    \"summary\": \"<2-3 zdania>\"\n  }}}},\n  \"corrected_article\": \"<CAŁY POPRAWIONY ARTYKUŁ - MINIMUM {word_count} SŁÓW!>\"\n}}}}\n\n=== ARTYKUŁ DO WERYFIKACJI ({word_count} słów) ===\n\n{full_text}",
-  
-  "variables": {
-    "topic": "Temat artykułu (z projektu)",
-    "word_count": "Liczba słów w oryginalnym artykule",
-    "full_text": "Pełny tekst artykułu do weryfikacji",
-    "unused_keywords_section": "Sekcja z nieużytymi frazami (generowana dynamicznie)"
-  },
-  
-  "notes": [
-    "Prompt wymusza minimum długości (nie skraca tekstu)",
-    "Claude musi wpleść nieużyte frazy BASIC i EXTENDED",
-    "Zwraca JSON z analysis + corrected_article",
-    "Po review następuje rescan_keywords (v27.1)"
-  ]
+    }
+  }
 }
