@@ -1111,7 +1111,7 @@ def get_project_status(project_id):
 # ================================================================
 @project_routes.get("/api/project/<project_id>/pre_batch_info")
 def get_pre_batch_info(project_id):
-    """v25.0: Nowy format z coverage-first logic."""
+    """v28.1: Używa batch_plan dla zróżnicowanych długości batchy."""
     db = firestore.client()
     doc = db.collection("seo_projects").document(project_id).get()
     if not doc.exists:
@@ -1125,6 +1125,9 @@ def get_pre_batch_info(project_id):
     main_keyword = data.get("main_keyword", data.get("topic", ""))
     main_keyword_synonyms = data.get("main_keyword_synonyms", [])
     s1_data = data.get("s1_data", {})
+    
+    # v28.1: Pobierz batch_plan
+    batch_plan = data.get("batch_plan", {})
     
     current_batch_num = len(batches) + 1
     remaining_batches = max(1, total_planned_batches - len(batches))
@@ -1226,6 +1229,24 @@ def get_pre_batch_info(project_id):
     top_relationships = entity_relationships[:5]
     # MUST topics
     must_topics = [t for t in topical_coverage if t.get("priority") == "MUST"][:5]
+    
+    # v28.0: Dodatkowe dane z S1
+    serp_analysis = s1_data.get("serp_analysis", {})
+    
+    # PAA - pytania użytkowników
+    paa_questions = serp_analysis.get("paa_questions", [])
+    paa_for_batch = []
+    if paa_questions and current_batch_num <= 3:  # PAA tylko w pierwszych 3 batchach
+        paa_per_batch = max(1, len(paa_questions) // 3)
+        start_paa = (current_batch_num - 1) * paa_per_batch
+        paa_for_batch = paa_questions[start_paa:start_paa + paa_per_batch][:2]
+    
+    # Related searches - powiązane tematy
+    related_searches = serp_analysis.get("related_searches", [])[:6]
+    
+    # Semantic keyphrases (LSI) - jeśli dostępne
+    semantic_keyphrases = s1_data.get("semantic_keyphrases", [])
+    lsi_keywords = [kp.get("phrase", "") for kp in semantic_keyphrases if kp.get("score", 0) > 0.7][:6]
     
     # Keyword categorization
     basic_must_use = []
@@ -1467,6 +1488,27 @@ def get_pre_batch_info(project_id):
             prompt_sections.append(f"   • {rel.get('subject', '')} → {rel.get('verb', '')} → {rel.get('object', '')}")
         prompt_sections.append("")
     
+    # v28.0: PAA - pytania użytkowników (odpowiedz na nie w tekście)
+    if paa_for_batch:
+        prompt_sections.append("❓ PYTANIA UŻYTKOWNIKÓW (odpowiedz w tekście):")
+        for paa in paa_for_batch:
+            q = paa.get("question", "")
+            if q:
+                prompt_sections.append(f"   • {q}")
+        prompt_sections.append("")
+    
+    # v28.0: LSI keywords (semantic keyphrases)
+    if lsi_keywords:
+        prompt_sections.append("🔤 LSI KEYWORDS (wpleć naturalnie):")
+        prompt_sections.append(f"   {', '.join(lsi_keywords)}")
+        prompt_sections.append("")
+    
+    # v28.0: Related searches (powiązane tematy - inspiracja)
+    if related_searches and current_batch_num <= 2:  # tylko w pierwszych batchach
+        prompt_sections.append("🔍 POWIĄZANE TEMATY (opcjonalnie nawiąż):")
+        prompt_sections.append(f"   {', '.join(related_searches[:4])}")
+        prompt_sections.append("")
+    
     # v27.2: Sekcja ZABRONIONYCH fraz - rozdzielona na typy
     # Zbierz wszystkie zabronione: locked + exceeded + extended_done
     forbidden_basic = []
@@ -1559,34 +1601,49 @@ def get_pre_batch_info(project_id):
     else:
         uses_this_batch = total_remaining_all
     
-    # Oblicz minimalną długość żeby zmieścić frazy w density < 2%
-    # density = (uses * avg_phrase_words) / total_words * 100
-    # total_words = (uses * avg_phrase_words) / (density / 100)
-    TARGET_DENSITY_FOR_CALC = 1.5  # Celujemy w 1.5% żeby mieć margines
+    # v28.1: UŻYJ BATCH_PLAN jeśli dostępny
+    suggested_min_words = None
+    suggested_max_words = None
+    batch_plan_used = False
     
-    if uses_this_batch > 0:
-        min_words_for_density = int((uses_this_batch * avg_phrase_words) / (TARGET_DENSITY_FOR_CALC / 100))
-    else:
-        min_words_for_density = 300  # minimum
+    if batch_plan and "batches" in batch_plan:
+        batch_plans_list = batch_plan.get("batches", [])
+        # Znajdź plan dla current_batch_num
+        for bp in batch_plans_list:
+            if bp.get("batch_number") == current_batch_num:
+                suggested_min_words = bp.get("target_words_min")
+                suggested_max_words = bp.get("target_words_max")
+                batch_plan_used = True
+                print(f"[PRE_BATCH] Using batch_plan for batch {current_batch_num}: {suggested_min_words}-{suggested_max_words} words")
+                break
     
-    # Podstawowa długość zależy od typu batcha
-    if batch_type == "INTRO":
-        base_min_words = 400
-        base_max_words = 600
-    elif batch_type == "FINAL":
-        base_min_words = 350
-        base_max_words = 550
-    else:
-        base_min_words = 350
-        base_max_words = 600
-    
-    # Weź większą z: bazowej i obliczonej dla density
-    suggested_min_words = max(base_min_words, min_words_for_density)
-    suggested_max_words = max(base_max_words, suggested_min_words + 200)
-    
-    # Limit maksymalny
-    suggested_min_words = min(suggested_min_words, 800)
-    suggested_max_words = min(suggested_max_words, 1000)
+    # FALLBACK: jeśli brak batch_plan, oblicz dynamicznie
+    if not suggested_min_words:
+        TARGET_DENSITY_FOR_CALC = 1.5
+        
+        if uses_this_batch > 0:
+            min_words_for_density = int((uses_this_batch * avg_phrase_words) / (TARGET_DENSITY_FOR_CALC / 100))
+        else:
+            min_words_for_density = 200
+        
+        # Podstawowa długość zależy od typu batcha - ZMNIEJSZONE WARTOŚCI!
+        if batch_type == "INTRO":
+            base_min_words = 120
+            base_max_words = 180
+        elif batch_type == "FINAL":
+            base_min_words = 250
+            base_max_words = 400
+        else:
+            base_min_words = 280
+            base_max_words = 450
+        
+        # Weź większą z: bazowej i obliczonej dla density
+        suggested_min_words = max(base_min_words, min_words_for_density)
+        suggested_max_words = max(base_max_words, suggested_min_words + 100)
+        
+        # Limit maksymalny
+        suggested_min_words = min(suggested_min_words, 600)
+        suggested_max_words = min(suggested_max_words, 800)
     
     batch_length_info = {
         "suggested_min": suggested_min_words,
@@ -1594,12 +1651,14 @@ def get_pre_batch_info(project_id):
         "total_remaining": total_remaining_all,
         "uses_this_batch": uses_this_batch,
         "remaining_batches": remaining_batches,
+        "from_batch_plan": batch_plan_used,
         "reason": f"Pozostało {total_remaining_all} użyć fraz / {remaining_batches} batchy = ~{uses_this_batch} na ten batch",
-        "density_note": f"Przy {suggested_min_words} słowach osiągniesz ~{TARGET_DENSITY_FOR_CALC}% density"
+        "density_note": f"Przy {suggested_min_words} słowach utrzymasz density w normie"
     }
     
     prompt_sections.append("="*50)
-    prompt_sections.append(f"📏 SUGEROWANA DŁUGOŚĆ BATCHA: {suggested_min_words}-{suggested_max_words} słów")
+    plan_note = " (z batch_plan)" if batch_plan_used else ""
+    prompt_sections.append(f"📏 DŁUGOŚĆ BATCHA{plan_note}: {suggested_min_words}-{suggested_max_words} słów")
     prompt_sections.append(f"   Pozostało {total_remaining_all} użyć fraz / {remaining_batches} batchy = ~{uses_this_batch} na ten batch")
     if uses_this_batch > 15:
         prompt_sections.append(f"   ⚠️ DUŻO FRAZ! Pisz dłuższe sekcje żeby zmieścić wszystkie.")
@@ -1697,6 +1756,13 @@ def get_pre_batch_info(project_id):
             "must_topics": must_topics,
             "total_entities": len(entities),
             "enabled": bool(entity_seo)
+        },
+        
+        # v28.0: Dodatkowe dane SERP
+        "serp_enrichment": {
+            "paa_for_batch": paa_for_batch,
+            "lsi_keywords": lsi_keywords,
+            "related_searches": related_searches
         },
         
         "h2_remaining": remaining_h2,
