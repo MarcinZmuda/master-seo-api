@@ -61,6 +61,22 @@ except ImportError as e:
     BATCH_PLANNER_ENABLED = False
     print(f"[PROJECT] Batch Planner not available: {e}")
 
+# v27.4: Polish language quality check
+try:
+    from polish_language_quality import (
+        quick_polish_check,
+        check_collocations,
+        check_banned_phrases,
+        INCORRECT_COLLOCATIONS
+    )
+    POLISH_QUALITY_ENABLED = True
+    print("[PROJECT] ✅ Polish Language Quality module loaded")
+except ImportError as e:
+    POLISH_QUALITY_ENABLED = False
+    print(f"[PROJECT] ⚠️ Polish Quality not available: {e}")
+    BATCH_PLANNER_ENABLED = False
+    print(f"[PROJECT] Batch Planner not available: {e}")
+
 # Gemini API configuration
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if GEMINI_API_KEY:
@@ -1198,6 +1214,19 @@ def get_pre_batch_info(project_id):
     end_idx = min(start_idx + ngrams_per_batch + 2, len(top_ngrams))
     batch_ngrams = top_ngrams[start_idx:end_idx]
     
+    # v28.0: Entity SEO - wyciągnij encje z s1_data
+    entity_seo = s1_data.get("entity_seo", {})
+    entities = entity_seo.get("entities", [])
+    entity_relationships = entity_seo.get("entity_relationships", [])
+    topical_coverage = entity_seo.get("topical_coverage", [])
+    
+    # Top encje do wspomnienia (max 8)
+    top_entities = [e for e in entities if e.get("importance", 0) > 0.5][:8]
+    # Top relacje (max 5)
+    top_relationships = entity_relationships[:5]
+    # MUST topics
+    must_topics = [t for t in topical_coverage if t.get("priority") == "MUST"][:5]
+    
     # Keyword categorization
     basic_must_use = []
     basic_target = []
@@ -1417,6 +1446,25 @@ def get_pre_batch_info(project_id):
         prompt_sections.append("💡 N-GRAMY (wpleć naturalnie):")
         for ngram in batch_ngrams[:4]:
             prompt_sections.append(f"   • \"{ngram}\"")
+        prompt_sections.append("")
+    
+    # v28.0: Entity SEO - encje do wspomnienia
+    if top_entities:
+        prompt_sections.append("🏢 ENCJE DO WSPOMNIENIA (Entity SEO):")
+        prompt_sections.append("   Wspomnij te nazwy własne naturalnie w tekście:")
+        for ent in top_entities[:5]:
+            ent_type = ent.get("type", "")
+            type_label = {"ORGANIZATION": "firma/inst.", "PERSON": "osoba", "LOCATION": "miejsce"}.get(ent_type, "")
+            if type_label:
+                prompt_sections.append(f"   • {ent.get('text', '')} ({type_label})")
+            else:
+                prompt_sections.append(f"   • {ent.get('text', '')}")
+        prompt_sections.append("")
+    
+    if top_relationships:
+        prompt_sections.append("🔗 RELACJE DO OPISANIA:")
+        for rel in top_relationships[:3]:
+            prompt_sections.append(f"   • {rel.get('subject', '')} → {rel.get('verb', '')} → {rel.get('object', '')}")
         prompt_sections.append("")
     
     # v27.2: Sekcja ZABRONIONYCH fraz - rozdzielona na typy
@@ -1642,12 +1690,21 @@ def get_pre_batch_info(project_id):
         
         "ngrams_for_batch": batch_ngrams,
         
+        # v28.0: Entity SEO
+        "entity_seo": {
+            "top_entities": top_entities,
+            "relationships": top_relationships,
+            "must_topics": must_topics,
+            "total_entities": len(entities),
+            "enabled": bool(entity_seo)
+        },
+        
         "h2_remaining": remaining_h2,
         "h2_used": used_h2,
         
         "gpt_prompt": gpt_prompt,
         
-        "version": "v25.0"
+        "version": "v28.0"
     }), 200
 
 
@@ -1752,6 +1809,40 @@ def preview_batch(project_id):
             "message": f"Niskie pokrycie n-gramów ({ngram_check['coverage']:.0%})"
         })
     
+    # v27.4: Polish Language Quality Check
+    polish_quality = {"status": "DISABLED", "issues": []}
+    if POLISH_QUALITY_ENABLED:
+        try:
+            polish_quality = quick_polish_check(batch_text)
+            
+            # Dodaj szczegóły kolokacji i banned phrases
+            collocations, _ = check_collocations(batch_text)
+            banned, _ = check_banned_phrases(batch_text)
+            
+            polish_quality["collocations"] = collocations[:5]  # Max 5
+            polish_quality["banned_phrases"] = banned[:5]  # Max 5
+            
+            # Dodaj warnings jeśli są problemy
+            for coll in collocations[:3]:
+                warnings.append({
+                    "type": "COLLOCATION_ERROR",
+                    "found": coll.get("found", ""),
+                    "suggested": coll.get("suggested", ""),
+                    "message": f"Błędna kolokacja: '{coll.get('found')}' → '{coll.get('suggested')}'"
+                })
+            
+            for bp in banned[:3]:
+                warnings.append({
+                    "type": "BANNED_PHRASE",
+                    "phrase": bp.get("phrase", ""),
+                    "category": bp.get("category", ""),
+                    "message": f"Fraza AI: '{bp.get('phrase')}' - usuń lub przeformułuj"
+                })
+                
+        except Exception as e:
+            print(f"[PREVIEW_BATCH] ⚠️ Polish quality check error: {e}")
+            polish_quality = {"status": "ERROR", "error": str(e)}
+    
     status = "OK"
     if errors:
         status = "ERROR"
@@ -1783,10 +1874,11 @@ def preview_batch(project_id):
             "h3_length": h3_validation,
             "main_vs_synonyms": main_synonym_check,
             "ngram_coverage": ngram_check,
-            "density": {"value": density, "status": density_status, "message": density_msg}
+            "density": {"value": density, "status": density_status, "message": density_msg},
+            "polish_quality": polish_quality
         },
         "last_preview_saved": True,
-        "version": "v27.0"
+        "version": "v27.4"
     }), 200
 
 
