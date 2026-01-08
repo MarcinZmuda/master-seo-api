@@ -1320,8 +1320,12 @@ def get_pre_batch_info(project_id):
         elif sentences:
             last_sentences = sentences[-1] + "."
     
-    # GPT Prompt
+    # GPT Prompt - v27.4: WYMUSZAJĄCY użycie fraz
     prompt_sections = []
+    prompt_sections.append("="*60)
+    prompt_sections.append("⚠️ KRYTYCZNE INSTRUKCJE - PRZECZYTAJ UWAŻNIE!")
+    prompt_sections.append("="*60)
+    prompt_sections.append("")
     prompt_sections.append(f"📝 BATCH #{current_batch_num} z {total_planned_batches} ({batch_type})")
     prompt_sections.append("")
     
@@ -1344,46 +1348,69 @@ def get_pre_batch_info(project_id):
         prompt_sections.append(f"⚠️ {ratio_warning}")
         prompt_sections.append("")
     
-    if main_keyword_info:
-        prompt_sections.append("="*50)
-        prompt_sections.append(f"🔴 FRAZA GŁÓWNA: \"{main_keyword}\"")
-        prompt_sections.append(f"   Użyj {main_keyword_info['use_this_batch']}x W TYM BATCHU (actual: {main_keyword_info['actual']})")
-        prompt_sections.append("="*50)
-        prompt_sections.append("")
-    
-    # v27.3: Pokaż WSZYSTKIE nieużyte frazy - GPT sam wybierze które pasują do sekcji
+    # v27.4: Oblicz ile fraz MUSI być użytych w tym batchu
     total_unused_basic = len(basic_must_use)
+    total_unused_extended = len(extended_this_batch) + len(extended_scheduled)
+    total_unused = total_unused_basic + total_unused_extended
     
-    if basic_must_use:
-        prompt_sections.append(f"🔴 FRAZY DO UŻYCIA ({total_unused_basic} nieużytych - wybierz które pasują do tej sekcji):")
-        for kw in basic_must_use:
-            prompt_sections.append(f"   • \"{kw['keyword']}\"")
-        prompt_sections.append(f"   ⚠️ Każda MUSI być użyta min 1x w całym artykule!")
-        prompt_sections.append(f"   💡 W tym batchu użyj ~{max(3, total_unused_basic // max(1, remaining_batches))} fraz które pasują do tematu sekcji")
+    # Ile fraz na ten batch (proporcjonalnie)
+    if remaining_batches > 0:
+        basic_this_batch_count = max(3, math.ceil(total_unused_basic / remaining_batches))
+        extended_this_batch_count = max(2, math.ceil(total_unused_extended / remaining_batches))
+    else:
+        basic_this_batch_count = total_unused_basic
+        extended_this_batch_count = total_unused_extended
+    
+    # Wybierz konkretne frazy do tego batcha
+    basic_for_this_batch = basic_must_use[:basic_this_batch_count]
+    extended_for_this_batch = extended_this_batch[:extended_this_batch_count]
+    
+    prompt_sections.append("="*60)
+    prompt_sections.append("🔴🔴🔴 OBOWIĄZKOWE FRAZY DO UŻYCIA W TYM BATCHU 🔴🔴🔴")
+    prompt_sections.append("="*60)
+    prompt_sections.append("")
+    prompt_sections.append("❗ KAŻDA fraza z poniższej listy MUSI pojawić się w tekście!")
+    prompt_sections.append("❗ Nie możesz pominąć ŻADNEJ frazy - to warunek konieczny!")
+    prompt_sections.append("❗ Wpleć frazy naturalnie w zdania, nie zmieniaj ich formy!")
+    prompt_sections.append("")
+    
+    if main_keyword_info:
+        prompt_sections.append(f"🎯 FRAZA GŁÓWNA: \"{main_keyword}\"")
+        prompt_sections.append(f"   → Użyj DOKŁADNIE {main_keyword_info['use_this_batch']}x w tym batchu")
         prompt_sections.append("")
+    
+    if basic_for_this_batch:
+        prompt_sections.append(f"📋 BASIC - MUSISZ UŻYĆ WSZYSTKIE ({len(basic_for_this_batch)} fraz):")
+        for i, kw in enumerate(basic_for_this_batch, 1):
+            prompt_sections.append(f"   {i}. \"{kw['keyword']}\" ← OBOWIĄZKOWO 1x")
+        prompt_sections.append("")
+    
+    if extended_for_this_batch:
+        prompt_sections.append(f"📋 EXTENDED - MUSISZ UŻYĆ WSZYSTKIE ({len(extended_for_this_batch)} fraz):")
+        for i, kw in enumerate(extended_for_this_batch, 1):
+            prompt_sections.append(f"   {i}. \"{kw['keyword']}\" ← OBOWIĄZKOWO 1x")
+        prompt_sections.append("")
+    
+    # Pokaż pozostałe nieużyte (info)
+    basic_remaining = basic_must_use[basic_this_batch_count:]
+    extended_remaining = extended_this_batch[extended_this_batch_count:] + extended_scheduled
+    
+    if basic_remaining or extended_remaining:
+        prompt_sections.append(f"📌 POZOSTAŁE NIEUŻYTE (do kolejnych batchy: {len(basic_remaining)} BASIC + {len(extended_remaining)} EXTENDED)")
+        prompt_sections.append("")
+    
+    prompt_sections.append("="*60)
+    prompt_sections.append("✅ CHECKLIST PRZED WYSŁANIEM:")
+    prompt_sections.append(f"   [ ] Fraza główna użyta {main_keyword_info['use_this_batch'] if main_keyword_info else 1}x")
+    prompt_sections.append(f"   [ ] Wszystkie {len(basic_for_this_batch)} fraz BASIC użyte")
+    prompt_sections.append(f"   [ ] Wszystkie {len(extended_for_this_batch)} fraz EXTENDED użyte")
+    prompt_sections.append("="*60)
+    prompt_sections.append("")
     
     if basic_target:
-        prompt_sections.append("🟠 BASIC - DĄŻ DO TARGET:")
-        for kw in basic_target[:5]:
-            prompt_sections.append(f"   • \"{kw['keyword']}\" → użyj {kw['use_this_batch']}x W TYM BATCHU (actual: {kw['actual']})")
-        prompt_sections.append("")
-    
-    # v27.2: Rozdziel EXTENDED na CRITICAL i HIGH
-    extended_critical = [kw for kw in extended_this_batch if kw.get('priority') == 'CRITICAL']
-    extended_high = [kw for kw in extended_this_batch if kw.get('priority') == 'HIGH']
-    
-    if extended_critical:
-        prompt_sections.append("🔴 EXTENDED - KRYTYCZNE (MUSISZ użyć!):")
-        for kw in extended_critical:  # Wszystkie, bez limitu
-            prompt_sections.append(f"   • \"{kw['keyword']}\" → {kw['instruction']}")
-        prompt_sections.append("")
-    
-    if extended_high:
-        prompt_sections.append("📌 EXTENDED - WPLEĆ 1x W TYM BATCHU:")
-        for kw in extended_high[:8]:  # Zwiększony limit z 6 do 8
-            prompt_sections.append(f"   • \"{kw['keyword']}\"")
-        if len(extended_high) > 8:
-            prompt_sections.append(f"   ... i {len(extended_high) - 8} więcej")
+        prompt_sections.append("🟠 OPCJONALNE - DĄŻ DO TARGET (jeśli zmieścisz):")
+        for kw in basic_target[:3]:
+            prompt_sections.append(f"   • \"{kw['keyword']}\" → {kw['use_this_batch']}x")
         prompt_sections.append("")
     
     if batch_ngrams:
@@ -1530,15 +1557,30 @@ def get_pre_batch_info(project_id):
         prompt_sections.append(f"   ⚠️ DUŻO FRAZ! Pisz dłuższe sekcje żeby zmieścić wszystkie.")
     prompt_sections.append("")
     
-    # v27.3: Proste podsumowanie
-    total_unused_all = total_unused_basic + len(extended_this_batch) + len(extended_scheduled)
+    # v27.4: FINALNE PODSUMOWANIE z konkretną listą
+    prompt_sections.append("="*60)
+    prompt_sections.append("🎯 FINALNE PODSUMOWANIE - CO MUSISZ ZROBIĆ:")
+    prompt_sections.append("="*60)
+    prompt_sections.append("")
+    prompt_sections.append(f"W tym batchu MUSISZ użyć DOKŁADNIE tych fraz:")
+    prompt_sections.append("")
     
-    prompt_sections.append("="*50)
-    prompt_sections.append("📊 PODSUMOWANIE:")
-    prompt_sections.append(f"   • Nieużytych fraz: {total_unused_all}")
-    prompt_sections.append(f"   • Pozostałe batchy: {remaining_batches}")
-    prompt_sections.append(f"   ⚠️ KAŻDA fraza MUSI być użyta min 1x w całym artykule!")
-    prompt_sections.append("="*50)
+    all_required = []
+    if main_keyword_info:
+        all_required.append(f"• \"{main_keyword}\" × {main_keyword_info['use_this_batch']}")
+    for kw in basic_for_this_batch:
+        all_required.append(f"• \"{kw['keyword']}\" × 1")
+    for kw in extended_for_this_batch:
+        all_required.append(f"• \"{kw['keyword']}\" × 1")
+    
+    for req in all_required:
+        prompt_sections.append(f"   {req}")
+    
+    prompt_sections.append("")
+    prompt_sections.append(f"RAZEM: {len(all_required)} fraz do wplecenia")
+    prompt_sections.append("")
+    prompt_sections.append("❌ Jeśli pominiesz KTÓRĄKOLWIEK frazę - batch będzie ODRZUCONY!")
+    prompt_sections.append("="*60)
     prompt_sections.append("")
     
     prompt_sections.append("="*50)
