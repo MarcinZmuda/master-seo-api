@@ -919,6 +919,94 @@ def create_project():
 
 
 # ================================================================
+#  CONVERT KEYWORDS TO EXTENDED (v27.3)
+# ================================================================
+@project_routes.post("/api/project/<project_id>/convert_to_extended")
+def convert_to_extended(project_id):
+    """
+    v27.3: Konwertuje wybrane frazy BASIC na EXTENDED.
+    
+    Body:
+    {
+        "keywords": ["fraza1", "fraza2", ...]  // lista fraz do konwersji
+    }
+    
+    lub
+    
+    {
+        "all_with_target_1": true  // konwertuj wszystkie z target_max=1
+    }
+    """
+    db = firestore.client()
+    doc_ref = db.collection("seo_projects").document(project_id)
+    doc = doc_ref.get()
+    
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+    
+    data = doc.to_dict()
+    keywords_state = data.get("keywords_state", {})
+    
+    body = request.get_json() or {}
+    keywords_to_convert = body.get("keywords", [])
+    all_with_target_1 = body.get("all_with_target_1", False)
+    
+    converted = []
+    skipped = []
+    
+    for rid, meta in keywords_state.items():
+        keyword = meta.get("keyword", "")
+        kw_type = meta.get("type", "BASIC").upper()
+        target_max = meta.get("target_max", 999)
+        is_main = meta.get("is_main_keyword", False)
+        
+        # Pomiń już EXTENDED i MAIN
+        if kw_type == "EXTENDED" or kw_type == "MAIN" or is_main:
+            continue
+        
+        should_convert = False
+        
+        # Konwertuj jeśli na liście
+        if keyword.lower() in [k.lower() for k in keywords_to_convert]:
+            should_convert = True
+        
+        # Konwertuj jeśli target_max=1 i flaga ustawiona
+        if all_with_target_1 and target_max == 1:
+            should_convert = True
+        
+        if should_convert:
+            keywords_state[rid]["type"] = "EXTENDED"
+            keywords_state[rid]["target_min"] = 1
+            keywords_state[rid]["target_max"] = max(1, target_max)
+            converted.append(keyword)
+        else:
+            if keyword in keywords_to_convert:
+                skipped.append({"keyword": keyword, "reason": "not found or already EXTENDED/MAIN"})
+    
+    # Zapisz do Firestore
+    if converted:
+        doc_ref.update({"keywords_state": keywords_state})
+    
+    # Policz nowe statystyki
+    basic_count = sum(1 for k in keywords_state.values() if k.get("type", "BASIC").upper() in ["BASIC"])
+    extended_count = sum(1 for k in keywords_state.values() if k.get("type", "").upper() == "EXTENDED")
+    main_count = sum(1 for k in keywords_state.values() if k.get("type", "").upper() == "MAIN" or k.get("is_main_keyword"))
+    
+    return jsonify({
+        "status": "OK",
+        "converted": converted,
+        "converted_count": len(converted),
+        "skipped": skipped,
+        "keywords_breakdown": {
+            "main": main_count,
+            "basic": basic_count,
+            "extended": extended_count,
+            "total": len(keywords_state)
+        }
+    }), 200
+
+
+# ================================================================
 #  GET PROJECT STATUS
 # ================================================================
 @project_routes.get("/api/project/<project_id>/status")
@@ -1263,10 +1351,15 @@ def get_pre_batch_info(project_id):
         prompt_sections.append("="*50)
         prompt_sections.append("")
     
+    # v27.3: Pokaż WSZYSTKIE nieużyte frazy - GPT sam wybierze które pasują do sekcji
+    total_unused_basic = len(basic_must_use)
+    
     if basic_must_use:
-        prompt_sections.append("🔴 BASIC - MUSISZ UŻYĆ (brak coverage!):")
-        for kw in basic_must_use[:6]:
-            prompt_sections.append(f"   • \"{kw['keyword']}\" → użyj {kw['use_this_batch']}x W TYM BATCHU")
+        prompt_sections.append(f"🔴 FRAZY DO UŻYCIA ({total_unused_basic} nieużytych - wybierz które pasują do tej sekcji):")
+        for kw in basic_must_use:
+            prompt_sections.append(f"   • \"{kw['keyword']}\"")
+        prompt_sections.append(f"   ⚠️ Każda MUSI być użyta min 1x w całym artykule!")
+        prompt_sections.append(f"   💡 W tym batchu użyj ~{max(3, total_unused_basic // max(1, remaining_batches))} fraz które pasują do tematu sekcji")
         prompt_sections.append("")
     
     if basic_target:
@@ -1437,15 +1530,14 @@ def get_pre_batch_info(project_id):
         prompt_sections.append(f"   ⚠️ DUŻO FRAZ! Pisz dłuższe sekcje żeby zmieścić wszystkie.")
     prompt_sections.append("")
     
-    # v27.2: Podsumowanie - ile fraz użyć W TYM BATCHU
-    total_must_use = len(basic_must_use) + len([e for e in extended_this_batch if e.get('priority') in ['CRITICAL', 'HIGH']])
-    total_suggested_uses = sum(kw.get('suggested', 0) for kw in basic_must_use + basic_target + extended_this_batch)
+    # v27.3: Proste podsumowanie
+    total_unused_all = total_unused_basic + len(extended_this_batch) + len(extended_scheduled)
     
     prompt_sections.append("="*50)
-    prompt_sections.append("📊 PODSUMOWANIE - W TYM BATCHU:")
-    prompt_sections.append(f"   • Fraz OBOWIĄZKOWYCH: {total_must_use}")
-    prompt_sections.append(f"   • Łączna liczba użyć: ~{total_suggested_uses}")
-    prompt_sections.append(f"   • Nie używaj fraz z sekcji 🚫 ZABRONIONE!")
+    prompt_sections.append("📊 PODSUMOWANIE:")
+    prompt_sections.append(f"   • Nieużytych fraz: {total_unused_all}")
+    prompt_sections.append(f"   • Pozostałe batchy: {remaining_batches}")
+    prompt_sections.append(f"   ⚠️ KAŻDA fraza MUSI być użyta min 1x w całym artykule!")
     prompt_sections.append("="*50)
     prompt_sections.append("")
     
