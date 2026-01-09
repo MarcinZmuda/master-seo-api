@@ -1,12 +1,11 @@
 """
 ===============================================================================
-🇵🇱 POLISH LEMMATIZER v26.1 - Używa współdzielonego spaCy
+🇵🇱 POLISH LEMMATIZER v29.1 - Używa współdzielonego spaCy
 ===============================================================================
-Wykorzystuje shared_nlp.py do lemmatyzacji polskich słów.
-spaCy pl_core_news_md obsługuje:
-- Lemmatyzację (rozwodu → rozwód)
-- Rozpoznawanie form (sądem, sądzie → sąd)
-- POS tagging (rzeczownik, czasownik, przymiotnik)
+v29.1: 
+- Normalizacja myślników i symboli w frazach
+- Bidirectional matching (terapii ↔ terapia)
+- Obsługa fraz typu "integracja sensoryczna – pomoce"
 
 v26.1: Używa shared_nlp.py + rozszerzone wzorce polskich form
 ===============================================================================
@@ -29,6 +28,54 @@ _lemma_cache = {}
 _forms_cache = {}
 
 BACKEND = "SPACY" if _SPACY_OK else "FALLBACK"
+
+
+# ============================================================================
+# v29.1: NORMALIZACJA FRAZ Z MYŚLNIKAMI I SYMBOLAMI
+# ============================================================================
+def normalize_phrase(phrase: str) -> str:
+    """
+    v29.1: Normalizuje frazę do porównania.
+    
+    - Zamienia wszystkie typy myślników na spację
+    - Usuwa wielokrotne spacje
+    - Zamienia em dash (–), en dash (–), hyphen (-) na spację
+    
+    "integracja sensoryczna – pomoce" → "integracja sensoryczna pomoce"
+    """
+    if not phrase:
+        return ""
+    
+    # Zamień różne typy myślników na spację
+    normalized = phrase
+    normalized = normalized.replace('–', ' ')  # em dash
+    normalized = normalized.replace('—', ' ')  # em dash (longer)
+    normalized = normalized.replace('-', ' ')   # hyphen
+    normalized = normalized.replace('−', ' ')  # minus sign
+    
+    # Usuń wielokrotne spacje
+    normalized = ' '.join(normalized.split())
+    
+    return normalized.lower().strip()
+
+
+def normalize_text_for_matching(text: str) -> str:
+    """
+    v29.1: Normalizuje tekst do wyszukiwania fraz.
+    """
+    if not text:
+        return ""
+    
+    normalized = text.lower()
+    # Zamień myślniki na spacje
+    normalized = normalized.replace('–', ' ')
+    normalized = normalized.replace('—', ' ')
+    normalized = normalized.replace('-', ' ')
+    normalized = normalized.replace('−', ' ')
+    # Usuń wielokrotne spacje
+    normalized = ' '.join(normalized.split())
+    
+    return normalized
 
 
 def init_backend():
@@ -279,21 +326,22 @@ def get_phrase_lemmas(phrase: str) -> List[str]:
 
 def count_phrase_occurrences(text: str, phrase: str) -> Dict:
     """
-    v29.0: PRAWIDŁOWA LEMMATYZACJA
+    v29.1: PRAWIDŁOWA LEMMATYZACJA + NORMALIZACJA MYŚLNIKÓW
     
-    Metoda 1 (spaCy dostępny):
-    - Zlemmatyzuj tekst i frazę
-    - Porównaj sekwencje lematów
+    NAJPIERW normalizuje frazę i tekst (usuwa myślniki),
+    POTEM liczy z lemmatyzacją.
     
-    Metoda 2 (fallback):
-    - Wygeneruj wszystkie formy słów frazy
-    - Sprawdź czy słowa tekstu pasują do form
+    "integracja sensoryczna – pomoce" → szuka "integracja sensoryczna pomoce"
     """
-    text_lower = text.lower()
-    phrase_lower = phrase.lower().strip()
-    
-    if not text_lower or not phrase_lower:
+    if not text or not phrase:
         return {"count": 0, "method": "empty", "matches": []}
+    
+    # v29.1: NORMALIZACJA - zamień myślniki na spacje
+    phrase_normalized = normalize_phrase(phrase)
+    text_normalized = normalize_text_for_matching(text)
+    
+    if not phrase_normalized:
+        return {"count": 0, "method": "empty_after_normalize", "matches": []}
     
     # Sprawdź czy spaCy działa (czy lematy są różne od oryginału)
     test_word = "sensoryczną"
@@ -302,8 +350,8 @@ def count_phrase_occurrences(text: str, phrase: str) -> Dict:
     
     if spacy_works:
         # METODA 1: Porównanie lematów (spaCy działa)
-        phrase_lemmas = get_phrase_lemmas(phrase_lower)
-        text_lemmas = lemmatize_text(text_lower)
+        phrase_lemmas = get_phrase_lemmas(phrase_normalized)
+        text_lemmas = lemmatize_text(text_normalized)
         
         if not phrase_lemmas or not text_lemmas:
             return {"count": 0, "method": "spacy_empty", "matches": []}
@@ -320,12 +368,13 @@ def count_phrase_occurrences(text: str, phrase: str) -> Dict:
         return {
             "count": count,
             "method": "SPACY_LEMMA",
+            "phrase_normalized": phrase_normalized,
             "phrase_lemmas": phrase_lemmas,
             "matches": matches[:10]
         }
     else:
         # METODA 2: Generowanie form (fallback)
-        return _count_multi_word_with_forms(text_lower, phrase_lower)
+        return _count_multi_word_with_forms(text_normalized, phrase_normalized)
 
 
 def _count_multi_word_with_forms(text: str, phrase: str) -> Dict:
