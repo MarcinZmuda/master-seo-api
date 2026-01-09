@@ -1,5 +1,10 @@
 # ================================================================
-# 🔍 FINAL REVIEW ROUTES v24.2 - UNIFIED KEYWORD COUNTING
+# 🔍 FINAL REVIEW ROUTES v29.1 - NOWE PRIORYTETY
+# ================================================================
+# ZMIANY v29.1:
+# - Jakość tekstu > Encje > SEO
+# - "underused" NIE blokuje (tylko warning)
+# - Blokuje TYLKO: brak frazy (0×) lub stuffing
 # ================================================================
 
 import os
@@ -32,21 +37,29 @@ GEMINI_MODEL = "gemini-2.5-flash"
 
 
 # ================================================================
-# 1. MISSING KEYWORDS DETECTOR
+# 1. MISSING KEYWORDS DETECTOR - v29.1
 # ================================================================
 def detect_missing_keywords(text, keywords_state):
-    """Wykrywa brakujące frazy BASIC/EXTENDED."""
+    """
+    v29.1: Wykrywa brakujące frazy z NOWĄ LOGIKĄ:
+    
+    - missing (0×) → CRITICAL (blokuje)
+    - underused (< target) → WARNING (NIE blokuje!)
+    - stuffing (> max) → CRITICAL (blokuje)
+    
+    needs_correction = True TYLKO gdy missing > 0 lub stuffing > 0
+    """
     try:
         text_lower = text.lower()
         
-        missing_basic = []
-        missing_extended = []
-        underused_basic = []
-        underused_extended = []
+        missing_basic = []      # 0 wystąpień - CRITICAL
+        missing_extended = []   # 0 wystąpień - CRITICAL
+        underused_basic = []    # < target - tylko WARNING
+        underused_extended = [] # < target - tylko WARNING
+        stuffing = []           # > max - CRITICAL
         
         # v24.2: Unified counting
         if UNIFIED_COUNTER:
-            # v27.2: Używa EXCLUSIVE (jak NeuronWriter)
             counts = count_keywords_for_state(text, keywords_state, use_exclusive_for_nested=True)
         
         for rid, meta in keywords_state.items():
@@ -56,6 +69,7 @@ def detect_missing_keywords(text, keywords_state):
             
             kw_type = meta.get("type", "BASIC").upper()
             target_min = meta.get("target_min", 1)
+            target_max = meta.get("target_max", target_min * 3)  # max = 3× target
             
             # v24.2: Unified vs legacy counting
             if UNIFIED_COUNTER:
@@ -71,15 +85,23 @@ def detect_missing_keywords(text, keywords_state):
                 "type": kw_type,
                 "actual": actual,
                 "target_min": target_min,
+                "target_max": target_max,
                 "missing": max(0, target_min - actual)
             }
             
+            # v29.1: NOWA LOGIKA
             if actual == 0:
+                # CRITICAL: fraza w ogóle nie występuje
                 if kw_type in ["BASIC", "MAIN"]:
                     missing_basic.append(info)
                 else:
                     missing_extended.append(info)
+            elif actual > target_max:
+                # CRITICAL: stuffing
+                info["severity"] = "stuffing"
+                stuffing.append(info)
             elif actual < target_min:
+                # WARNING: mogłoby być więcej, ale NIE BLOKUJE
                 if kw_type in ["BASIC", "MAIN"]:
                     underused_basic.append(info)
                 else:
@@ -87,15 +109,26 @@ def detect_missing_keywords(text, keywords_state):
         
         missing_basic.sort(key=lambda x: x["missing"], reverse=True)
         
+        # v29.1: needs_correction TYLKO dla missing (0×) lub stuffing
+        # underused NIE blokuje!
+        has_critical = len(missing_basic) > 0 or len(stuffing) > 0
+        
         return {
             "missing": {"basic": missing_basic, "extended": missing_extended},
             "underused": {"basic": underused_basic, "extended": underused_extended},
+            "stuffing": stuffing,
             "priority_to_add": {
-                "critical": missing_basic[:5],
-                "high": underused_basic[:5] + missing_extended[:5],
-                "medium": underused_extended[:5]
+                "critical": missing_basic[:5] + stuffing[:3],  # brak + stuffing
+                "high": missing_extended[:5],                   # brak extended
+                "medium": underused_basic[:5],                  # za mało basic (warning)
+                "low": underused_extended[:5]                   # za mało extended (warning)
             },
-            "needs_correction": len(missing_basic) > 0 or len(underused_basic) > 0
+            "needs_correction": has_critical,  # v29.1: TYLKO critical blokuje!
+            "summary": {
+                "missing_count": len(missing_basic) + len(missing_extended),
+                "underused_count": len(underused_basic) + len(underused_extended),
+                "stuffing_count": len(stuffing)
+            }
         }
     except Exception as e:
         print(f"[FINAL_REVIEW] ❌ detect_missing_keywords error: {e}")
