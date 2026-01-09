@@ -105,6 +105,29 @@ def _generate_forms_from_lemma(word: str) -> Set[str]:
     if not word or len(word) < 2:
         return forms
     
+    # === RZECZOWNIKI ŻEŃSKIE ===
+    
+    # -ia (terapia, integracja) - WAŻNE!
+    if word.endswith('ia') and len(word) > 3:
+        base = word[:-2]
+        forms.update([word, base + 'ii', base + 'ię', base + 'ią', base + 'io',
+                     base + 'ie', base + 'ij', base + 'iom', base + 'iami', base + 'iach'])
+        return forms
+    
+    # -ka (ścieżka, podróżka) - BARDZO WAŻNE!
+    if word.endswith('ka') and len(word) > 3:
+        base = word[:-2]
+        forms.update([word, base + 'ki', base + 'kę', base + 'ką', base + 'ce',
+                     base + 'ek', base + 'kom', base + 'kami', base + 'kach'])
+        return forms
+    
+    # -a (droga, mama) - rzeczowniki żeńskie
+    if word.endswith('a') and len(word) > 2 and not word.endswith('ca'):
+        base = word[:-1]
+        forms.update([word, base + 'y', base + 'ę', base + 'ą', base + 'ie', base + 'o',
+                     base, base + 'om', base + 'ami', base + 'ach'])
+        return forms
+    
     # -enie, -anie (uzależnienie)
     if word.endswith('enie') or word.endswith('anie'):
         base = word[:-1]
@@ -181,31 +204,52 @@ def _generate_forms_from_lemma(word: str) -> Set[str]:
     
     # === PRZYMIOTNIKI ===
     
-    # -ny (prawny)
-    if word.endswith('ny'):
-        base = word[:-2]
-        forms.update([word, base + 'na', base + 'ne', base + 'nego', base + 'nej',
-                     base + 'nemu', base + 'nym', base + 'ni', base + 'nych', base + 'nymi'])
+    # -yczny (sensoryczny, techniczny) - BARDZO WAŻNE!
+    if word.endswith('yczny'):
+        base = word[:-5]
+        forms.update([
+            word,  # sensoryczny
+            base + 'yczna', base + 'yczne',  # sensoryczna, sensoryczne
+            base + 'ycznego', base + 'ycznej',  # sensorycznego, sensorycznej
+            base + 'ycznemu',  # sensorycznemu
+            base + 'ycznym', base + 'yczną',  # sensorycznym, sensoryczną
+            base + 'yczni', base + 'ycznych', base + 'ycznymi'  # sensoryczni, sensorycznych
+        ])
         return forms
     
-    # -ski, -cki (małżeński)
-    if word.endswith('ski') or word.endswith('cki'):
-        base = word[:-2]
-        forms.update([word, base + 'ka', base + 'kie', base + 'kiego', base + 'kiej',
-                     base + 'kiemu', base + 'kim', base + 'cy', base + 'kich', base + 'kimi'])
-        return forms
-    
-    # -owy (rozwodowy)
+    # -owy (rozwodowy, kolorowy)
     if word.endswith('owy'):
         base = word[:-3]
         forms.update([word, base + 'owa', base + 'owe', base + 'owego', base + 'owej',
-                     base + 'owemu', base + 'owym', base + 'owi', base + 'owych', base + 'owymi'])
+                     base + 'owemu', base + 'owym', base + 'ową', base + 'owi', base + 'owych', base + 'owymi'])
+        return forms
+    
+    # -ny (prawny, ciemny)
+    if word.endswith('ny'):
+        base = word[:-2]
+        forms.update([word, base + 'na', base + 'ne', base + 'nego', base + 'nej',
+                     base + 'nemu', base + 'nym', base + 'ną', base + 'ni', base + 'nych', base + 'nymi'])
+        return forms
+    
+    # -ski, -cki (małżeński, miejski)
+    if word.endswith('ski') or word.endswith('cki'):
+        base = word[:-2]
+        forms.update([word, base + 'ka', base + 'kie', base + 'kiego', base + 'kiej',
+                     base + 'kiemu', base + 'kim', base + 'ką', base + 'cy', base + 'kich', base + 'kimi'])
+        return forms
+    
+    # -ły (mały, biały)
+    if word.endswith('ły'):
+        base = word[:-2]
+        forms.update([word, base + 'ła', base + 'łe', base + 'łego', base + 'łej',
+                     base + 'łemu', base + 'łym', base + 'łą', base + 'li', base + 'łych', base + 'łymi'])
         return forms
     
     # === DOMYŚLNE ===
     if len(word) >= 3:
         forms.update([word, word + 'a', word + 'u', word + 'owi', word + 'em', word + 'ie',
-                     word + 'y', word + 'ów', word + 'om', word + 'ami', word + 'ach'])
+                     word + 'y', word + 'ów', word + 'om', word + 'ami', word + 'ach',
+                     word + 'ą', word + 'ę'])  # dodane formy żeńskie
     
     return forms
 
@@ -234,19 +278,152 @@ def get_phrase_lemmas(phrase: str) -> List[str]:
 
 
 def count_phrase_occurrences(text: str, phrase: str) -> Dict:
-    """Liczy wystąpienia frazy w tekście z uwzględnieniem form."""
+    """
+    v29.0: PRAWIDŁOWA LEMMATYZACJA
+    
+    Metoda 1 (spaCy dostępny):
+    - Zlemmatyzuj tekst i frazę
+    - Porównaj sekwencje lematów
+    
+    Metoda 2 (fallback):
+    - Wygeneruj wszystkie formy słów frazy
+    - Sprawdź czy słowa tekstu pasują do form
+    """
     text_lower = text.lower()
     phrase_lower = phrase.lower().strip()
     
     if not text_lower or not phrase_lower:
         return {"count": 0, "method": "empty", "matches": []}
     
-    words = phrase_lower.split()
+    # Sprawdź czy spaCy działa (czy lematy są różne od oryginału)
+    test_word = "sensoryczną"
+    test_lemma = get_lemma(test_word)
+    spacy_works = (test_lemma != test_word)  # Jeśli zlemmatyzował, to działa
     
-    if len(words) == 1:
-        return _count_single_word(text_lower, phrase_lower)
+    if spacy_works:
+        # METODA 1: Porównanie lematów (spaCy działa)
+        phrase_lemmas = get_phrase_lemmas(phrase_lower)
+        text_lemmas = lemmatize_text(text_lower)
+        
+        if not phrase_lemmas or not text_lemmas:
+            return {"count": 0, "method": "spacy_empty", "matches": []}
+        
+        count = 0
+        matches = []
+        phrase_len = len(phrase_lemmas)
+        
+        for i in range(len(text_lemmas) - phrase_len + 1):
+            if text_lemmas[i:i + phrase_len] == phrase_lemmas:
+                count += 1
+                matches.append(f"pos:{i}")
+        
+        return {
+            "count": count,
+            "method": "SPACY_LEMMA",
+            "phrase_lemmas": phrase_lemmas,
+            "matches": matches[:10]
+        }
     else:
-        return _count_multi_word(text_lower, words)
+        # METODA 2: Generowanie form (fallback)
+        return _count_multi_word_with_forms(text_lower, phrase_lower)
+
+
+def _count_multi_word_with_forms(text: str, phrase: str) -> Dict:
+    """
+    Fallback: dla każdego słowa frazy i tekstu generuj formy,
+    sprawdź czy się przecinają (match w dowolną stronę).
+    
+    "terapii" ma formy: [terapii, terapia, terapią...]
+    "terapia" ma formy: [terapia, terapii, terapią...]
+    → Przecięcie niepuste = MATCH!
+    """
+    words = phrase.split()
+    text_words = re.findall(r'\b\w+\b', text.lower())
+    
+    # Dla każdego słowa frazy, pobierz WSZYSTKIE możliwe formy (włącznie z formą bazową)
+    forms_per_phrase_word = []
+    for w in words:
+        # Pobierz formy od tego słowa
+        forms_from_word = get_all_forms(w)
+        # Znajdź też formę bazową (lemat) i pobierz jej formy
+        # Heurystyka: jeśli słowo kończy się na -ii, -ą, -ę, spróbuj znaleźć bazę
+        base = _guess_lemma(w)
+        if base != w:
+            forms_from_word.update(get_all_forms(base))
+        forms_per_phrase_word.append(forms_from_word)
+    
+    count = 0
+    matches = []
+    
+    for i in range(len(text_words) - len(words) + 1):
+        match = True
+        matched_phrase = []
+        
+        for j, phrase_forms in enumerate(forms_per_phrase_word):
+            text_word = text_words[i + j]
+            # Sprawdź czy słowo tekstu jest w formach słowa frazy
+            # LUB czy formy słowa tekstu przecinają się z formami słowa frazy
+            text_word_forms = get_all_forms(text_word)
+            
+            if text_word not in phrase_forms and not phrase_forms.intersection(text_word_forms):
+                match = False
+                break
+            matched_phrase.append(text_word)
+        
+        if match:
+            count += 1
+            matches.append(" ".join(matched_phrase))
+    
+    return {
+        "count": count,
+        "method": "FORMS_BIDIRECTIONAL",
+        "phrase_words": words,
+        "matches": matches[:10]
+    }
+
+
+def _guess_lemma(word: str) -> str:
+    """
+    Heurystyka: zgadnij formę podstawową (lemat) bez spaCy.
+    Używane gdy spaCy niedostępny.
+    """
+    word = word.lower()
+    
+    # Rzeczowniki żeńskie w dopełniaczu/celowniku
+    if word.endswith('ii'):
+        return word[:-1] + 'a'  # terapii → terapia
+    if word.endswith('ji'):
+        return word[:-2] + 'ja'  # integracji → integracja
+    if word.endswith('cji'):
+        return word[:-1] + 'a'  # integracji → integracja
+    
+    # Przymiotniki w różnych przypadkach
+    if word.endswith('ycznej'):
+        return word[:-2] + 'y'  # sensorycznej → sensoryczny
+    if word.endswith('yczną'):
+        return word[:-1] + 'y'  # sensoryczną → sensoryczny  
+    if word.endswith('ycznego'):
+        return word[:-3] + 'y'  # sensorycznego → sensoryczny
+    if word.endswith('ycznym'):
+        return word[:-2] + 'y'  # sensorycznym → sensoryczny
+    
+    # Rzeczowniki żeńskie
+    if word.endswith('ką'):
+        return word[:-1] + 'a'  # ścieżką → ścieżka
+    if word.endswith('kę'):
+        return word[:-1] + 'a'  # ścieżkę → ścieżka
+    if word.endswith('ce') and len(word) > 3:
+        return word[:-1] + 'a'  # ścieżce → ścieżka (przybliżenie)
+    if word.endswith('ki') and len(word) > 3:
+        return word[:-1] + 'a'  # ścieżki → ścieżka
+    
+    # Rzeczowniki męskie w dopełniaczu
+    if word.endswith('ów'):
+        return word[:-2]  # terapeutów → terapeut
+    if word.endswith('ach'):
+        return word[:-3]  # przedszkolach → przedszkol? (nie idealne)
+    
+    return word
 
 
 def _count_single_word(text: str, word: str) -> Dict:
