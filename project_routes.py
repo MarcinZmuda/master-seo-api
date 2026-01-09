@@ -882,22 +882,39 @@ def create_project():
     batch_plan_dict = None
     if BATCH_PLANNER_ENABLED and h2_structure:
         try:
+            # v28.1: Zbierz dane dla batch_complexity
             ngrams = [n.get("ngram", "") for n in s1_data.get("ngrams", []) if n.get("weight", 0) > 0.3]
+            
+            # v28.1: Encje z S1
+            entities = []
+            for e in s1_data.get("entities", []):
+                if isinstance(e, dict):
+                    entities.append(e.get("name", str(e)))
+                else:
+                    entities.append(str(e))
+            
+            # v28.1: PAA z S1
+            paa_questions = [p.get("question", "") for p in s1_data.get("paa", [])]
+            
             article_plan = create_article_plan(
                 h2_structure=h2_structure,
                 keywords_state=firestore_keywords,
                 main_keyword=topic,
                 target_length=target_length,
                 ngrams=ngrams[:20],
+                entities=entities[:15],  # v28.1
+                paa_questions=paa_questions[:10],  # v28.1
                 max_batches=6
             )
             batch_plan_dict = article_plan.to_dict()
             project_data["batch_plan"] = batch_plan_dict
             project_data["total_planned_batches"] = article_plan.total_batches
             total_planned_batches = article_plan.total_batches
-            print(f"[PROJECT] Generated batch_plan: {article_plan.total_batches} batches")
+            print(f"[PROJECT] Generated batch_plan: {article_plan.total_batches} batches, ~{article_plan.total_target_words} words")
         except Exception as e:
             print(f"[PROJECT] batch_plan failed: {e}")
+            import traceback
+            traceback.print_exc()
     
     doc_ref.set(project_data)
     
@@ -1604,6 +1621,12 @@ def get_pre_batch_info(project_id):
     # v28.1: UŻYJ BATCH_PLAN jeśli dostępny
     suggested_min_words = None
     suggested_max_words = None
+    suggested_paragraphs_min = 3  # v28.1: default
+    suggested_paragraphs_max = 4  # v28.1: default
+    length_profile = "medium"  # v28.1: default
+    complexity_score = 50  # v28.1: default
+    complexity_reasoning = []  # v28.1: dlaczego taka długość
+    snippet_required = True  # v28.1
     batch_plan_used = False
     
     if batch_plan and "batches" in batch_plan:
@@ -1613,8 +1636,15 @@ def get_pre_batch_info(project_id):
             if bp.get("batch_number") == current_batch_num:
                 suggested_min_words = bp.get("target_words_min")
                 suggested_max_words = bp.get("target_words_max")
+                # v28.1: Pobierz wszystkie nowe pola
+                suggested_paragraphs_min = bp.get("target_paragraphs_min", 3)
+                suggested_paragraphs_max = bp.get("target_paragraphs_max", 4)
+                length_profile = bp.get("length_profile", "medium")
+                complexity_score = bp.get("complexity_score", 50)
+                complexity_reasoning = bp.get("complexity_reasoning", [])
+                snippet_required = bp.get("snippet_required", True)
                 batch_plan_used = True
-                print(f"[PRE_BATCH] Using batch_plan for batch {current_batch_num}: {suggested_min_words}-{suggested_max_words} words")
+                print(f"[PRE_BATCH] batch_plan: batch {current_batch_num}, score={complexity_score}, profile={length_profile}, {suggested_min_words}-{suggested_max_words} words")
                 break
     
     # FALLBACK: jeśli brak batch_plan, oblicz dynamicznie
@@ -1648,6 +1678,12 @@ def get_pre_batch_info(project_id):
     batch_length_info = {
         "suggested_min": suggested_min_words,
         "suggested_max": suggested_max_words,
+        "paragraphs_min": suggested_paragraphs_min,
+        "paragraphs_max": suggested_paragraphs_max,
+        "length_profile": length_profile,
+        "complexity_score": complexity_score,  # v28.1
+        "complexity_reasoning": complexity_reasoning,  # v28.1: DLACZEGO taka długość
+        "snippet_required": snippet_required,  # v28.1
         "total_remaining": total_remaining_all,
         "uses_this_batch": uses_this_batch,
         "remaining_batches": remaining_batches,
@@ -1659,6 +1695,18 @@ def get_pre_batch_info(project_id):
     prompt_sections.append("="*50)
     plan_note = " (z batch_plan)" if batch_plan_used else ""
     prompt_sections.append(f"📏 DŁUGOŚĆ BATCHA{plan_note}: {suggested_min_words}-{suggested_max_words} słów")
+    prompt_sections.append(f"📄 AKAPITY: {suggested_paragraphs_min}-{suggested_paragraphs_max}")
+    prompt_sections.append(f"🎯 SCORE ZŁOŻONOŚCI: {complexity_score}/100 → profil: {length_profile.upper()}")
+    
+    # v28.1: Pokaż DLACZEGO taka długość (max 2 powody)
+    if complexity_reasoning:
+        prompt_sections.append(f"💡 DLACZEGO TAKA DŁUGOŚĆ:")
+        for reason in complexity_reasoning[:2]:
+            prompt_sections.append(f"   • {reason}")
+    
+    if snippet_required:
+        prompt_sections.append(f"⚡ SNIPPET WYMAGANY: Pierwszych 40-60 słów = bezpośrednia odpowiedź!")
+    
     prompt_sections.append(f"   Pozostało {total_remaining_all} użyć fraz / {remaining_batches} batchy = ~{uses_this_batch} na ten batch")
     if uses_this_batch > 15:
         prompt_sections.append(f"   ⚠️ DUŻO FRAZ! Pisz dłuższe sekcje żeby zmieścić wszystkie.")
@@ -1792,6 +1840,234 @@ def add_batch_to_project(project_id):
     result = process_batch_in_firestore(project_id, batch_text, meta_trace)
     
     return jsonify(result), 200
+
+
+# ================================================================
+#  APPROVE BATCH - v28.2 z CLAUDE REVIEWER
+# ================================================================
+@project_routes.post("/api/project/<project_id>/approve_batch")
+def approve_batch_with_review(project_id):
+    """
+    v28.2: Approve batch z automatycznym review przez Claude.
+    
+    Flow:
+    1. Quick checks (Python) - frazy, długość
+    2. Claude review - pełna analiza semantyczna
+    3. Jeśli CORRECTED → zwróć poprawiony tekst
+    4. Jeśli APPROVED → zapisz do Firestore
+    5. Jeśli REJECTED → zwróć do przepisania
+    
+    Request:
+    {
+        "text": "h2: Tytuł...",
+        "skip_review": false,  // opcjonalne - pomiń Claude
+        "force_save": false    // opcjonalne - zapisz mimo warnings
+    }
+    """
+    from dataclasses import asdict
+    
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "No JSON data"}), 400
+    
+    batch_text = data.get("corrected_text") or data.get("text") or data.get("batch_text")
+    if not batch_text:
+        return jsonify({"error": "No text provided"}), 400
+    
+    skip_review = data.get("skip_review", False)
+    force_save = data.get("force_save", False)
+    
+    db = firestore.client()
+    project_ref = db.collection("seo_projects").document(project_id)
+    project_doc = project_ref.get()
+    
+    if not project_doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+    
+    project_data = project_doc.to_dict()
+    
+    # ============================================
+    # ZBUDUJ CONTEXT DLA REVIEWERA
+    # ============================================
+    keywords_state = project_data.get("keywords_state", {})
+    main_keyword = project_data.get("main_keyword", project_data.get("topic", ""))
+    batch_plan = project_data.get("batch_plan", {})
+    current_batch = project_data.get("current_batch_num", 1)
+    
+    # Znajdź wymagane frazy (nieużyte)
+    keywords_required = []
+    keywords_forbidden = []
+    
+    # Main keyword
+    main_kw_count = 2
+    for rid, meta in keywords_state.items():
+        if meta.get("is_main_keyword"):
+            actual = meta.get("actual_uses", 0)
+            target = meta.get("target_max", 10)
+            remaining = max(0, target - actual)
+            main_kw_count = min(3, max(1, remaining // max(1, project_data.get("total_planned_batches", 4) - current_batch + 1)))
+            break
+    
+    keywords_required.append({"keyword": main_keyword, "count": main_kw_count})
+    
+    for rid, meta in keywords_state.items():
+        keyword = meta.get("keyword", "")
+        if not keyword or keyword.lower() == main_keyword.lower():
+            continue
+        
+        kw_type = meta.get("type", "BASIC").upper()
+        actual = meta.get("actual_uses", 0)
+        target_min = meta.get("target_min", 1)
+        target_max = meta.get("target_max", 5)
+        
+        if kw_type == "EXTENDED":
+            if actual >= 1:
+                keywords_forbidden.append(keyword)
+            else:
+                keywords_required.append({"keyword": keyword, "count": 1})
+        else:
+            if actual >= target_max:
+                keywords_forbidden.append(keyword)
+            elif actual < target_min:
+                keywords_required.append({"keyword": keyword, "count": 1})
+    
+    # Limit fraz na batch
+    keywords_required = keywords_required[:12]
+    
+    # Długość z batch_plan
+    target_words_min = 200
+    target_words_max = 500
+    target_para_min = 2
+    target_para_max = 5
+    snippet_required = True
+    complexity_score = 50
+    
+    if batch_plan and "batches" in batch_plan:
+        for bp in batch_plan.get("batches", []):
+            if bp.get("batch_number") == current_batch:
+                target_words_min = bp.get("target_words_min", 200)
+                target_words_max = bp.get("target_words_max", 500)
+                target_para_min = bp.get("target_paragraphs_min", 2)
+                target_para_max = bp.get("target_paragraphs_max", 5)
+                snippet_required = bp.get("snippet_required", True)
+                complexity_score = bp.get("complexity_score", 50)
+                break
+    
+    # Last sentences
+    article_content = project_data.get("article_content", "")
+    last_sentences = article_content[-200:] if len(article_content) > 200 else article_content
+    
+    review_context = {
+        "topic": project_data.get("topic", ""),
+        "h2_current": project_data.get("h2_remaining", [])[:2],
+        "keywords_required": keywords_required,
+        "keywords_forbidden": keywords_forbidden,
+        "last_sentences": last_sentences,
+        "target_words_min": target_words_min,
+        "target_words_max": target_words_max,
+        "target_paragraphs_min": target_para_min,
+        "target_paragraphs_max": target_para_max,
+        "main_keyword": main_keyword,
+        "main_keyword_count": main_kw_count,
+        "batch_number": current_batch,
+        "snippet_required": snippet_required,
+        "complexity_score": complexity_score
+    }
+    
+    # ============================================
+    # CLAUDE REVIEW
+    # ============================================
+    try:
+        from claude_reviewer import review_batch, ReviewResult
+        
+        result = review_batch(batch_text, review_context, skip_claude=skip_review)
+        
+        # QUICK_CHECK_FAILED - zwróć do poprawy
+        if result.status == "QUICK_CHECK_FAILED":
+            issues_list = [asdict(i) for i in result.issues]
+            return jsonify({
+                "status": "QUICK_CHECK_FAILED",
+                "needs_correction": True,
+                "issues": issues_list,
+                "correction_prompt": build_correction_prompt(issues_list, batch_text),
+                "message": result.summary,
+                "word_count": result.word_count
+            }), 200
+        
+        # REJECTED - wymaga przepisania
+        if result.status == "REJECTED":
+            issues_list = [asdict(i) for i in result.issues]
+            return jsonify({
+                "status": "REJECTED",
+                "needs_correction": True,
+                "issues": issues_list,
+                "correction_prompt": f"Tekst wymaga przepisania. {result.summary}",
+                "message": result.summary
+            }), 200
+        
+        # CORRECTED - Claude poprawił
+        if result.status == "CORRECTED" and result.corrected_text:
+            # Użyj poprawionego tekstu
+            batch_text = result.corrected_text
+            issues_list = [asdict(i) for i in result.issues]
+            
+            if not force_save:
+                # Zwróć do akceptacji przez GPT
+                return jsonify({
+                    "status": "CORRECTED",
+                    "needs_correction": False,
+                    "corrected_text": batch_text,
+                    "original_text": result.original_text,
+                    "issues": issues_list,
+                    "message": f"Claude poprawił tekst: {result.summary}",
+                    "word_count": result.word_count,
+                    "instruction": "Sprawdź poprawki i wyślij ponownie z force_save=true lub popraw ręcznie"
+                }), 200
+        
+        # APPROVED lub force_save - zapisz
+        print(f"[APPROVE_BATCH] ✅ Review passed: {result.status}, saving batch")
+        
+    except ImportError:
+        print(f"[APPROVE_BATCH] ⚠️ claude_reviewer not available, saving without review")
+    except Exception as e:
+        print(f"[APPROVE_BATCH] ⚠️ Review error: {e}, saving anyway")
+    
+    # ============================================
+    # ZAPISZ DO FIRESTORE
+    # ============================================
+    meta_trace = data.get("meta_trace", {})
+    save_result = process_batch_in_firestore(project_id, batch_text, meta_trace)
+    
+    return jsonify({
+        "status": "APPROVED",
+        "needs_correction": False,
+        "saved": True,
+        "batch_number": save_result.get("batch_number"),
+        "word_count": len(batch_text.split()),
+        "message": "Batch zatwierdzony i zapisany",
+        **save_result
+    }), 200
+
+
+def build_correction_prompt(issues: list, original_text: str) -> str:
+    """Buduje prompt do poprawienia tekstu."""
+    lines = ["Popraw poniższy tekst:"]
+    
+    for issue in issues:
+        severity = issue.get("severity", "warning")
+        desc = issue.get("description", "")
+        if severity == "critical":
+            lines.append(f"❌ KRYTYCZNE: {desc}")
+        else:
+            lines.append(f"⚠️ {desc}")
+    
+    lines.append("\n--- TEKST DO POPRAWY ---")
+    lines.append(original_text[:1000])
+    if len(original_text) > 1000:
+        lines.append("...")
+    lines.append("\n--- WYŚLIJ POPRAWIONY TEKST ---")
+    
+    return "\n".join(lines)
 
 
 # ================================================================
