@@ -1915,12 +1915,42 @@ def preview_batch(project_id):
     elif len(warnings) > 2:
         status = "WARN"
     
+    # v28.1: GRAMMAR VALIDATION - sprawdź przed zapisem!
+    grammar_validation = {"is_valid": True, "error_count": 0, "correction_needed": False}
+    try:
+        from grammar_middleware import validate_batch_full
+        grammar_validation = validate_batch_full(batch_text)
+        
+        if not grammar_validation["is_valid"]:
+            status = "NEEDS_CORRECTION"
+            print(f"[PREVIEW_BATCH] ⚠️ Grammar issues: {grammar_validation['grammar']['error_count']} errors, banned: {grammar_validation['banned_phrases']['found']}")
+            
+            # Dodaj do warnings
+            if grammar_validation["grammar"]["error_count"] > 0:
+                warnings.append({
+                    "type": "GRAMMAR_ERRORS",
+                    "count": grammar_validation["grammar"]["error_count"],
+                    "message": f"Wykryto {grammar_validation['grammar']['error_count']} błędów gramatycznych - popraw przed zapisem!"
+                })
+            
+            for phrase in grammar_validation["banned_phrases"]["found"]:
+                warnings.append({
+                    "type": "BANNED_PHRASE_DETECTED",
+                    "phrase": phrase,
+                    "message": f"Usuń frazę: '{phrase}'"
+                })
+    except ImportError:
+        print(f"[PREVIEW_BATCH] ⚠️ grammar_middleware not available")
+    except Exception as e:
+        print(f"[PREVIEW_BATCH] ⚠️ Grammar check error: {e}")
+    
     # v27.0: Zapisz tekst do last_preview (fallback dla approve_batch)
     try:
         db.collection("seo_projects").document(project_id).update({
             "last_preview": {
                 "text": batch_text,
                 "status": status,
+                "grammar_valid": grammar_validation.get("is_valid", True),
                 "timestamp": firestore.SERVER_TIMESTAMP
             }
         })
@@ -1928,7 +1958,8 @@ def preview_batch(project_id):
     except Exception as e:
         print(f"[PREVIEW_BATCH] ⚠️ Nie udało się zapisać last_preview: {e}")
     
-    return jsonify({
+    # v28.1: Jeśli błędy gramatyczne - zwróć prompt do poprawy
+    response_data = {
         "status": status,
         "semantic_score": report.get("semantic_score", 0),
         "density": density,
@@ -1941,11 +1972,20 @@ def preview_batch(project_id):
             "main_vs_synonyms": main_synonym_check,
             "ngram_coverage": ngram_check,
             "density": {"value": density, "status": density_status, "message": density_msg},
-            "polish_quality": polish_quality
+            "polish_quality": polish_quality,
+            "grammar": grammar_validation  # v28.1
         },
         "last_preview_saved": True,
-        "version": "v27.4"
-    }), 200
+        "version": "v28.1"
+    }
+    
+    # v28.1: Jeśli wymaga korekty - dodaj prompt
+    if grammar_validation.get("correction_needed"):
+        response_data["needs_correction"] = True
+        response_data["correction_prompt"] = grammar_validation.get("correction_prompt", "")
+        response_data["instruction"] = "POPRAW błędy i wyślij ponownie do preview_batch"
+    
+    return jsonify(response_data), 200
 
 
 # ================================================================
