@@ -1,5 +1,12 @@
 """
-PROJECT ROUTES - v27.0 BRAJEN SEO Engine
+PROJECT ROUTES - v29.1 BRAJEN SEO Engine
+
+ZMIANY v29.1:
+- NOWE PRIORYTETY: Jakość tekstu > Encje > SEO
+- Elastyczne podejście do fraz (min 1×, nie blokuje za "za mało")
+- Lemmatyzacja fraz (ścieżka sensoryczna = ścieżką sensoryczną)
+- Wykrywanie tautologii i pleonazmów
+- Auto-approve po 3 próbach
 
 ZMIANY v26.1:
 - Best-of-N batch selection (generuje 3 wersje, wybiera najlepszą)
@@ -9,12 +16,11 @@ ZMIANY v26.1:
 - Soft cap + short keyword protection
 - Synonimy przy przekroczeniu fraz
 
-ZMIANY v25.0:
-- BASIC keywords: twarde min 1x, target z inputu użytkownika
-- EXTENDED keywords: dokładnie 1x, potem DONE
-- Nowy format pre_batch_info z coverage tracking
-- Density ranges (0.5-1.5% optimal)
-- Nowa funkcja calculate_suggested_v25()
+LOGIKA FRAZ v29.1:
+- BASIC/MAIN: min 1× (MUSI być), zalecane ilości to CEL nie wymóg
+- EXTENDED: min 1× (MUSI być), potem OK
+- Stuffing (>3× target): BLOKUJE
+- Underused (<target ale >0): WARNING (nie blokuje!)
 """
 
 import uuid
@@ -185,13 +191,17 @@ def get_density_status(density: float) -> tuple:
 
 
 # ================================================================
-# v25.0: COVERAGE VALIDATION
+# v29.1: COVERAGE VALIDATION
 # ================================================================
 def validate_coverage(keywords_state: dict) -> dict:
     """
-    v25.0: Sprawdza coverage dla BASIC i EXTENDED keywords.
-    BASIC: każda min 1x (hard requirement), target z inputu
-    EXTENDED: każda dokładnie 1x
+    v29.1: Sprawdza coverage dla BASIC i EXTENDED keywords.
+    
+    NOWA LOGIKA:
+    - BASIC: min 1× (hard requirement), target to CEL nie wymóg
+    - EXTENDED: min 1× (hard requirement)
+    - Underused (>0 ale <target): OK, tylko warning
+    - Missing (0×): CRITICAL
     """
     basic_total = 0
     basic_covered = 0
@@ -277,7 +287,7 @@ Odpowiedź (tylko synonimy):
 
 
 # ================================================================
-# v25.0: CALCULATE SUGGESTED - nowa logika coverage-first
+# v29.1: CALCULATE SUGGESTED - nowa logika coverage-first
 # ================================================================
 def calculate_suggested_v25(
     keyword: str,
@@ -291,10 +301,13 @@ def calculate_suggested_v25(
     is_main: bool = False
 ) -> dict:
     """
-    v26.1: Nowa logika suggested z soft cap i adjusted max dla krótkich fraz.
-    - BASIC: twarde min 1x, target z inputu, soft cap warning
-    - EXTENDED: dokładnie 1x, potem DONE
-    - Krótkie frazy: automatycznie niższy max
+    v29.1: Logika suggested z elastycznym podejściem.
+    
+    NOWE ZASADY:
+    - BASIC: min 1× (hard), target to CEL (zalecane, nie wymóg)
+    - EXTENDED: min 1× (hard), potem OK
+    - Krótkie frazy: automatycznie niższy max (ochrona przed stuffingiem)
+    - Underused: sugestia ale NIE blokuje
     """
     
     # v26.1: Skoryguj max dla krótkich fraz (nie dla EXTENDED)
@@ -1848,7 +1861,12 @@ def add_batch_to_project(project_id):
 @project_routes.post("/api/project/<project_id>/approve_batch")
 def approve_batch_with_review(project_id):
     """
-    v28.2: Approve batch z automatycznym review przez Claude.
+    v28.3: Approve batch z automatycznym review przez Claude.
+    
+    NOWOŚĆ v28.3:
+    - Auto-approve po 3 próbach (attempt >= 3)
+    - Lemmatyzacja fraz (ścieżka sensoryczna = ścieżką sensoryczną)
+    - Wykrywanie tautologii przez Claude
     
     Flow:
     1. Quick checks (Python) - frazy, długość
@@ -1861,8 +1879,11 @@ def approve_batch_with_review(project_id):
     {
         "text": "h2: Tytuł...",
         "skip_review": false,  // opcjonalne - pomiń Claude
-        "force_save": false    // opcjonalne - zapisz mimo warnings
+        "force_save": false,   // opcjonalne - zapisz mimo warnings
+        "attempt": 1           // NOWE! numer próby (1, 2, 3...)
     }
+    
+    Po attempt >= 3: automatyczne force_save=True (auto-approve)
     """
     from dataclasses import asdict
     
@@ -1876,6 +1897,12 @@ def approve_batch_with_review(project_id):
     
     skip_review = data.get("skip_review", False)
     force_save = data.get("force_save", False)
+    attempt = data.get("attempt", 1)  # v28.3: numer próby
+    
+    # v28.3: AUTO-APPROVE po 3 próbach
+    if attempt >= 3 and not force_save:
+        print(f"[APPROVE_BATCH] ⚡ Auto-approve: attempt={attempt} >= 3, force_save=True")
+        force_save = True
     
     db = firestore.client()
     project_ref = db.collection("seo_projects").document(project_id)
@@ -1991,7 +2018,10 @@ def approve_batch_with_review(project_id):
                 "issues": issues_list,
                 "correction_prompt": build_correction_prompt(issues_list, batch_text),
                 "message": result.summary,
-                "word_count": result.word_count
+                "word_count": result.word_count,
+                "attempt": attempt,
+                "next_attempt": attempt + 1,  # v28.3: GPT powinien przekazać to w następnym requeście
+                "auto_approve_at": 3  # v28.3: info że po 3 próbie będzie auto-approve
             }), 200
         
         # REJECTED - wymaga przepisania
@@ -2002,7 +2032,10 @@ def approve_batch_with_review(project_id):
                 "needs_correction": True,
                 "issues": issues_list,
                 "correction_prompt": f"Tekst wymaga przepisania. {result.summary}",
-                "message": result.summary
+                "message": result.summary,
+                "attempt": attempt,
+                "next_attempt": attempt + 1,
+                "auto_approve_at": 3
             }), 200
         
         # CORRECTED - Claude poprawił
@@ -2021,7 +2054,10 @@ def approve_batch_with_review(project_id):
                     "issues": issues_list,
                     "message": f"Claude poprawił tekst: {result.summary}",
                     "word_count": result.word_count,
-                    "instruction": "Sprawdź poprawki i wyślij ponownie z force_save=true lub popraw ręcznie"
+                    "instruction": "Użyj corrected_text i wyślij ponownie z force_save=true",
+                    "attempt": attempt,
+                    "next_attempt": attempt + 1,
+                    "auto_approve_at": 3
                 }), 200
         
         # APPROVED lub force_save - zapisz
