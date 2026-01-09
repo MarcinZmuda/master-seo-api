@@ -1695,7 +1695,7 @@ def get_pre_batch_info(project_id):
     prompt_sections.append(f"   • Sekcje H2: różna długość (min {suggested_min_words // 2} słów na sekcję)")
     prompt_sections.append("   • Akapity: 40-150 słów")
     prompt_sections.append("   • H3: max 2-3 na artykuł")
-    prompt_sections.append("   • Max 1 lista wypunktowana")
+    prompt_sections.append("   • Listy wypunktowane: dozwolone w miarę potrzeb")
     prompt_sections.append("   • Format: h2: / h3:")
     prompt_sections.append("="*50)
     
@@ -1834,14 +1834,16 @@ def preview_batch(project_id):
             "message": density_msg
         })
     
+    # v28.1: Usunięto limit 1 listy - teraz max 3 (informacyjnie)
     list_count = count_bullet_lists(batch_text)
-    if list_count > 1:
-        warnings.append({
-            "type": "TOO_MANY_LISTS",
-            "count": list_count,
-            "max": 1,
-            "message": f"Za dużo list ({list_count}). Max 1 na artykuł!"
-        })
+    # Tylko informacja, nie blokuje
+    # if list_count > 3:
+    #     warnings.append({
+    #         "type": "TOO_MANY_LISTS",
+    #         "count": list_count,
+    #         "max": 3,
+    #         "message": f"Dużo list ({list_count}). Rozważ ograniczenie."
+    #     })
     
     h3_validation = validate_h3_length(batch_text, min_words=80)
     if h3_validation["issues"]:
@@ -1967,7 +1969,7 @@ def preview_batch(project_id):
         "warnings": warnings,
         "errors": errors,
         "validations": {
-            "lists": {"count": list_count, "valid": list_count <= 1},
+            "lists": {"count": list_count, "valid": True},  # v28.1: brak limitu list
             "h3_length": h3_validation,
             "main_vs_synonyms": main_synonym_check,
             "ngram_coverage": ngram_check,
@@ -2174,13 +2176,8 @@ def preview_batch_v2(project_id):
             "message": density_msg
         })
     
+    # v28.1: Usunięto limit list
     list_count = count_bullet_lists(batch_text)
-    if list_count > 1:
-        warnings.append({
-            "type": "TOO_MANY_LISTS",
-            "count": list_count,
-            "message": f"Za dużo list ({list_count}). Max 1!"
-        })
     
     status = "OK"
     if errors:
