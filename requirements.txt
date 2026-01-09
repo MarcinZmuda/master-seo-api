@@ -1,4 +1,4 @@
-# Master SEO API v28.1 - Dependencies (Memory Optimized)
+# Master SEO API v28.2 - Dependencies
 
 # Web Framework
 flask>=3.0.0
@@ -19,6 +19,9 @@ pl_core_news_md @ https://github.com/explosion/spacy-models/releases/download/pl
 # W Render Build Command dodaj: apt-get update && apt-get install -y default-jre
 language-tool-python>=2.7.1
 
+# Claude Reviewer (v28.2)
+anthropic>=0.40.0
+
 # Fuzzy matching
 rapidfuzz>=3.5.0
 
@@ -26,7 +29,6 @@ rapidfuzz>=3.5.0
 textstat>=0.7.3
 
 # AI APIs
-anthropic>=0.40.0
 google-generativeai>=0.3.0
 
 # Document generation
