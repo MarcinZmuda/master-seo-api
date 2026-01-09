@@ -56,25 +56,30 @@ except ImportError:
     print("[CLAUDE_REVIEWER] ⚠️ polish_lemmatizer not available, using exact match")
 
 
-def quick_check_keywords(text: str, required: List[Dict]) -> Tuple[List[str], List[str]]:
+def quick_check_keywords(text: str, required: List[Dict]) -> Tuple[List[str], List[str], Dict]:
     """
-    v29.0: NOWE PODEJŚCIE DO FRAZ
+    v29.2: NOWA LOGIKA - TYLKO STUFFING BLOKUJE!
     
-    - Fraza występuje 0× → CRITICAL (musi być chociaż raz)
-    - Fraza występuje 1-N× gdzie N < max → OK (nie blokuj!)
-    - Fraza występuje > max×2.5 → CRITICAL (stuffing)
+    - Fraza 0× → WARNING (Claude uzupełni na końcu)
+    - Fraza <target → OK
+    - Fraza >max → CRITICAL (stuffing) - JEDYNY BLOKER!
     
-    NIE BLOKUJEMY za "za mało użyć" jeśli fraza jest w tekście!
+    Zwraca: (critical_errors, warnings, missing_info)
+    - critical = TYLKO stuffing
+    - warnings = missing (0×) + suggestions
+    - missing_info = {"basic": [...], "extended": [...]} - do przekazania Claude'owi
     """
     text_lower = text.lower()
-    missing_completely = []  # 0 wystąpień - CRITICAL
-    stuffing_warnings = []   # za dużo - CRITICAL
-    suggestions = []         # mogłoby być więcej - tylko info
+    missing_basic = []        # 0 wystąpień BASIC - do uzupełnienia
+    missing_extended = []     # 0 wystąpień EXTENDED - do uzupełnienia
+    stuffing_errors = []      # za dużo - CRITICAL (blokuje!)
+    warnings = []             # info o brakujących
     
     for kw in required:
         keyword = kw.get("keyword", "")
         count_req = kw.get("count", 1)
         count_max = kw.get("max", count_req * 3)  # max = 3× wymagane
+        kw_type = kw.get("type", "BASIC").upper()
         if not keyword:
             continue
         
@@ -85,22 +90,32 @@ def quick_check_keywords(text: str, required: List[Dict]) -> Tuple[List[str], Li
         else:
             count_found = text_lower.count(keyword.lower())
         
-        # LOGIKA v29.0:
+        # LOGIKA v29.2:
         if count_found == 0:
-            # CRITICAL: fraza w ogóle nie występuje
-            missing_completely.append(f'"{keyword}" (0/{count_req}) - BRAK W TEKŚCIE')
+            # WARNING: fraza brakuje - Claude uzupełni na końcu
+            warnings.append(f'"{keyword}" (0/{count_req}) - brak, do uzupełnienia')
+            # Dodaj do listy dla Claude
+            if kw_type == "EXTENDED":
+                missing_extended.append(keyword)
+            else:
+                missing_basic.append(keyword)
         elif count_found > count_max:
-            # CRITICAL: stuffing
-            stuffing_warnings.append(f'"{keyword}" ({count_found}×) - STUFFING! Max {count_max}×')
+            # CRITICAL: stuffing - JEDYNY BLOKER!
+            stuffing_errors.append(f'"{keyword}" ({count_found}×) - STUFFING! Max {count_max}×')
         elif count_found < count_req:
-            # OK ale mogłoby być więcej - NIE BLOKUJ, tylko info
-            suggestions.append(f'"{keyword}" ({count_found}/{count_req}) - OK, ale mogłoby być więcej')
+            # OK: mogłoby być więcej - tylko info, nie dodajemy do missing
+            warnings.append(f'"{keyword}" ({count_found}/{count_req}) - OK')
     
-    # CRITICAL = missing_completely + stuffing
-    # WARNINGS = suggestions (nie blokują!)
-    critical = missing_completely + stuffing_warnings
+    # v29.2: TYLKO stuffing blokuje!
+    critical = stuffing_errors
     
-    return critical, suggestions
+    # Info o brakujących frazach do przekazania Claude'owi
+    missing_info = {
+        "basic": missing_basic,
+        "extended": missing_extended
+    }
+    
+    return critical, warnings, missing_info
 
 
 def quick_check_text_quality(text: str) -> Tuple[List[str], List[str]]:
@@ -229,16 +244,17 @@ def run_quick_checks(text: str, context: Dict) -> Dict:
             warnings.append({"type": "length", "severity": "warning", "msg": len_err})
     
     # ============================================
-    # PRIORYTET 3: KEYWORDS (nowa logika!)
+    # PRIORYTET 3: KEYWORDS (nowa logika v29.2!)
     # ============================================
-    # critical = brak frazy LUB stuffing
-    # suggestions = mogłoby być więcej (NIE BLOKUJE!)
-    kw_critical, kw_suggestions = quick_check_keywords(text, context.get("keywords_required", []))
+    # critical = TYLKO stuffing
+    # warnings = info o brakujących i niedostatecznych
+    # missing_info = lista fraz do uzupełnienia przez Claude
+    kw_critical, kw_warnings, missing_info = quick_check_keywords(text, context.get("keywords_required", []))
     
     for err in kw_critical:
         critical_errors.append({"type": "seo", "severity": "critical", "msg": err})
-    for sug in kw_suggestions:
-        suggestions.append({"type": "seo", "severity": "info", "msg": sug})
+    for warn in kw_warnings:
+        warnings.append({"type": "seo", "severity": "warning", "msg": warn})
     
     # Forbidden keywords - zawsze critical
     forbidden = quick_check_forbidden(text, context.get("keywords_forbidden", []))
@@ -251,12 +267,13 @@ def run_quick_checks(text: str, context: Dict) -> Dict:
     paras = len([p for p in text.split('\n\n') if p.strip() and len(p) > 30])
     
     return {
-        "passed": len(critical_errors) == 0,  # Tylko CRITICAL blokuje!
+        "passed": len(critical_errors) == 0,  # Tylko CRITICAL (stuffing) blokuje!
         "errors": critical_errors,
         "warnings": warnings,
-        "suggestions": suggestions,  # Nowe - nie blokują
+        "suggestions": suggestions,
         "word_count": words,
         "paragraph_count": paras,
+        "missing_phrases": missing_info,  # v29.2: do uzupełnienia przez Claude
         "priority_summary": {
             "quality_issues": len([e for e in critical_errors if e["type"] == "quality"]),
             "seo_issues": len([e for e in critical_errors if e["type"] == "seo"]),
@@ -270,7 +287,7 @@ def run_quick_checks(text: str, context: Dict) -> Dict:
 # ================================================================
 
 def build_review_prompt(text: str, ctx: Dict) -> str:
-    """v29.1: Prompt z nowymi priorytetami + przywrócone ważne elementy"""
+    """v29.2: Prompt z listą BRAKUJĄCYCH FRAZ do uzupełnienia przez Claude"""
     
     required = "\n".join([f'  • "{k["keyword"]}" (min 1×, zalecane {k.get("count",1)}×)' 
                           for k in ctx.get("keywords_required", []) if k.get("keyword")])
@@ -283,6 +300,32 @@ def build_review_prompt(text: str, ctx: Dict) -> str:
     
     # Snippet info
     snippet_info = "TAK (40-60 słów na początku)" if ctx.get("snippet_required") else "NIE"
+    
+    # v29.2: BRAKUJĄCE FRAZY DO UZUPEŁNIENIA
+    missing_basic = ctx.get("missing_basic", [])
+    missing_extended = ctx.get("missing_extended", [])
+    
+    missing_section = ""
+    if missing_basic or missing_extended:
+        missing_section = """
+### 🔴 BRAKUJĄCE FRAZY - MUSISZ UZUPEŁNIĆ!
+
+**Te frazy NIE występują w tekście - wpleć je naturalnie:**
+"""
+        if missing_basic:
+            missing_section += "\nBASIC (ważniejsze):\n"
+            for phrase in missing_basic:
+                missing_section += f'  • "{phrase}"\n'
+        
+        if missing_extended:
+            missing_section += "\nEXTENDED:\n"
+            for phrase in missing_extended:
+                missing_section += f'  • "{phrase}"\n'
+        
+        missing_section += """
+⚠️ WPLEĆ KAŻDĄ BRAKUJĄCĄ FRAZĘ min 1× w naturalny sposób!
+   Możesz użyć odmiany (np. "ścieżką sensoryczną" zamiast "ścieżka sensoryczna")
+"""
     
     return f"""Jesteś redaktorem i stylistą języka polskiego. Sprawdź i POPRAW tekst.
 
@@ -303,8 +346,8 @@ SPRAWDŹ I POPRAW:
 
 ### 🟡 PRIORYTET 2: ENCJE I N-GRAMY
 Upewnij się, że kluczowe pojęcia są zdefiniowane/wyjaśnione przy pierwszym użyciu.
-
-### 🟢 PRIORYTET 3: SŁOWA KLUCZOWE (elastyczne!)
+{missing_section}
+### 🟢 PRIORYTET 3: ISTNIEJĄCE FRAZY (sprawdź ilości)
 Frazy powinny występować NATURALNIE. Lepiej 1× naturalnie niż 3× sztucznie!
 
 GŁÓWNA FRAZA: "{main_kw}" (min {main_kw_count}×)
@@ -340,18 +383,20 @@ ZABRONIONE: {forbidden}
   "issues": [
     {{"priority": 1, "type": "tautologia|pleonazm|gramatyka|halucynacja|ai_pattern", "description": "...", "fix_applied": true}},
     {{"priority": 2, "type": "encja_brak", "description": "...", "fix_applied": false}},
-    {{"priority": 3, "type": "fraza_brak", "description": "...", "fix_applied": true}}
+    {{"priority": 3, "type": "fraza_dodana|fraza_brak", "description": "...", "fix_applied": true}}
   ],
+  "phrases_added": ["lista fraz które wplotłeś"],
   "corrected_text": "pełny poprawiony tekst (tylko jeśli CORRECTED)",
   "summary": "co poprawiono"
 }}
 ```
 
 ZASADY:
-- APPROVED = jakość OK, frazy OK (nawet jeśli nie idealnie po ilości)
-- CORRECTED = poprawiłeś błędy jakościowe, zwróć pełny tekst
+- APPROVED = jakość OK, wszystkie brakujące frazy uzupełnione
+- CORRECTED = poprawiłeś błędy jakościowe LUB uzupełniłeś frazy, zwróć pełny tekst
 - REJECTED = tekst nie do uratowania (za krótki, same błędy, halucynacje)
 - Zachowaj format h2: / h3:
+- JEŚLI SĄ BRAKUJĄCE FRAZY → MUSISZ zwrócić CORRECTED z uzupełnionym tekstem!
 - NIE dopisuj tekstu jeśli za krótki → zwróć REJECTED
 - PRIORYTET 1 (jakość) ważniejszy niż dokładne ilości fraz!"""
 
@@ -415,17 +460,20 @@ def review_with_claude(text: str, ctx: Dict) -> ReviewResult:
 
 def review_batch(text: str, context: Dict, skip_claude: bool = False) -> ReviewResult:
     """
-    Pełny review: Quick Checks + Claude.
+    v29.2: Pełny review: Quick Checks + Claude.
+    
+    Jeśli są brakujące frazy (0×), przekazuje je do Claude do uzupełnienia.
     """
     # Quick checks
     qc = run_quick_checks(text, context)
     
     if not qc["passed"]:
+        # v29.2: Jedyny bloker to stuffing
         issues = [ReviewIssue(e["type"], "critical", e["msg"]) for e in qc["errors"]]
         issues += [ReviewIssue(w["type"], "warning", w["msg"]) for w in qc["warnings"]]
         return ReviewResult(
             "QUICK_CHECK_FAILED", text, None, issues,
-            "Popraw błędy krytyczne",
+            "Popraw błędy krytyczne (stuffing)",
             qc["word_count"], qc["paragraph_count"]
         )
     
@@ -437,7 +485,12 @@ def review_batch(text: str, context: Dict, skip_claude: bool = False) -> ReviewR
             qc["word_count"], qc["paragraph_count"]
         )
     
-    # Claude review
+    # v29.2: Przekaż brakujące frazy do kontekstu Claude
+    missing = qc.get("missing_phrases", {})
+    context["missing_basic"] = missing.get("basic", [])
+    context["missing_extended"] = missing.get("extended", [])
+    
+    # Claude review - uzupełni brakujące frazy
     result = review_with_claude(text, context)
     
     # Dodaj warnings z quick check
