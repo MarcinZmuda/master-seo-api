@@ -1,10 +1,10 @@
 # ================================================================
-# 🔍 FINAL REVIEW ROUTES v29.1 - NOWE PRIORYTETY
+# 🔍 FINAL REVIEW ROUTES v29.2 - TYLKO STUFFING BLOKUJE
 # ================================================================
-# ZMIANY v29.1:
-# - Jakość tekstu > Encje > SEO
-# - "underused" NIE blokuje (tylko warning)
-# - Blokuje TYLKO: brak frazy (0×) lub stuffing
+# ZMIANY v29.2:
+# - TYLKO stuffing (>max) blokuje
+# - Brak frazy (0×) = warning, Claude uzupełni
+# - underused (<target) = OK
 # ================================================================
 
 import os
@@ -37,26 +37,26 @@ GEMINI_MODEL = "gemini-2.5-flash"
 
 
 # ================================================================
-# 1. MISSING KEYWORDS DETECTOR - v29.1
+# 1. MISSING KEYWORDS DETECTOR - v29.2
 # ================================================================
 def detect_missing_keywords(text, keywords_state):
     """
-    v29.1: Wykrywa brakujące frazy z NOWĄ LOGIKĄ:
+    v29.2: Wykrywa brakujące frazy - TYLKO STUFFING BLOKUJE!
     
-    - missing (0×) → CRITICAL (blokuje)
-    - underused (< target) → WARNING (NIE blokuje!)
-    - stuffing (> max) → CRITICAL (blokuje)
+    - missing (0×) → WARNING (Claude uzupełni)
+    - underused (< target) → OK
+    - stuffing (> max) → CRITICAL (JEDYNY BLOKER!)
     
-    needs_correction = True TYLKO gdy missing > 0 lub stuffing > 0
+    needs_correction = True TYLKO gdy stuffing > 0
     """
     try:
         text_lower = text.lower()
         
-        missing_basic = []      # 0 wystąpień - CRITICAL
-        missing_extended = []   # 0 wystąpień - CRITICAL
-        underused_basic = []    # < target - tylko WARNING
-        underused_extended = [] # < target - tylko WARNING
-        stuffing = []           # > max - CRITICAL
+        missing_basic = []      # 0 wystąpień - WARNING
+        missing_extended = []   # 0 wystąpień - WARNING
+        underused_basic = []    # < target - OK
+        underused_extended = [] # < target - OK
+        stuffing = []           # > max - CRITICAL (JEDYNY BLOKER!)
         
         # v24.2: Unified counting
         if UNIFIED_COUNTER:
@@ -89,19 +89,19 @@ def detect_missing_keywords(text, keywords_state):
                 "missing": max(0, target_min - actual)
             }
             
-            # v29.1: NOWA LOGIKA
-            if actual == 0:
-                # CRITICAL: fraza w ogóle nie występuje
+            # v29.2: NOWA LOGIKA - tylko stuffing blokuje!
+            if actual > target_max:
+                # CRITICAL: stuffing - JEDYNY BLOKER!
+                info["severity"] = "stuffing"
+                stuffing.append(info)
+            elif actual == 0:
+                # WARNING: fraza brakuje - Claude uzupełni
                 if kw_type in ["BASIC", "MAIN"]:
                     missing_basic.append(info)
                 else:
                     missing_extended.append(info)
-            elif actual > target_max:
-                # CRITICAL: stuffing
-                info["severity"] = "stuffing"
-                stuffing.append(info)
             elif actual < target_min:
-                # WARNING: mogłoby być więcej, ale NIE BLOKUJE
+                # OK: mogłoby być więcej
                 if kw_type in ["BASIC", "MAIN"]:
                     underused_basic.append(info)
                 else:
@@ -109,21 +109,21 @@ def detect_missing_keywords(text, keywords_state):
         
         missing_basic.sort(key=lambda x: x["missing"], reverse=True)
         
-        # v29.1: needs_correction TYLKO dla missing (0×) lub stuffing
-        # underused NIE blokuje!
-        has_critical = len(missing_basic) > 0 or len(stuffing) > 0
+        # v29.2: needs_correction TYLKO dla stuffing!
+        # missing = warning, Claude uzupełni
+        has_stuffing = len(stuffing) > 0
         
         return {
             "missing": {"basic": missing_basic, "extended": missing_extended},
             "underused": {"basic": underused_basic, "extended": underused_extended},
             "stuffing": stuffing,
             "priority_to_add": {
-                "critical": missing_basic[:5] + stuffing[:3],  # brak + stuffing
-                "high": missing_extended[:5],                   # brak extended
-                "medium": underused_basic[:5],                  # za mało basic (warning)
-                "low": underused_extended[:5]                   # za mało extended (warning)
+                "critical": stuffing,                          # TYLKO stuffing jest critical
+                "to_add_by_claude": missing_basic + missing_extended,  # Claude uzupełni
+                "ok": underused_basic + underused_extended     # OK, nie trzeba nic robić
             },
-            "needs_correction": has_critical,  # v29.1: TYLKO critical blokuje!
+            "needs_correction": has_stuffing,  # v29.2: TYLKO stuffing blokuje!
+            "needs_claude_help": len(missing_basic) + len(missing_extended) > 0,  # Claude uzupełni
             "summary": {
                 "missing_count": len(missing_basic) + len(missing_extended),
                 "underused_count": len(underused_basic) + len(underused_extended),
