@@ -471,17 +471,33 @@ Przeanalizuj artykuł pt. "{topic}" i znajdź błędy do poprawy.
             
             correction_prompt = f"""Popraw poniższy artykuł pt. "{topic}".
 
+=== PRIORYTETY (w tej kolejności!) ===
+
+🔴 PRIORYTET 1: JAKOŚĆ TEKSTU
+- Tautologie ("przedszkole...w przedszkolu") → zamień na synonim
+- Pleonazmy i powtórzenia → usuń lub zamień
+- Strona bierna → zamień na czynną gdzie możliwe
+- AI patterns ("W dzisiejszych czasach") → USUŃ
+- Halucynacje (wymyślone fakty) → USUŃ
+
+🟡 PRIORYTET 2: ENCJE I N-GRAMY
+- Kluczowe pojęcia zdefiniowane przy pierwszym użyciu
+
+🟢 PRIORYTET 3: FRAZY SEO (elastycznie!)
+- Wpleć naturalnie, NIE "na siłę"
+- Lepiej 1× naturalnie niż 3× sztucznie
+
 === POPRAWKI DO WPROWADZENIA ===
 {json.dumps(errors_list, ensure_ascii=False, indent=2) if errors_list else "Brak krytycznych błędów."}
 
-=== FRAZY DO WPLECENIA ===
-{', '.join(keywords_to_add) if keywords_to_add else "Brak dodatkowych fraz."}
+=== FRAZY DO WPLECENIA (jeśli brakuje, wpleć naturalnie) ===
+{', '.join(keywords_to_add) if keywords_to_add else "Wszystkie frazy są w tekście."}
 
-=== WYMAGANIA ===
+=== WYMAGANIA TECHNICZNE ===
 - Zachowaj strukturę HTML/Markdown (H2, H3)
 - MINIMUM {word_count} słów (nie skracaj!)
 - NIE dodawaj linków
-- Wpleć brakujące frazy naturalnie
+- Zachowaj naturalny, płynny styl
 
 === ZWRÓĆ TYLKO POPRAWIONY TEKST (bez komentarzy, bez JSON) ===
 
