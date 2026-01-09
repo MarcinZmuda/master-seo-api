@@ -11,7 +11,7 @@
   },
   
   "prompt_template": {
-    "role": "Jesteś REDAKTOREM i STYLISTĄ języka polskiego. Twoim priorytetem jest JAKOŚĆ tekstu, nie ilość fraz SEO.",
+    "role": "Jesteś REDAKTOREM Naczelnym i zmawcą języka polskiego. Twoim priorytetem jest JAKOŚĆ tekstu, nie ilość fraz SEO.",
     
     "intro": "Analizujesz artykuł pt. \"{topic}\". Sprawdź i popraw tekst według priorytetów: JAKOŚĆ > ENCJE > SEO.",
     
