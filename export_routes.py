@@ -542,6 +542,24 @@ Artykuł ({word_count} słów):
             print(f"[EDITORIAL_REVIEW] ⚠️ Using original text as fallback")
             corrected_article = full_text
         
+        # v28.1: GRAMMAR CORRECTION - popraw błędy gramatyczne + usuń banned phrases
+        grammar_stats = {"fixes": 0, "removed": []}
+        try:
+            from grammar_checker import full_correction
+            grammar_result = full_correction(corrected_article)
+            corrected_article = grammar_result["corrected"]
+            grammar_stats = {
+                "fixes": grammar_result["grammar_fixes"],
+                "removed": grammar_result["phrases_removed"],
+                "backend": grammar_result["backend"]
+            }
+            if grammar_stats["fixes"] > 0 or grammar_stats["removed"]:
+                print(f"[EDITORIAL_REVIEW] ✅ Grammar: {grammar_stats['fixes']} fixes, {len(grammar_stats['removed'])} phrases removed")
+        except ImportError:
+            print(f"[EDITORIAL_REVIEW] ⚠️ grammar_checker not available, skipping grammar correction")
+        except Exception as e:
+            print(f"[EDITORIAL_REVIEW] ⚠️ Grammar correction error: {e}")
+        
         corrected_word_count = len(corrected_article.split())
         
         # Zapisz w Firestore
@@ -555,6 +573,7 @@ Artykuł ({word_count} słów):
                     "basic": unused_basic,
                     "extended": unused_extended
                 },
+                "grammar_correction": grammar_stats,  # v28.1
                 "ai_model": ai_model,
                 "created_at": firestore.SERVER_TIMESTAMP
             }
@@ -585,7 +604,8 @@ Artykuł ({word_count} słów):
                 "extended": unused_extended
             },
             "ai_model": ai_model,
-            "version": "v27.1",
+            "version": "v28.1",
+            "grammar_correction": grammar_stats,  # v28.1: statystyki korekty gramatycznej
             "rescan_result": rescan_result  # v27.1: wynik przeliczenia fraz
         }), 200
         
