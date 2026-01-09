@@ -534,7 +534,7 @@ def _minimal_batch_response(result: dict, project_data: dict = None) -> dict:
 @tracker_routes.post("/api/project/<project_id>/approve_batch")
 def approve_batch(project_id):
     """
-    v27.0: NAPRAWIONE - akceptuje różne nazwy pól tekstu + fallback z ostatniego preview.
+    v28.1: Grammar validation before save + fallback z ostatniego preview.
     Obsługuje: corrected_text, text, content, batch_text
     Fallback: Pobiera tekst z ostatniego preview jeśli nie wysłano w body.
     """
@@ -588,6 +588,30 @@ def approve_batch(project_id):
     if source:
         meta_trace["text_source"] = source
     forced = data.get("forced", False)
+    
+    # v28.1: GRAMMAR VALIDATION - sprawdź przed zapisem (chyba że forced=true)
+    if not forced:
+        try:
+            from grammar_middleware import validate_batch_full
+            grammar_check = validate_batch_full(text)
+            
+            if not grammar_check["is_valid"]:
+                print(f"[APPROVE_BATCH] ⚠️ Grammar issues found, returning for correction")
+                return jsonify({
+                    "saved": False,
+                    "status": "NEEDS_CORRECTION",
+                    "needs_correction": True,
+                    "grammar": grammar_check["grammar"],
+                    "banned_phrases": grammar_check["banned_phrases"],
+                    "correction_prompt": grammar_check["correction_prompt"],
+                    "instruction": "Popraw błędy i wyślij ponownie. Użyj forced=true aby zapisać mimo błędów.",
+                    "hint": "Możesz też wywołać z 'forced': true aby wymusić zapis"
+                }), 200  # 200, nie 400 - to nie jest błąd, to walidacja
+                
+        except ImportError:
+            print(f"[APPROVE_BATCH] ⚠️ grammar_middleware not available, skipping validation")
+        except Exception as e:
+            print(f"[APPROVE_BATCH] ⚠️ Grammar check error: {e}, proceeding with save")
 
     result = process_batch_in_firestore(project_id, text, meta_trace, forced)
 
@@ -597,6 +621,7 @@ def approve_batch(project_id):
     
     response = _minimal_batch_response(result, project_data)
     response["text_source"] = source
+    response["grammar_validated"] = not forced  # v28.1
     
     return jsonify(response), 200
 
