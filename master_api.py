@@ -36,7 +36,7 @@ app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024  # 32 MB
 CORS(app)
 
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-VERSION = "v29.1"
+VERSION = "v29.2"
 
 # ================================================================
 # 🧠 Check if semantic analysis is available
@@ -76,6 +76,16 @@ from final_review_routes import final_review_routes
 from paa_routes import paa_routes
 from export_routes import export_routes  # v23.9: Eksport DOCX/HTML/TXT + Editorial Review
 
+# v29.3: Entity SEO routes
+try:
+    from entity_routes import entity_routes
+    ENTITY_ROUTES_ENABLED = True
+    print("[MASTER_API] ✅ Entity routes loaded")
+except ImportError as e:
+    ENTITY_ROUTES_ENABLED = False
+    entity_routes = None
+    print(f"[MASTER_API] ⚠️ Entity routes not available: {e}")
+
 # ================================================================
 # 🔗 Rejestracja blueprintów
 # ================================================================
@@ -84,6 +94,11 @@ app.register_blueprint(tracker_routes)
 app.register_blueprint(final_review_routes)
 app.register_blueprint(paa_routes)
 app.register_blueprint(export_routes)  # v23.9: Eksport + Editorial Review
+
+# v29.3: Entity routes (jeśli dostępne)
+if ENTITY_ROUTES_ENABLED and entity_routes:
+    app.register_blueprint(entity_routes)
+    print("[MASTER_API] ✅ Entity routes registered")
 
 # ================================================================
 # 🔗 S1 PROXY ENDPOINTS (przekierowanie do N-gram API)
@@ -247,6 +262,49 @@ def s1_analysis_proxy():
                         print(f"[S1_PROXY] ✅ Added semantic analysis to S1 result")
             except Exception as e:
                 print(f"[S1_PROXY] ⚠️ Semantic analysis failed: {e}")
+        
+        # v29.3: Enhanced entity_seo response
+        try:
+            entity_seo = result.get("entity_seo", {})
+            entities = entity_seo.get("entities", [])
+            
+            # Dodaj must_mention_entities (encje obecne u 80%+ konkurencji)
+            if entities and "must_mention_entities" not in entity_seo:
+                # Top 5 encji z najwyższą importance
+                top_entities = sorted(
+                    entities, 
+                    key=lambda x: x.get("importance", 0) if isinstance(x, dict) else 0, 
+                    reverse=True
+                )[:5]
+                must_mention = [
+                    e.get("name", str(e)) if isinstance(e, dict) else str(e)
+                    for e in top_entities
+                ]
+                entity_seo["must_mention_entities"] = must_mention
+            
+            # Dodaj synonyms do ngrams
+            ngrams = result.get("ngrams", [])
+            if ngrams and "synonyms" not in result:
+                # Podstawowe synonimy
+                BASIC_SYNONYMS = {
+                    "pomoce sensoryczne": ["narzędzia terapeutyczne", "sprzęt SI", "akcesoria sensoryczne"],
+                    "integracja sensoryczna": ["SI", "terapia SI", "przetwarzanie sensoryczne"],
+                    "dziecko": ["maluch", "przedszkolak", "najmłodsi"],
+                    "rozwój": ["postęp", "kształtowanie", "doskonalenie"]
+                }
+                
+                result["synonyms"] = {}
+                main_kw_lower = keyword.lower()
+                for key, syns in BASIC_SYNONYMS.items():
+                    if key in main_kw_lower or main_kw_lower in key:
+                        result["synonyms"][keyword] = syns
+                        break
+            
+            result["entity_seo"] = entity_seo
+            print(f"[S1_PROXY] ✅ Enhanced entity_seo with must_mention_entities")
+            
+        except Exception as e:
+            print(f"[S1_PROXY] ⚠️ Entity enhancement failed: {e}")
         
         return jsonify(result), 200
         
