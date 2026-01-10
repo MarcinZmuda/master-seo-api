@@ -285,6 +285,44 @@ def get_synonyms_for_overused(previous_texts: list, main_keyword: str) -> dict:
     return result
 
 
+def get_section_length_guidance(batch_num: int, total_batches: int, batch_type: str) -> dict:
+    """
+    Zwraca guidance o różnej długości sekcji.
+    Każdy batch dostaje INNĄ zalecaną długość żeby uniknąć monotonii.
+    """
+    # Wzorce długości dla różnych batchów
+    LENGTH_PATTERNS = {
+        1: {"profile": "SHORT", "range": "180-220", "reason": "Intro - zwięzłe wprowadzenie"},
+        2: {"profile": "LONG", "range": "350-400", "reason": "Główny temat - rozbudowana treść"},
+        3: {"profile": "MEDIUM", "range": "250-300", "reason": "Rozwinięcie tematu"},
+        4: {"profile": "LONG", "range": "320-380", "reason": "Praktyczne porady - więcej szczegółów"},
+        5: {"profile": "MEDIUM", "range": "240-280", "reason": "Uzupełnienie tematu"},
+        6: {"profile": "SHORT", "range": "200-250", "reason": "Sekcja przed FAQ - krótsza"},
+    }
+    
+    # Pobierz pattern dla tego batcha
+    pattern = LENGTH_PATTERNS.get(batch_num, {"profile": "MEDIUM", "range": "250-300", "reason": "Standardowa sekcja"})
+    
+    # Specjalne przypadki
+    if batch_type == "INTRO":
+        pattern = {"profile": "SHORT", "range": "150-200", "reason": "Intro musi być zwięzłe"}
+    elif batch_type == "FAQ":
+        pattern = {"profile": "VARIABLE", "range": "40-60 per answer", "reason": "FAQ - różne długości odpowiedzi"}
+    
+    return {
+        "batch_number": batch_num,
+        "recommended_profile": pattern["profile"],
+        "recommended_range": pattern["range"],
+        "reason": pattern["reason"],
+        "variety_reminder": "⚠️ Sekcje MUSZĄ mieć RÓŻNE długości! NIE pisz wszystkich po ~250 słów!",
+        "distribution_hint": {
+            "short_sections": "1-2 sekcje: 180-220 słów",
+            "medium_sections": "2-3 sekcje: 250-300 słów",
+            "long_sections": "1-2 sekcje: 350-400 słów"
+        }
+    }
+
+
 # Gemini API configuration
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if GEMINI_API_KEY:
@@ -2341,6 +2379,13 @@ def get_pre_batch_info(project_id):
             ),
             "lsi_to_include": lsi_keywords[:3] if lsi_keywords else batch_ngrams[:3]
         },
+        
+        # v29.3: Section length variety guidance
+        "section_length_guidance": get_section_length_guidance(
+            current_batch_num,
+            total_planned_batches,
+            batch_type
+        ),
         
         # v28.0: Dodatkowe dane SERP
         "serp_enrichment": {
