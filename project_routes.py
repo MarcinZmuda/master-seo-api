@@ -1,5 +1,10 @@
 """
-PROJECT ROUTES - v29.1 BRAJEN SEO Engine
+PROJECT ROUTES - v29.2 BRAJEN SEO Engine
+
+ZMIANY v29.2:
+- NOWY ENDPOINT: generateH2Plan - generuje H2 na podstawie Semantic HTML + Content Relevancy
+- H2 Generator: Intent matching, Related subtopics, PAA integration
+- Frazy użytkownika MUSZĄ być w H2 (ale naturalnie!)
 
 ZMIANY v29.1:
 - NOWE PRIORYTETY: Jakość tekstu > Encje > SEO
@@ -16,11 +21,12 @@ ZMIANY v26.1:
 - Soft cap + short keyword protection
 - Synonimy przy przekroczeniu fraz
 
-LOGIKA FRAZ v29.1:
+LOGIKA FRAZ v29.2:
 - BASIC/MAIN: min 1× (MUSI być), zalecane ilości to CEL nie wymóg
 - EXTENDED: min 1× (MUSI być), potem OK
-- Stuffing (>3× target): BLOKUJE
-- Underused (<target ale >0): WARNING (nie blokuje!)
+- Stuffing (>MAX): JEDYNY BLOKER!
+- Brak (0×): WARNING, Claude uzupełni
+- Underused (<target ale >0): OK
 """
 
 import uuid
@@ -82,6 +88,15 @@ except ImportError as e:
     print(f"[PROJECT] ⚠️ Polish Quality not available: {e}")
     BATCH_PLANNER_ENABLED = False
     print(f"[PROJECT] Batch Planner not available: {e}")
+
+# v29.2: H2 Generator - Semantic HTML + Content Relevancy
+try:
+    from h2_generator import generate_h2_plan, validate_h2_plan
+    H2_GENERATOR_ENABLED = True
+    print("[PROJECT] ✅ H2 Generator module loaded")
+except ImportError as e:
+    H2_GENERATOR_ENABLED = False
+    print(f"[PROJECT] ⚠️ H2 Generator not available: {e}")
 
 # Gemini API configuration
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -717,6 +732,300 @@ Zwroc TYLKO liste H2, kazdy w nowej linii.
         
     except Exception as e:
         return jsonify({"status": "ERROR", "error": str(e), "final_h2": suggested_h2}), 500
+
+
+# ================================================================
+# 🏗️ VALIDATE H2 PLAN v29.2 - Claude tworzy, API waliduje
+# ================================================================
+@project_routes.post("/api/project/<project_id>/validate_h2_plan")
+def validate_h2_plan_endpoint(project_id):
+    """
+    Waliduje plan H2 stworzony przez Claude.
+    
+    CLAUDE TWORZY H2 według zasad → API WALIDUJE
+    
+    INPUT:
+    {
+        "main_keyword": "pomoce sensoryczne w przedszkolu",
+        "h2_phrases": ["integracja sensoryczna", "ścieżka sensoryczna"],
+        "h2_plan": [
+            {"h2": "Czym są pomoce sensoryczne?", "phrase_used": "pomoce sensoryczne"},
+            {"h2": "Integracja sensoryczna - dlaczego?", "phrase_used": "integracja sensoryczna"},
+            ...
+        ]
+    }
+    
+    OUTPUT:
+    {
+        "valid": true/false,
+        "coverage": {"all_phrases_covered": true, "missing": []},
+        "issues": [],
+        "warnings": [],
+        "suggestions": []
+    }
+    """
+    if not H2_GENERATOR_ENABLED:
+        return jsonify({
+            "error": "H2 Validator module not available",
+            "fallback": True
+        }), 500
+    
+    data = request.get_json() or {}
+    
+    main_keyword = data.get("main_keyword", "")
+    h2_phrases = data.get("h2_phrases", [])
+    h2_plan = data.get("h2_plan", [])
+    
+    if not main_keyword:
+        return jsonify({"error": "main_keyword is required"}), 400
+    
+    if not h2_plan:
+        return jsonify({"error": "h2_plan is required (list of H2 from Claude)"}), 400
+    
+    try:
+        # Walidacja planu
+        validation = validate_h2_plan(h2_plan, main_keyword)
+        
+        # Sprawdź coverage fraz
+        coverage = check_phrase_coverage(h2_plan, h2_phrases, main_keyword)
+        
+        # Ogólna ocena
+        is_valid = validation["valid"] and coverage["all_phrases_covered"]
+        
+        # Zapisz do projektu jeśli valid
+        if is_valid:
+            db = firestore.client()
+            project_ref = db.collection("projects").document(project_id)
+            if project_ref.get().exists:
+                # Normalizuj h2_plan do listy dict
+                normalized_plan = []
+                for i, h2 in enumerate(h2_plan, 1):
+                    if isinstance(h2, str):
+                        normalized_plan.append({
+                            "position": i,
+                            "h2": h2,
+                            "phrase_used": None
+                        })
+                    else:
+                        h2["position"] = i
+                        normalized_plan.append(h2)
+                
+                project_ref.update({
+                    "h2_plan": normalized_plan,
+                    "h2_coverage": coverage,
+                    "h2_validated_at": firestore.SERVER_TIMESTAMP
+                })
+        
+        return jsonify({
+            "status": "OK",
+            "project_id": project_id,
+            "valid": is_valid,
+            "validation": validation,
+            "coverage": coverage,
+            "message": "Plan H2 zaakceptowany!" if is_valid else "Plan H2 wymaga poprawek"
+        }), 200
+        
+    except Exception as e:
+        import traceback
+        return jsonify({
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }), 500
+
+
+def check_phrase_coverage(h2_plan: list, h2_phrases: list, main_keyword: str) -> dict:
+    """Sprawdza czy wszystkie frazy użytkownika są pokryte w H2."""
+    
+    # Zbierz wszystkie H2 jako tekst
+    h2_texts = []
+    for h2 in h2_plan:
+        if isinstance(h2, str):
+            h2_texts.append(h2.lower())
+        elif isinstance(h2, dict):
+            h2_texts.append(h2.get("h2", "").lower())
+    
+    all_h2_text = " ".join(h2_texts)
+    
+    # Sprawdź główną frazę
+    main_keyword_covered = main_keyword.lower() in all_h2_text
+    
+    # Sprawdź frazy użytkownika
+    covered = []
+    missing = []
+    
+    for phrase in h2_phrases:
+        phrase_lower = phrase.lower()
+        if phrase_lower in all_h2_text:
+            covered.append(phrase)
+        else:
+            # Sprawdź też odmiany (częściowe dopasowanie)
+            phrase_words = set(phrase_lower.split())
+            found_partial = False
+            for h2_text in h2_texts:
+                h2_words = set(h2_text.split())
+                if phrase_words.issubset(h2_words) or len(phrase_words.intersection(h2_words)) >= len(phrase_words) * 0.7:
+                    found_partial = True
+                    break
+            
+            if found_partial:
+                covered.append(phrase)
+            else:
+                missing.append(phrase)
+    
+    coverage_percent = (len(covered) / len(h2_phrases) * 100) if h2_phrases else 100
+    
+    return {
+        "main_keyword_covered": main_keyword_covered,
+        "phrases_covered": covered,
+        "phrases_missing": missing,
+        "coverage_percent": round(coverage_percent, 1),
+        "all_phrases_covered": len(missing) == 0 and main_keyword_covered
+    }
+
+
+@project_routes.post("/api/project/<project_id>/save_h2_plan")
+def save_h2_plan_endpoint(project_id):
+    """
+    Zapisuje plan H2 do projektu (bez walidacji - zaufaj Claude).
+    
+    INPUT:
+    {
+        "h2_plan": [
+            "Czym są pomoce sensoryczne?",
+            "Integracja sensoryczna - dlaczego?",
+            ...
+        ]
+    }
+    """
+    data = request.get_json() or {}
+    h2_plan = data.get("h2_plan", [])
+    
+    if not h2_plan:
+        return jsonify({"error": "h2_plan is required"}), 400
+    
+    try:
+        db = firestore.client()
+        project_ref = db.collection("projects").document(project_id)
+        
+        if not project_ref.get().exists:
+            return jsonify({"error": f"Project {project_id} not found"}), 404
+        
+        # Normalizuj do listy dict
+        normalized_plan = []
+        for i, h2 in enumerate(h2_plan, 1):
+            if isinstance(h2, str):
+                normalized_plan.append({
+                    "position": i,
+                    "h2": h2
+                })
+            else:
+                h2["position"] = i
+                normalized_plan.append(h2)
+        
+        project_ref.update({
+            "h2_plan": normalized_plan,
+            "h2_saved_at": firestore.SERVER_TIMESTAMP
+        })
+        
+        return jsonify({
+            "status": "OK",
+            "project_id": project_id,
+            "h2_plan": normalized_plan,
+            "message": "Plan H2 zapisany!"
+        }), 200
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@project_routes.get("/api/project/<project_id>/h2_plan")
+def get_h2_plan(project_id):
+    """
+    Pobiera zapisany plan H2 dla projektu.
+    """
+    try:
+        db = firestore.client()
+        project_ref = db.collection("projects").document(project_id)
+        project_doc = project_ref.get()
+        
+        if not project_doc.exists:
+            return jsonify({"error": f"Project {project_id} not found"}), 404
+        
+        project = project_doc.to_dict()
+        
+        h2_plan = project.get("h2_plan", [])
+        
+        if not h2_plan:
+            return jsonify({
+                "status": "NOT_GENERATED",
+                "message": "H2 plan not generated yet. Call POST /generate_h2_plan first."
+            }), 200
+        
+        return jsonify({
+            "status": "OK",
+            "project_id": project_id,
+            "h2_plan": h2_plan,
+            "h3_suggestions": project.get("h2_h3_suggestions", {}),
+            "coverage": project.get("h2_coverage", {}),
+            "meta": project.get("h2_plan_meta", {})
+        }), 200
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@project_routes.post("/api/project/<project_id>/update_h2_plan")
+def update_h2_plan(project_id):
+    """
+    Aktualizuje plan H2 (po modyfikacjach użytkownika).
+    
+    INPUT:
+    {
+        "h2_plan": [
+            {"position": 1, "h2": "...", ...},
+            ...
+        ]
+    }
+    """
+    data = request.get_json() or {}
+    h2_plan = data.get("h2_plan", [])
+    
+    if not h2_plan:
+        return jsonify({"error": "h2_plan is required"}), 400
+    
+    try:
+        db = firestore.client()
+        project_ref = db.collection("projects").document(project_id)
+        project_doc = project_ref.get()
+        
+        if not project_doc.exists:
+            return jsonify({"error": f"Project {project_id} not found"}), 404
+        
+        project = project_doc.to_dict()
+        main_keyword = project.get("main_keyword", "")
+        
+        # Walidacja nowego planu
+        if H2_GENERATOR_ENABLED:
+            validation = validate_h2_plan(h2_plan, main_keyword)
+        else:
+            validation = {"valid": True, "issues": [], "warnings": []}
+        
+        # Zapisz zaktualizowany plan
+        project_ref.update({
+            "h2_plan": h2_plan,
+            "h2_plan_updated_at": firestore.SERVER_TIMESTAMP,
+            "h2_plan_validation": validation
+        })
+        
+        return jsonify({
+            "status": "OK",
+            "project_id": project_id,
+            "h2_plan": h2_plan,
+            "validation": validation
+        }), 200
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # ================================================================
@@ -1829,9 +2138,13 @@ def get_pre_batch_info(project_id):
         "h2_remaining": remaining_h2,
         "h2_used": used_h2,
         
+        # v29.2: H2 Plan z generatora
+        "h2_plan": data.get("h2_plan", []),
+        "h2_plan_meta": data.get("h2_plan_meta", {}),
+        
         "gpt_prompt": gpt_prompt,
         
-        "version": "v28.0"
+        "version": "v29.2"
     }), 200
 
 
