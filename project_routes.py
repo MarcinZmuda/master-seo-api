@@ -98,6 +98,193 @@ except ImportError as e:
     H2_GENERATOR_ENABLED = False
     print(f"[PROJECT] ⚠️ H2 Generator not available: {e}")
 
+# ================================================================
+# v29.3: Entity & N-gram Guidance Helpers
+# ================================================================
+
+def get_entities_to_introduce(top_entities: list, batch_num: int, total_batches: int, previous_texts: list) -> list:
+    """
+    Zwraca encje do wprowadzenia w tym batchu.
+    Rozdziela encje równomiernie między batche.
+    """
+    if not top_entities:
+        return []
+    
+    # Połącz poprzednie teksty
+    previous_text = " ".join(previous_texts).lower()
+    
+    # Encje jeszcze nie użyte
+    unused_entities = []
+    for entity in top_entities:
+        entity_name = entity.get("name", "") if isinstance(entity, dict) else str(entity)
+        if entity_name.lower() not in previous_text:
+            unused_entities.append(entity)
+    
+    if not unused_entities:
+        return []
+    
+    # Rozdziel między pozostałe batche
+    remaining_batches = max(total_batches - batch_num + 1, 1)
+    entities_per_batch = max(1, len(unused_entities) // remaining_batches)
+    
+    # Weź encje dla tego batcha
+    start_idx = 0
+    end_idx = min(entities_per_batch + 1, len(unused_entities))
+    
+    result = []
+    for entity in unused_entities[start_idx:end_idx]:
+        if isinstance(entity, dict):
+            result.append({
+                "name": entity.get("name", ""),
+                "type": entity.get("type", "CONCEPT"),
+                "definition_hint": entity.get("definition_hint", "")
+            })
+        else:
+            result.append({
+                "name": str(entity),
+                "type": "CONCEPT",
+                "definition_hint": ""
+            })
+    
+    return result[:3]  # Max 3 na batch
+
+
+def get_already_defined_entities(previous_texts: list) -> list:
+    """
+    Zwraca encje już zdefiniowane w poprzednich batchach.
+    """
+    if not previous_texts:
+        return []
+    
+    previous_text = " ".join(previous_texts).lower()
+    
+    # Wzorce definicji
+    definition_patterns = [
+        r'(\w+[\w\s]*)\s+to\s+(?:proces|metoda|technika|sposób|narzędzie)',
+        r'(\w+[\w\s]*),\s+czyli\s+',
+        r'(\w+[\w\s]*)\s+opracował[a]?\s+',
+        r'(\w+[\w\s]*)\s+stworzy[łl][a]?\s+',
+        r'dr\.?\s+(\w+\s+\w+)',
+        r'(\w+\s+\w+),\s+(?:amerykańsk|polsk|włosk)',
+    ]
+    
+    defined = set()
+    for pattern in definition_patterns:
+        matches = re.findall(pattern, previous_text)
+        for match in matches:
+            if len(match) > 3:  # Min 4 znaki
+                defined.add(match.strip())
+    
+    return list(defined)[:10]
+
+
+def get_overused_phrases(previous_texts: list, main_keyword: str) -> list:
+    """
+    Znajduje frazy użyte zbyt często (>5x).
+    """
+    if not previous_texts:
+        return []
+    
+    previous_text = " ".join(previous_texts).lower()
+    
+    # Zlicz wystąpienia głównej frazy i jej wariantów
+    overused = []
+    
+    # Główna fraza
+    main_count = previous_text.count(main_keyword.lower())
+    if main_count > 5:
+        overused.append({
+            "phrase": main_keyword,
+            "count": main_count,
+            "warning": f"Użyto {main_count}x - rozważ synonimy"
+        })
+    
+    # Sprawdź popularne frazy
+    common_phrases = [
+        "integracja sensoryczna",
+        "pomoce sensoryczne", 
+        "terapia si",
+        "rozwój dziecka",
+        "ścieżka sensoryczna"
+    ]
+    
+    for phrase in common_phrases:
+        if phrase != main_keyword.lower():
+            count = previous_text.count(phrase)
+            if count > 4:
+                overused.append({
+                    "phrase": phrase,
+                    "count": count,
+                    "warning": f"Użyto {count}x - rozważ synonimy"
+                })
+    
+    return overused
+
+
+def get_synonyms_for_overused(previous_texts: list, main_keyword: str) -> dict:
+    """
+    Zwraca synonimy dla nadużywanych fraz.
+    """
+    # Import słownika synonimów
+    SYNONYM_MAP = {
+        "pomoce sensoryczne": [
+            "narzędzia terapeutyczne",
+            "sprzęt SI",
+            "akcesoria sensoryczne",
+            "materiały do stymulacji"
+        ],
+        "integracja sensoryczna": [
+            "SI",
+            "terapia integracji sensorycznej",
+            "przetwarzanie sensoryczne"
+        ],
+        "dziecko": [
+            "maluch",
+            "przedszkolak",
+            "najmłodsi",
+            "pociecha"
+        ],
+        "rozwój": [
+            "postęp",
+            "doskonalenie",
+            "kształtowanie"
+        ],
+        "ścieżka sensoryczna": [
+            "tor sensoryczny",
+            "ścieżka dotykowa",
+            "mata sensoryczna"
+        ],
+        "terapia": [
+            "zajęcia terapeutyczne",
+            "sesja",
+            "ćwiczenia"
+        ]
+    }
+    
+    result = {}
+    
+    # Dla głównej frazy
+    main_lower = main_keyword.lower()
+    for key, synonyms in SYNONYM_MAP.items():
+        if key in main_lower or main_lower in key:
+            result[main_keyword] = synonyms
+            break
+    
+    # Dla innych popularnych
+    if not previous_texts:
+        return result
+    
+    previous_text = " ".join(previous_texts).lower()
+    
+    for phrase, synonyms in SYNONYM_MAP.items():
+        if phrase in previous_text and phrase not in result:
+            count = previous_text.count(phrase)
+            if count > 3:
+                result[phrase] = synonyms
+    
+    return result
+
+
 # Gemini API configuration
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if GEMINI_API_KEY:
@@ -2126,6 +2313,33 @@ def get_pre_batch_info(project_id):
             "must_topics": must_topics,
             "total_entities": len(entities),
             "enabled": bool(entity_seo)
+        },
+        
+        # v29.3: Entity guidance for batch
+        "entities_for_batch": {
+            "to_introduce": get_entities_to_introduce(
+                top_entities, 
+                current_batch_num, 
+                total_planned_batches,
+                [b.get("text", "") for b in data.get("batches", [])]
+            ),
+            "already_defined": get_already_defined_entities(
+                [b.get("text", "") for b in data.get("batches", [])]
+            ),
+            "suggested_relationships": top_relationships[:2] if current_batch_num > 1 else []
+        },
+        
+        # v29.3: N-gram diversity guidance
+        "ngram_guidance": {
+            "overused_phrases": get_overused_phrases(
+                [b.get("text", "") for b in data.get("batches", [])],
+                main_keyword
+            ),
+            "suggested_synonyms": get_synonyms_for_overused(
+                [b.get("text", "") for b in data.get("batches", [])],
+                main_keyword
+            ),
+            "lsi_to_include": lsi_keywords[:3] if lsi_keywords else batch_ngrams[:3]
         },
         
         # v28.0: Dodatkowe dane SERP
