@@ -57,7 +57,8 @@ try:
         validate_content,
         validate_semantic_enhancement,
         full_validate_complete,
-        quick_validate
+        quick_validate,
+        calculate_entity_density  # 🆕 v31.3
     )
     SEMANTIC_ENHANCEMENT_ENABLED = True
     print("[MASTER] ✅ Semantic Enhancement v31.0 loaded")
@@ -866,6 +867,241 @@ def auto_final_review(project_id):
         return response
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# ================================================================
+# 🆕 v31.3: APPROVE BATCH (z metrykami semantycznymi na bieżąco)
+# ================================================================
+@app.post("/api/approveBatch")
+def approve_batch():
+    """
+    🆕 v31.3: Zatwierdzenie batcha z walidacją fraz + metrykami semantycznymi.
+    
+    Łączy walidację keyword (stuffing/missing) z bieżącym śledzeniem:
+    - Entity density (dla dotychczasowej treści)
+    - Entities used vs missing
+    - Topic completeness estimate
+    - Checkpoint alerts
+    
+    Request body:
+    {
+        "project_id": "abc123",
+        "batch_number": 3,
+        "batch_content": "treść tego batcha",
+        "accumulated_content": "cała treść do tej pory (batche 1-3)",
+        "keywords_state": {
+            "basic": {"przeprowadzki": {"target": 21, "current": 8}, ...},
+            "extended": {"tanie przeprowadzki warszawa": {"target": 1, "current": 1}, ...}
+        },
+        "s1_data": {
+            "entities": [...],
+            "topics": [...]
+        },
+        "total_batches": 7
+    }
+    """
+    data = request.get_json(force=True)
+    
+    # Required fields
+    project_id = data.get("project_id", "unknown")
+    batch_number = data.get("batch_number", 1)
+    batch_content = data.get("batch_content", "")
+    accumulated_content = data.get("accumulated_content", batch_content)
+    keywords_state = data.get("keywords_state", {})
+    s1_data = data.get("s1_data", {})
+    total_batches = data.get("total_batches", 7)
+    
+    # ============================================
+    # 1. WALIDACJA FRAZ (stuffing/missing)
+    # ============================================
+    keyword_warnings = []
+    keyword_blockers = []
+    
+    basic_kw = keywords_state.get("basic", {})
+    extended_kw = keywords_state.get("extended", {})
+    
+    # Sprawdź BASIC - stuffing = bloker
+    for phrase, state in basic_kw.items():
+        current = state.get("current", 0)
+        target_min = state.get("target_min", state.get("target", 1))
+        target_max = state.get("target_max", target_min * 4)  # domyślnie 4× min
+        
+        if current > target_max:
+            keyword_blockers.append({
+                "type": "STUFFING",
+                "phrase": phrase,
+                "current": current,
+                "max": target_max,
+                "message": f"STUFFING: '{phrase}' użyte {current}× (max {target_max})"
+            })
+        elif current == 0:
+            keyword_warnings.append({
+                "type": "MISSING",
+                "phrase": phrase,
+                "current": 0,
+                "target": target_min,
+                "message": f"BRAK: '{phrase}' nie użyte (cel: {target_min}×)"
+            })
+    
+    # Sprawdź EXTENDED - dokładnie 1×
+    extended_used = 0
+    extended_total = len(extended_kw)
+    extended_missing = []
+    
+    for phrase, state in extended_kw.items():
+        current = state.get("current", 0)
+        if current >= 1:
+            extended_used += 1
+        else:
+            extended_missing.append(phrase)
+        
+        if current > 1:
+            keyword_warnings.append({
+                "type": "EXTENDED_OVERFLOW",
+                "phrase": phrase,
+                "current": current,
+                "message": f"EXTENDED '{phrase}' użyte {current}× (powinno być 1×)"
+            })
+    
+    # ============================================
+    # 2. METRYKI SEMANTYCZNE (na bieżąco)
+    # ============================================
+    semantic_progress = {
+        "entity_density_current": 0,
+        "word_count_total": 0,
+        "entities_used": [],
+        "entities_missing_critical": [],
+        "topic_completeness_estimate": 0,
+        "extended_progress": f"{extended_used}/{extended_total}"
+    }
+    
+    if SEMANTIC_ENHANCEMENT_ENABLED and accumulated_content:
+        try:
+            # Entity density
+            density_result = calculate_entity_density(accumulated_content)
+            semantic_progress["entity_density_current"] = density_result.get("density", 0)
+            semantic_progress["word_count_total"] = density_result.get("word_count", 0)
+            
+            # Entities tracking
+            s1_entities = s1_data.get("entities", [])
+            content_lower = accumulated_content.lower()
+            
+            entities_used = []
+            entities_missing = []
+            
+            for ent in s1_entities:
+                ent_name = ent.get("name", "")
+                importance = ent.get("importance", 0)
+                sources = ent.get("sources", 0)
+                
+                if ent_name.lower() in content_lower:
+                    entities_used.append(ent_name)
+                elif importance >= 0.7 or sources >= 4:
+                    entities_missing.append({
+                        "name": ent_name,
+                        "importance": importance,
+                        "priority": "CRITICAL" if (importance >= 0.7 and sources >= 4) else "HIGH"
+                    })
+            
+            semantic_progress["entities_used"] = entities_used[:10]
+            semantic_progress["entities_missing_critical"] = [e["name"] for e in entities_missing if e["priority"] == "CRITICAL"][:5]
+            
+            # Topic completeness estimate
+            s1_topics = s1_data.get("topics", [])
+            if s1_topics:
+                topics_covered = 0
+                must_topics = [t for t in s1_topics if t.get("priority") in ["MUST", "HIGH"]]
+                
+                for topic in must_topics:
+                    topic_name = topic.get("name", "").lower()
+                    if topic_name in content_lower:
+                        topics_covered += 1
+                
+                if must_topics:
+                    semantic_progress["topic_completeness_estimate"] = round(
+                        (topics_covered / len(must_topics)) * 100, 1
+                    )
+                    
+        except Exception as e:
+            print(f"[APPROVE_BATCH] Semantic calc error: {e}")
+    
+    # ============================================
+    # 3. CHECKPOINT ALERTS
+    # ============================================
+    checkpoint_alerts = []
+    
+    # Checkpoint: Batch 3 - min 2 encje PERSON/ORG
+    if batch_number >= 3:
+        if len(semantic_progress["entities_used"]) < 2:
+            checkpoint_alerts.append({
+                "checkpoint": "BATCH_3",
+                "status": "WARNING",
+                "message": f"Batch 3+: użyto tylko {len(semantic_progress['entities_used'])} encji (min: 2)"
+            })
+    
+    # Checkpoint: Batch 5 - topic_completeness >= 50%
+    if batch_number >= 5:
+        if semantic_progress["topic_completeness_estimate"] < 50:
+            checkpoint_alerts.append({
+                "checkpoint": "BATCH_5",
+                "status": "WARNING",
+                "message": f"Batch 5+: topic_completeness {semantic_progress['topic_completeness_estimate']}% (min: 50%)"
+            })
+    
+    # Checkpoint: Pre-FAQ (batch N-1) - entity_density >= 2.5
+    if batch_number >= total_batches - 1:
+        if semantic_progress["entity_density_current"] < 2.5:
+            checkpoint_alerts.append({
+                "checkpoint": "PRE_FAQ",
+                "status": "WARNING",
+                "message": f"Pre-FAQ: entity_density {semantic_progress['entity_density_current']:.1f} (min: 2.5)"
+            })
+        
+        # Sprawdź czy są nieużyte CRITICAL encje
+        if semantic_progress["entities_missing_critical"]:
+            checkpoint_alerts.append({
+                "checkpoint": "PRE_FAQ",
+                "status": "ALERT",
+                "message": f"Brakujące CRITICAL encje: {', '.join(semantic_progress['entities_missing_critical'][:3])}"
+            })
+    
+    # ============================================
+    # 4. WYNIK
+    # ============================================
+    has_blockers = len(keyword_blockers) > 0
+    
+    result = {
+        "status": "BLOCKED" if has_blockers else "SAVED",
+        "project_id": project_id,
+        "batch_number": batch_number,
+        "batch_total": total_batches,
+        
+        # Walidacja fraz
+        "keyword_validation": {
+            "blockers": keyword_blockers,
+            "warnings": keyword_warnings,
+            "extended_progress": {
+                "used": extended_used,
+                "total": extended_total,
+                "missing": extended_missing[:10]  # pierwsze 10
+            }
+        },
+        
+        # Metryki semantyczne na bieżąco
+        "semantic_progress": semantic_progress,
+        
+        # Alerty checkpointów
+        "checkpoint_alerts": checkpoint_alerts,
+        
+        # Podsumowanie dla GPT
+        "summary": {
+            "can_continue": not has_blockers,
+            "action_required": "FIX_STUFFING" if has_blockers else ("CHECK_WARNINGS" if keyword_warnings else "CONTINUE"),
+            "next_step": f"Batch {batch_number + 1}/{total_batches}" if not has_blockers and batch_number < total_batches else "FINALIZE"
+        }
+    }
+    
+    return jsonify(result), 200
 
 
 # ================================================================
