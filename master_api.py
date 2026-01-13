@@ -36,7 +36,10 @@ app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024  # 32 MB
 CORS(app)
 
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-VERSION = "v31.0"  # 🆕 Updated version with semantic enhancement
+VERSION = "v31.3"  # 🆕 Updated version with semantic enhancement + workflow fix
+
+# 🆕 v31.3: In-memory storage for projects
+PROJECTS = {}
 
 # ================================================================
 # 🧠 Check if semantic analysis is available
@@ -1102,6 +1105,78 @@ def approve_batch():
     }
     
     return jsonify(result), 200
+
+
+# ================================================================
+# 🆕 v31.3: SAVE FULL ARTICLE (scalanie batchy)
+# ================================================================
+@app.post("/api/project/<project_id>/save_full_article")
+def save_full_article(project_id):
+    """
+    🆕 v31.3: Zapisuje pełną treść artykułu do projektu.
+    
+    Wywołaj PO wszystkich batchach, PRZED getFinalReview!
+    
+    Request body:
+    {
+        "full_content": "cały tekst artykułu (wszystkie batche scalone)",
+        "word_count": 1100,
+        "h2_count": 7
+    }
+    """
+    data = request.get_json(force=True)
+    
+    full_content = data.get("full_content", "")
+    word_count = data.get("word_count", len(full_content.split()))
+    h2_count = data.get("h2_count", 0)
+    
+    if not full_content or len(full_content) < 500:
+        return jsonify({
+            "status": "ERROR",
+            "message": "full_content too short (min 500 chars)"
+        }), 400
+    
+    # Zapisz do projektu (w PROJECTS dict lub storage)
+    if project_id not in PROJECTS:
+        PROJECTS[project_id] = {}
+    
+    PROJECTS[project_id]["full_article"] = {
+        "content": full_content,
+        "word_count": word_count,
+        "h2_count": h2_count,
+        "saved_at": datetime.utcnow().isoformat()
+    }
+    
+    return jsonify({
+        "status": "SAVED",
+        "project_id": project_id,
+        "word_count": word_count,
+        "h2_count": h2_count,
+        "message": "Full article saved. Ready for getFinalReview."
+    }), 200
+
+
+# ================================================================
+# 🆕 v31.3: GET FULL ARTICLE
+# ================================================================
+@app.get("/api/project/<project_id>/full_article")
+def get_full_article(project_id):
+    """Pobiera zapisany pełny artykuł."""
+    if project_id not in PROJECTS:
+        return jsonify({"status": "ERROR", "message": "Project not found"}), 404
+    
+    full_article = PROJECTS[project_id].get("full_article")
+    if not full_article:
+        return jsonify({"status": "ERROR", "message": "No full article saved. Call saveFullArticle first."}), 404
+    
+    return jsonify({
+        "status": "OK",
+        "project_id": project_id,
+        "content": full_article.get("content", ""),
+        "word_count": full_article.get("word_count", 0),
+        "h2_count": full_article.get("h2_count", 0),
+        "saved_at": full_article.get("saved_at")
+    }), 200
 
 
 # ================================================================
