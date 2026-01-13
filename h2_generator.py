@@ -474,8 +474,8 @@ def generate_h3_suggestions(
     suggestions = {}
     
     for h2 in h2_plan:
-        pos = str(h2["position"])
-        h2_type = h2["type"]
+        pos = str(h2.get("position", "0"))
+        h2_type = h2.get("type", "")
         
         # H3 sugestie na podstawie typu H2
         if h2_type == "types":
@@ -500,7 +500,7 @@ def generate_coverage_report(
     main_keyword: str
 ) -> Dict:
     """Generuje raport pokrycia fraz."""
-    used_phrases = [h["phrase_used"] for h in h2_plan if h["phrase_used"]]
+    used_phrases = [h.get("phrase_used", "") for h in h2_plan if h.get("phrase_used")]
     
     # Sprawdź które frazy użytkownika są pokryte
     phrases_covered = []
@@ -518,7 +518,7 @@ def generate_coverage_report(
         # Sprawdź też w treści H2
         if not found:
             for h2 in h2_plan:
-                if phrase_lower in h2["h2"].lower():
+                if phrase_lower in h2.get("h2", "").lower():
                     found = True
                     break
         
@@ -546,26 +546,30 @@ def validate_h2_plan(h2_plan: List[Dict], main_keyword: str) -> Dict:
     warnings = []
     
     # 1. Sprawdź czy pierwszy H2 zawiera główną frazę
-    if h2_plan and main_keyword.lower() not in h2_plan[0]["h2"].lower():
-        issues.append("Pierwszy H2 nie zawiera głównej frazy")
+    if h2_plan:
+        first_h2_text = h2_plan[0].get("h2", "").lower()
+        if main_keyword.lower() not in first_h2_text:
+            issues.append("Pierwszy H2 nie zawiera głównej frazy")
     
     # 2. Sprawdź relevancy każdego H2
     for h2 in h2_plan:
-        if h2["relevancy_score"] < 60:
-            warnings.append(f"H2 #{h2['position']} ma niską relevancy ({h2['relevancy_score']})")
+        relevancy = h2.get("relevancy_score", 100)  # domyślnie 100 jeśli brak
+        if relevancy < 60:
+            warnings.append(f"H2 #{h2.get('position', '?')} ma niską relevancy ({relevancy})")
     
     # 3. Sprawdź długość H2
     for h2 in h2_plan:
-        if len(h2["h2"]) > 60:
-            warnings.append(f"H2 #{h2['position']} jest za długi ({len(h2['h2'])} znaków)")
+        h2_text = h2.get("h2", "")
+        if len(h2_text) > 60:
+            warnings.append(f"H2 #{h2.get('position', '?')} jest za długi ({len(h2_text)} znaków)")
     
     # 4. Sprawdź duplikaty
-    h2_texts = [h["h2"].lower() for h in h2_plan]
+    h2_texts = [h.get("h2", "").lower() for h in h2_plan]
     if len(h2_texts) != len(set(h2_texts)):
         issues.append("Plan zawiera zduplikowane H2")
     
     # 5. Sprawdź czy jest FAQ na końcu
-    if h2_plan and h2_plan[-1]["type"] != "faq":
+    if h2_plan and h2_plan[-1].get("type", "") != "faq":
         warnings.append("Ostatni H2 nie jest FAQ")
     
     return {
@@ -592,7 +596,7 @@ if __name__ == "__main__":
     print("\n=== H2 PLAN ===")
     for h2 in result["h2_plan"]:
         print(f"{h2['position']}. {h2['h2']}")
-        print(f"   Phrase: {h2['phrase_used']} | Type: {h2['type']} | Relevancy: {h2['relevancy_score']}")
+        print(f"   Phrase: {h2.get('phrase_used', 'N/A')} | Type: {h2.get('type', 'N/A')} | Relevancy: {h2.get('relevancy_score', 'N/A')}")
     
     print("\n=== COVERAGE ===")
     print(f"Covered: {result['coverage']['phrases_covered']}")
