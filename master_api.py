@@ -36,7 +36,7 @@ app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024  # 32 MB
 CORS(app)
 
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-VERSION = "v29.2"
+VERSION = "v31.0"  # 🆕 Updated version with semantic enhancement
 
 # ================================================================
 # 🧠 Check if semantic analysis is available
@@ -48,6 +48,22 @@ try:
 except ImportError:
     SEMANTIC_ENABLED = False
     print("[MASTER] ⚠️ Semantic analysis NOT available (sentence-transformers not installed)")
+
+# ================================================================
+# 🆕 v31.0: Semantic Enhancement Integration
+# ================================================================
+try:
+    from unified_validator import (
+        validate_content,
+        validate_semantic_enhancement,
+        full_validate_complete,
+        quick_validate
+    )
+    SEMANTIC_ENHANCEMENT_ENABLED = True
+    print("[MASTER] ✅ Semantic Enhancement v31.0 loaded")
+except ImportError as e:
+    SEMANTIC_ENHANCEMENT_ENABLED = False
+    print(f"[MASTER] ⚠️ Semantic Enhancement not available: {e}")
 
 # ================================================================
 # 🔗 N-gram API Configuration (for S1 proxy)
@@ -107,7 +123,7 @@ if ENTITY_ROUTES_ENABLED and entity_routes:
 def s1_analysis_proxy():
     """
     Proxy endpoint dla S1 analysis.
-    v27.0: UTF-8 encoding fix + keyword normalization + recommended_length
+    v31.0: + semantic_enhancement data
     """
     data = request.get_json(force=True)
     
@@ -306,6 +322,55 @@ def s1_analysis_proxy():
         except Exception as e:
             print(f"[S1_PROXY] ⚠️ Entity enhancement failed: {e}")
         
+        # =============================================================
+        # 🆕 v31.0: Add semantic_enhancement hints to S1 response
+        # =============================================================
+        if SEMANTIC_ENHANCEMENT_ENABLED:
+            try:
+                # Przygotuj dane dla GPT - co ma sprawdzać w każdym batchu
+                entity_seo = result.get("entity_seo", {})
+                entities = entity_seo.get("entities", [])
+                topical_coverage = result.get("topical_coverage", [])
+                
+                # Critical entities (importance >= 0.7, sources >= 4)
+                critical_entities = [
+                    {"text": e.get("text") or e.get("name"), "type": e.get("type"), "importance": e.get("importance")}
+                    for e in entities
+                    if isinstance(e, dict) and e.get("importance", 0) >= 0.7 and e.get("sources_count", 0) >= 4
+                ][:5]
+                
+                # High priority entities (importance >= 0.5, sources >= 2)
+                high_entities = [
+                    {"text": e.get("text") or e.get("name"), "type": e.get("type"), "importance": e.get("importance")}
+                    for e in entities
+                    if isinstance(e, dict) and e.get("importance", 0) >= 0.5 and e.get("sources_count", 0) >= 2
+                    and e not in critical_entities
+                ][:5]
+                
+                # Must topics
+                must_topics = [
+                    {"topic": t.get("subtopic"), "sample_h2": t.get("sample_h2")}
+                    for t in topical_coverage
+                    if isinstance(t, dict) and t.get("priority") == "MUST"
+                ][:5]
+                
+                result["semantic_enhancement_hints"] = {
+                    "critical_entities": critical_entities,
+                    "high_entities": high_entities,
+                    "must_topics": must_topics,
+                    "checkpoints": {
+                        "batch_3": "entity_density >= 2.5, min 50% critical entities",
+                        "batch_5": "topic_completeness >= 50%, source_effort signals",
+                        "pre_faq": "all critical entities, all MUST topics"
+                    },
+                    "version": "v31.0"
+                }
+                
+                print(f"[S1_PROXY] ✅ Added semantic_enhancement_hints (critical={len(critical_entities)}, high={len(high_entities)}, must_topics={len(must_topics)})")
+                
+            except Exception as e:
+                print(f"[S1_PROXY] ⚠️ Semantic enhancement hints failed: {e}")
+        
         return jsonify(result), 200
         
     except requests.exceptions.Timeout:
@@ -329,6 +394,123 @@ def s1_analysis_proxy():
             "error": "S1 proxy error",
             "message": str(e)
         }), 500
+
+
+# ================================================================
+# 🆕 v31.0: SEMANTIC VALIDATION ENDPOINT
+# ================================================================
+@app.post("/api/semantic_validate")
+def semantic_validate():
+    """
+    🆕 v31.0: Walidacja semantyczna treści.
+    
+    Sprawdza:
+    - Entity Density (gęstość encji)
+    - Topic Completeness (kompletność tematyczna vs S1)
+    - Entity Gap (brakujące encje vs konkurencja)
+    - Source Effort (sygnały wysiłku badawczego)
+    
+    Request body:
+    {
+        "text": "treść do walidacji",
+        "s1_data": {...},  // opcjonalne - dane z S1
+        "entities": [...],  // opcjonalne - wykryte encje
+        "keywords_state": {...},  // opcjonalne - dla full validation
+        "main_keyword": "...",  // opcjonalne
+        "mode": "semantic" | "full"  // domyślnie "semantic"
+    }
+    """
+    if not SEMANTIC_ENHANCEMENT_ENABLED:
+        return jsonify({
+            "error": "Semantic Enhancement not available",
+            "message": "unified_validator module not loaded"
+        }), 503
+    
+    data = request.get_json(force=True)
+    
+    if "text" not in data:
+        return jsonify({"error": "Missing 'text' field"}), 400
+    
+    text = data["text"]
+    s1_data = data.get("s1_data", {})
+    entities = data.get("entities", [])
+    mode = data.get("mode", "semantic")
+    
+    try:
+        if mode == "full":
+            # Pełna walidacja SEO + Semantic
+            keywords_state = data.get("keywords_state", {})
+            main_keyword = data.get("main_keyword", "")
+            ngrams = data.get("ngrams", [])
+            
+            result = full_validate_complete(
+                text=text,
+                keywords_state=keywords_state,
+                main_keyword=main_keyword,
+                ngrams=ngrams,
+                s1_data=s1_data,
+                detected_entities=entities
+            )
+        else:
+            # Tylko semantic validation
+            result = validate_semantic_enhancement(
+                content=text,
+                s1_data=s1_data,
+                detected_entities=entities
+            )
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        print(f"[SEMANTIC_VALIDATE] ❌ Error: {e}")
+        return jsonify({
+            "error": "Validation failed",
+            "message": str(e)
+        }), 500
+
+
+# ================================================================
+# 🆕 v31.0: QUICK SEMANTIC CHECK (for GPT pre-batch)
+# ================================================================
+@app.post("/api/quick_semantic_check")
+def quick_semantic_check():
+    """
+    🆕 v31.0: Szybka walidacja semantyczna dla GPT.
+    
+    Zwraca tylko najważniejsze metryki:
+    - entity_density_ok (bool)
+    - generics_found (list)
+    - source_effort_score (float)
+    - quick_wins (list)
+    """
+    if not SEMANTIC_ENHANCEMENT_ENABLED:
+        return jsonify({"status": "unavailable"}), 503
+    
+    data = request.get_json(force=True)
+    text = data.get("text", "")
+    
+    if not text or len(text) < 100:
+        return jsonify({"status": "text_too_short"}), 400
+    
+    try:
+        result = validate_semantic_enhancement(content=text)
+        
+        # Zwróć uproszczony wynik
+        density = result.get("analyses", {}).get("entity_density", {})
+        effort = result.get("analyses", {}).get("source_effort", {})
+        
+        return jsonify({
+            "status": result.get("status", "UNKNOWN"),
+            "semantic_score": result.get("semantic_score", 0),
+            "entity_density_ok": density.get("status") == "GOOD",
+            "generics_found": density.get("generics_found", [])[:3],
+            "source_effort_score": effort.get("score", 0),
+            "quick_wins": result.get("quick_wins", [])[:3]
+        }), 200
+        
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 
 @app.post("/api/synthesize_topics")
 def synthesize_topics_proxy():
@@ -358,8 +540,6 @@ def synthesize_topics_proxy():
 def analyze_serp_length():
     """
     Analizuje długość artykułów konkurencji i zwraca rekomendowaną długość.
-    
-    Zamiast stałych 3000 słów - pobiera medianę z konkurencji.
     """
     data = request.get_json(force=True)
     keyword = data.get("keyword") or data.get("main_keyword", "")
@@ -368,7 +548,6 @@ def analyze_serp_length():
         return jsonify({"error": "Missing keyword"}), 400
     
     try:
-        # Pobierz analizę SERP (max 6 stron)
         response = requests.post(
             NGRAM_ANALYSIS_ENDPOINT,
             json={"keyword": keyword, "max_urls": 6, "top_results": 6},
@@ -385,8 +564,6 @@ def analyze_serp_length():
             }), 200
         
         result = response.json()
-        
-        # Szukaj word_count w danych konkurencji
         word_counts = []
         
         serp_data = result.get("serp_analysis", {}) or {}
@@ -398,13 +575,11 @@ def analyze_serp_length():
                 if wc and wc > 100:
                     word_counts.append(wc)
         
-        # Heurystyka jeśli brak danych
         if not word_counts:
             ngrams_count = len(result.get("ngrams", []) or result.get("hybrid_ngrams", []) or [])
             estimated = max(2000, min(5000, 2000 + ngrams_count * 20))
             word_counts = [estimated]
         
-        # Oblicz statystyki
         word_counts.sort()
         n = len(word_counts)
         
@@ -419,7 +594,6 @@ def analyze_serp_length():
         min_wc = min(word_counts) if word_counts else 2000
         max_wc = max(word_counts) if word_counts else 4000
         
-        # Rekomendacja: mediana + 10%
         recommended = int(median * 1.1)
         recommended = max(1500, min(6000, recommended))
         
@@ -477,7 +651,8 @@ def s1_health_check():
                 "ngram_base_url": NGRAM_BASE_URL,
                 "ngram_analysis_endpoint": NGRAM_ANALYSIS_ENDPOINT,
                 "proxy_enabled": True,
-                "semantic_enabled": SEMANTIC_ENABLED
+                "semantic_enabled": SEMANTIC_ENABLED,
+                "semantic_enhancement_enabled": SEMANTIC_ENHANCEMENT_ENABLED
             }), 200
         else:
             return jsonify({
@@ -485,7 +660,8 @@ def s1_health_check():
                 "ngram_api_status": "error",
                 "ngram_base_url": NGRAM_BASE_URL,
                 "proxy_enabled": True,
-                "semantic_enabled": SEMANTIC_ENABLED
+                "semantic_enabled": SEMANTIC_ENABLED,
+                "semantic_enhancement_enabled": SEMANTIC_ENHANCEMENT_ENABLED
             }), 200
     except Exception as e:
         return jsonify({
@@ -493,7 +669,8 @@ def s1_health_check():
             "error": str(e),
             "ngram_base_url": NGRAM_BASE_URL,
             "proxy_enabled": True,
-            "semantic_enabled": SEMANTIC_ENABLED
+            "semantic_enabled": SEMANTIC_ENABLED,
+            "semantic_enhancement_enabled": SEMANTIC_ENHANCEMENT_ENABLED
         }), 503
 
 
@@ -543,7 +720,8 @@ def master_debug(project_id):
         "last_update": batches[-1]["timestamp"].isoformat() if batches else None,
         "lsi_keywords": data.get("lsi_enrichment", {}).get("count", 0),
         "has_final_review": "final_review" in data,
-        "semantic_enabled": SEMANTIC_ENABLED
+        "semantic_enabled": SEMANTIC_ENABLED,
+        "semantic_enhancement_enabled": SEMANTIC_ENHANCEMENT_ENABLED
     }), 200
 
 
@@ -576,7 +754,8 @@ def health():
             "paa_routes",
             "export_routes",
             "seo_optimizer",
-            "s1_proxy (to N-gram API)"
+            "s1_proxy (to N-gram API)",
+            "semantic_enhancement v31.0" if SEMANTIC_ENHANCEMENT_ENABLED else "semantic_enhancement (disabled)"
         ],
         "debug_mode": DEBUG_MODE,
         "firebase_connected": True,
@@ -584,13 +763,15 @@ def health():
         "ngram_analysis_endpoint": NGRAM_ANALYSIS_ENDPOINT,
         "s1_proxy_enabled": True,
         "semantic_enabled": SEMANTIC_ENABLED,
-        "features_v23_9": [
-            "approve_batch: minimal response (~500B)",
-            "pre_batch_info: BASIC full, EXTENDED names only",
-            "paa/analyze: ALL unused keywords",
-            "analyze_serp_length: dynamic article length",
-            "editorial_review: Gemini as editor",
-            "export: DOCX/HTML/TXT direct download"
+        "semantic_enhancement_enabled": SEMANTIC_ENHANCEMENT_ENABLED,
+        "features_v31_0": [
+            "Entity Density validation",
+            "Topic Completeness check",
+            "Entity Gap detection (auto from S1)",
+            "Source Effort scoring",
+            "/api/semantic_validate endpoint",
+            "/api/quick_semantic_check endpoint",
+            "S1 response includes semantic_enhancement_hints"
         ]
     }), 200
 
@@ -610,18 +791,29 @@ def version_info():
             "export_routes": "v23.9-editorial-review",
             "seo_optimizer": "v23.9",
             "final_review_routes": "v23.9",
-            "s1_proxy": "v23.9 (6 URLs default)"
+            "s1_proxy": "v31.0 (semantic hints)",
+            "unified_validator": "v31.0 (semantic enhancement)"
         },
         "optimizations": {
             "approve_batch_response": "~500B (was 220KB)",
             "pre_batch_info_response": "~5-10KB (was 30-60KB)",
             "s1_default_urls": 6
         },
+        "semantic_enhancement": {
+            "enabled": SEMANTIC_ENHANCEMENT_ENABLED,
+            "features": [
+                "entity_density",
+                "topic_completeness",
+                "entity_gap",
+                "source_effort"
+            ]
+        },
         "environment": {
             "debug_mode": DEBUG_MODE,
             "firebase_connected": True,
             "ngram_base_url": NGRAM_BASE_URL,
-            "semantic_enabled": SEMANTIC_ENABLED
+            "semantic_enabled": SEMANTIC_ENABLED,
+            "semantic_enhancement_enabled": SEMANTIC_ENHANCEMENT_ENABLED
         }
     }), 200
 
@@ -638,7 +830,7 @@ def manual_check():
     dummy_keywords = data.get("keywords_state", {})
     result = unified_prevalidation(data["text"], dummy_keywords)
 
-    return jsonify({
+    response = {
         "status": "CHECK_OK",
         "semantic_score": result["semantic_score"],
         "density": result["density"],
@@ -646,7 +838,21 @@ def manual_check():
         "readability": result["readability"],
         "warnings": result["warnings"],
         "semantic_coverage": result.get("semantic_coverage", {})
-    }), 200
+    }
+    
+    # 🆕 v31.0: Dodaj semantic enhancement check jeśli dostępne
+    if SEMANTIC_ENHANCEMENT_ENABLED:
+        try:
+            sem_result = validate_semantic_enhancement(content=data["text"])
+            response["semantic_enhancement"] = {
+                "status": sem_result.get("status"),
+                "score": sem_result.get("semantic_score"),
+                "quick_wins": sem_result.get("quick_wins", [])[:3]
+            }
+        except Exception as e:
+            response["semantic_enhancement"] = {"error": str(e)}
+
+    return jsonify(response), 200
 
 
 # ================================================================
@@ -671,9 +877,12 @@ if __name__ == "__main__":
     print(f"🔧 Debug mode: {DEBUG_MODE}")
     print(f"🔗 S1 Proxy enabled → {NGRAM_ANALYSIS_ENDPOINT}")
     print(f"🧠 Semantic analysis: {'ENABLED ✅' if SEMANTIC_ENABLED else 'DISABLED ⚠️'}")
-    print(f"📦 Features v23.9:")
-    print(f"   - approve_batch: minimal response (~500B)")
-    print(f"   - pre_batch_info: BASIC full, EXTENDED names")
-    print(f"   - analyze_serp_length: dynamic article length")
-    print(f"   - editorial_review: Gemini as editor\n")
+    print(f"🆕 Semantic Enhancement v31.0: {'ENABLED ✅' if SEMANTIC_ENHANCEMENT_ENABLED else 'DISABLED ⚠️'}")
+    print(f"📦 Features v31.0:")
+    print(f"   - Entity Density validation")
+    print(f"   - Topic Completeness check")
+    print(f"   - Entity Gap detection")
+    print(f"   - Source Effort scoring")
+    print(f"   - /api/semantic_validate endpoint")
+    print(f"   - /api/quick_semantic_check endpoint\n")
     app.run(host="0.0.0.0", port=port, debug=DEBUG_MODE)
