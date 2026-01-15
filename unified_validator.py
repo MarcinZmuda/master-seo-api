@@ -1,13 +1,10 @@
 """
 ===============================================================================
-🔍 UNIFIED VALIDATOR v23.0 + SEMANTIC PATCH v31.0
+🔍 UNIFIED VALIDATOR v32.0 (BRAJEN)
 ===============================================================================
-Jeden moduł walidacyjny dla całego systemu + rozszerzenia semantyczne.
-
-Funkcje:
-- validate_content() - główna funkcja walidacji SEO
-- validate_semantic_enhancement() - walidacja Entity Density, Topic Completeness, Entity Gap, Source Effort
-- full_validate_complete() - kompletna walidacja: SEO + E-E-A-T + HCU + AI Detection + Semantic
+v32.0 ZMIANY:
+- Dwupoziomowe progi burstiness (CRITICAL/WARNING)
+- Severity.CRITICAL dodane
 ===============================================================================
 """
 
@@ -37,13 +34,24 @@ except ImportError:
 
 
 # ================================================================
-# 📊 STAŁE KONFIGURACYJNE
+# 📊 STAŁE KONFIGURACYJNE - v32.0
 # ================================================================
 class ValidationConfig:
     """Centralna konfiguracja wszystkich progów walidacji."""
-    BURSTINESS_MIN = 2.5
-    BURSTINESS_MAX = 4.5
+    
+    # 🆕 v32.0: DWUPOZIOMOWE PROGI BURSTINESS
+    BURSTINESS_CRITICAL_LOW = 2.0
+    BURSTINESS_WARNING_LOW = 2.8
+    BURSTINESS_OPTIMAL_MIN = 3.2
+    BURSTINESS_OPTIMAL_MAX = 3.8
+    BURSTINESS_WARNING_HIGH = 4.2
+    BURSTINESS_CRITICAL_HIGH = 4.8
+    
+    # Stare aliasy dla kompatybilności
+    BURSTINESS_MIN = BURSTINESS_WARNING_LOW
+    BURSTINESS_MAX = BURSTINESS_WARNING_HIGH
     BURSTINESS_OPTIMAL = 3.5
+    
     TRANSITION_RATIO_MIN = 0.25
     TRANSITION_RATIO_MAX = 0.50
     DENSITY_MAX = 3.0
@@ -92,7 +100,6 @@ class SemanticConfig:
     SOURCE_EFFORT_MIN: float = 0.35
 
 
-# Wagi typów encji
 ENTITY_TYPE_WEIGHTS = {
     "PERSON": 1.5, "PER": 1.5,
     "ORGANIZATION": 1.3, "ORG": 1.3,
@@ -108,9 +115,10 @@ HARD_ENTITY_TYPES = {"PERSON", "PER", "ORGANIZATION", "ORG", "LEGAL_ACT", "PUBLI
 
 
 # ================================================================
-# 📋 STRUKTURY DANYCH
+# 📋 STRUKTURY DANYCH - v32.0 z CRITICAL
 # ================================================================
 class Severity(Enum):
+    CRITICAL = "CRITICAL"  # 🆕 v32.0
     ERROR = "ERROR"
     WARNING = "WARNING"
     INFO = "INFO"
@@ -150,11 +158,15 @@ class ValidationResult:
             "keywords_analysis": self.keywords_analysis,
             "structure_analysis": self.structure_analysis,
             "summary": {
+                "critical": len([i for i in self.issues if i.severity == Severity.CRITICAL]),
                 "errors": len([i for i in self.issues if i.severity == Severity.ERROR]),
                 "warnings": len([i for i in self.issues if i.severity == Severity.WARNING]),
                 "infos": len([i for i in self.issues if i.severity == Severity.INFO])
             }
         }
+    
+    def get_critical(self) -> List[ValidationIssue]:
+        return [i for i in self.issues if i.severity == Severity.CRITICAL]
     
     def get_errors(self) -> List[ValidationIssue]:
         return [i for i in self.issues if i.severity == Severity.ERROR]
@@ -247,14 +259,63 @@ def calculate_burstiness(text: str) -> float:
     sentences = re.split(r'[.!?]+', text)
     sentences = [s.strip() for s in sentences if s.strip()]
     if len(sentences) < 3:
-        return 0.0
+        return 3.5
     lengths = [len(s.split()) for s in sentences]
     mean = sum(lengths) / len(lengths)
     if not mean:
-        return 0.0
+        return 3.5
     variance = sum((x - mean) ** 2 for x in lengths) / len(lengths)
     raw_score = math.sqrt(variance) / mean
     return round(raw_score * 5, 2)
+
+
+def validate_burstiness(burstiness: float, issues: List[ValidationIssue]) -> Dict[str, Any]:
+    """🆕 v32.0: Dwupoziomowa walidacja burstiness."""
+    details = {"value": burstiness, "status": "OK", "level": None}
+    
+    if burstiness < ValidationConfig.BURSTINESS_CRITICAL_LOW:
+        details["status"] = "CRITICAL"
+        details["level"] = "critical_low"
+        issues.append(ValidationIssue(
+            "CRITICAL_LOW_BURSTINESS", 
+            f"Burstiness KRYTYCZNIE niski: {burstiness:.2f} - silny sygnał AI!", 
+            Severity.CRITICAL,
+            {"value": burstiness, "threshold": ValidationConfig.BURSTINESS_CRITICAL_LOW}
+        ))
+    elif burstiness < ValidationConfig.BURSTINESS_WARNING_LOW:
+        details["status"] = "WARNING"
+        details["level"] = "warning_low"
+        issues.append(ValidationIssue(
+            "LOW_BURSTINESS", 
+            f"Burstiness za niski: {burstiness:.2f} - zdania zbyt podobnej długości", 
+            Severity.WARNING, 
+            {"value": burstiness, "threshold": ValidationConfig.BURSTINESS_WARNING_LOW}
+        ))
+    elif burstiness > ValidationConfig.BURSTINESS_CRITICAL_HIGH:
+        details["status"] = "CRITICAL"
+        details["level"] = "critical_high"
+        issues.append(ValidationIssue(
+            "CRITICAL_HIGH_BURSTINESS", 
+            f"Burstiness KRYTYCZNIE wysoki: {burstiness:.2f} - tekst chaotyczny!", 
+            Severity.CRITICAL, 
+            {"value": burstiness, "threshold": ValidationConfig.BURSTINESS_CRITICAL_HIGH}
+        ))
+    elif burstiness > ValidationConfig.BURSTINESS_WARNING_HIGH:
+        details["status"] = "WARNING"
+        details["level"] = "warning_high"
+        issues.append(ValidationIssue(
+            "HIGH_BURSTINESS", 
+            f"Burstiness za wysoki: {burstiness:.2f} - zdania zbyt zróżnicowane", 
+            Severity.WARNING, 
+            {"value": burstiness, "threshold": ValidationConfig.BURSTINESS_WARNING_HIGH}
+        ))
+    else:
+        if ValidationConfig.BURSTINESS_OPTIMAL_MIN <= burstiness <= ValidationConfig.BURSTINESS_OPTIMAL_MAX:
+            details["level"] = "optimal"
+        else:
+            details["level"] = "acceptable"
+    
+    return details
 
 
 def calculate_transition_ratio(text: str) -> Dict[str, Any]:
@@ -286,7 +347,7 @@ def calculate_density(text: str, keywords_state: Dict) -> float:
 
 
 # ================================================================
-# 🎯 GŁÓWNA FUNKCJA WALIDACJI
+# 🎯 GŁÓWNA FUNKCJA WALIDACJI - v32.0
 # ================================================================
 def validate_content(
     text: str,
@@ -297,7 +358,7 @@ def validate_content(
     existing_lists_count: int = 0,
     validation_mode: str = "full"
 ) -> ValidationResult:
-    """Główna funkcja walidacji SEO."""
+    """Główna funkcja walidacji SEO. v32.0: Dwupoziomowe progi burstiness."""
     issues: List[ValidationIssue] = []
     keywords_state = keywords_state or {}
     required_ngrams = required_ngrams or []
@@ -309,10 +370,8 @@ def validate_content(
     transition_data = calculate_transition_ratio(text)
     density = calculate_density(text, keywords_state)
     
-    if burstiness < ValidationConfig.BURSTINESS_MIN:
-        issues.append(ValidationIssue("LOW_BURSTINESS", f"Burstiness za niski: {burstiness}", Severity.WARNING, {"value": burstiness}))
-    elif burstiness > ValidationConfig.BURSTINESS_MAX:
-        issues.append(ValidationIssue("HIGH_BURSTINESS", f"Burstiness za wysoki: {burstiness}", Severity.WARNING, {"value": burstiness}))
+    # 🆕 v32.0: Dwupoziomowa walidacja burstiness
+    burstiness_details = validate_burstiness(burstiness, issues)
     
     if transition_data["ratio"] < ValidationConfig.TRANSITION_RATIO_MIN:
         issues.append(ValidationIssue("LOW_TRANSITION_RATIO", f"Za mało transition words: {transition_data['ratio']:.0%}", Severity.WARNING, transition_data))
@@ -397,22 +456,35 @@ def validate_content(
         if coverage < ValidationConfig.NGRAM_COVERAGE_MIN:
             issues.append(ValidationIssue("LOW_NGRAM_COVERAGE", f"Niskie pokrycie n-gramów: {coverage:.0%}", Severity.WARNING, {"coverage": coverage}))
     
-    # 6. Score
+    # 6. Score - v32.0: CRITICAL ma większy wpływ
     score = 100
     for issue in issues:
-        if issue.severity == Severity.ERROR:
+        if issue.severity == Severity.CRITICAL:
+            score -= 25
+        elif issue.severity == Severity.ERROR:
             score -= 15
         elif issue.severity == Severity.WARNING:
             score -= 5
         elif issue.severity == Severity.INFO:
             score -= 1
     score = max(0, min(100, score))
-    is_valid = not any(i.severity == Severity.ERROR for i in issues)
+    
+    has_critical = any(i.severity == Severity.CRITICAL for i in issues)
+    has_errors = any(i.severity == Severity.ERROR for i in issues)
+    is_valid = not (has_critical or has_errors)
     
     return ValidationResult(
-        is_valid=is_valid, score=score, issues=issues,
-        metrics={"burstiness": {"value": burstiness}, "transition_ratio": {"value": transition_data["ratio"]}, "density": {"value": density}, "word_count": word_count},
-        keywords_analysis=keywords_analysis, structure_analysis=structure_analysis
+        is_valid=is_valid, 
+        score=score, 
+        issues=issues,
+        metrics={
+            "burstiness": burstiness_details,
+            "transition_ratio": {"value": transition_data["ratio"]}, 
+            "density": {"value": density}, 
+            "word_count": word_count
+        },
+        keywords_analysis=keywords_analysis, 
+        structure_analysis=structure_analysis
     )
 
 
@@ -421,7 +493,14 @@ def validate_content(
 # ================================================================
 def quick_validate(text: str, keywords_state: Dict = None) -> Dict:
     result = validate_content(text, keywords_state, validation_mode="preview")
-    return {"status": "OK" if result.is_valid else "WARN", "score": result.score, "errors": len(result.get_errors()), "warnings": len(result.get_warnings()), "metrics": result.metrics}
+    return {
+        "status": "OK" if result.is_valid else "CRITICAL" if result.get_critical() else "WARN",
+        "score": result.score, 
+        "critical": len(result.get_critical()),
+        "errors": len(result.get_errors()), 
+        "warnings": len(result.get_warnings()), 
+        "metrics": result.metrics
+    }
 
 
 def full_validate(text: str, keywords_state: Dict, main_keyword: str, ngrams: List[str] = None) -> Dict:
@@ -452,7 +531,7 @@ def calculate_entity_density(text: str, entities: List[Dict] = None) -> Dict[str
     words = text.split()
     word_count = len(words)
     if word_count < 50:
-        return {"status": "TOO_SHORT", "density": 0}
+        return {"status": "TOO_SHORT", "density": 0, "word_count": word_count}
     entity_count = len(entities) if entities else 0
     density = (entity_count / word_count) * 100
     hard_count = sum(1 for e in (entities or []) if e.get("type") in HARD_ENTITY_TYPES)
@@ -464,7 +543,17 @@ def calculate_entity_density(text: str, entities: List[Dict] = None) -> Dict[str
     status = "GOOD" if density >= config.ENTITY_DENSITY_MIN else "NEEDS_IMPROVEMENT"
     if density > config.ENTITY_DENSITY_MAX:
         status = "OVERSTUFFED"
-    return {"status": status, "density_per_100": round(density, 2), "entity_count": entity_count, "hard_entity_ratio": round(hard_ratio, 2), "generics_found": generics[:5], "zero_value_found": zero_value[:3], "action_required": status != "GOOD" or len(generics) > 2}
+    return {
+        "status": status, 
+        "density": round(density, 2),
+        "density_per_100": round(density, 2), 
+        "entity_count": entity_count, 
+        "word_count": word_count,
+        "hard_entity_ratio": round(hard_ratio, 2), 
+        "generics_found": generics[:5], 
+        "zero_value_found": zero_value[:3], 
+        "action_required": status != "GOOD" or len(generics) > 2
+    }
 
 
 def calculate_topic_completeness(content: str, s1_topics: List[Dict]) -> Dict[str, Any]:
@@ -596,7 +685,6 @@ def full_validate_complete(text: str, keywords_state: Dict, main_keyword: str, n
     semantic = validate_semantic_enhancement(text, s1_data, detected_entities)
     result_dict = extend_validation_result(result_dict, semantic)
     
-    # Final score
     base_score = result_dict["score"]
     semantic_score = semantic.get("semantic_score", 0.5) * 100
     result_dict["final_score"] = round(base_score * 0.6 + semantic_score * 0.4, 1)
