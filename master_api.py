@@ -7,14 +7,11 @@ from firebase_admin import credentials, initialize_app, firestore
 from datetime import datetime
 
 # ================================================================
-# 🔥 Firestore Initialization – kompatybilne z Render
+# 🔥 Firestore Initialization
 # ================================================================
 FIREBASE_CREDS_JSON = os.getenv("FIREBASE_CREDS_JSON")
 if not FIREBASE_CREDS_JSON:
-    raise RuntimeError(
-        "❌ Brak zmiennej środowiskowej FIREBASE_CREDS_JSON – "
-        "wgraj JSON z Service Account jako string do ENV."
-    )
+    raise RuntimeError("❌ Brak zmiennej środowiskowej FIREBASE_CREDS_JSON")
 
 try:
     creds_dict = json.loads(FIREBASE_CREDS_JSON)
@@ -29,20 +26,15 @@ db = firestore.client()
 # ⚙️ Flask App Initialization
 # ================================================================
 app = Flask(__name__)
-
-# 🔧 FIX: Zwiększenie limitu payloadu do 32MB (dla dużych analiz SERP/S1)
-app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024  # 32 MB
-
+app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024
 CORS(app)
 
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-VERSION = "v31.3"  # 🆕 Updated version with semantic enhancement + workflow fix
-
-# 🆕 v31.3: In-memory storage for projects
+VERSION = "v32.0"
 PROJECTS = {}
 
 # ================================================================
-# 🧠 Check if semantic analysis is available
+# 🧠 Check modules
 # ================================================================
 try:
     from sentence_transformers import SentenceTransformer
@@ -50,18 +42,12 @@ try:
     print("[MASTER] ✅ Semantic analysis available")
 except ImportError:
     SEMANTIC_ENABLED = False
-    print("[MASTER] ⚠️ Semantic analysis NOT available (sentence-transformers not installed)")
+    print("[MASTER] ⚠️ Semantic analysis NOT available")
 
-# ================================================================
-# 🆕 v31.0: Semantic Enhancement Integration
-# ================================================================
 try:
     from unified_validator import (
-        validate_content,
-        validate_semantic_enhancement,
-        full_validate_complete,
-        quick_validate,
-        calculate_entity_density  # 🆕 v31.3
+        validate_content, validate_semantic_enhancement,
+        full_validate_complete, quick_validate, calculate_entity_density
     )
     SEMANTIC_ENHANCEMENT_ENABLED = True
     print("[MASTER] ✅ Semantic Enhancement v31.0 loaded")
@@ -69,42 +55,45 @@ except ImportError as e:
     SEMANTIC_ENHANCEMENT_ENABLED = False
     print(f"[MASTER] ⚠️ Semantic Enhancement not available: {e}")
 
+# 🆕 v32.0: AI Detection
+try:
+    from ai_detection_metrics import validate_ai_detection, create_ai_detection_response
+    AI_DETECTION_ENABLED = True
+    print("[MASTER] ✅ AI Detection Metrics v1.0 loaded")
+except ImportError as e:
+    AI_DETECTION_ENABLED = False
+    print(f"[MASTER] ⚠️ AI Detection not available: {e}")
+
 # ================================================================
-# 🔗 N-gram API Configuration (for S1 proxy)
+# 🔗 N-gram API Configuration
 # ================================================================
 NGRAM_API_URL = os.getenv("NGRAM_API_URL", "https://gpt-ngram-api.onrender.com")
 
-# Sprawdź czy URL już zawiera endpoint
 if "/api/ngram_entity_analysis" in NGRAM_API_URL:
     NGRAM_BASE_URL = NGRAM_API_URL.replace("/api/ngram_entity_analysis", "")
     NGRAM_ANALYSIS_ENDPOINT = NGRAM_API_URL
-    print(f"[MASTER] 🔗 N-gram API URL (full endpoint detected): {NGRAM_ANALYSIS_ENDPOINT}")
 else:
     NGRAM_BASE_URL = NGRAM_API_URL
     NGRAM_ANALYSIS_ENDPOINT = f"{NGRAM_API_URL}/api/ngram_entity_analysis"
-    print(f"[MASTER] 🔗 N-gram API URL (base URL): {NGRAM_BASE_URL}")
 
 print(f"[MASTER] 🎯 S1 Analysis endpoint: {NGRAM_ANALYSIS_ENDPOINT}")
 
 # ================================================================
-# 📦 Import blueprintów (po inicjalizacji Firestore)
+# 📦 Import blueprintów
 # ================================================================
 from project_routes import project_routes
 from firestore_tracker_routes import tracker_routes
 from seo_optimizer import unified_prevalidation
 from final_review_routes import final_review_routes
 from paa_routes import paa_routes
-from export_routes import export_routes  # v23.9: Eksport DOCX/HTML/TXT + Editorial Review
+from export_routes import export_routes
 
-# v29.3: Entity SEO routes
 try:
     from entity_routes import entity_routes
     ENTITY_ROUTES_ENABLED = True
-    print("[MASTER_API] ✅ Entity routes loaded")
-except ImportError as e:
+except ImportError:
     ENTITY_ROUTES_ENABLED = False
     entity_routes = None
-    print(f"[MASTER_API] ⚠️ Entity routes not available: {e}")
 
 # ================================================================
 # 🔗 Rejestracja blueprintów
@@ -113,74 +102,84 @@ app.register_blueprint(project_routes)
 app.register_blueprint(tracker_routes)
 app.register_blueprint(final_review_routes)
 app.register_blueprint(paa_routes)
-app.register_blueprint(export_routes)  # v23.9: Eksport + Editorial Review
+app.register_blueprint(export_routes)
 
-# v29.3: Entity routes (jeśli dostępne)
 if ENTITY_ROUTES_ENABLED and entity_routes:
     app.register_blueprint(entity_routes)
-    print("[MASTER_API] ✅ Entity routes registered")
+    # ================================================================
+# 🆕 v32.0: AI DETECTION ENDPOINTS
+# ================================================================
+@app.post("/api/ai_detection")
+def ai_detection_endpoint():
+    """🆕 v32.0: Sprawdza tekst pod kątem wykrywalności przez detektory AI."""
+    if not AI_DETECTION_ENABLED:
+        return jsonify({"status": "ERROR", "message": "AI Detection not available. Install: pip install wordfreq"}), 503
+    
+    data = request.get_json(force=True)
+    text = data.get("text", "")
+    result, status_code = create_ai_detection_response(text)
+    return jsonify(result), status_code
+
+
+@app.post("/api/quick_ai_check")
+def quick_ai_check_endpoint():
+    """🆕 v32.0: Szybki check AI - tylko score i status."""
+    if not AI_DETECTION_ENABLED:
+        return jsonify({"score": 70, "status": "UNAVAILABLE"}), 200
+    
+    data = request.get_json(force=True)
+    text = data.get("text", "")
+    
+    if len(text) < 200:
+        return jsonify({"score": 70, "status": "INSUFFICIENT_DATA"}), 200
+    
+    try:
+        result = validate_ai_detection(text)
+        return jsonify({
+            "score": result["humanness_score"],
+            "status": result["status"],
+            "warnings_count": len(result["warnings"]),
+            "top_warning": result["warnings"][0] if result["warnings"] else None,
+            "burstiness": result["components"]["burstiness"]["value"]
+        }), 200
+    except Exception as e:
+        return jsonify({"score": 70, "status": "ERROR", "message": str(e)}), 200
+
 
 # ================================================================
-# 🔗 S1 PROXY ENDPOINTS (przekierowanie do N-gram API)
+# 🔗 S1 PROXY ENDPOINT
 # ================================================================
 @app.post("/api/s1_analysis")
 def s1_analysis_proxy():
-    """
-    Proxy endpoint dla S1 analysis.
-    v31.0: + semantic_enhancement data
-    """
+    """Proxy endpoint dla S1 analysis."""
     data = request.get_json(force=True)
     
-    # v27.0: Normalizuj nazwę parametru - N-gram API oczekuje "main_keyword"
     if "keyword" in data and "main_keyword" not in data:
         data["main_keyword"] = data["keyword"]
     if "main_keyword" not in data:
         return jsonify({"error": "Required: keyword or main_keyword"}), 400
     
-    # v23.9: Domyślnie 6 stron zamiast 30
     if "max_urls" not in data:
         data["max_urls"] = 6
     if "top_results" not in data:
         data["top_results"] = 6
     
     keyword = data.get("main_keyword", "")
-    print(f"[S1_PROXY] 📡 Forwarding S1 analysis for '{keyword}' to {NGRAM_ANALYSIS_ENDPOINT}")
-    print(f"[S1_PROXY] 📦 Request body: main_keyword='{keyword}', keys={list(data.keys())}")
+    print(f"[S1_PROXY] 📡 Forwarding S1 analysis for '{keyword}'")
     
     try:
-        # v27.0: Explicit UTF-8 encoding
         response = requests.post(
-            NGRAM_ANALYSIS_ENDPOINT,
-            json=data,
-            timeout=90,
-            headers={
-                'Content-Type': 'application/json; charset=utf-8',
-                'Accept': 'application/json'
-            }
+            NGRAM_ANALYSIS_ENDPOINT, json=data, timeout=90,
+            headers={'Content-Type': 'application/json; charset=utf-8', 'Accept': 'application/json'}
         )
         
-        print(f"[S1_PROXY] 📬 Response status: {response.status_code}")
-        
         if response.status_code != 200:
-            error_text = response.text[:500] if response.text else "No error message"
-            print(f"[S1_PROXY] ❌ N-gram API error {response.status_code}: {error_text}")
-            return jsonify({
-                "error": "N-gram API error",
-                "status_code": response.status_code,
-                "details": error_text,
-                "sent_keyword": keyword,
-                "sent_keys": list(data.keys())
-            }), response.status_code
+            return jsonify({"error": "N-gram API error", "status_code": response.status_code}), response.status_code
         
         result = response.json()
-        print(f"[S1_PROXY] ✅ S1 analysis completed successfully")
         
-        # =============================================================
-        # v27.0: AUTOMATYCZNE OBLICZANIE recommended_length
-        # =============================================================
+        # Length analysis
         word_counts = []
-        
-        # Szukaj word_count w danych konkurencji
         serp_data = result.get("serp_analysis", {}) or {}
         competitors = serp_data.get("competitors", []) or result.get("competitors", []) or []
         
@@ -190,316 +189,61 @@ def s1_analysis_proxy():
                 if wc and wc > 100:
                     word_counts.append(wc)
         
-        # Heurystyka jeśli brak danych word_count
         if not word_counts:
-            ngrams_count = len(result.get("ngrams", []) or result.get("hybrid_ngrams", []) or [])
-            h2_count = len(serp_data.get("competitor_h2_patterns", []) or [])
-            
-            if ngrams_count > 50 or h2_count > 15:
-                estimated = 4000
-            elif ngrams_count > 30 or h2_count > 10:
-                estimated = 3000
-            elif ngrams_count > 15 or h2_count > 5:
-                estimated = 2000
-            else:
-                estimated = 1500
-            
+            ngrams_count = len(result.get("ngrams", []) or [])
+            estimated = 2000 if ngrams_count < 30 else 3000 if ngrams_count < 50 else 4000
             word_counts = [estimated]
-            print(f"[S1_PROXY] ℹ️ No word_count data, estimated: {estimated} (ngrams={ngrams_count}, h2={h2_count})")
         
-        # Oblicz statystyki
         word_counts.sort()
         n = len(word_counts)
-        
-        if n > 0:
-            median = word_counts[n // 2] if n % 2 == 1 else (word_counts[n // 2 - 1] + word_counts[n // 2]) // 2
-            avg = sum(word_counts) // n
-            recommended = int(median * 1.1)
-            recommended = round(recommended / 100) * 100
-            recommended = max(1000, min(6000, recommended))
-        else:
-            median = 3000
-            avg = 3000
-            recommended = 3000
+        median = word_counts[n // 2] if n % 2 == 1 else (word_counts[n // 2 - 1] + word_counts[n // 2]) // 2
+        recommended = max(1000, min(6000, round(int(median * 1.1) / 100) * 100))
         
         result["recommended_length"] = recommended
-        result["length_analysis"] = {
-            "word_counts": word_counts,
-            "median": median,
-            "average": avg,
-            "recommended": recommended,
-            "analyzed_urls": len(word_counts),
-            "note": "Rekomendacja = mediana + 10%, zaokrąglone do 100"
-        }
-        
-        print(f"[S1_PROXY] 📏 Length analysis: median={median}, recommended={recommended} words")
-        
-        # Semantic analysis
-        if SEMANTIC_ENABLED:
-            try:
-                from seo_optimizer import semantic_keyword_coverage
-                
-                if "keywords" in result:
-                    sample_text = ""
-                    ft = result.get("full_text_sample") or result.get("full_text_content") or ""
-                    if isinstance(ft, str) and ft.strip():
-                        sample_text = ft
-                    else:
-                        parts = []
-                        fs = serp_data.get("featured_snippet")
-                        if isinstance(fs, dict):
-                            for k in ("snippet", "text", "answer"):
-                                v = fs.get(k)
-                                if isinstance(v, str) and v.strip():
-                                    parts.append(v.strip())
-                        elif isinstance(fs, str) and fs.strip():
-                            parts.append(fs.strip())
-                        
-                        paa = serp_data.get("paa_questions", [])
-                        if isinstance(paa, list):
-                            for item in paa:
-                                if isinstance(item, dict):
-                                    q = item.get("question") or item.get("q")
-                                    a = item.get("answer") or item.get("snippet") or item.get("a")
-                                    if isinstance(q, str) and q.strip():
-                                        parts.append(q.strip())
-                                    if isinstance(a, str) and a.strip():
-                                        parts.append(a.strip())
-                                elif isinstance(item, str) and item.strip():
-                                    parts.append(item.strip())
-                        
-                        sample_text = "\n".join(parts)
-                    
-                    sample_text = (sample_text or "")[:5000]
-                    
-                    if sample_text.strip():
-                        dummy_kw_state = {
-                            str(i): {"keyword": kw, "actual_uses": 0}
-                            for i, kw in enumerate(result.get("keywords", []))
-                        }
-                        semantic_cov = semantic_keyword_coverage(sample_text, dummy_kw_state)
-                        result["semantic_analysis"] = semantic_cov
-                        print(f"[S1_PROXY] ✅ Added semantic analysis to S1 result")
-            except Exception as e:
-                print(f"[S1_PROXY] ⚠️ Semantic analysis failed: {e}")
-        
-        # v29.3: Enhanced entity_seo response
-        try:
-            entity_seo = result.get("entity_seo", {})
-            entities = entity_seo.get("entities", [])
-            
-            # Dodaj must_mention_entities (encje obecne u 80%+ konkurencji)
-            if entities and "must_mention_entities" not in entity_seo:
-                # Top 5 encji z najwyższą importance
-                top_entities = sorted(
-                    entities, 
-                    key=lambda x: x.get("importance", 0) if isinstance(x, dict) else 0, 
-                    reverse=True
-                )[:5]
-                must_mention = [
-                    e.get("name", str(e)) if isinstance(e, dict) else str(e)
-                    for e in top_entities
-                ]
-                entity_seo["must_mention_entities"] = must_mention
-            
-            # Dodaj synonyms do ngrams
-            ngrams = result.get("ngrams", [])
-            if ngrams and "synonyms" not in result:
-                # Podstawowe synonimy
-                BASIC_SYNONYMS = {
-                    "pomoce sensoryczne": ["narzędzia terapeutyczne", "sprzęt SI", "akcesoria sensoryczne"],
-                    "integracja sensoryczna": ["SI", "terapia SI", "przetwarzanie sensoryczne"],
-                    "dziecko": ["maluch", "przedszkolak", "najmłodsi"],
-                    "rozwój": ["postęp", "kształtowanie", "doskonalenie"]
-                }
-                
-                result["synonyms"] = {}
-                main_kw_lower = keyword.lower()
-                for key, syns in BASIC_SYNONYMS.items():
-                    if key in main_kw_lower or main_kw_lower in key:
-                        result["synonyms"][keyword] = syns
-                        break
-            
-            result["entity_seo"] = entity_seo
-            print(f"[S1_PROXY] ✅ Enhanced entity_seo with must_mention_entities")
-            
-        except Exception as e:
-            print(f"[S1_PROXY] ⚠️ Entity enhancement failed: {e}")
-        
-        # =============================================================
-        # 🆕 v31.0: Add semantic_enhancement hints to S1 response
-        # =============================================================
-        if SEMANTIC_ENHANCEMENT_ENABLED:
-            try:
-                # Przygotuj dane dla GPT - co ma sprawdzać w każdym batchu
-                entity_seo = result.get("entity_seo", {})
-                entities = entity_seo.get("entities", [])
-                topical_coverage = result.get("topical_coverage", [])
-                
-                # Critical entities (importance >= 0.7, sources >= 4)
-                critical_entities = [
-                    {"text": e.get("text") or e.get("name"), "type": e.get("type"), "importance": e.get("importance")}
-                    for e in entities
-                    if isinstance(e, dict) and e.get("importance", 0) >= 0.7 and e.get("sources_count", 0) >= 4
-                ][:5]
-                
-                # High priority entities (importance >= 0.5, sources >= 2)
-                high_entities = [
-                    {"text": e.get("text") or e.get("name"), "type": e.get("type"), "importance": e.get("importance")}
-                    for e in entities
-                    if isinstance(e, dict) and e.get("importance", 0) >= 0.5 and e.get("sources_count", 0) >= 2
-                    and e not in critical_entities
-                ][:5]
-                
-                # Must topics
-                must_topics = [
-                    {"topic": t.get("subtopic"), "sample_h2": t.get("sample_h2")}
-                    for t in topical_coverage
-                    if isinstance(t, dict) and t.get("priority") == "MUST"
-                ][:5]
-                
-                result["semantic_enhancement_hints"] = {
-                    "critical_entities": critical_entities,
-                    "high_entities": high_entities,
-                    "must_topics": must_topics,
-                    "checkpoints": {
-                        "batch_3": "entity_density >= 2.5, min 50% critical entities",
-                        "batch_5": "topic_completeness >= 50%, source_effort signals",
-                        "pre_faq": "all critical entities, all MUST topics"
-                    },
-                    "version": "v31.0"
-                }
-                
-                print(f"[S1_PROXY] ✅ Added semantic_enhancement_hints (critical={len(critical_entities)}, high={len(high_entities)}, must_topics={len(must_topics)})")
-                
-            except Exception as e:
-                print(f"[S1_PROXY] ⚠️ Semantic enhancement hints failed: {e}")
+        result["length_analysis"] = {"median": median, "recommended": recommended, "analyzed_urls": len(word_counts)}
         
         return jsonify(result), 200
         
     except requests.exceptions.Timeout:
-        print(f"[S1_PROXY] ⏱️ Timeout after 90s")
-        return jsonify({
-            "error": "N-gram API timeout",
-            "message": "SERP analysis took too long (>90s). Try with fewer sources."
-        }), 504
-        
+        return jsonify({"error": "N-gram API timeout"}), 504
     except requests.exceptions.ConnectionError:
-        print(f"[S1_PROXY] ❌ Connection error to {NGRAM_ANALYSIS_ENDPOINT}")
-        return jsonify({
-            "error": "Cannot connect to N-gram API",
-            "ngram_api_url": NGRAM_ANALYSIS_ENDPOINT,
-            "message": "Check if N-gram API service is running"
-        }), 503
-        
+        return jsonify({"error": "Cannot connect to N-gram API"}), 503
     except Exception as e:
-        print(f"[S1_PROXY] ❌ Unexpected error: {e}")
-        return jsonify({
-            "error": "S1 proxy error",
-            "message": str(e)
-        }), 500
+        return jsonify({"error": "S1 proxy error", "message": str(e)}), 500
 
 
 # ================================================================
-# 🆕 v31.0: SEMANTIC VALIDATION ENDPOINT
+# 🆕 v31.0: SEMANTIC VALIDATION ENDPOINTS
 # ================================================================
 @app.post("/api/semantic_validate")
 def semantic_validate():
-    """
-    🆕 v31.0: Walidacja semantyczna treści.
-    
-    Sprawdza:
-    - Entity Density (gęstość encji)
-    - Topic Completeness (kompletność tematyczna vs S1)
-    - Entity Gap (brakujące encje vs konkurencja)
-    - Source Effort (sygnały wysiłku badawczego)
-    
-    Request body:
-    {
-        "text": "treść do walidacji",
-        "s1_data": {...},  // opcjonalne - dane z S1
-        "entities": [...],  // opcjonalne - wykryte encje
-        "keywords_state": {...},  // opcjonalne - dla full validation
-        "main_keyword": "...",  // opcjonalne
-        "mode": "semantic" | "full"  // domyślnie "semantic"
-    }
-    """
     if not SEMANTIC_ENHANCEMENT_ENABLED:
-        return jsonify({
-            "error": "Semantic Enhancement not available",
-            "message": "unified_validator module not loaded"
-        }), 503
+        return jsonify({"error": "Semantic Enhancement not available"}), 503
     
     data = request.get_json(force=True)
-    
     if "text" not in data:
         return jsonify({"error": "Missing 'text' field"}), 400
     
-    text = data["text"]
-    s1_data = data.get("s1_data", {})
-    entities = data.get("entities", [])
-    mode = data.get("mode", "semantic")
-    
     try:
-        if mode == "full":
-            # Pełna walidacja SEO + Semantic
-            keywords_state = data.get("keywords_state", {})
-            main_keyword = data.get("main_keyword", "")
-            ngrams = data.get("ngrams", [])
-            
-            result = full_validate_complete(
-                text=text,
-                keywords_state=keywords_state,
-                main_keyword=main_keyword,
-                ngrams=ngrams,
-                s1_data=s1_data,
-                detected_entities=entities
-            )
-        else:
-            # Tylko semantic validation
-            result = validate_semantic_enhancement(
-                content=text,
-                s1_data=s1_data,
-                detected_entities=entities
-            )
-        
+        result = validate_semantic_enhancement(content=data["text"], s1_data=data.get("s1_data", {}), detected_entities=data.get("entities", []))
         return jsonify(result), 200
-        
     except Exception as e:
-        print(f"[SEMANTIC_VALIDATE] ❌ Error: {e}")
-        return jsonify({
-            "error": "Validation failed",
-            "message": str(e)
-        }), 500
+        return jsonify({"error": str(e)}), 500
 
 
-# ================================================================
-# 🆕 v31.0: QUICK SEMANTIC CHECK (for GPT pre-batch)
-# ================================================================
 @app.post("/api/quick_semantic_check")
 def quick_semantic_check():
-    """
-    🆕 v31.0: Szybka walidacja semantyczna dla GPT.
-    
-    Zwraca tylko najważniejsze metryki:
-    - entity_density_ok (bool)
-    - generics_found (list)
-    - source_effort_score (float)
-    - quick_wins (list)
-    """
     if not SEMANTIC_ENHANCEMENT_ENABLED:
         return jsonify({"status": "unavailable"}), 503
     
     data = request.get_json(force=True)
     text = data.get("text", "")
     
-    if not text or len(text) < 100:
+    if len(text) < 100:
         return jsonify({"status": "text_too_short"}), 400
     
     try:
         result = validate_semantic_enhancement(content=text)
-        
-        # Zwróć uproszczony wynik
         density = result.get("analyses", {}).get("entity_density", {})
         effort = result.get("analyses", {}).get("source_effort", {})
         
@@ -511,401 +255,16 @@ def quick_semantic_check():
             "source_effort_score": effort.get("score", 0),
             "quick_wins": result.get("quick_wins", [])[:3]
         }), 200
-        
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
-
-
-@app.post("/api/synthesize_topics")
-def synthesize_topics_proxy():
-    """Proxy dla synthesize_topics."""
-    data = request.get_json(force=True)
-
-    if isinstance(data, dict):
-        ngrams = data.get("ngrams")
-        if isinstance(ngrams, list) and ngrams and isinstance(ngrams[0], dict):
-            data["ngrams"] = [x.get("ngram", "") for x in ngrams if isinstance(x, dict) and x.get("ngram")]
-    
-    try:
-        response = requests.post(
-            f"{NGRAM_BASE_URL}/api/synthesize_topics",
-            json=data,
-            timeout=30
-        )
-        return jsonify(response.json()), response.status_code
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-# ============================================================================
-# 🆕 v23.9: ANALYZE SERP LENGTH - mediana długości z konkurencji
-# ============================================================================
-@app.post("/api/analyze_serp_length")
-def analyze_serp_length():
-    """
-    Analizuje długość artykułów konkurencji i zwraca rekomendowaną długość.
-    """
-    data = request.get_json(force=True)
-    keyword = data.get("keyword") or data.get("main_keyword", "")
-    
-    if not keyword:
-        return jsonify({"error": "Missing keyword"}), 400
-    
-    try:
-        response = requests.post(
-            NGRAM_ANALYSIS_ENDPOINT,
-            json={"keyword": keyword, "max_urls": 6, "top_results": 6},
-            timeout=60,
-            headers={'Content-Type': 'application/json'}
-        )
-        
-        if response.status_code != 200:
-            return jsonify({
-                "keyword": keyword,
-                "recommended_length": 3000,
-                "source": "default",
-                "message": "Could not analyze SERP, using default 3000 words"
-            }), 200
-        
-        result = response.json()
-        word_counts = []
-        
-        serp_data = result.get("serp_analysis", {}) or {}
-        competitors = serp_data.get("competitors", []) or result.get("competitors", []) or []
-        
-        for comp in competitors:
-            if isinstance(comp, dict):
-                wc = comp.get("word_count") or comp.get("wordCount") or comp.get("content_length", 0)
-                if wc and wc > 100:
-                    word_counts.append(wc)
-        
-        if not word_counts:
-            ngrams_count = len(result.get("ngrams", []) or result.get("hybrid_ngrams", []) or [])
-            estimated = max(2000, min(5000, 2000 + ngrams_count * 20))
-            word_counts = [estimated]
-        
-        word_counts.sort()
-        n = len(word_counts)
-        
-        if n == 0:
-            median = 3000
-        elif n % 2 == 0:
-            median = (word_counts[n//2 - 1] + word_counts[n//2]) // 2
-        else:
-            median = word_counts[n//2]
-        
-        avg = sum(word_counts) // n if n > 0 else 3000
-        min_wc = min(word_counts) if word_counts else 2000
-        max_wc = max(word_counts) if word_counts else 4000
-        
-        recommended = int(median * 1.1)
-        recommended = max(1500, min(6000, recommended))
-        
-        return jsonify({
-            "keyword": keyword,
-            "analyzed_competitors": n,
-            "word_counts": word_counts,
-            "statistics": {
-                "median": median,
-                "average": avg,
-                "min": min_wc,
-                "max": max_wc
-            },
-            "recommended_length": recommended,
-            "source": "serp_analysis",
-            "note": f"Rekomendowana długość {recommended} słów (mediana konkurencji + 10%)"
-        }), 200
-        
-    except Exception as e:
-        print(f"[SERP_LENGTH] ❌ Error: {e}")
-        return jsonify({
-            "keyword": keyword,
-            "recommended_length": 3000,
-            "source": "fallback",
-            "error": str(e)
-        }), 200
-
-
-@app.post("/api/generate_compliance_report")
-def compliance_report_proxy():
-    """Proxy dla generate_compliance_report."""
-    data = request.get_json(force=True)
-    
-    try:
-        response = requests.post(
-            f"{NGRAM_BASE_URL}/api/generate_compliance_report",
-            json=data,
-            timeout=30
-        )
-        return jsonify(response.json()), response.status_code
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.get("/api/s1_health")
-def s1_health_check():
-    """Sprawdza czy N-gram API service jest dostępny."""
-    try:
-        response = requests.get(f"{NGRAM_BASE_URL}/health", timeout=5)
-        if response.status_code == 200:
-            ngram_status = response.json()
-            return jsonify({
-                "status": "ok",
-                "ngram_api_status": ngram_status,
-                "ngram_base_url": NGRAM_BASE_URL,
-                "ngram_analysis_endpoint": NGRAM_ANALYSIS_ENDPOINT,
-                "proxy_enabled": True,
-                "semantic_enabled": SEMANTIC_ENABLED,
-                "semantic_enhancement_enabled": SEMANTIC_ENHANCEMENT_ENABLED
-            }), 200
-        else:
-            return jsonify({
-                "status": "degraded",
-                "ngram_api_status": "error",
-                "ngram_base_url": NGRAM_BASE_URL,
-                "proxy_enabled": True,
-                "semantic_enabled": SEMANTIC_ENABLED,
-                "semantic_enhancement_enabled": SEMANTIC_ENHANCEMENT_ENABLED
-            }), 200
-    except Exception as e:
-        return jsonify({
-            "status": "unavailable",
-            "error": str(e),
-            "ngram_base_url": NGRAM_BASE_URL,
-            "proxy_enabled": True,
-            "semantic_enabled": SEMANTIC_ENABLED,
-            "semantic_enhancement_enabled": SEMANTIC_ENHANCEMENT_ENABLED
-        }), 503
-
-
-# ================================================================
-# 🧠 MASTER DEBUG ROUTES (diagnostyka)
-# ================================================================
-@app.get("/api/master_debug/<project_id>")
-def master_debug(project_id):
-    """Pełna diagnostyka projektu."""
-    doc = db.collection("seo_projects").document(project_id).get()
-    if not doc.exists:
-        return jsonify({"error": "Project not found"}), 404
-
-    data = doc.to_dict()
-    keywords = data.get("keywords_state", {})
-    batches = data.get("batches", [])
-    total_batches = len(batches)
-
-    all_warnings = []
-    for b in batches:
-        warns = b.get("warnings", [])
-        if warns:
-            all_warnings.extend(warns)
-
-    semantic_scores = [
-        b.get("language_audit", {}).get("semantic_score")
-        for b in batches if b.get("language_audit")
-    ]
-    avg_semantic = (
-        round(sum([s for s in semantic_scores if s]) / len(semantic_scores), 3)
-        if semantic_scores else 0
-    )
-
-    return jsonify({
-        "project_id": project_id,
-        "topic": data.get("topic"),
-        "total_batches": total_batches,
-        "keywords_count": len(keywords),
-        "warnings_total": len(all_warnings),
-        "avg_semantic_score": avg_semantic,
-        "avg_density": round(
-            sum([b.get("language_audit", {}).get("density", 0) for b in batches]) / max(1, total_batches), 2
-        ),
-        "burstiness_avg": round(
-            sum([b.get("burstiness", 0) for b in batches]) / max(1, total_batches), 2
-        ),
-        "last_update": batches[-1]["timestamp"].isoformat() if batches else None,
-        "lsi_keywords": data.get("lsi_enrichment", {}).get("count", 0),
-        "has_final_review": "final_review" in data,
-        "semantic_enabled": SEMANTIC_ENABLED,
-        "semantic_enhancement_enabled": SEMANTIC_ENHANCEMENT_ENABLED
-    }), 200
-
-
-# ================================================================
-# 🚨 ERROR HANDLERS (Globalne)
-# ================================================================
-@app.errorhandler(413)
-def request_entity_too_large(error):
-    return jsonify({"error": "Request Entity Too Large", "message": "Payload przekracza 32MB"}), 413
-
-@app.errorhandler(500)
-def internal_server_error(error):
-    return jsonify({"error": "Internal Server Error", "message": str(error)}), 500
-
-
-# ================================================================
-# 🏥 HEALTHCHECK
-# ================================================================
-@app.get("/health")
-def health():
-    return jsonify({
-        "status": "ok",
-        "message": "Master SEO API działa",
-        "version": VERSION,
-        "timestamp": datetime.utcnow().isoformat(),
-        "modules": [
-            "project_routes",
-            "firestore_tracker_routes",
-            "final_review_routes",
-            "paa_routes",
-            "export_routes",
-            "seo_optimizer",
-            "s1_proxy (to N-gram API)",
-            "semantic_enhancement v31.0" if SEMANTIC_ENHANCEMENT_ENABLED else "semantic_enhancement (disabled)"
-        ],
-        "debug_mode": DEBUG_MODE,
-        "firebase_connected": True,
-        "ngram_base_url": NGRAM_BASE_URL,
-        "ngram_analysis_endpoint": NGRAM_ANALYSIS_ENDPOINT,
-        "s1_proxy_enabled": True,
-        "semantic_enabled": SEMANTIC_ENABLED,
-        "semantic_enhancement_enabled": SEMANTIC_ENHANCEMENT_ENABLED,
-        "features_v31_0": [
-            "Entity Density validation",
-            "Topic Completeness check",
-            "Entity Gap detection (auto from S1)",
-            "Source Effort scoring",
-            "/api/semantic_validate endpoint",
-            "/api/quick_semantic_check endpoint",
-            "S1 response includes semantic_enhancement_hints"
-        ]
-    }), 200
-
-
-# ================================================================
-# 🔎 VERSION CHECK
-# ================================================================
-@app.get("/api/version")
-def version_info():
-    return jsonify({
-        "engine": "BRAJEN SEO Engine",
-        "api_version": VERSION,
-        "components": {
-            "project_routes": "v23.9-optimized",
-            "firestore_tracker_routes": "v23.9-minimal-response",
-            "paa_routes": "v23.9-all-unused",
-            "export_routes": "v23.9-editorial-review",
-            "seo_optimizer": "v23.9",
-            "final_review_routes": "v23.9",
-            "s1_proxy": "v31.0 (semantic hints)",
-            "unified_validator": "v31.0 (semantic enhancement)"
-        },
-        "optimizations": {
-            "approve_batch_response": "~500B (was 220KB)",
-            "pre_batch_info_response": "~5-10KB (was 30-60KB)",
-            "s1_default_urls": 6
-        },
-        "semantic_enhancement": {
-            "enabled": SEMANTIC_ENHANCEMENT_ENABLED,
-            "features": [
-                "entity_density",
-                "topic_completeness",
-                "entity_gap",
-                "source_effort"
-            ]
-        },
-        "environment": {
-            "debug_mode": DEBUG_MODE,
-            "firebase_connected": True,
-            "ngram_base_url": NGRAM_BASE_URL,
-            "semantic_enabled": SEMANTIC_ENABLED,
-            "semantic_enhancement_enabled": SEMANTIC_ENHANCEMENT_ENABLED
-        }
-    }), 200
-
-
-# ================================================================
-# 🧩 MANUAL CHECK ENDPOINT (test unified_prevalidation)
-# ================================================================
-@app.post("/api/manual_check")
-def manual_check():
-    data = request.get_json()
-    if not data or "text" not in data:
-        return jsonify({"error": "Missing text"}), 400
-
-    dummy_keywords = data.get("keywords_state", {})
-    result = unified_prevalidation(data["text"], dummy_keywords)
-
-    response = {
-        "status": "CHECK_OK",
-        "semantic_score": result["semantic_score"],
-        "density": result["density"],
-        "smog": result["smog"],
-        "readability": result["readability"],
-        "warnings": result["warnings"],
-        "semantic_coverage": result.get("semantic_coverage", {})
-    }
-    
-    # 🆕 v31.0: Dodaj semantic enhancement check jeśli dostępne
-    if SEMANTIC_ENHANCEMENT_ENABLED:
-        try:
-            sem_result = validate_semantic_enhancement(content=data["text"])
-            response["semantic_enhancement"] = {
-                "status": sem_result.get("status"),
-                "score": sem_result.get("semantic_score"),
-                "quick_wins": sem_result.get("quick_wins", [])[:3]
-            }
-        except Exception as e:
-            response["semantic_enhancement"] = {"error": str(e)}
-
-    return jsonify(response), 200
-
-
-# ================================================================
-# 🧩 AUTO FINAL REVIEW TRIGGER (po eksporcie)
-# ================================================================
-@app.post("/api/auto_final_review/<project_id>")
-def auto_final_review(project_id):
-    from final_review_routes import perform_final_review
-    try:
-        response = perform_final_review(project_id)
-        return response
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-# ================================================================
-# 🆕 v31.3: APPROVE BATCH (z metrykami semantycznymi na bieżąco)
+        # ================================================================
+# 🆕 v32.0: APPROVE BATCH (z AI Detection)
 # ================================================================
 @app.post("/api/approveBatch")
 def approve_batch():
-    """
-    🆕 v31.3: Zatwierdzenie batcha z walidacją fraz + metrykami semantycznymi.
-    
-    Łączy walidację keyword (stuffing/missing) z bieżącym śledzeniem:
-    - Entity density (dla dotychczasowej treści)
-    - Entities used vs missing
-    - Topic completeness estimate
-    - Checkpoint alerts
-    
-    Request body:
-    {
-        "project_id": "abc123",
-        "batch_number": 3,
-        "batch_content": "treść tego batcha",
-        "accumulated_content": "cała treść do tej pory (batche 1-3)",
-        "keywords_state": {
-            "basic": {"przeprowadzki": {"target": 21, "current": 8}, ...},
-            "extended": {"tanie przeprowadzki warszawa": {"target": 1, "current": 1}, ...}
-        },
-        "s1_data": {
-            "entities": [...],
-            "topics": [...]
-        },
-        "total_batches": 7
-    }
-    """
+    """🆕 v32.0: Zatwierdzenie batcha z walidacją + AI Detection."""
     data = request.get_json(force=True)
     
-    # Required fields
     project_id = data.get("project_id", "unknown")
     batch_number = data.get("batch_number", 1)
     batch_content = data.get("batch_content", "")
@@ -914,269 +273,137 @@ def approve_batch():
     s1_data = data.get("s1_data", {})
     total_batches = data.get("total_batches", 7)
     
-    # ============================================
-    # 1. WALIDACJA FRAZ (stuffing/missing)
-    # ============================================
+    # 1. Walidacja fraz
     keyword_warnings = []
     keyword_blockers = []
-    
     basic_kw = keywords_state.get("basic", {})
     extended_kw = keywords_state.get("extended", {})
     
-    # Sprawdź BASIC - stuffing = bloker
     for phrase, state in basic_kw.items():
         current = state.get("current", 0)
         target_min = state.get("target_min", state.get("target", 1))
-        target_max = state.get("target_max", target_min * 4)  # domyślnie 4× min
+        target_max = state.get("target_max", target_min * 4)
         
         if current > target_max:
-            keyword_blockers.append({
-                "type": "STUFFING",
-                "phrase": phrase,
-                "current": current,
-                "max": target_max,
-                "message": f"STUFFING: '{phrase}' użyte {current}× (max {target_max})"
-            })
+            keyword_blockers.append({"type": "STUFFING", "phrase": phrase, "current": current, "max": target_max})
         elif current == 0:
-            keyword_warnings.append({
-                "type": "MISSING",
-                "phrase": phrase,
-                "current": 0,
-                "target": target_min,
-                "message": f"BRAK: '{phrase}' nie użyte (cel: {target_min}×)"
-            })
+            keyword_warnings.append({"type": "MISSING", "phrase": phrase, "target": target_min})
     
-    # Sprawdź EXTENDED - dokładnie 1×
-    extended_used = 0
+    extended_used = sum(1 for state in extended_kw.values() if state.get("current", 0) >= 1)
     extended_total = len(extended_kw)
-    extended_missing = []
     
-    for phrase, state in extended_kw.items():
-        current = state.get("current", 0)
-        if current >= 1:
-            extended_used += 1
-        else:
-            extended_missing.append(phrase)
-        
-        if current > 1:
-            keyword_warnings.append({
-                "type": "EXTENDED_OVERFLOW",
-                "phrase": phrase,
-                "current": current,
-                "message": f"EXTENDED '{phrase}' użyte {current}× (powinno być 1×)"
-            })
-    
-    # ============================================
-    # 2. METRYKI SEMANTYCZNE (na bieżąco)
-    # ============================================
-    semantic_progress = {
-        "entity_density_current": 0,
-        "word_count_total": 0,
-        "entities_used": [],
-        "entities_missing_critical": [],
-        "topic_completeness_estimate": 0,
-        "extended_progress": f"{extended_used}/{extended_total}"
-    }
+    # 2. Semantic progress
+    semantic_progress = {"entity_density_current": 0, "word_count_total": 0, "extended_progress": f"{extended_used}/{extended_total}"}
     
     if SEMANTIC_ENHANCEMENT_ENABLED and accumulated_content:
         try:
-            # Entity density
             density_result = calculate_entity_density(accumulated_content)
             semantic_progress["entity_density_current"] = density_result.get("density", 0)
             semantic_progress["word_count_total"] = density_result.get("word_count", 0)
-            
-            # Entities tracking
-            s1_entities = s1_data.get("entities", [])
-            content_lower = accumulated_content.lower()
-            
-            entities_used = []
-            entities_missing = []
-            
-            for ent in s1_entities:
-                ent_name = ent.get("name", "")
-                importance = ent.get("importance", 0)
-                sources = ent.get("sources", 0)
-                
-                if ent_name.lower() in content_lower:
-                    entities_used.append(ent_name)
-                elif importance >= 0.7 or sources >= 4:
-                    entities_missing.append({
-                        "name": ent_name,
-                        "importance": importance,
-                        "priority": "CRITICAL" if (importance >= 0.7 and sources >= 4) else "HIGH"
-                    })
-            
-            semantic_progress["entities_used"] = entities_used[:10]
-            semantic_progress["entities_missing_critical"] = [e["name"] for e in entities_missing if e["priority"] == "CRITICAL"][:5]
-            
-            # Topic completeness estimate
-            s1_topics = s1_data.get("topics", [])
-            if s1_topics:
-                topics_covered = 0
-                must_topics = [t for t in s1_topics if t.get("priority") in ["MUST", "HIGH"]]
-                
-                for topic in must_topics:
-                    topic_name = topic.get("name", "").lower()
-                    if topic_name in content_lower:
-                        topics_covered += 1
-                
-                if must_topics:
-                    semantic_progress["topic_completeness_estimate"] = round(
-                        (topics_covered / len(must_topics)) * 100, 1
-                    )
-                    
-        except Exception as e:
-            print(f"[APPROVE_BATCH] Semantic calc error: {e}")
+        except:
+            pass
     
-    # ============================================
-    # 3. CHECKPOINT ALERTS
-    # ============================================
+    # 🆕 3. AI Detection
+    ai_detection_result = None
+    if AI_DETECTION_ENABLED and len(accumulated_content) > 500:
+        try:
+            ai_result = validate_ai_detection(accumulated_content)
+            ai_detection_result = {
+                "humanness_score": ai_result["humanness_score"],
+                "status": ai_result["status"],
+                "burstiness": ai_result["components"]["burstiness"]["value"],
+                "warnings": ai_result["warnings"][:3]
+            }
+        except:
+            pass
+    
+    # 4. Checkpoint alerts
     checkpoint_alerts = []
+    if ai_detection_result and ai_detection_result["humanness_score"] < 50:
+        checkpoint_alerts.append({
+            "checkpoint": "AI_DETECTION",
+            "status": "WARNING",
+            "message": f"Humanness score {ai_detection_result['humanness_score']}/100 - tekst może być wykryty jako AI"
+        })
     
-    # Checkpoint: Batch 3 - min 2 encje PERSON/ORG
-    if batch_number >= 3:
-        if len(semantic_progress["entities_used"]) < 2:
-            checkpoint_alerts.append({
-                "checkpoint": "BATCH_3",
-                "status": "WARNING",
-                "message": f"Batch 3+: użyto tylko {len(semantic_progress['entities_used'])} encji (min: 2)"
-            })
-    
-    # Checkpoint: Batch 5 - topic_completeness >= 50%
-    if batch_number >= 5:
-        if semantic_progress["topic_completeness_estimate"] < 50:
-            checkpoint_alerts.append({
-                "checkpoint": "BATCH_5",
-                "status": "WARNING",
-                "message": f"Batch 5+: topic_completeness {semantic_progress['topic_completeness_estimate']}% (min: 50%)"
-            })
-    
-    # Checkpoint: Pre-FAQ (batch N-1) - entity_density >= 2.5
-    if batch_number >= total_batches - 1:
-        if semantic_progress["entity_density_current"] < 2.5:
-            checkpoint_alerts.append({
-                "checkpoint": "PRE_FAQ",
-                "status": "WARNING",
-                "message": f"Pre-FAQ: entity_density {semantic_progress['entity_density_current']:.1f} (min: 2.5)"
-            })
-        
-        # Sprawdź czy są nieużyte CRITICAL encje
-        if semantic_progress["entities_missing_critical"]:
-            checkpoint_alerts.append({
-                "checkpoint": "PRE_FAQ",
-                "status": "ALERT",
-                "message": f"Brakujące CRITICAL encje: {', '.join(semantic_progress['entities_missing_critical'][:3])}"
-            })
-    
-    # ============================================
-    # 4. WYNIK
-    # ============================================
     has_blockers = len(keyword_blockers) > 0
     
-    result = {
+    return jsonify({
         "status": "BLOCKED" if has_blockers else "SAVED",
         "project_id": project_id,
         "batch_number": batch_number,
         "batch_total": total_batches,
-        
-        # Walidacja fraz
-        "keyword_validation": {
-            "blockers": keyword_blockers,
-            "warnings": keyword_warnings,
-            "extended_progress": {
-                "used": extended_used,
-                "total": extended_total,
-                "missing": extended_missing[:10]  # pierwsze 10
-            }
-        },
-        
-        # Metryki semantyczne na bieżąco
+        "keyword_validation": {"blockers": keyword_blockers, "warnings": keyword_warnings},
         "semantic_progress": semantic_progress,
-        
-        # Alerty checkpointów
+        "ai_detection": ai_detection_result,
         "checkpoint_alerts": checkpoint_alerts,
-        
-        # Podsumowanie dla GPT
-        "summary": {
-            "can_continue": not has_blockers,
-            "action_required": "FIX_STUFFING" if has_blockers else ("CHECK_WARNINGS" if keyword_warnings else "CONTINUE"),
-            "next_step": f"Batch {batch_number + 1}/{total_batches}" if not has_blockers and batch_number < total_batches else "FINALIZE"
-        }
-    }
-    
-    return jsonify(result), 200
+        "summary": {"can_continue": not has_blockers, "next_step": f"Batch {batch_number + 1}/{total_batches}" if not has_blockers else "FIX_ISSUES"}
+    }), 200
 
 
 # ================================================================
-# 🆕 v31.3: SAVE FULL ARTICLE (scalanie batchy)
+# SAVE/GET FULL ARTICLE
 # ================================================================
 @app.post("/api/project/<project_id>/save_full_article")
 def save_full_article(project_id):
-    """
-    🆕 v31.3: Zapisuje pełną treść artykułu do projektu.
-    
-    Wywołaj PO wszystkich batchach, PRZED getFinalReview!
-    
-    Request body:
-    {
-        "full_content": "cały tekst artykułu (wszystkie batche scalone)",
-        "word_count": 1100,
-        "h2_count": 7
-    }
-    """
     data = request.get_json(force=True)
-    
     full_content = data.get("full_content", "")
-    word_count = data.get("word_count", len(full_content.split()))
-    h2_count = data.get("h2_count", 0)
     
-    if not full_content or len(full_content) < 500:
-        return jsonify({
-            "status": "ERROR",
-            "message": "full_content too short (min 500 chars)"
-        }), 400
+    if len(full_content) < 500:
+        return jsonify({"status": "ERROR", "message": "full_content too short"}), 400
     
-    # Zapisz do projektu (w PROJECTS dict lub storage)
     if project_id not in PROJECTS:
         PROJECTS[project_id] = {}
     
     PROJECTS[project_id]["full_article"] = {
         "content": full_content,
-        "word_count": word_count,
-        "h2_count": h2_count,
+        "word_count": data.get("word_count", len(full_content.split())),
         "saved_at": datetime.utcnow().isoformat()
     }
     
-    return jsonify({
-        "status": "SAVED",
-        "project_id": project_id,
-        "word_count": word_count,
-        "h2_count": h2_count,
-        "message": "Full article saved. Ready for getFinalReview."
-    }), 200
+    return jsonify({"status": "SAVED", "project_id": project_id}), 200
 
 
-# ================================================================
-# 🆕 v31.3: GET FULL ARTICLE
-# ================================================================
 @app.get("/api/project/<project_id>/full_article")
 def get_full_article(project_id):
-    """Pobiera zapisany pełny artykuł."""
-    if project_id not in PROJECTS:
-        return jsonify({"status": "ERROR", "message": "Project not found"}), 404
+    if project_id not in PROJECTS or "full_article" not in PROJECTS[project_id]:
+        return jsonify({"status": "ERROR", "message": "No full article saved"}), 404
     
-    full_article = PROJECTS[project_id].get("full_article")
-    if not full_article:
-        return jsonify({"status": "ERROR", "message": "No full article saved. Call saveFullArticle first."}), 404
-    
+    return jsonify({"status": "OK", **PROJECTS[project_id]["full_article"]}), 200
+
+
+# ================================================================
+# HEALTH & VERSION
+# ================================================================
+@app.get("/health")
+def health():
     return jsonify({
-        "status": "OK",
-        "project_id": project_id,
-        "content": full_article.get("content", ""),
-        "word_count": full_article.get("word_count", 0),
-        "h2_count": full_article.get("h2_count", 0),
-        "saved_at": full_article.get("saved_at")
+        "status": "ok",
+        "version": VERSION,
+        "semantic_enabled": SEMANTIC_ENABLED,
+        "semantic_enhancement_enabled": SEMANTIC_ENHANCEMENT_ENABLED,
+        "ai_detection_enabled": AI_DETECTION_ENABLED
     }), 200
+
+
+@app.get("/api/version")
+def version_info():
+    return jsonify({
+        "engine": "BRAJEN SEO Engine",
+        "api_version": VERSION,
+        "ai_detection": {"enabled": AI_DETECTION_ENABLED, "features": ["burstiness_v2", "vocabulary_richness", "lexical_sophistication", "starter_entropy"]},
+        "semantic_enhancement": {"enabled": SEMANTIC_ENHANCEMENT_ENABLED}
+    }), 200
+
+
+@app.errorhandler(413)
+def request_entity_too_large(error):
+    return jsonify({"error": "Request Entity Too Large"}), 413
+
+
+@app.errorhandler(500)
+def internal_server_error(error):
+    return jsonify({"error": "Internal Server Error", "message": str(error)}), 500
 
 
 # ================================================================
@@ -1185,15 +412,7 @@ def get_full_article(project_id):
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8080))
     print(f"\n🚀 Starting Master SEO API {VERSION} on port {port}")
-    print(f"🔧 Debug mode: {DEBUG_MODE}")
-    print(f"🔗 S1 Proxy enabled → {NGRAM_ANALYSIS_ENDPOINT}")
-    print(f"🧠 Semantic analysis: {'ENABLED ✅' if SEMANTIC_ENABLED else 'DISABLED ⚠️'}")
-    print(f"🆕 Semantic Enhancement v31.0: {'ENABLED ✅' if SEMANTIC_ENHANCEMENT_ENABLED else 'DISABLED ⚠️'}")
-    print(f"📦 Features v31.0:")
-    print(f"   - Entity Density validation")
-    print(f"   - Topic Completeness check")
-    print(f"   - Entity Gap detection")
-    print(f"   - Source Effort scoring")
-    print(f"   - /api/semantic_validate endpoint")
-    print(f"   - /api/quick_semantic_check endpoint\n")
+    print(f"🆕 AI Detection v32.0: {'ENABLED ✅' if AI_DETECTION_ENABLED else 'DISABLED ⚠️'}")
     app.run(host="0.0.0.0", port=port, debug=DEBUG_MODE)
+```
+
