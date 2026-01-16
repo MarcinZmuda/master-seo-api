@@ -1,6 +1,6 @@
 """
 ===============================================================================
-🤖 AI DETECTION METRICS v32.0
+🤖 AI DETECTION METRICS v33.0
 ===============================================================================
 Moduł do wykrywania tekstu wygenerowanego przez AI.
 
@@ -14,9 +14,19 @@ Metryki:
 Humanness Score = średnia ważona wszystkich metryk (0-100)
 
 CRITICAL validations:
-- Forbidden phrases check
+- Forbidden phrases check (BLOKUJE batch!)
+- Burstiness < 1.5 (BLOKUJE batch!)
 - JITTER validation
 - Triplets validation
+- Word repetition > 8× (BLOKUJE batch!)
+
+v33.0 CHANGES:
+- Rozszerzono SHORT_INSERTS_LIBRARY (29 wtrąceń)
+- Rozszerzono SYNONYM_MAP (27 słów) + dynamiczne z synonym_service
+- Nowe progi: burstiness < 1.5 = CRITICAL, < 2.0 = WARNING
+- Dodano fix_instructions z konkretnymi przykładami
+- Dodano analyze_sentence_distribution, generate_burstiness_fix
+- Integracja z synonym_service.py
 ===============================================================================
 """
 
@@ -179,6 +189,238 @@ def calculate_burstiness(text: str) -> Dict[str, Any]:
         "std_length": round(std_len, 1),
         "min_length": min(lengths),
         "max_length": max(lengths)
+    }
+
+
+# ================================================================
+# 🆕 v33.0: SHORT INSERTS LIBRARY (dla fix_instructions)
+# ================================================================
+SHORT_INSERTS_LIBRARY = [
+    # Potwierdzenia (2-4 słowa)
+    "To działa.",
+    "Efekt? Natychmiastowy.",
+    "Proste rozwiązanie.",
+    "I to nie wszystko.",
+    "Ale jest więcej.",
+    "Sprawdzone.",
+    "Nic trudnego.",
+    "Różnica jest widoczna.",
+    "Brzmi skomplikowanie? Nie jest.",
+    "Warto spróbować.",
+    "Klucz do sukcesu.",
+    "To podstawa.",
+    "Efekt? Szybki.",
+    "Proste, prawda?",
+    "A co dalej?",
+    "Działa od razu.",
+    "Bez niespodzianek.",
+    "Czas na konkrety.",
+    "I tu zaczyna się magia.",
+    "Rezultat mówi sam za siebie.",
+    # Pytania retoryczne
+    "Ale czy to wystarczy?",
+    "Co dalej?",
+    "Dlaczego to ważne?",
+    "Jak to osiągnąć?",
+    "A może inaczej?",
+    # Akcenty dramatyczne
+    "Efekt.",
+    "Rezultat?",
+    "Prosto.",
+    "Skutecznie.",
+]
+
+
+# ================================================================
+# 🆕 v33.0: ANALYZE SENTENCE DISTRIBUTION
+# ================================================================
+def analyze_sentence_distribution(text: str) -> Dict[str, Any]:
+    """
+    Analizuje rozkład długości zdań dla burstiness fix.
+    """
+    sentences = split_into_sentences(text)
+    
+    if len(sentences) < 3:
+        return {
+            "short_count": 0, "medium_count": 0, "long_count": 0,
+            "total": len(sentences), "distribution": [0, 0, 0],
+            "issues": ["Za mało zdań do analizy"]
+        }
+    
+    lengths = [len(s.split()) for s in sentences]
+    short = sum(1 for l in lengths if 5 <= l <= 8)
+    medium = sum(1 for l in lengths if 12 <= l <= 18)
+    long = sum(1 for l in lengths if l >= 20)
+    
+    total = len(lengths)
+    distribution = [
+        round(short / total * 100, 1),
+        round(medium / total * 100, 1),
+        round(long / total * 100, 1)
+    ]
+    
+    issues = []
+    if distribution[0] < 10:
+        issues.append(f"Za mało krótkich zdań: {distribution[0]}% vs cel 20%")
+    if distribution[2] < 15:
+        issues.append(f"Za mało długich zdań: {distribution[2]}% vs cel 30%")
+    
+    return {
+        "short_count": short,
+        "medium_count": medium,
+        "long_count": long,
+        "total": total,
+        "distribution": distribution,
+        "distribution_label": f"[{distribution[0]}% krótkich, {distribution[1]}% średnich, {distribution[2]}% długich]",
+        "issues": issues
+    }
+
+
+# ================================================================
+# 🆕 v33.0: GENERATE BURSTINESS FIX INSTRUCTION
+# ================================================================
+def generate_burstiness_fix(burstiness: float, sentence_distribution: Dict) -> Dict[str, Any]:
+    """
+    Generuje konkretne instrukcje naprawy burstiness.
+    """
+    import random
+    
+    if burstiness >= 2.0:
+        return {"needed": False, "message": "Burstiness OK"}
+    
+    inserts = random.sample(SHORT_INSERTS_LIBRARY, min(3, len(SHORT_INSERTS_LIBRARY)))
+    
+    rewrite_examples = [
+        {
+            "before": "Witamina C wspomaga syntezę kolagenu, co poprawia elastyczność skóry.",
+            "after": "Witamina C? Klucz do kolagenu. Wspomaga jego syntezę i poprawia elastyczność skóry – efekt widać już po kilku tygodniach."
+        },
+        {
+            "before": "Suplementy diety zawierają wiele cennych składników odżywczych.",
+            "after": "Suplementy działają. Zawierają składniki, które wspierają skórę od wewnątrz – witaminy, minerały, antyoksydanty. Proste i skuteczne."
+        }
+    ]
+    
+    return {
+        "needed": True,
+        "burstiness": burstiness,
+        "target": "≥ 2.0",
+        "fix_instruction": f"Dodaj krótkie zdania: {', '.join([f'\"{s}\"' for s in inserts])}",
+        "insert_suggestions": inserts,
+        "rewrite_example": random.choice(rewrite_examples),
+        "distribution": sentence_distribution.get("distribution_label", ""),
+        "tip": "Wzór: KRÓTKIE (5-8 słów) → DŁUGIE (20-30 słów) → ŚREDNIE (10-15 słów)"
+    }
+
+
+# ================================================================
+# 🆕 v33.0: EXTENDED SYNONYM MAP
+# ================================================================
+SYNONYM_MAP = {
+    # Skóra / uroda
+    "skóra": ["cera", "naskórek", "powierzchnia skóry", "tkanka", "powłoka"],
+    "witamina": ["mikroskładnik", "substancja odżywcza", "składnik", "nutrient"],
+    "suplement": ["preparat", "produkt", "środek", "wsparcie"],
+    "kolagen": ["białko strukturalne", "włókna kolagenowe", "substancja budulcowa"],
+    "nawilżenie": ["hydratacja", "uwodnienie", "poziom wilgoci"],
+    # Przymiotniki
+    "ważny": ["istotny", "znaczący", "zasadniczy", "niezbędny", "doniosły"],
+    "dobry": ["skuteczny", "wartościowy", "korzystny", "efektywny", "pomocny"],
+    "zdrowy": ["prawidłowy", "właściwy", "optymalny"],
+    "duży": ["znaczny", "spory", "pokaźny", "niemały"],
+    "mały": ["niewielki", "drobny", "ograniczony"],
+    "nowy": ["nowoczesny", "świeży", "najnowszy", "aktualny"],
+    # Czasowniki
+    "poprawia": ["wspiera", "wzmacnia", "podnosi", "ulepsza"],
+    "pomaga": ["wspiera", "ułatwia", "wspomaga", "przyczynia się"],
+    "zawiera": ["posiada", "obejmuje", "ma w składzie"],
+    "powoduje": ["wywołuje", "skutkuje", "prowadzi do"],
+    "działa": ["funkcjonuje", "pracuje", "oddziałuje", "wpływa"],
+    "chroni": ["zabezpiecza", "ochrania", "osłania"],
+    # Usługi / biznes
+    "firma": ["przedsiębiorstwo", "spółka", "wykonawca", "usługodawca"],
+    "usługa": ["świadczenie", "realizacja", "obsługa", "serwis"],
+    "klient": ["zleceniodawca", "usługobiorca", "zamawiający"],
+    "cena": ["koszt", "stawka", "wycena", "taryfa"],
+    "profesjonalny": ["doświadczony", "wykwalifikowany", "fachowy"],
+}
+
+
+# ================================================================
+# 🆕 v33.0: CHECK WORD REPETITION DETAILED (z dynamicznymi synonimami)
+# ================================================================
+def check_word_repetition_detailed(text: str, max_per_500: int = 5) -> Dict[str, Any]:
+    """
+    Sprawdza powtórzenia słów z dynamicznymi sugestiami synonimów.
+    """
+    # Próba dynamicznego importu synonym_service
+    try:
+        from synonym_service import get_synonyms
+        use_dynamic = True
+    except ImportError:
+        use_dynamic = False
+    
+    words = re.findall(r'\b[a-ząćęłńóśźż]{4,}\b', text.lower())
+    word_count = len(words)
+    word_freq = Counter(words)
+    
+    stop_words = {'jest', 'oraz', 'jako', 'przez', 'które', 'która', 'który', 
+                  'może', 'będzie', 'było', 'były', 'tego', 'tej', 'tych',
+                  'bardzo', 'także', 'również', 'jednak', 'więc', 'czyli'}
+    
+    scale = max(1, word_count / 500)
+    limit = int(max_per_500 * scale)
+    
+    violations = []
+    warnings = []
+    
+    def _get_synonyms(word: str) -> List[str]:
+        if use_dynamic:
+            result = get_synonyms(word)
+            return result.get("synonyms", [])
+        return SYNONYM_MAP.get(word, [])
+    
+    for word, count in word_freq.most_common(20):
+        if word in stop_words:
+            continue
+        
+        if count > limit * 1.6:  # > 8× = CRITICAL
+            synonyms = _get_synonyms(word)
+            violations.append({
+                "word": word, "count": count, "limit": limit,
+                "synonyms": synonyms,
+                "suggestion": f"Użyj: {', '.join(synonyms[:3])}" if synonyms else "Znajdź synonimy"
+            })
+        elif count > limit:  # > 5× = WARNING
+            synonyms = _get_synonyms(word)
+            warnings.append({
+                "word": word, "count": count, "limit": limit, "synonyms": synonyms
+            })
+    
+    if violations:
+        status = Severity.CRITICAL
+        viol_str = ', '.join([f'{v["word"]}({v["count"]}×)' for v in violations[:3]])
+        message = f"🔴 POWTÓRZENIA: {viol_str}"
+        should_block = True
+    elif warnings:
+        status = Severity.WARNING
+        warn_str = ', '.join([f'{w["word"]}({w["count"]}×)' for w in warnings[:3]])
+        message = f"⚠️ Powtórzenia: {warn_str}"
+        should_block = False
+    else:
+        status = Severity.OK
+        message = "Powtórzenia OK ✓"
+        should_block = False
+    
+    top_words = [(w, c) for w, c in word_freq.most_common(10) if w not in stop_words][:5]
+    
+    return {
+        "status": status.value,
+        "violations": violations,
+        "warnings": warnings,
+        "message": message,
+        "top_words": top_words,
+        "should_block": should_block
     }
 
 
@@ -542,11 +784,13 @@ def quick_ai_check(text: str) -> Dict[str, Any]:
 
 
 # ================================================================
-# 🆕 CRITICAL: FORBIDDEN PHRASES CHECK
+# 🆕 v33.0: CRITICAL: FORBIDDEN PHRASES CHECK (rozszerzono!)
 # ================================================================
 FORBIDDEN_PATTERNS = [
+    # Frazy typowe dla AI
     (r'\bwarto wiedzieć\b', "warto wiedzieć"),
     (r'\bnależy pamiętać\b', "należy pamiętać"),
+    (r'\bnależy podkreślić\b', "należy podkreślić"),
     (r'\bkluczowy aspekt\b', "kluczowy aspekt"),
     (r'\bkompleksowe rozwiązanie\b', "kompleksowe rozwiązanie"),
     (r'\bholistyczne podejście\b', "holistyczne podejście"),
@@ -559,28 +803,79 @@ FORBIDDEN_PATTERNS = [
     (r'\bkażdy z nas\b', "każdy z nas"),
     (r'\bnie jest tajemnicą\b', "nie jest tajemnicą"),
     (r'\bpowszechnie wiadomo\b', "powszechnie wiadomo"),
+    (r'\btrudno przecenić\b', "trudno przecenić"),
+    (r'\bw erze\s+\w+\b', "w erze..."),
+    (r'\bw dobie\s+\w+\b', "w dobie..."),
+    (r'\bw obliczu\b', "w obliczu"),
+    (r'\bna przestrzeni lat\b', "na przestrzeni lat"),
 ]
 
+# 🆕 v33.0: Słowa zakazane (pojedyncze)
+FORBIDDEN_WORDS = [
+    "kluczowy", "kompleksowy", "innowacyjny", "holistyczny", 
+    "transformacyjny", "fundamentalny", "niewątpliwie", "wieloaspektowy",
+    "przełomowy", "bezsprzecznie", "rewolucyjny", "optymalizować"
+]
+
+# 🆕 v33.0: Replacements dla zakazanych fraz
+FORBIDDEN_REPLACEMENTS = {
+    "coraz więcej osób": "wiele osób",
+    "w dzisiejszych czasach": "[USUŃ]",
+    "warto wiedzieć": "[USUŃ]",
+    "należy podkreślić": "[USUŃ]",
+    "podsumowując": "[zamień na konkretne zakończenie]",
+    "w tym artykule": "[NIGDY nie używaj]",
+    "kluczowy": "istotny/ważny",
+    "kompleksowy": "pełny/całościowy",
+    "innowacyjny": "nowoczesny/nowatorski",
+    "holistyczny": "całościowy",
+}
+
 def check_forbidden_phrases(text: str) -> Dict[str, Any]:
+    """
+    🆕 v33.0: Sprawdza zakazane frazy i słowa.
+    Zwraca should_block=True jeśli znaleziono ≥1 frazę!
+    """
     text_lower = text.lower()
-    found = []
+    found_phrases = []
+    found_words = []
+    replacements = []
     
+    # Sprawdź frazy
     for pattern, name in FORBIDDEN_PATTERNS:
         if re.search(pattern, text_lower, re.IGNORECASE):
-            found.append(name)
+            found_phrases.append(name)
+            if name in FORBIDDEN_REPLACEMENTS:
+                replacements.append(f"'{name}' → {FORBIDDEN_REPLACEMENTS[name]}")
     
-    if found:
-        status = Severity.CRITICAL if len(found) >= 3 else Severity.WARNING
-        message = f"Znaleziono {len(found)} zakazanych fraz AI: {', '.join(found[:3])}"
+    # Sprawdź pojedyncze słowa
+    for word in FORBIDDEN_WORDS:
+        if re.search(rf'\b{word}\b', text_lower, re.IGNORECASE):
+            found_words.append(word)
+            if word in FORBIDDEN_REPLACEMENTS:
+                replacements.append(f"'{word}' → {FORBIDDEN_REPLACEMENTS[word]}")
+    
+    all_found = found_phrases + found_words
+    
+    if all_found:
+        # 🔴 v33.0: BLOKUJ jeśli znaleziono zakazane frazy!
+        status = Severity.CRITICAL
+        message = f"🚫 ZAKAZANE FRAZY ({len(all_found)}×): {', '.join(all_found[:5])}"
+        should_block = True
     else:
         status = Severity.OK
-        message = "Brak zakazanych fraz"
+        message = "Brak zakazanych fraz ✓"
+        should_block = False
     
     return {
         "status": status.value,
-        "forbidden_found": found,
-        "count": len(found),
-        "message": message
+        "forbidden_found": all_found,
+        "phrases": found_phrases,
+        "words": found_words,
+        "count": len(all_found),
+        "message": message,
+        "replacements": replacements,
+        "should_block": should_block
     }
 
 
