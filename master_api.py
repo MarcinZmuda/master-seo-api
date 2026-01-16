@@ -36,7 +36,7 @@ app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024  # 32 MB
 CORS(app)
 
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-VERSION = "v32.6"  # 🔧 FIX: previous_paragraphs from request
+VERSION = "v33.0"  # 🆕 Humanization FULL: burstiness fix, synonyms, fix_instructions
 
 # ================================================================
 # 🆕 v32.4: Firestore persistence for projects
@@ -117,7 +117,7 @@ except ImportError as e:
     print(f"[MASTER] ⚠️ Semantic Enhancement not available: {e}")
 
 # ================================================================
-# 🆕 v32.0: AI Detection Integration
+# 🆕 v33.0: AI Detection Integration + Humanization
 # ================================================================
 try:
     from ai_detection_metrics import (
@@ -135,10 +135,15 @@ try:
         # Faza 3
         score_sentences,
         check_ngram_naturalness,
-        full_advanced_analysis
+        full_advanced_analysis,
+        # 🆕 v33.0: Humanization helpers
+        analyze_sentence_distribution,
+        generate_burstiness_fix,
+        check_word_repetition_detailed,
+        SYNONYM_MAP
     )
     AI_DETECTION_ENABLED = True
-    print("[MASTER] ✅ AI Detection v32.2 FULL loaded")
+    print("[MASTER] ✅ AI Detection v33.0 + Humanization loaded")
 except ImportError as e:
     AI_DETECTION_ENABLED = False
     print(f"[MASTER] ⚠️ AI Detection not available: {e}")
@@ -1317,6 +1322,75 @@ def approve_batch():
             print(f"[APPROVE_BATCH] Batch history error: {e}")
     
     # ============================================
+    # 🆕 v33.0: HUMANIZATION CHECKS + FIX INSTRUCTIONS
+    # ============================================
+    fix_instructions = []
+    should_block_humanization = False
+    
+    if AI_DETECTION_ENABLED and batch_content:
+        try:
+            # 1. BURSTINESS CHECK
+            burstiness_val = ai_detection_result.get("burstiness", 0)
+            if burstiness_val < 1.5:
+                should_block_humanization = True
+                sent_dist = analyze_sentence_distribution(batch_content)
+                burst_fix = generate_burstiness_fix(burstiness_val, sent_dist)
+                fix_instructions.append({
+                    "type": "BURSTINESS_CRITICAL",
+                    "message": f"🔴 Burstiness {burstiness_val} < 1.5 - PRZEPISZ batch!",
+                    "fix": burst_fix.get("fix_instruction", ""),
+                    "inserts": burst_fix.get("insert_suggestions", []),
+                    "example": burst_fix.get("rewrite_example", {}),
+                    "distribution": sent_dist.get("distribution_label", "")
+                })
+            elif burstiness_val < 2.0:
+                sent_dist = analyze_sentence_distribution(batch_content)
+                burst_fix = generate_burstiness_fix(burstiness_val, sent_dist)
+                fix_instructions.append({
+                    "type": "BURSTINESS_WARNING",
+                    "message": f"⚠️ Burstiness {burstiness_val} < 2.0 - popraw w tym batchu",
+                    "fix": burst_fix.get("fix_instruction", ""),
+                    "inserts": burst_fix.get("insert_suggestions", [])
+                })
+            
+            # 2. FORBIDDEN PHRASES CHECK
+            forbidden = ai_detection_result.get("validations", {}).get("forbidden_phrases", {})
+            if forbidden.get("should_block", False):
+                should_block_humanization = True
+                fix_instructions.append({
+                    "type": "FORBIDDEN_PHRASES",
+                    "message": f"🚫 Zakazane frazy: {', '.join(forbidden.get('forbidden_found', [])[:5])}",
+                    "replacements": forbidden.get("replacements", []),
+                    "action": "USUŃ lub ZAMIEŃ wskazane frazy!"
+                })
+            
+            # 3. WORD REPETITION CHECK
+            word_rep = check_word_repetition_detailed(batch_content)
+            if word_rep.get("should_block", False):
+                should_block_humanization = True
+                fix_instructions.append({
+                    "type": "WORD_REPETITION_CRITICAL",
+                    "message": word_rep.get("message", ""),
+                    "violations": word_rep.get("violations", [])[:3],
+                    "action": "Użyj synonimów!"
+                })
+            elif word_rep.get("status") == "WARNING":
+                fix_instructions.append({
+                    "type": "WORD_REPETITION_WARNING",
+                    "message": word_rep.get("message", ""),
+                    "warnings": word_rep.get("warnings", [])[:3]
+                })
+            
+            # Dodaj word_repetition do ai_detection_result
+            ai_detection_result["word_repetition"] = {
+                "top_words": word_rep.get("top_words", []),
+                "status": word_rep.get("status", "OK")
+            }
+            
+        except Exception as e:
+            print(f"[APPROVE_BATCH] Humanization check error: {e}")
+    
+    # ============================================
     # 7. WYNIK
     # ============================================
     has_blockers = len(keyword_blockers) > 0
@@ -1324,8 +1398,23 @@ def approve_batch():
     # 🆕 v32.0: AI CRITICAL także blokuje
     ai_critical = ai_detection_result.get("status") == "CRITICAL"
     
+    # 🆕 v33.0: Humanization issues blokują
+    final_should_block = has_blockers or ai_critical or should_block_humanization
+    
+    # Określ action_required
+    if has_blockers:
+        action_required = "FIX_STUFFING"
+    elif should_block_humanization:
+        action_required = "FIX_HUMANIZATION"
+    elif ai_critical:
+        action_required = "FIX_AI_DETECTION"
+    elif keyword_warnings or fix_instructions:
+        action_required = "CHECK_WARNINGS"
+    else:
+        action_required = "CONTINUE"
+    
     result = {
-        "status": "BLOCKED" if (has_blockers or ai_critical) else "SAVED",
+        "status": "BLOCKED" if final_should_block else "SAVED",
         "project_id": project_id,
         "batch_number": batch_number,
         "batch_total": total_batches,
@@ -1347,6 +1436,9 @@ def approve_batch():
         # 🆕 v32.0: AI Detection
         "ai_detection": ai_detection_result,
         
+        # 🆕 v33.0: Fix Instructions (WAŻNE!)
+        "fix_instructions": fix_instructions,
+        
         # 🆕 Faza 2: Entity Split
         "entity_split": entity_split_result,
         
@@ -1361,9 +1453,10 @@ def approve_batch():
         
         # Podsumowanie dla GPT
         "summary": {
-            "can_continue": not (has_blockers or ai_critical),
-            "action_required": "FIX_STUFFING" if has_blockers else ("FIX_AI_DETECTION" if ai_critical else ("CHECK_WARNINGS" if keyword_warnings else "CONTINUE")),
-            "next_step": f"Batch {batch_number + 1}/{total_batches}" if not (has_blockers or ai_critical) and batch_number < total_batches else "FINALIZE"
+            "can_continue": not final_should_block,
+            "action_required": action_required,
+            "fix_count": len(fix_instructions),
+            "next_step": f"Batch {batch_number + 1}/{total_batches}" if not final_should_block and batch_number < total_batches else ("APPLY_FIXES" if final_should_block else "FINALIZE")
         }
     }
     
@@ -1676,6 +1769,77 @@ def get_full_article(project_id):
         "h2_count": full_article.get("h2_count", 0),
         "saved_at": full_article.get("saved_at")
     }), 200
+
+
+# ================================================================
+# 🆕 v33.0: SYNONYM SERVICE ENDPOINT
+# ================================================================
+@app.post("/api/synonyms")
+def get_synonyms_endpoint():
+    """
+    🆕 v33.0: Pobiera synonimy dla słowa lub listy słów.
+    
+    Request body:
+    {
+        "word": "skóra",  // lub
+        "words": ["skóra", "witamina", "dobry"],
+        "context": "artykuł o suplementach"  // opcjonalne
+    }
+    """
+    try:
+        from synonym_service import get_synonyms
+        
+        data = request.get_json() or {}
+        word = data.get("word")
+        words = data.get("words", [])
+        context = data.get("context", "")
+        
+        if word:
+            result = get_synonyms(word, context)
+            return jsonify({"status": "OK", "results": {word: result}}), 200
+        
+        elif words:
+            results = {}
+            for w in words[:20]:  # max 20 słów
+                results[w] = get_synonyms(w, context)
+            return jsonify({"status": "OK", "results": results}), 200
+        
+        else:
+            return jsonify({"status": "ERROR", "message": "Provide 'word' or 'words'"}), 400
+            
+    except ImportError:
+        # Fallback do SYNONYM_MAP z ai_detection_metrics
+        data = request.get_json() or {}
+        word = data.get("word", "")
+        synonyms = SYNONYM_MAP.get(word.lower(), [])
+        return jsonify({
+            "status": "OK",
+            "results": {word: {"word": word.lower(), "synonyms": synonyms, "source": "static", "count": len(synonyms)}}
+        }), 200
+    except Exception as e:
+        return jsonify({"status": "ERROR", "message": str(e)}), 500
+
+
+@app.get("/api/synonyms/<word>")
+def get_synonym_simple(word: str):
+    """
+    🆕 v33.0: Prosty GET dla pojedynczego słowa.
+    GET /api/synonyms/skóra
+    """
+    try:
+        from synonym_service import get_synonyms
+        result = get_synonyms(word)
+        return jsonify(result), 200
+    except ImportError:
+        synonyms = SYNONYM_MAP.get(word.lower(), [])
+        return jsonify({
+            "word": word.lower(),
+            "synonyms": synonyms,
+            "source": "static_fallback",
+            "count": len(synonyms)
+        }), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # ================================================================
