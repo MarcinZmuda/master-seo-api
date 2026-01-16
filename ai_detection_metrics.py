@@ -301,11 +301,15 @@ def generate_burstiness_fix(burstiness: float, sentence_distribution: Dict) -> D
         }
     ]
     
+    # Buduj fix_instruction bez backslashy w f-string
+    quoted_inserts = ['"' + s + '"' for s in inserts]
+    fix_instruction = "Dodaj krótkie zdania: " + ", ".join(quoted_inserts)
+    
     return {
         "needed": True,
         "burstiness": burstiness,
         "target": "≥ 2.0",
-        "fix_instruction": f"Dodaj krótkie zdania: {', '.join([f'\"{s}\"' for s in inserts])}",
+        "fix_instruction": fix_instruction,
         "insert_suggestions": inserts,
         "rewrite_example": random.choice(rewrite_examples),
         "distribution": sentence_distribution.get("distribution_label", ""),
