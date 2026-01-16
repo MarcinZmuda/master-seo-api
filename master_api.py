@@ -36,7 +36,7 @@ app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024  # 32 MB
 CORS(app)
 
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-VERSION = "v32.5"  # 🔧 FIX: entity_relationships, entities, topics propagation
+VERSION = "v32.6"  # 🔧 FIX: previous_paragraphs from request
 
 # ================================================================
 # 🆕 v32.4: Firestore persistence for projects
@@ -971,13 +971,14 @@ def auto_final_review(project_id):
 @app.post("/api/approveBatch")
 def approve_batch():
     """
-    🆕 v31.3: Zatwierdzenie batcha z walidacją fraz + metrykami semantycznymi.
+    🆕 v32.5: Zatwierdzenie batcha z walidacją fraz + metrykami semantycznymi + AI Detection.
     
     Łączy walidację keyword (stuffing/missing) z bieżącym śledzeniem:
     - Entity density (dla dotychczasowej treści)
     - Entities used vs missing
     - Topic completeness estimate
     - Checkpoint alerts
+    - AI Detection (humanness_score, burstiness, JITTER)
     
     Request body:
     {
@@ -985,13 +986,15 @@ def approve_batch():
         "batch_number": 3,
         "batch_content": "treść tego batcha",
         "accumulated_content": "cała treść do tej pory (batche 1-3)",
+        "previous_paragraphs": 2,  // 🆕 v32.5: ile akapitów miał poprzedni batch (dla JITTER)
         "keywords_state": {
             "basic": {"przeprowadzki": {"target": 21, "current": 8}, ...},
             "extended": {"tanie przeprowadzki warszawa": {"target": 1, "current": 1}, ...}
         },
         "s1_data": {
             "entities": [...],
-            "topics": [...]
+            "topics": [...],
+            "entity_relationships": [...]  // triplety
         },
         "total_batches": 7
     }
@@ -1006,6 +1009,9 @@ def approve_batch():
     keywords_state = data.get("keywords_state", {})
     s1_data = data.get("s1_data", {})
     total_batches = data.get("total_batches", 7)
+    
+    # 🔧 v32.5 FIX: Pobierz previous_paragraphs z requestu (dla JITTER validation)
+    request_previous_paragraphs = data.get("previous_paragraphs")
     
     # ============================================
     # 1. WALIDACJA FRAZ (stuffing/missing)
@@ -1178,11 +1184,15 @@ def approve_batch():
     
     if AI_DETECTION_ENABLED and batch_content:
         try:
-            # 🆕 v32.4: Pobierz previous_paragraphs z Firestore
-            previous_paragraphs = None
-            project_data = get_project(project_id)
-            if project_data:
-                previous_paragraphs = project_data.get("last_batch_paragraphs")
+            # 🔧 v32.5 FIX: previous_paragraphs - priorytet z requestu, fallback z Firestore
+            previous_paragraphs = request_previous_paragraphs  # z requestu
+            if previous_paragraphs is None:
+                # Fallback: pobierz z Firestore jeśli nie było w request
+                project_data = get_project(project_id)
+                if project_data:
+                    previous_paragraphs = project_data.get("last_batch_paragraphs")
+            
+            print(f"[APPROVE_BATCH] 📊 previous_paragraphs={previous_paragraphs} (from {'request' if request_previous_paragraphs is not None else 'firestore'})")
             
             # 🔧 v32.5 FIX: Pobierz entity_relationships z entity_seo (nie z głównego s1_data!)
             entity_seo = s1_data.get("entity_seo", {})
