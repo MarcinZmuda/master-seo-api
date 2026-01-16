@@ -1,4 +1,6 @@
-# Master SEO API v32.0 - Dependencies
+# Master SEO API v33.0 - Dependencies
+# ================================================
+# 🆕 v33.0: Dodano synonym_service z dynamicznymi synonimami
 
 # Web Framework
 flask>=3.0.0
@@ -22,7 +24,7 @@ wordfreq>=3.0.0
 # W Render Build Command dodaj: apt-get update && apt-get install -y default-jre
 language-tool-python>=2.7.1
 
-# Claude Reviewer (v28.2)
+# Claude Reviewer (v28.2) + 🆕 v33.0: Synonym LLM fallback
 anthropic>=0.40.0
 
 # Fuzzy matching
@@ -44,3 +46,8 @@ requests>=2.31.0
 
 # Rich console output
 rich>=13.0.0
+
+# ================================================
+# 🆕 v33.0: OPCJONALNE - Polish WordNet (jeśli chcesz lokalnie)
+# plwordnet>=0.1.0  # Wymaga pobrania plwordnet_4_2.xml (~350MB)
+# ================================================
