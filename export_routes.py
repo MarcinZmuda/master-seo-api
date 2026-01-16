@@ -330,12 +330,24 @@ def editorial_review(project_id):
         return jsonify({"error": "Project not found"}), 404
     
     project_data = doc.to_dict()
-    batches = project_data.get("batches", [])
     
-    if not batches:
+    # v32.4: Priorytet źródeł treści
+    full_text = None
+    debug_info = {}
+    
+    if project_data.get("full_article", {}).get("content"):
+        full_text = project_data["full_article"]["content"]
+        debug_info = {"source": "full_article"}
+    else:
+        batches = project_data.get("batches", [])
+        if batches:
+            full_text, debug_info = extract_text_from_batches(batches)
+            debug_info["source"] = "batches"
+    
+    if not full_text:
         return jsonify({
-            "error": "No batches found",
-            "hint": "Artykuł nie ma zapisanych batchów. Użyj addBatch aby zapisać treść.",
+            "error": "No content found",
+            "hint": "Użyj save_full_article lub addBatch aby zapisać treść.",
             "project_keys": list(project_data.keys())
         }), 400
     
@@ -343,18 +355,14 @@ def editorial_review(project_id):
     if not claude_client and not GEMINI_API_KEY:
         return jsonify({"error": "No AI API configured (need ANTHROPIC_API_KEY or GEMINI_API_KEY)"}), 500
     
-    # Składanie treści z batchów
-    full_text, debug_info = extract_text_from_batches(batches)
-    
-    # Sprawdź czy mamy treść
+    # v32.4: full_text już mamy z wcześniejszego kodu
     word_count = len(full_text.split()) if full_text else 0
     
     if word_count < 50:
         return jsonify({
             "error": f"Article too short for review ({word_count} words)",
             "debug": debug_info,
-            "hint": "Batche istnieją ale nie zawierają tekstu w polu 'text'. Sprawdź strukturę batchów.",
-            "sample_batch_keys": list(batches[0].keys()) if batches else []
+            "hint": "Użyj save_full_article lub addBatch aby zapisać treść."
         }), 400
     
     # Pobierz temat z projektu
@@ -649,9 +657,22 @@ def export_status(project_id):
         return jsonify({"error": "Project not found"}), 404
     
     project_data = doc.to_dict()
-    batches = project_data.get("batches", [])
     
-    full_text, debug_info = extract_text_from_batches(batches)
+    # v32.4: Priorytet źródeł treści
+    full_text = None
+    debug_info = {"source": "none"}
+    batches_count = 0
+    
+    if project_data.get("full_article", {}).get("content"):
+        full_text = project_data["full_article"]["content"]
+        debug_info = {"source": "full_article"}
+    else:
+        batches = project_data.get("batches", [])
+        batches_count = len(batches)
+        if batches:
+            full_text, debug_info = extract_text_from_batches(batches)
+            debug_info["source"] = "batches"
+    
     word_count = len(full_text.split()) if full_text else 0
     
     editorial = project_data.get("editorial_review", {})
@@ -660,7 +681,7 @@ def export_status(project_id):
         "project_id": project_id,
         "topic": project_data.get("topic"),
         "status": project_data.get("status", "UNKNOWN"),
-        "batches_count": len(batches),
+        "batches_count": batches_count,
         "word_count": word_count,
         "debug": debug_info,
         "editorial_review": {
@@ -669,14 +690,14 @@ def export_status(project_id):
             "corrected_word_count": editorial.get("corrected_word_count"),
             "ai_model": editorial.get("ai_model")
         },
-        "ready_for_export": word_count >= 500 and debug_info["batches_with_text"] > 0,
+        "ready_for_export": word_count >= 500,
         "actions": {
             "editorial_review": f"POST /api/project/{project_id}/editorial_review",
             "export_docx": f"GET /api/project/{project_id}/export/docx",
             "export_html": f"GET /api/project/{project_id}/export/html",
             "export_txt": f"GET /api/project/{project_id}/export/txt"
         },
-        "version": "v27.0"
+        "version": "v32.4"
     }), 200
 
 
@@ -694,16 +715,23 @@ def export_docx(project_id):
     
     project_data = doc.to_dict()
     
-    # v27.0: Użyj poprawionego tekstu jeśli istnieje
+    # v32.4: Priorytet źródeł treści
+    # 1. editorial_review.corrected_article (po Claude review)
+    # 2. full_article.content (zapisany przez save_full_article)
+    # 3. batches[] (stary sposób)
     editorial = project_data.get("editorial_review", {})
     corrected = editorial.get("corrected_article", "")
     
     if corrected:
         full_text = corrected
         print(f"[EXPORT_DOCX] Using corrected article ({len(corrected.split())} words)")
+    elif project_data.get("full_article", {}).get("content"):
+        full_text = project_data["full_article"]["content"]
+        print(f"[EXPORT_DOCX] Using full_article ({len(full_text.split())} words)")
     else:
         batches = project_data.get("batches", [])
         full_text, _ = extract_text_from_batches(batches)
+        print(f"[EXPORT_DOCX] Using batches ({len(full_text.split()) if full_text else 0} words)")
     
     if not full_text:
         return jsonify({"error": "No content to export"}), 400
@@ -756,12 +784,14 @@ def export_html(project_id):
     
     project_data = doc.to_dict()
     
-    # v27.0: Użyj poprawionego tekstu jeśli istnieje
+    # v32.4: Priorytet źródeł treści
     editorial = project_data.get("editorial_review", {})
     corrected = editorial.get("corrected_article", "")
     
     if corrected:
         full_text = corrected
+    elif project_data.get("full_article", {}).get("content"):
+        full_text = project_data["full_article"]["content"]
     else:
         batches = project_data.get("batches", [])
         full_text, _ = extract_text_from_batches(batches)
@@ -831,12 +861,14 @@ def export_txt(project_id):
     
     project_data = doc.to_dict()
     
-    # v27.0: Użyj poprawionego tekstu jeśli istnieje
+    # v32.4: Priorytet źródeł treści
     editorial = project_data.get("editorial_review", {})
     corrected = editorial.get("corrected_article", "")
     
     if corrected:
         full_text = corrected
+    elif project_data.get("full_article", {}).get("content"):
+        full_text = project_data["full_article"]["content"]
     else:
         batches = project_data.get("batches", [])
         full_text, _ = extract_text_from_batches(batches)
