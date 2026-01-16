@@ -1,4 +1,4 @@
-# Master SEO API v28.2 - Dependencies
+# Master SEO API v32.0 - Dependencies
 
 # Web Framework
 flask>=3.0.0
@@ -14,7 +14,7 @@ google-cloud-storage>=2.14.0
 spacy>=3.7.0
 pl_core_news_md @ https://github.com/explosion/spacy-models/releases/download/pl_core_news_md-3.7.0/pl_core_news_md-3.7.0-py3-none-any.whl
 
-# Lexical frequency / word statistics
+# 🆕 v32.0: AI Detection
 wordfreq>=3.0.0
 
 # Grammar Check - LanguageTool (v28.1)
