@@ -36,10 +36,57 @@ app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024  # 32 MB
 CORS(app)
 
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-VERSION = "v32.3"  # 🆕 AI Detection FULL + wordfreq n-gram
+VERSION = "v32.5"  # 🔧 FIX: entity_relationships, entities, topics propagation
 
-# 🆕 v31.3: In-memory storage for projects
-PROJECTS = {}
+# ================================================================
+# 🆕 v32.4: Firestore persistence for projects
+# ================================================================
+PROJECTS = {}  # Cache w pamięci
+PROJECTS_COLLECTION = "seo_projects"  # Ta sama kolekcja co export_routes!
+
+
+def save_project_to_firestore(project_id: str, data: dict):
+    """Zapisuje projekt do Firestore."""
+    try:
+        doc_ref = db.collection(PROJECTS_COLLECTION).document(project_id)
+        doc_ref.set(data, merge=True)
+        print(f"[FIRESTORE] ✅ Saved project: {project_id}")
+    except Exception as e:
+        print(f"[FIRESTORE] ❌ Error saving: {e}")
+
+
+def load_project_from_firestore(project_id: str) -> dict:
+    """Ładuje projekt z Firestore."""
+    try:
+        doc_ref = db.collection(PROJECTS_COLLECTION).document(project_id)
+        doc = doc_ref.get()
+        if doc.exists:
+            print(f"[FIRESTORE] ✅ Loaded project: {project_id}")
+            return doc.to_dict()
+        return None
+    except Exception as e:
+        print(f"[FIRESTORE] ❌ Error loading: {e}")
+        return None
+
+
+def get_project(project_id: str) -> dict:
+    """Pobiera projekt z cache lub Firestore."""
+    if project_id in PROJECTS:
+        return PROJECTS[project_id]
+    
+    data = load_project_from_firestore(project_id)
+    if data:
+        PROJECTS[project_id] = data
+        return data
+    return None
+
+
+def update_project(project_id: str, data: dict):
+    """Aktualizuje projekt w cache i Firestore."""
+    if project_id not in PROJECTS:
+        PROJECTS[project_id] = {}
+    PROJECTS[project_id].update(data)
+    save_project_to_firestore(project_id, PROJECTS[project_id])
 
 # ================================================================
 # 🧠 Check if semantic analysis is available
@@ -348,6 +395,25 @@ def s1_analysis_proxy():
                         break
             
             result["entity_seo"] = entity_seo
+            
+            # 🔧 v32.5: Propaguj entity_relationships na główny poziom (dla kompatybilności z GPT)
+            relationships = entity_seo.get("entity_relationships", [])
+            if relationships:
+                result["entity_relationships"] = relationships
+                print(f"[S1_PROXY] ✅ Propagated {len(relationships)} entity_relationships to top level")
+            
+            # 🆕 v32.5: Propaguj entities i topical_coverage na główny poziom
+            entities = entity_seo.get("entities", [])
+            if entities:
+                result["entities"] = entities
+                print(f"[S1_PROXY] ✅ Propagated {len(entities)} entities to top level")
+            
+            topical = entity_seo.get("topical_coverage", [])
+            if topical:
+                result["topics"] = topical  # alias dla GPT
+                result["topical_coverage"] = topical
+                print(f"[S1_PROXY] ✅ Propagated {len(topical)} topics to top level")
+            
             print(f"[S1_PROXY] ✅ Enhanced entity_seo with must_mention_entities")
             
         except Exception as e:
@@ -1012,8 +1078,13 @@ def approve_batch():
             semantic_progress["entity_density_current"] = density_result.get("density", 0)
             semantic_progress["word_count_total"] = density_result.get("word_count", 0)
             
-            # Entities tracking
-            s1_entities = s1_data.get("entities", [])
+            # 🔧 v32.5 FIX: Entities są w entity_seo, nie na głównym poziomie
+            entity_seo = s1_data.get("entity_seo", {})
+            s1_entities = entity_seo.get("entities", [])
+            # Fallback na główny poziom dla kompatybilności
+            if not s1_entities:
+                s1_entities = s1_data.get("entities", [])
+            
             content_lower = accumulated_content.lower()
             
             entities_used = []
@@ -1107,13 +1178,21 @@ def approve_batch():
     
     if AI_DETECTION_ENABLED and batch_content:
         try:
-            # Pobierz previous_paragraphs z projektu (jeśli istnieje)
+            # 🆕 v32.4: Pobierz previous_paragraphs z Firestore
             previous_paragraphs = None
-            if project_id in PROJECTS:
-                previous_paragraphs = PROJECTS[project_id].get("last_batch_paragraphs")
+            project_data = get_project(project_id)
+            if project_data:
+                previous_paragraphs = project_data.get("last_batch_paragraphs")
             
-            # Pobierz entity_relationships z s1_data
-            s1_relationships = s1_data.get("entity_relationships", [])
+            # 🔧 v32.5 FIX: Pobierz entity_relationships z entity_seo (nie z głównego s1_data!)
+            entity_seo = s1_data.get("entity_seo", {})
+            s1_relationships = entity_seo.get("entity_relationships", [])
+            
+            # Fallback: jeśli brak, spróbuj z głównego poziomu (kompatybilność wsteczna)
+            if not s1_relationships:
+                s1_relationships = s1_data.get("entity_relationships", [])
+            
+            print(f"[APPROVE_BATCH] 📊 Found {len(s1_relationships)} entity_relationships")
             
             # Pełna analiza AI detection
             ai_result = full_ai_detection(
@@ -1130,12 +1209,10 @@ def approve_batch():
                 "validations": ai_result.get("validations", {})
             }
             
-            # Zapisz current paragraphs dla następnego batcha
+            # 🆕 v32.4: Zapisz current paragraphs do Firestore
             import re
             current_paragraphs = len(re.split(r'\n\s*\n', batch_content.strip()))
-            if project_id not in PROJECTS:
-                PROJECTS[project_id] = {}
-            PROJECTS[project_id]["last_batch_paragraphs"] = current_paragraphs
+            update_project(project_id, {"last_batch_paragraphs": current_paragraphs})
             
             # Dodaj checkpoint alert jeśli AI score < 50 (CRITICAL)
             if ai_result.get("humanness_score", 100) < 50:
@@ -1172,12 +1249,19 @@ def approve_batch():
     
     if AI_DETECTION_ENABLED and accumulated_content:
         try:
-            # Entity Split 60/40
-            s1_entities = s1_data.get("entities", [])
+            # 🔧 v32.5 FIX: Entity Split 60/40 - entities są w entity_seo
+            entity_seo = s1_data.get("entity_seo", {})
+            s1_entities = entity_seo.get("entities", [])
+            if not s1_entities:
+                s1_entities = s1_data.get("entities", [])
             entity_split_result = calculate_entity_split(accumulated_content, s1_entities)
             
-            # Topic Completeness
-            s1_topics = s1_data.get("topics", s1_data.get("topical_coverage", []))
+            # 🔧 v32.5 FIX: Topic Completeness - topics mogą być w różnych miejscach
+            s1_topics = (
+                entity_seo.get("topical_coverage", []) or  # preferowane miejsce
+                s1_data.get("topics", []) or
+                s1_data.get("topical_coverage", [])
+            )
             topic_completeness_result = calculate_topic_completeness(accumulated_content, s1_topics)
             
             # Dodaj do semantic_progress
@@ -1196,25 +1280,25 @@ def approve_batch():
     
     if AI_DETECTION_ENABLED:
         try:
-            if project_id not in PROJECTS:
-                PROJECTS[project_id] = {}
+            # 🆕 v32.4: Pobierz z Firestore
+            project_data = get_project(project_id) or {}
             
             # Pobierz historię
-            batch_history = PROJECTS[project_id].get("batch_history", [])
+            batch_history = project_data.get("batch_history", [])
             
             # Stwórz rekord dla tego batcha
             current_record = create_batch_record(
                 batch_number=batch_number,
                 humanness_score=ai_detection_result.get("humanness_score", 0),
                 burstiness=ai_detection_result.get("burstiness", 0),
-                paragraphs=PROJECTS[project_id].get("last_batch_paragraphs", 0),
+                paragraphs=project_data.get("last_batch_paragraphs", 0),
                 entity_density=semantic_progress.get("entity_density_current", 0),
                 topic_completeness=topic_completeness_result.get("score", 0)
             )
             
-            # Dodaj do historii
+            # Dodaj do historii i zapisz do Firestore
             batch_history.append(current_record)
-            PROJECTS[project_id]["batch_history"] = batch_history
+            update_project(project_id, {"batch_history": batch_history})
             
             # Analizuj trend
             batch_trend = analyze_batch_trend(batch_history)
@@ -1540,23 +1624,22 @@ def save_full_article(project_id):
             "message": "full_content too short (min 500 chars)"
         }), 400
     
-    # Zapisz do projektu (w PROJECTS dict lub storage)
-    if project_id not in PROJECTS:
-        PROJECTS[project_id] = {}
-    
-    PROJECTS[project_id]["full_article"] = {
-        "content": full_content,
-        "word_count": word_count,
-        "h2_count": h2_count,
-        "saved_at": datetime.utcnow().isoformat()
-    }
+    # 🆕 v32.4: Zapisz do Firestore (persystentnie)
+    update_project(project_id, {
+        "full_article": {
+            "content": full_content,
+            "word_count": word_count,
+            "h2_count": h2_count,
+            "saved_at": datetime.utcnow().isoformat()
+        }
+    })
     
     return jsonify({
         "status": "SAVED",
         "project_id": project_id,
         "word_count": word_count,
         "h2_count": h2_count,
-        "message": "Full article saved. Ready for getFinalReview."
+        "message": "Full article saved to Firestore. Ready for export."
     }), 200
 
 
@@ -1566,10 +1649,12 @@ def save_full_article(project_id):
 @app.get("/api/project/<project_id>/full_article")
 def get_full_article(project_id):
     """Pobiera zapisany pełny artykuł."""
-    if project_id not in PROJECTS:
+    # 🆕 v32.4: Pobierz z Firestore
+    project_data = get_project(project_id)
+    if not project_data:
         return jsonify({"status": "ERROR", "message": "Project not found"}), 404
     
-    full_article = PROJECTS[project_id].get("full_article")
+    full_article = project_data.get("full_article")
     if not full_article:
         return jsonify({"status": "ERROR", "message": "No full article saved. Call saveFullArticle first."}), 404
     
