@@ -35,6 +35,7 @@ import os
 import json
 import math
 import spacy
+from typing import List, Dict, Any, Optional
 from flask import Blueprint, request, jsonify
 from firebase_admin import firestore
 from firestore_tracker_routes import process_batch_in_firestore
@@ -1772,14 +1773,41 @@ def get_pre_batch_info(project_id):
     if current_batch_num > 1 and main_ratio < 0.30:
         ratio_warning = f"⚠️ Main keyword ratio {main_ratio:.0%} < 30%. Użyj więcej '{main_keyword}'!"
     
-    # N-gramy
-    ngrams = s1_data.get("ngrams", [])
-    top_ngrams = [n.get("ngram", "") for n in ngrams if n.get("weight", 0) > 0.4][:15]
+    # v33.3: Wcześniejsze obliczenie remaining_h2 dla dopasowania n-gramów
+    h2_structure = data.get("h2_structure", [])
+    used_h2_early = []
+    for batch in batches:
+        batch_text = batch.get("text", "")
+        h2_in_batch = re.findall(r'(?:^h2:\s*(.+)$|<h2[^>]*>([^<]+)</h2>)', batch_text, re.MULTILINE | re.IGNORECASE)
+        used_h2_early.extend([(m[0] or m[1]).strip() for m in h2_in_batch if m[0] or m[1]])
+    remaining_h2_early = [h2 for h2 in h2_structure if h2 not in used_h2_early]
     
-    ngrams_per_batch = max(3, len(top_ngrams) // total_planned_batches)
-    start_idx = (current_batch_num - 1) * ngrams_per_batch
-    end_idx = min(start_idx + ngrams_per_batch + 2, len(top_ngrams))
-    batch_ngrams = top_ngrams[start_idx:end_idx]
+    # v33.3: N-gramy dopasowane do H2 (zamiast sekwencyjnych)
+    ngrams = s1_data.get("ngrams", [])
+    top_ngrams_objs = [n for n in ngrams if n.get("weight", 0) > 0.4][:15]
+    top_ngrams = [n.get("ngram", "") for n in top_ngrams_objs]
+    
+    # Pobierz użyte n-gramy z poprzednich batchów
+    batches_so_far = data.get("batches", [])
+    used_ngrams = get_used_ngrams_from_batches(batches_so_far, top_ngrams)
+    
+    # Pobierz H2 dla tego batcha
+    current_h2 = remaining_h2_early[0] if remaining_h2_early else main_keyword
+    
+    # v33.3: Dopasuj n-gramy do H2 zamiast sekwencyjnego przydzielania
+    if current_batch_num == 1:
+        # Batch 1 (intro) - użyj n-gramów związanych z main keyword
+        batch_ngrams = get_ngrams_for_h2(main_keyword, top_ngrams_objs, used_ngrams, max_ngrams=4)
+    else:
+        # Pozostałe batche - dopasuj do H2
+        batch_ngrams = get_ngrams_for_h2(current_h2, top_ngrams_objs, used_ngrams, max_ngrams=4)
+    
+    # Fallback na sekwencyjne jeśli brak dopasowań
+    if not batch_ngrams and top_ngrams:
+        ngrams_per_batch = max(3, len(top_ngrams) // total_planned_batches)
+        start_idx = (current_batch_num - 1) * ngrams_per_batch
+        end_idx = min(start_idx + ngrams_per_batch + 2, len(top_ngrams))
+        batch_ngrams = top_ngrams[start_idx:end_idx]
     
     # v28.0: Entity SEO - wyciągnij encje z s1_data
     entity_seo = s1_data.get("entity_seo", {})
@@ -3172,6 +3200,100 @@ def check_main_vs_synonyms_in_text(text: str, main_keyword: str, keywords_state:
         "valid": main_ratio >= 0.3,
         "warning": f"Za dużo synonimów! '{main_keyword}' ma tylko {main_ratio:.0%}. Zamień synonimy." if main_ratio < 0.3 else None
     }
+
+
+def calculate_text_similarity(text1: str, text2: str) -> float:
+    """
+    v33.3: Oblicza podobieństwo między dwoma tekstami (0-1).
+    Używa Jaccard similarity na słowach.
+    """
+    if not text1 or not text2:
+        return 0.0
+    
+    words1 = set(text1.lower().split())
+    words2 = set(text2.lower().split())
+    
+    # Usuń stop words polskie
+    stop_words = {'i', 'w', 'na', 'do', 'z', 'się', 'nie', 'to', 'że', 'o', 'jak', 'ale', 'po', 'co', 'tak', 'za', 'od', 'czy', 'tylko', 'są', 'jest', 'dla', 'oraz', 'przez', 'przy', 'już', 'być', 'ma', 'te', 'ten', 'ta', 'tym'}
+    words1 = words1 - stop_words
+    words2 = words2 - stop_words
+    
+    if not words1 or not words2:
+        return 0.0
+    
+    intersection = len(words1 & words2)
+    union = len(words1 | words2)
+    
+    return intersection / union if union > 0 else 0.0
+
+
+def get_ngrams_for_h2(
+    h2_title: str,
+    all_ngrams: List[dict],
+    used_ngrams: List[str],
+    max_ngrams: int = 4
+) -> List[str]:
+    """
+    v33.3: Dopasowuje n-gramy do tematu H2 używając similarity.
+    
+    Zamiast przydzielać n-gramy sekwencyjnie, wybiera te które 
+    są najbardziej semantycznie związane z nagłówkiem H2.
+    
+    Args:
+        h2_title: Tytuł nagłówka H2 dla tego batcha
+        all_ngrams: Lista wszystkich n-gramów z S1 (z weight)
+        used_ngrams: Lista już użytych n-gramów w poprzednich batchach
+        max_ngrams: Max liczba n-gramów do zwrócenia
+    
+    Returns:
+        Lista n-gramów dopasowanych do H2
+    """
+    if not h2_title or not all_ngrams:
+        return []
+    
+    # Filtruj już użyte
+    available = [n for n in all_ngrams if n.get("ngram", "") not in used_ngrams]
+    
+    if not available:
+        return []
+    
+    # Oblicz score dla każdego n-grama: similarity + weight
+    scored = []
+    for ngram_obj in available:
+        ngram = ngram_obj.get("ngram", "")
+        weight = ngram_obj.get("weight", 0.5)
+        
+        # Similarity do H2
+        similarity = calculate_text_similarity(h2_title, ngram)
+        
+        # Bonus jeśli n-gram zawiera słowo z H2
+        h2_words = set(h2_title.lower().split())
+        ngram_words = set(ngram.lower().split())
+        word_overlap_bonus = 0.3 if h2_words & ngram_words else 0
+        
+        # Final score
+        score = similarity * 0.4 + weight * 0.4 + word_overlap_bonus * 0.2
+        scored.append((ngram, score))
+    
+    # Sortuj po score malejąco
+    scored.sort(key=lambda x: -x[1])
+    
+    # Zwróć top n-gramy
+    return [s[0] for s in scored[:max_ngrams]]
+
+
+def get_used_ngrams_from_batches(batches: List[dict], all_ngrams: List[str]) -> List[str]:
+    """
+    v33.3: Zbiera n-gramy które już zostały użyte w poprzednich batchach.
+    """
+    used = []
+    all_text = " ".join([b.get("text", "") for b in batches]).lower()
+    
+    for ngram in all_ngrams:
+        if ngram.lower() in all_text:
+            used.append(ngram)
+    
+    return used
 
 
 def check_ngram_coverage_in_text(text: str, required_ngrams: list) -> dict:
