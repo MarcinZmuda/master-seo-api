@@ -1,5 +1,6 @@
 # claude_reviewer.py
 # v28.2 - Claude jako Reviewer/Editor batchy
+# v33.3 - + mandatory_entities, diff output
 #
 # System sprawdzania i poprawiania batchy przez Claude API.
 # Sprawdza: SEO, długość, powtórzenia, gramatykę, AI patterns, halucynacje
@@ -8,8 +9,9 @@ import os
 import json
 import re
 import time
+import difflib
 from typing import Dict, List, Optional, Tuple, Any
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 
 try:
     import anthropic
@@ -28,6 +30,23 @@ class ReviewIssue:
 
 
 @dataclass
+class DiffChange:
+    """v33.3: Pojedyncza zmiana w tekście"""
+    type: str  # "removed", "added", "context"
+    text: str
+    line_num: int = 0
+
+
+@dataclass
+class DiffSummary:
+    """v33.3: Podsumowanie zmian"""
+    lines_changed: int = 0
+    words_removed: int = 0
+    words_added: int = 0
+    changes: List[DiffChange] = field(default_factory=list)
+
+
+@dataclass
 class ReviewResult:
     status: str  # APPROVED, CORRECTED, REJECTED, QUICK_CHECK_FAILED
     original_text: str
@@ -36,6 +55,7 @@ class ReviewResult:
     summary: str
     word_count: int = 0
     paragraph_count: int = 0
+    diff: Optional[DiffSummary] = None  # v33.3: diff output
 
 
 # ================================================================
@@ -287,7 +307,9 @@ def run_quick_checks(text: str, context: Dict) -> Dict:
 # ================================================================
 
 def build_review_prompt(text: str, ctx: Dict) -> str:
-    """v29.2: Prompt z listą BRAKUJĄCYCH FRAZ do uzupełnienia przez Claude"""
+    """v29.2: Prompt z listą BRAKUJĄCYCH FRAZ do uzupełnienia przez Claude
+       v33.3: + mandatory_entities których Claude NIE MOŻE usunąć
+    """
     
     required = "\n".join([f'  • "{k["keyword"]}" (min 1×, zalecane {k.get("count",1)}×)' 
                           for k in ctx.get("keywords_required", []) if k.get("keyword")])
@@ -304,6 +326,20 @@ def build_review_prompt(text: str, ctx: Dict) -> str:
     # v29.2: BRAKUJĄCE FRAZY DO UZUPEŁNIENIA
     missing_basic = ctx.get("missing_basic", [])
     missing_extended = ctx.get("missing_extended", [])
+    
+    # v33.3: MANDATORY ENTITIES - Claude NIE MOŻE ich usunąć/zmienić
+    mandatory_entities = ctx.get("mandatory_entities", [])
+    mandatory_section = ""
+    if mandatory_entities:
+        entities_list = "\n".join([f'  ⛔ "{e}"' for e in mandatory_entities])
+        mandatory_section = f"""
+### ⛔ OBOWIĄZKOWE ENCJE (NIE USUWAJ, NIE ZMIENIAJ!)
+{entities_list}
+
+Te encje/frazy MUSZĄ pozostać w tekście BEZ ZMIAN. Możesz tylko poprawić ich otoczenie gramatycznie.
+Jeśli usuniesz lub zmienisz którąkolwiek z nich - twoja odpowiedź zostanie odrzucona!
+
+"""
     
     missing_section = ""
     if missing_basic or missing_extended:
@@ -330,7 +366,7 @@ def build_review_prompt(text: str, ctx: Dict) -> str:
     return f"""Jesteś redaktorem i stylistą języka polskiego. Sprawdź i POPRAW tekst.
 
 ## PRIORYTETY (w tej kolejności!):
-
+{mandatory_section}
 ### 🔴 PRIORYTET 1: JAKOŚĆ TEKSTU (NAJWAŻNIEJSZE!)
 Tekst musi być poprawny, naturalny i przyjemny w czytaniu.
 
@@ -401,6 +437,78 @@ ZASADY:
 - PRIORYTET 1 (jakość) ważniejszy niż dokładne ilości fraz!"""
 
 
+def generate_diff(original: str, corrected: str) -> DiffSummary:
+    """
+    v33.3: Generuje diff między oryginałem a poprawionym tekstem.
+    """
+    if not corrected or original == corrected:
+        return DiffSummary()
+    
+    original_lines = original.splitlines()
+    corrected_lines = corrected.splitlines()
+    
+    differ = difflib.unified_diff(
+        original_lines,
+        corrected_lines,
+        lineterm='',
+        n=0  # bez kontekstu
+    )
+    
+    changes = []
+    words_removed = 0
+    words_added = 0
+    line_num = 0
+    
+    for line in differ:
+        if line.startswith('@@'):
+            # Parse line number from @@ -X,Y +A,B @@
+            match = re.search(r'\+(\d+)', line)
+            if match:
+                line_num = int(match.group(1))
+            continue
+        elif line.startswith('---') or line.startswith('+++'):
+            continue
+        elif line.startswith('-'):
+            text = line[1:]
+            if text.strip():
+                changes.append(DiffChange(type="removed", text=text, line_num=line_num))
+                words_removed += len(text.split())
+        elif line.startswith('+'):
+            text = line[1:]
+            if text.strip():
+                changes.append(DiffChange(type="added", text=text, line_num=line_num))
+                words_added += len(text.split())
+            line_num += 1
+    
+    return DiffSummary(
+        lines_changed=len([c for c in changes if c.type in ["removed", "added"]]),
+        words_removed=words_removed,
+        words_added=words_added,
+        changes=changes[:20]  # Limit do 20 zmian
+    )
+
+
+def validate_mandatory_entities(original: str, corrected: str, mandatory: List[str]) -> List[str]:
+    """
+    v33.3: Sprawdza czy mandatory_entities zostały zachowane w tekście.
+    Zwraca listę brakujących encji.
+    """
+    if not mandatory or not corrected:
+        return []
+    
+    missing = []
+    original_lower = original.lower()
+    corrected_lower = corrected.lower()
+    
+    for entity in mandatory:
+        entity_lower = entity.lower()
+        # Sprawdź czy encja była w oryginale i zniknęła z poprawionego
+        if entity_lower in original_lower and entity_lower not in corrected_lower:
+            missing.append(entity)
+    
+    return missing
+
+
 def review_with_claude(text: str, ctx: Dict) -> ReviewResult:
     if not ANTHROPIC_AVAILABLE or not os.environ.get("ANTHROPIC_API_KEY"):
         return ReviewResult("APPROVED", text, None, [], "Claude niedostępny", len(text.split()))
@@ -437,6 +545,29 @@ def review_with_claude(text: str, ctx: Dict) -> ReviewResult:
             status = "APPROVED"
             corrected = None
         
+        # v33.3: Walidacja mandatory_entities
+        mandatory_entities = ctx.get("mandatory_entities", [])
+        if corrected and mandatory_entities:
+            missing_entities = validate_mandatory_entities(text, corrected, mandatory_entities)
+            if missing_entities:
+                # Claude usunął obowiązkowe encje - odrzuć korektę!
+                issues.append(ReviewIssue(
+                    type="mandatory_entity_removed",
+                    severity="critical",
+                    description=f"Claude usunął obowiązkowe encje: {', '.join(missing_entities)}",
+                    fix_applied=False
+                ))
+                # Przywróć oryginalny tekst
+                print(f"[CLAUDE_REVIEWER] ⚠️ Mandatory entities removed: {missing_entities} - reverting to original")
+                corrected = None
+                status = "APPROVED"  # Zachowaj oryginalny tekst
+        
+        # v33.3: Generuj diff jeśli są zmiany
+        diff_summary = None
+        if corrected and corrected != text:
+            diff_summary = generate_diff(text, corrected)
+            print(f"[CLAUDE_REVIEWER] 📝 Diff: {diff_summary.lines_changed} lines, -{diff_summary.words_removed}/+{diff_summary.words_added} words")
+        
         final = corrected if corrected else text
         
         return ReviewResult(
@@ -446,7 +577,8 @@ def review_with_claude(text: str, ctx: Dict) -> ReviewResult:
             issues=issues,
             summary=data.get("summary", ""),
             word_count=len(final.split()),
-            paragraph_count=len([p for p in final.split('\n\n') if p.strip()])
+            paragraph_count=len([p for p in final.split('\n\n') if p.strip()]),
+            diff=diff_summary  # v33.3
         )
         
     except Exception as e:
