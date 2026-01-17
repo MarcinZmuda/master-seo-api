@@ -48,6 +48,22 @@ except ImportError:
     WORDFREQ_AVAILABLE = False
     print("[AI_DETECTION] ⚠️ wordfreq not available - lexical sophistication disabled")
 
+# ================================================================
+# 📦 v33.3: Opcjonalny import spacy dla POS diversity
+# ================================================================
+try:
+    import spacy
+    try:
+        _nlp_pos = spacy.load("pl_core_news_sm")
+        SPACY_POS_AVAILABLE = True
+        print("[AI_DETECTION] ✅ spacy pl_core_news_sm loaded for POS analysis")
+    except OSError:
+        SPACY_POS_AVAILABLE = False
+        print("[AI_DETECTION] ⚠️ spacy pl_core_news_sm not found - POS diversity disabled")
+except ImportError:
+    SPACY_POS_AVAILABLE = False
+    print("[AI_DETECTION] ⚠️ spacy not available - POS diversity disabled")
+
 
 # ================================================================
 # 📊 KONFIGURACJA
@@ -190,6 +206,98 @@ def calculate_burstiness(text: str) -> Dict[str, Any]:
         "min_length": min(lengths),
         "max_length": max(lengths)
     }
+
+
+# ================================================================
+# 🆕 v33.3: POS DIVERSITY (różnorodność części mowy)
+# ================================================================
+def calculate_pos_diversity(text: str) -> Dict[str, Any]:
+    """
+    v33.3: Mierzy zróżnicowanie części mowy na początku zdań.
+    
+    AI często zaczyna zdania od tych samych konstrukcji gramatycznych
+    (np. "Warto..." - VERB, "Ważne jest..." - ADJ).
+    
+    Wysoka entropia POS = bardziej ludzki tekst.
+    
+    Returns:
+        Dict z: value (0-1), status, first_pos_distribution
+    """
+    if not SPACY_POS_AVAILABLE:
+        return {
+            "value": 0.5,  # Neutral default
+            "status": "DISABLED",
+            "message": "spacy niedostępny - POS analysis wyłączona",
+            "enabled": False
+        }
+    
+    try:
+        doc = _nlp_pos(text)
+        first_pos = []
+        
+        for sent in doc.sents:
+            tokens = [t for t in sent if not t.is_punct and not t.is_space]
+            if tokens:
+                first_pos.append(tokens[0].pos_)
+        
+        if len(first_pos) < 5:
+            return {
+                "value": 0.5,
+                "status": "WARNING",
+                "message": "Za mało zdań do analizy POS (min 5)",
+                "enabled": True,
+                "sentence_count": len(first_pos)
+            }
+        
+        # Oblicz entropię Shannon'a dla POS
+        counter = Counter(first_pos)
+        total = len(first_pos)
+        
+        entropy = 0
+        for count in counter.values():
+            if count > 0:
+                p = count / total
+                entropy -= p * math.log2(p)
+        
+        # Normalizuj do 0-1
+        unique_pos = len(counter)
+        max_entropy = math.log2(unique_pos) if unique_pos > 1 else 1
+        normalized = entropy / max_entropy if max_entropy > 0 else 0
+        normalized = round(normalized, 2)
+        
+        # Status
+        if normalized < 0.4:
+            status = "CRITICAL"
+            message = f"Monotonne konstrukcje gramatyczne (POS entropy {normalized})"
+        elif normalized < 0.6:
+            status = "WARNING"
+            message = f"Niska różnorodność gramatyczna"
+        else:
+            status = "OK"
+            message = f"Dobra różnorodność POS"
+        
+        # Top 3 najczęstsze POS
+        top_pos = counter.most_common(3)
+        
+        return {
+            "value": normalized,
+            "status": status,
+            "message": message,
+            "enabled": True,
+            "unique_pos_count": unique_pos,
+            "total_sentences": total,
+            "top_pos": [{"pos": p, "count": c, "percent": round(c/total*100)} for p, c in top_pos],
+            "pos_distribution": dict(counter)
+        }
+        
+    except Exception as e:
+        print(f"[AI_DETECTION] POS analysis error: {e}")
+        return {
+            "value": 0.5,
+            "status": "ERROR",
+            "message": f"Błąd analizy POS: {e}",
+            "enabled": True
+        }
 
 
 # ================================================================
@@ -673,6 +781,9 @@ def calculate_humanness_score(text: str) -> Dict[str, Any]:
     entropy = calculate_starter_entropy(text)
     repetition = calculate_word_repetition(text)
     
+    # v33.3: POS diversity
+    pos_diversity = calculate_pos_diversity(text)
+    
     def normalize_burstiness(val):
         if val < config.BURSTINESS_CRITICAL_LOW:
             return 0.0
@@ -717,15 +828,36 @@ def calculate_humanness_score(text: str) -> Dict[str, Any]:
         else:
             return 0.0
     
+    # v33.3: Normalize POS diversity (same scale as entropy)
+    def normalize_pos(val):
+        if not SPACY_POS_AVAILABLE or val == 0:
+            return 0.5  # Neutral if disabled
+        if val >= 0.6:
+            return 1.0
+        elif val >= 0.4:
+            return 0.5 + (val - 0.4) / 0.2 * 0.5
+        else:
+            return val / 0.4 * 0.5
+    
     scores = {
         "burstiness": normalize_burstiness(burstiness.get("value", 0)),
         "vocabulary": normalize_ttr(vocabulary.get("value", 0)),
         "sophistication": normalize_zipf(sophistication.get("value", 0)),
         "entropy": normalize_entropy(entropy.get("value", 0)),
-        "repetition": repetition.get("value", 1.0)
+        "repetition": repetition.get("value", 1.0),
+        "pos_diversity": normalize_pos(pos_diversity.get("value", 0.5))  # v33.3
     }
     
-    weights = config.WEIGHTS
+    # v33.3: Zaktualizowane wagi z POS diversity
+    weights = {
+        "burstiness": 0.25,      # było 0.30
+        "vocabulary": 0.15,
+        "sophistication": 0.10,
+        "entropy": 0.20,         # było 0.20
+        "repetition": 0.20,
+        "pos_diversity": 0.10    # v33.3: nowa metryka
+    }
+    
     humanness = sum(scores[k] * weights[k] for k in scores)
     humanness_score = round(humanness * 100, 0)
     
@@ -750,6 +882,9 @@ def calculate_humanness_score(text: str) -> Dict[str, Any]:
         all_warnings.append(entropy.get("message"))
     if repetition.get("status") != "OK":
         all_warnings.append(repetition.get("message"))
+    # v33.3: POS diversity warnings
+    if pos_diversity.get("status") not in ["OK", "DISABLED"] and pos_diversity.get("enabled", True):
+        all_warnings.append(pos_diversity.get("message"))
     
     all_suggestions = []
     all_suggestions.extend(entropy.get("suggestions", []))
@@ -764,7 +899,8 @@ def calculate_humanness_score(text: str) -> Dict[str, Any]:
             "vocabulary_richness": vocabulary,
             "lexical_sophistication": sophistication,
             "starter_entropy": entropy,
-            "word_repetition": repetition
+            "word_repetition": repetition,
+            "pos_diversity": pos_diversity  # v33.3
         },
         "normalized_scores": scores,
         "warnings": all_warnings[:5],
