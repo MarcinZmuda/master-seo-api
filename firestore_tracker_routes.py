@@ -435,6 +435,22 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
     except Exception as e:
         print(f"[FIRESTORE] ⚠️ Błąd zapisu: {e}")
 
+    # =========================================================================
+    # v33.3: Przygotuj keywords_state_after do response
+    # GPT od razu widzi aktualny stan keywords bez dodatkowego GET /status
+    # =========================================================================
+    keywords_state_after = {}
+    for rid, meta in keywords_state.items():
+        keywords_state_after[rid] = {
+            "keyword": meta.get("keyword", ""),
+            "type": meta.get("type", "BASIC"),
+            "actual_uses": meta.get("actual_uses", 0),
+            "target_min": meta.get("target_min", 1),
+            "target_max": meta.get("target_max", 999),
+            "remaining_max": meta.get("remaining_max", 0),
+            "status": meta.get("status", "UNDER")
+        }
+
     return {
         "status": status,
         "semantic_score": semantic_score,
@@ -448,6 +464,7 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         "unified_counting": UNIFIED_COUNTING if 'UNIFIED_COUNTING' in dir() else False,  # v24.2
         "in_headers": in_headers if 'in_headers' in dir() else {},  # v24.2: frazy w H2/H3
         "in_intro": in_intro if 'in_intro' in dir() else {},  # v24.2: frazy w intro
+        "keywords_state_after": keywords_state_after,  # v33.3: Aktualny stan keywords po zapisie batcha
         "status_code": 200
     }
 
