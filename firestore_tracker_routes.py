@@ -78,6 +78,102 @@ else:
 
 
 # ============================================================================
+# v33.3: DELTA-S2 - Mierzy przyrost pokrycia encji po każdym batchu
+# ============================================================================
+def calculate_delta_s2(
+    batch_text: str,
+    accumulated_text: str,
+    s1_entities: list,
+    batch_number: int,
+    total_batches: int = 7
+) -> dict:
+    """
+    v33.3: Mierzy ile nowych encji z S1 zostało pokrytych w tym batchu.
+    
+    Pozwala śledzić czy "przyrost wiedzy" jest równomierny.
+    
+    Args:
+        batch_text: Tekst bieżącego batcha
+        accumulated_text: Tekst wszystkich poprzednich batchów
+        s1_entities: Lista encji z S1 analysis
+        batch_number: Numer bieżącego batcha (1-7)
+        total_batches: Planowana liczba batchów
+    
+    Returns:
+        Dict z: delta_entities, coverage_percent, on_track
+    """
+    if not s1_entities:
+        return {
+            "enabled": False,
+            "message": "Brak encji z S1"
+        }
+    
+    # Normalizuj encje do listy stringów
+    entity_names = []
+    for e in s1_entities:
+        if isinstance(e, dict):
+            name = e.get("entity", e.get("name", ""))
+        else:
+            name = str(e)
+        if name:
+            entity_names.append(name.lower())
+    
+    if not entity_names:
+        return {
+            "enabled": False,
+            "message": "Brak nazw encji"
+        }
+    
+    # Funkcja pomocnicza - które encje są pokryte w tekście
+    def get_covered_entities(text: str) -> set:
+        text_lower = text.lower()
+        covered = set()
+        for entity in entity_names:
+            if entity in text_lower:
+                covered.add(entity)
+        return covered
+    
+    # Encje pokryte przed tym batchem
+    covered_before = get_covered_entities(accumulated_text) if accumulated_text else set()
+    
+    # Encje pokryte po tym batchu
+    full_text = (accumulated_text + "\n\n" + batch_text) if accumulated_text else batch_text
+    covered_after = get_covered_entities(full_text)
+    
+    # Delta - nowe encje w tym batchu
+    new_entities = covered_after - covered_before
+    
+    # Oblicz oczekiwany przyrost
+    total_entities = len(entity_names)
+    expected_per_batch = total_entities / total_batches
+    expected_by_now = expected_per_batch * batch_number
+    
+    # Status
+    coverage_percent = len(covered_after) / total_entities * 100 if total_entities > 0 else 0
+    on_track = len(covered_after) >= (expected_by_now * 0.8)  # 80% oczekiwanego = OK
+    
+    # Pozostałe do pokrycia
+    remaining = set(entity_names) - covered_after
+    
+    return {
+        "enabled": True,
+        "batch_number": batch_number,
+        "delta_entities": list(new_entities),
+        "delta_count": len(new_entities),
+        "total_covered": len(covered_after),
+        "total_entities": total_entities,
+        "coverage_percent": round(coverage_percent, 1),
+        "expected_by_now": round(expected_by_now, 1),
+        "on_track": on_track,
+        "remaining_entities": list(remaining)[:10],  # Max 10
+        "remaining_count": len(remaining),
+        "status": "OK" if on_track else "BEHIND",
+        "message": f"Pokryto {len(covered_after)}/{total_entities} encji ({coverage_percent:.0f}%)" + 
+                   ("" if on_track else f" - poniżej oczekiwań ({expected_by_now:.0f})")
+    }
+
+
+# ============================================================================
 # 1. COUNTING FUNCTIONS
 # ============================================================================
 def count_all_forms(text: str, keyword: str) -> int:
@@ -451,6 +547,36 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
             "status": meta.get("status", "UNDER")
         }
 
+    # =========================================================================
+    # v33.3: Delta-S2 - mierz przyrost pokrycia encji
+    # =========================================================================
+    delta_s2 = None
+    try:
+        s1_data = project_data.get("s1_data", {})
+        entity_seo = s1_data.get("entity_seo", {})
+        s1_entities = entity_seo.get("entities", [])
+        
+        # Zbuduj accumulated_text z poprzednich batchów (bez bieżącego)
+        previous_batches = project_data.get("batches", [])[:-1]  # Bez właśnie dodanego
+        accumulated_text = "\n\n".join([b.get("text", "") for b in previous_batches])
+        
+        # Oblicz batch_number
+        batch_number = len(project_data.get("batches", []))
+        total_batches = project_data.get("total_planned_batches", 7)
+        
+        if s1_entities:
+            delta_s2 = calculate_delta_s2(
+                batch_text=batch_text,
+                accumulated_text=accumulated_text,
+                s1_entities=s1_entities,
+                batch_number=batch_number,
+                total_batches=total_batches
+            )
+            print(f"[TRACKER] 📊 Delta-S2: +{delta_s2.get('delta_count', 0)} encji, total {delta_s2.get('coverage_percent', 0)}%")
+    except Exception as e:
+        print(f"[TRACKER] Delta-S2 error: {e}")
+        delta_s2 = {"enabled": False, "error": str(e)}
+
     return {
         "status": status,
         "semantic_score": semantic_score,
@@ -465,6 +591,7 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         "in_headers": in_headers if 'in_headers' in dir() else {},  # v24.2: frazy w H2/H3
         "in_intro": in_intro if 'in_intro' in dir() else {},  # v24.2: frazy w intro
         "keywords_state_after": keywords_state_after,  # v33.3: Aktualny stan keywords po zapisie batcha
+        "delta_s2": delta_s2,  # v33.3: Przyrost pokrycia encji
         "status_code": 200
     }
 
