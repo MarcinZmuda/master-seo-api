@@ -36,7 +36,7 @@ app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024  # 32 MB
 CORS(app)
 
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-VERSION = "v33.0"  # 🆕 Humanization FULL: burstiness fix, synonyms, fix_instructions
+VERSION = "v34.0"  # 🆕 Semantic Entity SEO: Concept Map, Proximity Validation, Lead Paragraph
 
 # ================================================================
 # 🆕 v32.4: Firestore persistence for projects
@@ -149,6 +149,28 @@ except ImportError as e:
     print(f"[MASTER] ⚠️ AI Detection not available: {e}")
 
 # ================================================================
+# 🆕 v34.0: SEMANTIC ENTITY SEO - Concept Map & Proximity Validation
+# ================================================================
+try:
+    from concept_map_extractor import (
+        extract_concept_map,
+        flatten_supporting_entities,
+        format_concept_map_for_gpt,
+        get_proximity_instructions
+    )
+    from semantic_proximity_validator import (
+        full_semantic_validation,
+        get_keyword_context_statuses,
+        validate_lead_paragraph,
+        validate_semantic_proximity
+    )
+    SEMANTIC_ENTITY_SEO_ENABLED = True
+    print("[MASTER] ✅ Semantic Entity SEO v34.0 loaded (Concept Map + Proximity Validation)")
+except ImportError as e:
+    SEMANTIC_ENTITY_SEO_ENABLED = False
+    print(f"[MASTER] ⚠️ Semantic Entity SEO not available: {e}")
+
+# ================================================================
 # 🔗 N-gram API Configuration (for S1 proxy)
 # ================================================================
 NGRAM_API_URL = os.getenv("NGRAM_API_URL", "https://gpt-ngram-api.onrender.com")
@@ -207,6 +229,7 @@ def s1_analysis_proxy():
     """
     Proxy endpoint dla S1 analysis.
     v31.0: + semantic_enhancement data
+    v34.0: + concept_map extraction (Semantic Entity SEO)
     """
     data = request.get_json(force=True)
     
@@ -473,6 +496,79 @@ def s1_analysis_proxy():
             except Exception as e:
                 print(f"[S1_PROXY] ⚠️ Semantic enhancement hints failed: {e}")
         
+        # =============================================================
+        # 🆕 v34.0: CONCEPT MAP EXTRACTION (Semantic Entity SEO)
+        # =============================================================
+        if SEMANTIC_ENTITY_SEO_ENABLED:
+            try:
+                # Zbierz teksty konkurencji do analizy concept map
+                competitor_texts = []
+                
+                # Źródło 1: scraped content z competitors
+                for comp in competitors:
+                    if isinstance(comp, dict):
+                        content = comp.get("content") or comp.get("text") or comp.get("snippet", "")
+                        if content and len(content) > 200:
+                            competitor_texts.append(content)
+                
+                # Źródło 2: full_text_sample jeśli brak
+                if not competitor_texts:
+                    ft = result.get("full_text_sample") or result.get("full_text_content") or ""
+                    if ft and len(ft) > 200:
+                        competitor_texts.append(ft)
+                
+                # Źródło 3: PAA answers
+                paa = serp_data.get("paa_questions", [])
+                for item in paa:
+                    if isinstance(item, dict):
+                        answer = item.get("answer") or item.get("snippet", "")
+                        if answer and len(answer) > 100:
+                            competitor_texts.append(answer)
+                
+                if competitor_texts:
+                    print(f"[S1_PROXY] 🧠 Extracting Concept Map from {len(competitor_texts)} texts...")
+                    
+                    concept_map_result = extract_concept_map(
+                        main_keyword=keyword,
+                        competitor_texts=competitor_texts
+                    )
+                    
+                    concept_map = concept_map_result.get("concept_map", {})
+                    
+                    # Dodaj concept_map do wyniku
+                    result["concept_map"] = concept_map
+                    
+                    # Przygotuj uproszczoną strukturę entity_seo_v34
+                    supporting_entities_flat = flatten_supporting_entities(
+                        concept_map.get("supporting_entities", {})
+                    )
+                    
+                    result["entity_seo_v34"] = {
+                        "main_entity": concept_map.get("main_entity", {}),
+                        "supporting_entities": supporting_entities_flat,
+                        "relationships": concept_map.get("relationships", []),
+                        "classification_triplet": concept_map.get("classification_triplet", {}),
+                        "proximity_clusters": concept_map.get("proximity_clusters", []),
+                        "semantic_confidence_terms": concept_map.get("semantic_confidence_terms", []),
+                        "proximity_instructions": get_proximity_instructions(
+                            concept_map.get("proximity_clusters", [])
+                        )
+                    }
+                    
+                    print(f"[S1_PROXY] ✅ Concept Map extracted: "
+                          f"main_entity='{concept_map.get('main_entity', {}).get('name', 'N/A')}', "
+                          f"{len(supporting_entities_flat)} supporting entities, "
+                          f"{len(concept_map.get('proximity_clusters', []))} proximity clusters")
+                else:
+                    print(f"[S1_PROXY] ⚠️ No competitor texts for Concept Map extraction")
+                    result["concept_map"] = {}
+                    result["entity_seo_v34"] = {}
+                    
+            except Exception as e:
+                print(f"[S1_PROXY] ⚠️ Concept Map extraction failed: {e}")
+                result["concept_map"] = {}
+                result["entity_seo_v34"] = {"error": str(e)}
+        
         return jsonify(result), 200
         
     except requests.exceptions.Timeout:
@@ -612,6 +708,79 @@ def quick_semantic_check():
         
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# ================================================================
+# 🆕 v34.0: SEMANTIC PROXIMITY CHECK ENDPOINT
+# ================================================================
+@app.post("/api/semantic_proximity_check")
+def semantic_proximity_check():
+    """
+    🆕 v34.0: Sprawdza bliskość semantyczną fraz kluczowych.
+    
+    Weryfikuje czy frazy kluczowe są "otoczone" encjami wspierającymi
+    w promieniu 25 słów (Entity Proximity).
+    
+    Request body:
+    {
+        "text": "treść batcha",
+        "keywords": ["fraza1", "fraza2"],
+        "concept_map": {...},  // z S1
+        "batch_number": 1  // dla walidacji Lead Paragraph
+    }
+    
+    Returns:
+    {
+        "status": "OK" | "WARNING" | "LOW_SEMANTIC_CONTEXT",
+        "semantic_score": 82,
+        "isolated_keywords": [...],
+        "lead_paragraph": {...},  // tylko dla batch_number=1
+        "suggestions": [...]
+    }
+    """
+    if not SEMANTIC_ENTITY_SEO_ENABLED:
+        return jsonify({
+            "error": "Semantic Entity SEO not available",
+            "message": "concept_map_extractor or semantic_proximity_validator not loaded"
+        }), 503
+    
+    data = request.get_json(force=True)
+    
+    text = data.get("text", "")
+    keywords = data.get("keywords", [])
+    concept_map = data.get("concept_map", {})
+    batch_number = data.get("batch_number", 1)
+    
+    if not text or len(text) < 100:
+        return jsonify({"error": "Text too short (min 100 chars)"}), 400
+    
+    if not keywords:
+        return jsonify({"error": "No keywords provided"}), 400
+    
+    try:
+        result = full_semantic_validation(
+            text=text,
+            keywords=keywords,
+            concept_map=concept_map,
+            batch_number=batch_number
+        )
+        
+        return jsonify({
+            "status": result.get("overall_semantic_status", "UNKNOWN"),
+            "semantic_score": result.get("semantic_score", 0),
+            "isolated_keywords": result.get("isolated_keywords", []),
+            "lead_paragraph": result.get("lead_paragraph_validation"),
+            "proximity_stats": result.get("proximity_validation", {}).get("stats", {}),
+            "warnings": result.get("warnings", []),
+            "suggestions": result.get("suggestions", [])
+        }), 200
+        
+    except Exception as e:
+        print(f"[SEMANTIC_PROXIMITY] ❌ Error: {e}")
+        return jsonify({
+            "error": "Semantic proximity check failed",
+            "message": str(e)
+        }), 500
 
 
 @app.post("/api/synthesize_topics")
@@ -754,7 +923,8 @@ def s1_health_check():
                 "ngram_analysis_endpoint": NGRAM_ANALYSIS_ENDPOINT,
                 "proxy_enabled": True,
                 "semantic_enabled": SEMANTIC_ENABLED,
-                "semantic_enhancement_enabled": SEMANTIC_ENHANCEMENT_ENABLED
+                "semantic_enhancement_enabled": SEMANTIC_ENHANCEMENT_ENABLED,
+                "semantic_entity_seo_enabled": SEMANTIC_ENTITY_SEO_ENABLED  # 🆕 v34.0
             }), 200
         else:
             return jsonify({
@@ -763,7 +933,8 @@ def s1_health_check():
                 "ngram_base_url": NGRAM_BASE_URL,
                 "proxy_enabled": True,
                 "semantic_enabled": SEMANTIC_ENABLED,
-                "semantic_enhancement_enabled": SEMANTIC_ENHANCEMENT_ENABLED
+                "semantic_enhancement_enabled": SEMANTIC_ENHANCEMENT_ENABLED,
+                "semantic_entity_seo_enabled": SEMANTIC_ENTITY_SEO_ENABLED
             }), 200
     except Exception as e:
         return jsonify({
@@ -772,7 +943,8 @@ def s1_health_check():
             "ngram_base_url": NGRAM_BASE_URL,
             "proxy_enabled": True,
             "semantic_enabled": SEMANTIC_ENABLED,
-            "semantic_enhancement_enabled": SEMANTIC_ENHANCEMENT_ENABLED
+            "semantic_enhancement_enabled": SEMANTIC_ENHANCEMENT_ENABLED,
+            "semantic_entity_seo_enabled": SEMANTIC_ENTITY_SEO_ENABLED
         }), 503
 
 
@@ -822,8 +994,10 @@ def master_debug(project_id):
         "last_update": batches[-1]["timestamp"].isoformat() if batches else None,
         "lsi_keywords": data.get("lsi_enrichment", {}).get("count", 0),
         "has_final_review": "final_review" in data,
+        "has_concept_map": "concept_map" in data,  # 🆕 v34.0
         "semantic_enabled": SEMANTIC_ENABLED,
-        "semantic_enhancement_enabled": SEMANTIC_ENHANCEMENT_ENABLED
+        "semantic_enhancement_enabled": SEMANTIC_ENHANCEMENT_ENABLED,
+        "semantic_entity_seo_enabled": SEMANTIC_ENTITY_SEO_ENABLED  # 🆕 v34.0
     }), 200
 
 
@@ -857,7 +1031,9 @@ def health():
             "export_routes",
             "seo_optimizer",
             "s1_proxy (to N-gram API)",
-            "semantic_enhancement v31.0" if SEMANTIC_ENHANCEMENT_ENABLED else "semantic_enhancement (disabled)"
+            "semantic_enhancement v31.0" if SEMANTIC_ENHANCEMENT_ENABLED else "semantic_enhancement (disabled)",
+            "ai_detection v33.0" if AI_DETECTION_ENABLED else "ai_detection (disabled)",
+            "semantic_entity_seo v34.0" if SEMANTIC_ENTITY_SEO_ENABLED else "semantic_entity_seo (disabled)"  # 🆕
         ],
         "debug_mode": DEBUG_MODE,
         "firebase_connected": True,
@@ -866,14 +1042,37 @@ def health():
         "s1_proxy_enabled": True,
         "semantic_enabled": SEMANTIC_ENABLED,
         "semantic_enhancement_enabled": SEMANTIC_ENHANCEMENT_ENABLED,
+        "ai_detection_enabled": AI_DETECTION_ENABLED,
+        "semantic_entity_seo_enabled": SEMANTIC_ENTITY_SEO_ENABLED,  # 🆕 v34.0
+        "features_v34_0": [  # 🆕 v34.0
+            "Concept Map extraction from competitors (Gemini)",
+            "Entity Proximity validation (25 word radius)",
+            "Lead Paragraph / Golden Paragraph check",
+            "Classification Triplet validation",
+            "Proximity Clusters rules",
+            "Supporting Entities tracking",
+            "context_status for keywords (OK/WARNING/ISOLATED)",
+            "/api/semantic_proximity_check endpoint",
+            "S1 response includes concept_map and entity_seo_v34"
+        ],
+        "features_v33_0": [
+            "Humanization helpers",
+            "Burstiness fix instructions",
+            "Word repetition detailed check",
+            "Synonym suggestions"
+        ],
+        "features_v32_0": [
+            "AI Detection via wordfreq",
+            "Dwupoziomowe progi burstiness (CRITICAL/WARNING)",
+            "Vocabulary Richness (TTR)",
+            "Lexical Sophistication",
+            "Sentence Starter Entropy"
+        ],
         "features_v31_0": [
             "Entity Density validation",
             "Topic Completeness check",
             "Entity Gap detection (auto from S1)",
-            "Source Effort scoring",
-            "/api/semantic_validate endpoint",
-            "/api/quick_semantic_check endpoint",
-            "S1 response includes semantic_enhancement_hints"
+            "Source Effort scoring"
         ]
     }), 200
 
@@ -893,8 +1092,10 @@ def version_info():
             "export_routes": "v23.9-editorial-review",
             "seo_optimizer": "v23.9",
             "final_review_routes": "v23.9",
-            "s1_proxy": "v31.0 (semantic hints)",
-            "unified_validator": "v31.0 (semantic enhancement)"
+            "s1_proxy": "v34.0 (semantic + concept_map)",  # 🆕 v34.0
+            "unified_validator": "v31.0 (semantic enhancement)",
+            "concept_map_extractor": "v34.0" if SEMANTIC_ENTITY_SEO_ENABLED else "disabled",  # 🆕 v34.0
+            "semantic_proximity_validator": "v34.0" if SEMANTIC_ENTITY_SEO_ENABLED else "disabled"  # 🆕 v34.0
         },
         "optimizations": {
             "approve_batch_response": "~500B (was 220KB)",
@@ -910,12 +1111,25 @@ def version_info():
                 "source_effort"
             ]
         },
+        "semantic_entity_seo": {  # 🆕 v34.0
+            "enabled": SEMANTIC_ENTITY_SEO_ENABLED,
+            "features": [
+                "concept_map_extraction",
+                "entity_proximity_validation",
+                "lead_paragraph_check",
+                "classification_triplet",
+                "proximity_clusters",
+                "context_status_tracking"
+            ]
+        },
         "environment": {
             "debug_mode": DEBUG_MODE,
             "firebase_connected": True,
             "ngram_base_url": NGRAM_BASE_URL,
             "semantic_enabled": SEMANTIC_ENABLED,
-            "semantic_enhancement_enabled": SEMANTIC_ENHANCEMENT_ENABLED
+            "semantic_enhancement_enabled": SEMANTIC_ENHANCEMENT_ENABLED,
+            "ai_detection_enabled": AI_DETECTION_ENABLED,
+            "semantic_entity_seo_enabled": SEMANTIC_ENTITY_SEO_ENABLED
         }
     }), 200
 
@@ -976,7 +1190,8 @@ def auto_final_review(project_id):
 @app.post("/api/approveBatch")
 def approve_batch():
     """
-    🆕 v32.5: Zatwierdzenie batcha z walidacją fraz + metrykami semantycznymi + AI Detection.
+    🆕 v34.0: Zatwierdzenie batcha z walidacją fraz + metrykami semantycznymi 
+    + AI Detection + Semantic Proximity Validation.
     
     Łączy walidację keyword (stuffing/missing) z bieżącym śledzeniem:
     - Entity density (dla dotychczasowej treści)
@@ -984,6 +1199,7 @@ def approve_batch():
     - Topic completeness estimate
     - Checkpoint alerts
     - AI Detection (humanness_score, burstiness, JITTER)
+    - 🆕 v34.0: Semantic Proximity Validation (Entity Proximity)
     
     Request body:
     {
@@ -991,7 +1207,7 @@ def approve_batch():
         "batch_number": 3,
         "batch_content": "treść tego batcha",
         "accumulated_content": "cała treść do tej pory (batche 1-3)",
-        "previous_paragraphs": 2,  // 🆕 v32.5: ile akapitów miał poprzedni batch (dla JITTER)
+        "previous_paragraphs": 2,
         "keywords_state": {
             "basic": {"przeprowadzki": {"target": 21, "current": 8}, ...},
             "extended": {"tanie przeprowadzki warszawa": {"target": 1, "current": 1}, ...}
@@ -999,7 +1215,8 @@ def approve_batch():
         "s1_data": {
             "entities": [...],
             "topics": [...],
-            "entity_relationships": [...]  // triplety
+            "entity_relationships": [...],
+            "concept_map": {...}  // 🆕 v34.0
         },
         "total_batches": 7
     }
@@ -1322,7 +1539,7 @@ def approve_batch():
             print(f"[APPROVE_BATCH] Batch history error: {e}")
     
     # ============================================
-    # 🆕 v33.0: HUMANIZATION CHECKS + FIX INSTRUCTIONS
+    # 7. 🆕 v33.0: HUMANIZATION CHECKS + FIX INSTRUCTIONS
     # ============================================
     fix_instructions = []
     should_block_humanization = False
@@ -1391,7 +1608,101 @@ def approve_batch():
             print(f"[APPROVE_BATCH] Humanization check error: {e}")
     
     # ============================================
-    # 7. WYNIK
+    # 8. 🆕 v34.0: SEMANTIC PROXIMITY VALIDATION
+    # ============================================
+    semantic_proximity_result = {
+        "status": "DISABLED",
+        "semantic_score": 0
+    }
+    
+    if SEMANTIC_ENTITY_SEO_ENABLED and batch_content:
+        try:
+            # Pobierz concept_map z s1_data lub z projektu
+            concept_map = s1_data.get("concept_map", {})
+            
+            # Fallback: pobierz z Firestore jeśli nie było w request
+            if not concept_map:
+                project_data = get_project(project_id)
+                if project_data:
+                    concept_map = project_data.get("concept_map", {})
+            
+            if concept_map:
+                # Przygotuj listę fraz kluczowych
+                all_keywords = list(basic_kw.keys()) + list(extended_kw.keys())
+                
+                # Uruchom walidację semantic proximity
+                proximity_result = full_semantic_validation(
+                    text=batch_content,
+                    keywords=all_keywords,
+                    concept_map=concept_map,
+                    batch_number=batch_number
+                )
+                
+                semantic_proximity_result = {
+                    "status": proximity_result.get("overall_semantic_status", "OK"),
+                    "semantic_score": proximity_result.get("semantic_score", 0),
+                    "isolated_keywords": proximity_result.get("isolated_keywords", []),
+                    "lead_paragraph": proximity_result.get("lead_paragraph_validation"),
+                    "suggestions": proximity_result.get("suggestions", [])
+                }
+                
+                # Dodaj warning jeśli LOW_SEMANTIC_CONTEXT
+                if proximity_result.get("overall_semantic_status") == "LOW_SEMANTIC_CONTEXT":
+                    checkpoint_alerts.append({
+                        "checkpoint": f"BATCH_{batch_number}",
+                        "status": "WARNING",
+                        "message": f"LOW_SEMANTIC_CONTEXT: Frazy kluczowe są 'izolowane' (score: {proximity_result.get('semantic_score', 0)})"
+                    })
+                    fix_instructions.append({
+                        "type": "SEMANTIC_PROXIMITY",
+                        "message": "⚠️ Frazy kluczowe są izolowane - brak encji wspierających w pobliżu",
+                        "isolated": [ik.get("keyword") for ik in proximity_result.get("isolated_keywords", [])[:3]],
+                        "suggestions": proximity_result.get("suggestions", [])[:2],
+                        "action": "Dodaj encje wspierające w promieniu ~25 słów od fraz kluczowych"
+                    })
+                
+                # Dodaj warning dla Lead Paragraph (tylko batch 1)
+                if batch_number == 1 and proximity_result.get("lead_paragraph_validation"):
+                    lead = proximity_result["lead_paragraph_validation"]
+                    if lead.get("status") == "CRITICAL":
+                        checkpoint_alerts.append({
+                            "checkpoint": "BATCH_1",
+                            "status": "CRITICAL",
+                            "message": f"LEAD_PARAGRAPH: {lead.get('message', 'Brakuje Trójki Klasyfikacyjnej')}"
+                        })
+                        fix_instructions.append({
+                            "type": "LEAD_PARAGRAPH",
+                            "message": f"🎯 Złoty Akapit niekompletny: {lead.get('message')}",
+                            "missing": lead.get("missing_in_first_100", []),
+                            "action": "Dodaj brakujące elementy do pierwszych 100 słów"
+                        })
+                    elif lead.get("status") == "WARNING":
+                        checkpoint_alerts.append({
+                            "checkpoint": "BATCH_1",
+                            "status": "WARNING",
+                            "message": f"LEAD_PARAGRAPH: {lead.get('message', 'Niepełna Trójka Klasyfikacyjna')}"
+                        })
+                
+                # Aktualizuj context_status dla keywords
+                context_statuses = get_keyword_context_statuses(
+                    proximity_result.get("proximity_validation", {}).get("keywords_analysis", [])
+                )
+                
+                # Zapisz context_statuses do semantic_progress
+                semantic_progress["context_statuses"] = context_statuses
+                
+                print(f"[APPROVE_BATCH] 🔗 Semantic Proximity: score={proximity_result.get('semantic_score', 0)}, "
+                      f"status={proximity_result.get('overall_semantic_status')}, "
+                      f"isolated={len(proximity_result.get('isolated_keywords', []))}")
+            else:
+                print(f"[APPROVE_BATCH] ⚠️ No concept_map available for semantic proximity validation")
+                
+        except Exception as e:
+            print(f"[APPROVE_BATCH] Semantic Proximity error: {e}")
+            semantic_proximity_result["error"] = str(e)
+    
+    # ============================================
+    # 9. WYNIK
     # ============================================
     has_blockers = len(keyword_blockers) > 0
     
@@ -1447,6 +1758,9 @@ def approve_batch():
         
         # 🆕 Faza 2: Batch History & Trend
         "batch_trend": batch_trend,
+        
+        # 🆕 v34.0: Semantic Proximity Validation
+        "semantic_proximity": semantic_proximity_result,
         
         # Alerty checkpointów
         "checkpoint_alerts": checkpoint_alerts,
@@ -1529,24 +1843,9 @@ def ai_detection_endpoint():
 def quick_ai_check_endpoint():
     """
     🆕 v32.0: Szybki check AI - tylko podstawowe metryki.
-    
-    Request body:
-    {
-        "text": "treść do analizy"
-    }
-    
-    Returns:
-    {
-        "humanness_score": 72,
-        "status": "OK" | "WARNING" | "CRITICAL",
-        "burstiness": 3.2,
-        "top_warning": "..."
-    }
     """
     if not AI_DETECTION_ENABLED:
-        return jsonify({
-            "error": "AI Detection not available"
-        }), 503
+        return jsonify({"error": "AI Detection not available"}), 503
     
     data = request.get_json(force=True)
     text = data.get("text", "")
@@ -1572,25 +1871,7 @@ def quick_ai_check_endpoint():
 # ================================================================
 @app.post("/api/score_sentences")
 def score_sentences_endpoint():
-    """
-    🆕 v32.2: Analiza poszczególnych zdań.
-    
-    Request body:
-    {
-        "text": "treść do analizy",
-        "limit": 10  // opcjonalne - ile najgorszych zdań zwrócić
-    }
-    
-    Returns:
-    {
-        "status": "OK" | "WARNING" | "CRITICAL",
-        "total_sentences": 25,
-        "avg_score": 72.5,
-        "ai_like_count": 2,
-        "worst_sentences": [...],
-        "suggestions": [...]
-    }
-    """
+    """🆕 v32.2: Analiza poszczególnych zdań."""
     if not AI_DETECTION_ENABLED:
         return jsonify({"error": "AI Detection not available"}), 503
     
@@ -1616,22 +1897,7 @@ def score_sentences_endpoint():
 
 @app.post("/api/ngram_naturalness")
 def ngram_naturalness_endpoint():
-    """
-    🆕 v32.2: Sprawdza naturalność fraz (n-gramów).
-    
-    Request body:
-    {
-        "text": "treść do analizy"
-    }
-    
-    Returns:
-    {
-        "status": "OK" | "WARNING" | "CRITICAL",
-        "naturalness_score": 0.75,
-        "unnatural_list": ["kluczowy aspekt", ...],
-        "suggestions": [...]
-    }
-    """
+    """🆕 v32.2: Sprawdza naturalność fraz (n-gramów)."""
     if not AI_DETECTION_ENABLED:
         return jsonify({"error": "AI Detection not available"}), 503
     
@@ -1656,20 +1922,7 @@ def ngram_naturalness_endpoint():
 
 @app.post("/api/full_analysis")
 def full_analysis_endpoint():
-    """
-    🆕 v32.2: Pełna zaawansowana analiza (wszystkie metryki).
-    
-    Request body:
-    {
-        "text": "treść do analizy",
-        "previous_paragraphs": 3,
-        "s1_relationships": [...],
-        "s1_entities": [...],
-        "s1_topics": [...]
-    }
-    
-    Returns kompletną analizę ze wszystkich faz.
-    """
+    """🆕 v32.2: Pełna zaawansowana analiza (wszystkie metryki)."""
     if not AI_DETECTION_ENABLED:
         return jsonify({"error": "AI Detection not available"}), 503
     
@@ -1703,18 +1956,7 @@ def full_analysis_endpoint():
 # ================================================================
 @app.post("/api/project/<project_id>/save_full_article")
 def save_full_article(project_id):
-    """
-    🆕 v31.3: Zapisuje pełną treść artykułu do projektu.
-    
-    Wywołaj PO wszystkich batchach, PRZED getFinalReview!
-    
-    Request body:
-    {
-        "full_content": "cały tekst artykułu (wszystkie batche scalone)",
-        "word_count": 1100,
-        "h2_count": 7
-    }
-    """
+    """🆕 v31.3: Zapisuje pełną treść artykułu do projektu."""
     data = request.get_json(force=True)
     
     full_content = data.get("full_content", "")
@@ -1752,7 +1994,6 @@ def save_full_article(project_id):
 @app.get("/api/project/<project_id>/full_article")
 def get_full_article(project_id):
     """Pobiera zapisany pełny artykuł."""
-    # 🆕 v32.4: Pobierz z Firestore
     project_data = get_project(project_id)
     if not project_data:
         return jsonify({"status": "ERROR", "message": "Project not found"}), 404
@@ -1776,16 +2017,7 @@ def get_full_article(project_id):
 # ================================================================
 @app.post("/api/synonyms")
 def get_synonyms_endpoint():
-    """
-    🆕 v33.0: Pobiera synonimy dla słowa lub listy słów.
-    
-    Request body:
-    {
-        "word": "skóra",  // lub
-        "words": ["skóra", "witamina", "dobry"],
-        "context": "artykuł o suplementach"  // opcjonalne
-    }
-    """
+    """🆕 v33.0: Pobiera synonimy dla słowa lub listy słów."""
     try:
         from synonym_service import get_synonyms
         
@@ -1822,10 +2054,7 @@ def get_synonyms_endpoint():
 
 @app.get("/api/synonyms/<word>")
 def get_synonym_simple(word: str):
-    """
-    🆕 v33.0: Prosty GET dla pojedynczego słowa.
-    GET /api/synonyms/skóra
-    """
+    """🆕 v33.0: Prosty GET dla pojedynczego słowa."""
     try:
         from synonym_service import get_synonyms
         result = get_synonyms(word)
@@ -1852,25 +2081,17 @@ if __name__ == "__main__":
     print(f"🔗 S1 Proxy enabled → {NGRAM_ANALYSIS_ENDPOINT}")
     print(f"🧠 Semantic analysis: {'ENABLED ✅' if SEMANTIC_ENABLED else 'DISABLED ⚠️'}")
     print(f"🆕 Semantic Enhancement v31.0: {'ENABLED ✅' if SEMANTIC_ENHANCEMENT_ENABLED else 'DISABLED ⚠️'}")
-    print(f"🤖 AI Detection v32.2 FULL: {'ENABLED ✅' if AI_DETECTION_ENABLED else 'DISABLED ⚠️'}")
-    print(f"📦 Features v32.2 FULL:")
-    print(f"   ─── Faza 1 (CRITICAL) ───")
-    print(f"   ✅ AI Detection (humanness_score)")
-    print(f"   ✅ Forbidden phrases check")
-    print(f"   ✅ JITTER validation")
-    print(f"   ✅ Triplets validation")
-    print(f"   ─── Faza 2 (HIGH) ───")
-    print(f"   ✅ Entity Split 60/40 tracking")
-    print(f"   ✅ Topic Completeness w approveBatch")
-    print(f"   ✅ Batch History & Trend tracking")
-    print(f"   ─── Faza 3 (ADVANCED) ───")
-    print(f"   ✅ Per-sentence scoring")
-    print(f"   ✅ N-gram naturalness check")
-    print(f"   ✅ Full advanced analysis")
+    print(f"🤖 AI Detection v33.0: {'ENABLED ✅' if AI_DETECTION_ENABLED else 'DISABLED ⚠️'}")
+    print(f"🔗 Semantic Entity SEO v34.0: {'ENABLED ✅' if SEMANTIC_ENTITY_SEO_ENABLED else 'DISABLED ⚠️'}")
+    print(f"📦 Features v34.0 (Semantic Entity SEO):")
+    print(f"   ✅ Concept Map extraction from competitors")
+    print(f"   ✅ Entity Proximity validation")
+    print(f"   ✅ Lead Paragraph / Golden Paragraph check")
+    print(f"   ✅ Classification Triplet validation")
+    print(f"   ✅ Proximity Clusters rules")
+    print(f"   ✅ context_status tracking for keywords")
     print(f"   ─── Endpoints ───")
-    print(f"   /api/ai_detection")
-    print(f"   /api/quick_ai_check")
-    print(f"   /api/score_sentences")
-    print(f"   /api/ngram_naturalness")
-    print(f"   /api/full_analysis\n")
+    print(f"   /api/semantic_proximity_check")
+    print(f"   /api/s1_analysis (+ concept_map)")
+    print(f"   /api/approveBatch (+ semantic_proximity)\n")
     app.run(host="0.0.0.0", port=port, debug=DEBUG_MODE)
