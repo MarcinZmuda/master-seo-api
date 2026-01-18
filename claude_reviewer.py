@@ -1,6 +1,7 @@
 # claude_reviewer.py
 # v28.2 - Claude jako Reviewer/Editor batchy
 # v33.3 - + mandatory_entities, diff output
+# v33.4 - + LanguageTool integration, semantic_diversity
 #
 # System sprawdzania i poprawiania batchy przez Claude API.
 # Sprawdza: SEO, długość, powtórzenia, gramatykę, AI patterns, halucynacje
@@ -12,12 +13,23 @@ import time
 import difflib
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass, asdict, field
+from collections import Counter
+import math
 
 try:
     import anthropic
     ANTHROPIC_AVAILABLE = True
 except ImportError:
     ANTHROPIC_AVAILABLE = False
+
+# v33.4: LanguageTool integration
+try:
+    from grammar_middleware import validate_batch_grammar, validate_batch_full
+    LANGUAGETOOL_AVAILABLE = True
+    print("[CLAUDE_REVIEWER] ✅ LanguageTool integration enabled")
+except ImportError:
+    LANGUAGETOOL_AVAILABLE = False
+    print("[CLAUDE_REVIEWER] ⚠️ LanguageTool not available, using Claude-only grammar check")
 
 
 @dataclass
@@ -56,6 +68,188 @@ class ReviewResult:
     word_count: int = 0
     paragraph_count: int = 0
     diff: Optional[DiffSummary] = None  # v33.3: diff output
+    semantic_diversity: Optional[Dict] = None  # v33.4: semantic diversity score
+    grammar_lt: Optional[Dict] = None  # v33.4: LanguageTool results
+
+
+# ================================================================
+# v33.4: SEMANTIC DIVERSITY - Wykrywanie powtórzeń semantycznych
+# ================================================================
+
+def extract_key_phrases(text: str) -> List[str]:
+    """
+    Wyciąga kluczowe frazy informacyjne z tekstu.
+    Ignoruje słowa funkcyjne, zostawia tylko frazy niosące informację.
+    """
+    # Słowa funkcyjne do ignorowania
+    stop_words = {
+        'jest', 'są', 'być', 'to', 'oraz', 'i', 'lub', 'ale', 'jednak', 'który', 'która', 'które',
+        'ten', 'ta', 'te', 'tym', 'tej', 'tego', 'na', 'w', 'z', 'do', 'od', 'dla', 'po', 'przez',
+        'jako', 'też', 'także', 'również', 'więc', 'dlatego', 'ponieważ', 'gdyż', 'jeśli', 'gdy',
+        'bardzo', 'bardziej', 'najbardziej', 'może', 'można', 'powinien', 'warto', 'należy',
+        'co', 'jak', 'gdzie', 'kiedy', 'dlaczego', 'ile', 'każdy', 'każda', 'wszystko', 'nic',
+        'tylko', 'już', 'jeszcze', 'właśnie', 'natomiast', 'zatem', 'bowiem', 'czyli'
+    }
+    
+    # Wyciągnij zdania
+    sentences = re.split(r'[.!?]+', text)
+    
+    key_phrases = []
+    for sent in sentences:
+        sent = sent.strip().lower()
+        if len(sent) < 10:
+            continue
+        
+        # Wyciągnij 3-5 gramowe frazy (bez słów funkcyjnych na początku/końcu)
+        words = [w for w in re.findall(r'\b[a-ząćęłńóśźż]{3,}\b', sent) if w not in stop_words]
+        
+        # Bigramy i trigramy
+        for n in [2, 3]:
+            for i in range(len(words) - n + 1):
+                phrase = ' '.join(words[i:i+n])
+                key_phrases.append(phrase)
+    
+    return key_phrases
+
+
+def calculate_semantic_diversity(text: str, sections: List[str] = None) -> Dict:
+    """
+    v33.4: Oblicza różnorodność semantyczną tekstu.
+    
+    Wykrywa:
+    - Powtórzenia tych samych informacji różnymi słowami
+    - Sekcje mówiące o tym samym
+    - Brak nowych informacji w kolejnych sekcjach
+    
+    Returns:
+        {
+            "score": 0-100 (wyższy = bardziej różnorodny),
+            "status": "OK" | "WARNING" | "CRITICAL",
+            "repeated_concepts": ["witamina C synteza kolagenu", ...],
+            "section_similarity": [{"sections": [1,3], "similarity": 0.8}],
+            "suggestions": ["Sekcja 3 powtarza informacje z sekcji 1"]
+        }
+    """
+    if not text or len(text) < 200:
+        return {
+            "score": 100,
+            "status": "OK",
+            "repeated_concepts": [],
+            "section_similarity": [],
+            "suggestions": []
+        }
+    
+    # Podziel na sekcje (po h2: lub podwójnym newline)
+    if sections is None:
+        sections = re.split(r'\n\n+|(?=h2:)', text)
+        sections = [s.strip() for s in sections if s.strip() and len(s.strip()) > 50]
+    
+    if len(sections) < 2:
+        return {
+            "score": 100,
+            "status": "OK", 
+            "repeated_concepts": [],
+            "section_similarity": [],
+            "suggestions": []
+        }
+    
+    # Wyciągnij kluczowe frazy z każdej sekcji
+    section_phrases = [set(extract_key_phrases(s)) for s in sections]
+    
+    # Znajdź powtórzenia między sekcjami
+    repeated_concepts = []
+    section_similarities = []
+    suggestions = []
+    
+    for i in range(len(sections)):
+        for j in range(i + 1, len(sections)):
+            common = section_phrases[i] & section_phrases[j]
+            
+            if len(common) == 0:
+                continue
+            
+            # Oblicz Jaccard similarity
+            union = section_phrases[i] | section_phrases[j]
+            similarity = len(common) / len(union) if union else 0
+            
+            if similarity > 0.3:  # >30% podobieństwa = warning
+                section_similarities.append({
+                    "sections": [i + 1, j + 1],
+                    "similarity": round(similarity, 2),
+                    "common_phrases": list(common)[:5]
+                })
+                
+                if similarity > 0.5:
+                    suggestions.append(f"Sekcja {j + 1} powtarza ~{int(similarity * 100)}% informacji z sekcji {i + 1}")
+            
+            # Zbierz powtórzone frazy (te które występują w >2 sekcjach)
+            for phrase in common:
+                if phrase not in repeated_concepts:
+                    repeated_concepts.append(phrase)
+    
+    # Oblicz końcowy score
+    # Penalizuj za: podobne sekcje, powtórzone koncepty
+    penalty = 0
+    penalty += len([s for s in section_similarities if s["similarity"] > 0.5]) * 15
+    penalty += len([s for s in section_similarities if 0.3 < s["similarity"] <= 0.5]) * 8
+    penalty += min(len(repeated_concepts), 10) * 3
+    
+    score = max(0, 100 - penalty)
+    
+    if score >= 70:
+        status = "OK"
+    elif score >= 40:
+        status = "WARNING"
+    else:
+        status = "CRITICAL"
+    
+    return {
+        "score": score,
+        "status": status,
+        "repeated_concepts": repeated_concepts[:10],  # Max 10
+        "section_similarity": section_similarities[:5],  # Max 5
+        "suggestions": suggestions[:3]  # Max 3
+    }
+
+
+def check_grammar_with_languagetool(text: str) -> Dict:
+    """
+    v33.4: Sprawdza gramatykę przez LanguageTool.
+    Zwraca wyniki w formacie kompatybilnym z ReviewIssue.
+    """
+    if not LANGUAGETOOL_AVAILABLE:
+        return {
+            "enabled": False,
+            "errors": [],
+            "error_count": 0
+        }
+    
+    try:
+        result = validate_batch_grammar(text)
+        
+        return {
+            "enabled": True,
+            "is_valid": result.is_valid,
+            "errors": [
+                {
+                    "message": err.get("message", ""),
+                    "context": err.get("context", {}).get("text", "")[:50] if isinstance(err.get("context"), dict) else str(err.get("context", ""))[:50],
+                    "suggestions": [r.get("value", r) if isinstance(r, dict) else r for r in err.get("replacements", [])[:2]]
+                }
+                for err in result.errors[:5]  # Max 5 błędów
+            ],
+            "error_count": result.error_count,
+            "backend": result.backend,
+            "correction_prompt": result.correction_prompt
+        }
+    except Exception as e:
+        print(f"[CLAUDE_REVIEWER] ⚠️ LanguageTool error: {e}")
+        return {
+            "enabled": True,
+            "errors": [],
+            "error_count": 0,
+            "error_message": str(e)
+        }
 
 
 # ================================================================
@@ -380,6 +574,19 @@ SPRAWDŹ I POPRAW:
 - **AI PATTERNS**: "W dzisiejszych czasach", "Warto wiedzieć", "Nie jest tajemnicą" → USUŃ
 - **HALUCYNACJE**: Wymyślone statystyki, badania, fakty bez źródła → USUŃ
 
+### 🔴 PRIORYTET 1b: SEMANTIC DIVERSITY (v33.4 NOWE!)
+KAŻDA SEKCJA MUSI WNOSIĆ NOWE INFORMACJE!
+
+⛔ NIEDOPUSZCZALNE:
+- Powtarzanie tej samej informacji w różnych sekcjach (np. "witamina C wspomaga kolagen" → "wit. C produkuje kolagen" → "C odpowiada za kolagen")
+- Mówienie o tym samym innymi słowami
+- Sekcje które można usunąć bez utraty informacji
+
+✅ WYMAGANE:
+- Każda sekcja = NOWA wiedza, nowy aspekt, nowy kontekst
+- Jeśli witamina C była w sekcji 1, w sekcji 3 napisz o czymś INNYM (dawkowanie, źródła, interakcje)
+- Konkrety zamiast powtórzeń: nazwy substancji, wartości, przykłady
+
 ### 🟡 PRIORYTET 2: ENCJE I N-GRAMY
 Upewnij się, że kluczowe pojęcia są zdefiniowane/wyjaśnione przy pierwszym użyciu.
 {missing_section}
@@ -417,7 +624,7 @@ ZABRONIONE: {forbidden}
   "status": "APPROVED | CORRECTED | REJECTED",
   "quality_score": 1-10,
   "issues": [
-    {{"priority": 1, "type": "tautologia|pleonazm|gramatyka|halucynacja|ai_pattern", "description": "...", "fix_applied": true}},
+    {{"priority": 1, "type": "tautologia|pleonazm|gramatyka|halucynacja|ai_pattern|semantic_repetition", "description": "...", "fix_applied": true}},
     {{"priority": 2, "type": "encja_brak", "description": "...", "fix_applied": false}},
     {{"priority": 3, "type": "fraza_dodana|fraza_brak", "description": "...", "fix_applied": true}}
   ],
@@ -570,6 +777,36 @@ def review_with_claude(text: str, ctx: Dict) -> ReviewResult:
         
         final = corrected if corrected else text
         
+        # v33.4: Semantic diversity check
+        semantic_div = calculate_semantic_diversity(final)
+        if semantic_div["status"] == "CRITICAL":
+            issues.append(ReviewIssue(
+                type="semantic_repetition",
+                severity="critical",
+                description=f"Tekst zawiera zbyt dużo powtórzeń semantycznych. {'; '.join(semantic_div['suggestions'][:2])}",
+                fix_applied=False
+            ))
+            print(f"[CLAUDE_REVIEWER] ⚠️ Semantic diversity CRITICAL: {semantic_div['score']}")
+        elif semantic_div["status"] == "WARNING":
+            issues.append(ReviewIssue(
+                type="semantic_repetition",
+                severity="warning",
+                description=f"Niektóre sekcje powtarzają podobne informacje. {'; '.join(semantic_div['suggestions'][:1])}",
+                fix_applied=False
+            ))
+        
+        # v33.4: LanguageTool grammar check
+        grammar_lt = check_grammar_with_languagetool(final)
+        if grammar_lt.get("enabled") and grammar_lt.get("error_count", 0) > 0:
+            for err in grammar_lt.get("errors", [])[:3]:
+                issues.append(ReviewIssue(
+                    type="grammar_lt",
+                    severity="warning" if grammar_lt["error_count"] <= 2 else "critical",
+                    description=f"Błąd gramatyczny: {err.get('message', '')}. Kontekst: ...{err.get('context', '')}...",
+                    fix_applied=False
+                ))
+            print(f"[CLAUDE_REVIEWER] ⚠️ LanguageTool found {grammar_lt['error_count']} errors")
+        
         return ReviewResult(
             status=status,
             original_text=text,
@@ -578,7 +815,9 @@ def review_with_claude(text: str, ctx: Dict) -> ReviewResult:
             summary=data.get("summary", ""),
             word_count=len(final.split()),
             paragraph_count=len([p for p in final.split('\n\n') if p.strip()]),
-            diff=diff_summary  # v33.3
+            diff=diff_summary,  # v33.3
+            semantic_diversity=semantic_div,  # v33.4
+            grammar_lt=grammar_lt  # v33.4
         )
         
     except Exception as e:
