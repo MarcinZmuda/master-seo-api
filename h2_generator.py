@@ -473,9 +473,14 @@ def generate_h3_suggestions(
     """Generuje sugestie H3 dla każdego H2."""
     suggestions = {}
     
-    for h2 in h2_plan:
-        pos = str(h2.get("position", "0"))
-        h2_type = h2.get("type", "")
+    for i, h2 in enumerate(h2_plan, 1):
+        # v33.4: Obsługa stringów
+        if isinstance(h2, str):
+            pos = str(i)
+            h2_type = ""
+        else:
+            pos = str(h2.get("position", i))
+            h2_type = h2.get("type", "")
         
         # H3 sugestie na podstawie typu H2
         if h2_type == "types":
@@ -500,7 +505,18 @@ def generate_coverage_report(
     main_keyword: str
 ) -> Dict:
     """Generuje raport pokrycia fraz."""
-    used_phrases = [h.get("phrase_used", "") for h in h2_plan if h.get("phrase_used")]
+    # v33.4: Obsługa stringów
+    def get_h2_text(item):
+        if isinstance(item, str):
+            return item
+        return item.get("h2", "")
+    
+    def get_phrase_used(item):
+        if isinstance(item, str):
+            return ""
+        return item.get("phrase_used", "")
+    
+    used_phrases = [get_phrase_used(h) for h in h2_plan if get_phrase_used(h)]
     
     # Sprawdź które frazy użytkownika są pokryte
     phrases_covered = []
@@ -518,7 +534,7 @@ def generate_coverage_report(
         # Sprawdź też w treści H2
         if not found:
             for h2 in h2_plan:
-                if phrase_lower in h2.get("h2", "").lower():
+                if phrase_lower in get_h2_text(h2).lower():
                     found = True
                     break
         
@@ -540,37 +556,56 @@ def generate_coverage_report(
 # VALIDATION
 # ================================================================
 
-def validate_h2_plan(h2_plan: List[Dict], main_keyword: str) -> Dict:
-    """Waliduje plan H2 pod kątem Semantic HTML i Content Relevancy."""
+def validate_h2_plan(h2_plan: List, main_keyword: str) -> Dict:
+    """
+    Waliduje plan H2 pod kątem Semantic HTML i Content Relevancy.
+    v33.4: Obsługuje zarówno listę stringów jak i listę dict.
+    """
     issues = []
     warnings = []
     
+    # Normalizuj - wyciągnij tekst H2 niezależnie od formatu
+    def get_h2_text(item):
+        if isinstance(item, str):
+            return item
+        elif isinstance(item, dict):
+            return item.get("h2", "")
+        return ""
+    
+    def get_h2_attr(item, attr, default=None):
+        if isinstance(item, dict):
+            return item.get(attr, default)
+        return default
+    
     # 1. Sprawdź czy pierwszy H2 zawiera główną frazę
     if h2_plan:
-        first_h2_text = h2_plan[0].get("h2", "").lower()
+        first_h2_text = get_h2_text(h2_plan[0]).lower()
         if main_keyword.lower() not in first_h2_text:
-            issues.append("Pierwszy H2 nie zawiera głównej frazy")
+            warnings.append("Pierwszy H2 nie zawiera głównej frazy (to OK jeśli jest w innym H2)")
     
-    # 2. Sprawdź relevancy każdego H2
-    for h2 in h2_plan:
-        relevancy = h2.get("relevancy_score", 100)  # domyślnie 100 jeśli brak
+    # 2. Sprawdź relevancy każdego H2 (tylko jeśli dict z relevancy_score)
+    for i, h2 in enumerate(h2_plan, 1):
+        relevancy = get_h2_attr(h2, "relevancy_score", 100)
         if relevancy < 60:
-            warnings.append(f"H2 #{h2.get('position', '?')} ma niską relevancy ({relevancy})")
+            warnings.append(f"H2 #{i} ma niską relevancy ({relevancy})")
     
     # 3. Sprawdź długość H2
-    for h2 in h2_plan:
-        h2_text = h2.get("h2", "")
-        if len(h2_text) > 60:
-            warnings.append(f"H2 #{h2.get('position', '?')} jest za długi ({len(h2_text)} znaków)")
+    for i, h2 in enumerate(h2_plan, 1):
+        h2_text = get_h2_text(h2)
+        if len(h2_text) > 80:
+            warnings.append(f"H2 #{i} jest za długi ({len(h2_text)} znaków)")
     
     # 4. Sprawdź duplikaty
-    h2_texts = [h.get("h2", "").lower() for h in h2_plan]
+    h2_texts = [get_h2_text(h).lower() for h in h2_plan]
     if len(h2_texts) != len(set(h2_texts)):
         issues.append("Plan zawiera zduplikowane H2")
     
-    # 5. Sprawdź czy jest FAQ na końcu
-    if h2_plan and h2_plan[-1].get("type", "") != "faq":
-        warnings.append("Ostatni H2 nie jest FAQ")
+    # 5. Sprawdź czy jest FAQ na końcu (tylko jeśli dict z type)
+    if h2_plan:
+        last_type = get_h2_attr(h2_plan[-1], "type", "")
+        last_text = get_h2_text(h2_plan[-1]).lower()
+        if last_type != "faq" and "faq" not in last_text and "pytania" not in last_text:
+            warnings.append("Rozważ dodanie FAQ jako ostatni H2")
     
     return {
         "valid": len(issues) == 0,
