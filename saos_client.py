@@ -1,14 +1,18 @@
 # saos_client.py
-# BRAJEN Legal Module - Klient SAOS API v3.0
-# Z pełną treścią do scoringu
+# BRAJEN Legal Module - Klient SAOS API v3.1
+# Z pełną treścią do scoringu + FILTROWANIE SYGNATUR
 
 """
 ===============================================================================
-🏛️ SAOS CLIENT v3.0
+🏛️ SAOS CLIENT v3.1
 ===============================================================================
 
 Klient do System Analizy Orzeczeń Sądowych (SAOS).
 https://www.saos.org.pl/api
+
+Zmiany w v3.1:
+- 🆕 Filtrowanie po SYGNATURZE (wydział C/K/U)
+- 🆕 Wykrywanie przedmiotu sprawy vs kontekst uboczny
 
 Zmiany w v3:
 - Zwraca full_text do scoringu
@@ -19,7 +23,7 @@ Zmiany w v3:
 
 import requests
 from typing import Dict, List, Any, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 import re
 
@@ -33,8 +37,8 @@ class SAOSConfig:
     BASE_URL: str = "https://www.saos.org.pl/api"
     SEARCH_ENDPOINT: str = "/search/judgments"
     JUDGMENT_ENDPOINT: str = "/judgments"
-    DEFAULT_PAGE_SIZE: int = 10
-    MAX_PAGE_SIZE: int = 20
+    DEFAULT_PAGE_SIZE: int = 15
+    MAX_PAGE_SIZE: int = 25
     DEFAULT_MIN_YEAR: int = 2020
     TIMEOUT: int = 15
     
@@ -45,6 +49,65 @@ class SAOSConfig:
         "CONSTITUTIONAL": "Trybunał Konstytucyjny",
         "NATIONAL_APPEAL_CHAMBER": "Krajowa Izba Odwoławcza"
     }
+    
+    # 🆕 v3.1: MAPOWANIE WYDZIAŁÓW - które sygnatury dla jakich tematów
+    # Sygnatura zawiera literę wydziału: C=cywilny, K=karny, U=ubezpieczenia, P=pracy
+    DIVISION_CODES: Dict[str, List[str]] = field(default_factory=lambda: {
+        "cywilne": ["C", "Ca", "ACa", "Cz", "ACz", "CZP", "CSK", "CNP"],  # Cywilne
+        "rodzinne": ["C", "Ca", "ACa", "RC", "RCa", "CZP"],  # Rodzinne = też cywilne
+        "karne": ["K", "Ka", "AKa", "Kz", "AKz", "KZP", "KK"],  # Karne
+        "pracy": ["P", "Pa", "APa", "Pz", "APz", "PZP"],  # Prawo pracy
+        "ubezpieczenia": ["U", "Ua", "AUa", "Uz", "AUz", "UZP"],  # Ubezpieczenia społeczne
+        "administracyjne": ["SA", "OSA", "GSK", "NSA", "OSK"]  # Administracyjne
+    })
+    
+    # 🆕 v3.1: MAPOWANIE TEMAT → DOZWOLONE WYDZIAŁY
+    TOPIC_TO_DIVISIONS: Dict[str, List[str]] = field(default_factory=lambda: {
+        # Prawo rodzinne → TYLKO cywilne/rodzinne
+        "alimenty": ["cywilne", "rodzinne"],
+        "rozwód": ["cywilne", "rodzinne"],
+        "separacja": ["cywilne", "rodzinne"],
+        "opieka nad dzieckiem": ["cywilne", "rodzinne"],
+        "władza rodzicielska": ["cywilne", "rodzinne"],
+        "ubezwłasnowolnienie": ["cywilne", "rodzinne"],  # 🆕 KLUCZOWE!
+        "kuratela": ["cywilne", "rodzinne"],
+        "przysposobienie": ["cywilne", "rodzinne"],
+        "adopcja": ["cywilne", "rodzinne"],
+        
+        # Prawo spadkowe → TYLKO cywilne
+        "spadek": ["cywilne"],
+        "testament": ["cywilne"],
+        "dziedziczenie": ["cywilne"],
+        "zachowek": ["cywilne"],
+        
+        # Prawo cywilne → TYLKO cywilne
+        "umowa": ["cywilne"],
+        "odszkodowanie": ["cywilne"],
+        "zadośćuczynienie": ["cywilne"],
+        "nieruchomość": ["cywilne"],
+        "służebność": ["cywilne"],
+        "hipoteka": ["cywilne"],
+        
+        # Prawo pracy → TYLKO pracy/cywilne
+        "wypowiedzenie": ["pracy", "cywilne"],
+        "mobbing": ["pracy", "cywilne"],
+        "wynagrodzenie": ["pracy"],
+        "zwolnienie": ["pracy"],
+        
+        # Prawo karne → TYLKO karne
+        "przestępstwo": ["karne"],
+        "kara": ["karne"],
+        "oskarżenie": ["karne"],
+        "jazda po alkoholu": ["karne"],
+        "kradzież": ["karne"],
+        "niealimentacja": ["karne"],  # Art. 209 KK
+        
+        # Ubezpieczenia społeczne → TYLKO ubezpieczenia
+        "emerytura": ["ubezpieczenia"],
+        "renta": ["ubezpieczenia"],
+        "zasiłek": ["ubezpieczenia"],
+        "niezdolność do pracy": ["ubezpieczenia"],
+    })
 
 
 CONFIG = SAOSConfig()
@@ -107,18 +170,24 @@ class SAOSClient:
         self,
         keyword: str,
         court_type: Optional[str] = None,
-        max_results: int = 10,
-        min_year: Optional[int] = CONFIG.DEFAULT_MIN_YEAR
+        max_results: int = 15,
+        min_year: Optional[int] = CONFIG.DEFAULT_MIN_YEAR,
+        filter_by_topic: bool = True  # 🆕 v3.1
     ) -> Dict[str, Any]:
         """
         Wyszukuje orzeczenia i formatuje do scoringu.
         Zwraca PEŁNĄ TREŚĆ (full_text) dla każdego orzeczenia.
+        
+        🆕 v3.1: Filtruje orzeczenia po wydziale (sygnatura) zgodnie z tematem!
         """
+        
+        # Pobierz więcej niż max_results bo część odfiltrujemy
+        fetch_count = max_results * 2 if filter_by_topic else max_results
         
         raw_results = self.search_judgments(
             keyword=keyword,
             court_type=court_type,
-            page_size=max_results,
+            page_size=fetch_count,
             min_year=min_year
         )
         
@@ -130,10 +199,28 @@ class SAOSClient:
             }
         
         judgments = []
+        filtered_out = []
+        
+        # 🆕 v3.1: Pobierz dozwolone wydziały dla tematu
+        allowed_divisions = self._get_allowed_divisions(keyword)
+        allowed_codes = self._get_division_codes(allowed_divisions)
         
         for item in raw_results.get("items", []):
             judgment = self._format_judgment(item, keyword)
             if judgment:
+                # 🆕 v3.1: Filtruj po sygnaturze
+                if filter_by_topic and allowed_codes:
+                    signature = judgment.get("signature", "")
+                    division_code = self._extract_division_code(signature)
+                    
+                    if division_code and division_code not in allowed_codes:
+                        filtered_out.append({
+                            "signature": signature,
+                            "division": division_code,
+                            "reason": f"Wydział {division_code} nie pasuje do tematu '{keyword}' (dozwolone: {allowed_codes})"
+                        })
+                        continue
+                
                 judgments.append(judgment)
         
         return {
@@ -141,8 +228,65 @@ class SAOSClient:
             "keyword": keyword,
             "total_found": raw_results.get("info", {}).get("totalResults", 0),
             "returned": len(judgments),
-            "judgments": judgments
+            "filtered_out": len(filtered_out),  # 🆕 v3.1
+            "filtered_details": filtered_out[:5] if filtered_out else [],  # 🆕 v3.1
+            "allowed_divisions": allowed_divisions,  # 🆕 v3.1
+            "judgments": judgments[:max_results]  # Ogranicz do max_results
         }
+    
+    # ================================================================
+    # 🆕 v3.1: METODY FILTROWANIA SYGNATUR
+    # ================================================================
+    
+    def _get_allowed_divisions(self, keyword: str) -> List[str]:
+        """Zwraca dozwolone kategorie wydziałów dla tematu."""
+        keyword_lower = keyword.lower()
+        
+        # Szukaj dopasowania w mapowaniu
+        for topic, divisions in CONFIG.TOPIC_TO_DIVISIONS.items():
+            if topic in keyword_lower or keyword_lower in topic:
+                return divisions
+        
+        # Fallback: wszystkie cywilne jeśli nie znaleziono
+        return ["cywilne", "rodzinne"]
+    
+    def _get_division_codes(self, divisions: List[str]) -> List[str]:
+        """Zwraca kody wydziałów (z sygnatur) dla kategorii."""
+        codes = []
+        for div in divisions:
+            codes.extend(CONFIG.DIVISION_CODES.get(div, []))
+        return codes
+    
+    def _extract_division_code(self, signature: str) -> Optional[str]:
+        """
+        Wyciąga kod wydziału z sygnatury.
+        
+        Przykłady:
+        - "XII K 103/24" → "K" (karny)
+        - "III Ca 456/23" → "Ca" (cywilny apelacyjny)
+        - "IX U 324/24" → "U" (ubezpieczenia społeczne)
+        - "I ACa 190/18" → "ACa" (apelacyjny cywilny)
+        - "III CZP 12/23" → "CZP" (Izba Cywilna SN)
+        """
+        if not signature:
+            return None
+        
+        # Wzorce dla różnych formatów sygnatur
+        patterns = [
+            r'\b([IVX]+)\s+([A-Z]{1,4})\s+\d+',  # "III Ca 456/23"
+            r'\b([IVX]+)\s+([A-Za-z]{1,4})\s+\d+',  # "I ACa 190/18"
+            r'\b([A-Z]{1,4})\s+\d+/\d+',  # "CZP 12/23"
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, signature, re.IGNORECASE)
+            if match:
+                groups = match.groups()
+                # Ostatnia grupa to zwykle kod wydziału
+                code = groups[-1] if len(groups) > 1 else groups[0]
+                return code.upper()
+        
+        return None
     
     def _format_judgment(self, item: Dict, keyword: str) -> Optional[Dict]:
         """Formatuje pojedyncze orzeczenie."""
