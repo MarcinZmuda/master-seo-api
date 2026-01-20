@@ -426,6 +426,20 @@ def get_best_judgments_for_article(
                 "judgments": best_judgments,
                 "instruction": _build_article_instruction(best_judgments)
             }
+        elif claude_result["status"] == "OK" and not claude_result["selected"]:
+            # 🆕 v3.3: Claude odrzucił WSZYSTKIE orzeczenia - NIE fallback!
+            reasoning = claude_result.get("reasoning", "Brak pasujących orzeczeń")
+            print(f"[LEGAL_MODULE] ⚠️ Claude odrzucił wszystkie orzeczenia: {reasoning}")
+            
+            return {
+                "status": "NO_MATCHING",
+                "keyword_used": search_keyword,
+                "total_found": results.get("total_found", 0),
+                "analyzed": len(all_judgments),
+                "message": f"Żadne z {len(all_judgments)} orzeczeń nie pasuje do tematu. {reasoning}",
+                "judgments": [],
+                "instruction": ""
+            }
     
     # ================================================================
     # FALLBACK: Prosty scoring (gdy Claude niedostępny)
@@ -445,8 +459,18 @@ def get_best_judgments_for_article(
                 "verified_by_claude": False
             })
     
+    # 🆕 v3.3: NIE fallbackuj na złe orzeczenia!
     if not scored_judgments:
-        scored_judgments = all_judgments[:max_results]
+        print(f"[LEGAL_MODULE] ⚠️ Żadne orzeczenie nie przeszło scoringu")
+        return {
+            "status": "NO_MATCHING",
+            "keyword_used": search_keyword,
+            "total_found": results.get("total_found", 0),
+            "analyzed": len(all_judgments),
+            "message": f"Żadne z {len(all_judgments)} orzeczeń nie przeszło weryfikacji merytorycznej.",
+            "judgments": [],
+            "instruction": ""
+        }
     
     # Sortuj i weź najlepsze
     sorted_judgments = sorted(
