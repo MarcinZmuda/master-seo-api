@@ -131,10 +131,11 @@ def _build_verification_prompt(
     judgments_text = ""
     for i, j in enumerate(judgments, 1):
         signature = j.get('signature', '')
+        excerpt = j.get('excerpt', '')[:400]
         judgments_text += f"""
 [{i}] {j.get('citation', f'Orzeczenie {i}')}
 Sygnatura: {signature}
-Fragment: "{j.get('excerpt', '')[:300]}..."
+Fragment: "{excerpt}..."
 """
     
     # Wykryj czy temat dotyczy przestępstwa
@@ -167,10 +168,25 @@ KANDYDACI (orzeczenia z SAOS):
 ZADANIE:
 Wybierz {max_to_select} orzeczenia które NAJLEPIEJ pasują do tematu artykułu.
 
-KRYTERIA:
-1. Orzeczenie musi dotyczyć TEGO SAMEGO zagadnienia prawnego co artykuł
-2. Fragment musi zawierać wartościową tezę prawną (nie tylko procedurę)
-3. Preferuj orzeczenia Sądu Najwyższego i Sądów Apelacyjnych
+KRYTERIA WYBORU:
+
+1. WERYFIKACJA PRZEPISU (NAJWAŻNIEJSZE!):
+   Znasz treść polskich kodeksów (KK, KC, KRO, KPC, KPK, KP).
+   Sprawdź czy przepis cytowany w orzeczeniu PASUJE do tematu artykułu.
+   
+   Przykłady:
+   - Temat "alimenty" + orzeczenie o art. 133 KRO → ✅ PASUJE (alimenty)
+   - Temat "alimenty" + orzeczenie o art. 178a KK → ❌ ODRZUĆ (to jazda po alkoholu!)
+   - Temat "jazda po alkoholu" + orzeczenie o art. 178a KK → ✅ PASUJE
+   - Temat "rozwód" + orzeczenie o art. 56 KRO → ✅ PASUJE (rozwód)
+   - Temat "spadek" + orzeczenie o art. 178a KK → ❌ ODRZUĆ (nie dotyczy spadków)
+
+2. KONTEKST MERYTORYCZNY:
+   Fragment orzeczenia musi zawierać wartościową tezę prawną związaną z tematem.
+   NIE wybieraj orzeczeń czysto proceduralnych.
+
+3. PRIORYTET SĄDÓW:
+   Preferuj: Sąd Najwyższy > Sądy Apelacyjne > Sądy Okręgowe > Sądy Rejonowe
 {division_hint}
 ODPOWIEDZ W FORMACIE JSON:
 {{
@@ -178,12 +194,9 @@ ODPOWIEDZ W FORMACIE JSON:
         {{
             "index": 1,
             "direction": "za|przeciw|neutralny",
-            "reason": "krótkie uzasadnienie wyboru (max 20 słów)"
-        }},
-        {{
-            "index": 3,
-            "direction": "przeciw",
-            "reason": "..."
+            "article_cited": "art. X ustawy Y",
+            "article_matches_topic": true,
+            "reason": "krótkie uzasadnienie (max 20 słów)"
         }}
     ],
     "rejected_reason": "dlaczego pozostałe nie pasują (max 30 słów)"
@@ -192,7 +205,8 @@ ODPOWIEDZ W FORMACIE JSON:
 WAŻNE:
 - "direction": "za" = sąd uwzględnił roszczenie
 - "direction": "przeciw" = sąd oddalił (ale uzasadnienie może być wartościowe!)
-- "direction": "neutralny" = brak jasnego rozstrzygnięcia
+- "article_matches_topic": true TYLKO jeśli przepis dotyczy tematu artykułu!
+- Jeśli ŻADNE orzeczenie nie pasuje do tematu → zwróć pustą listę selected
 
 Odpowiedz TYLKO JSON, bez dodatkowego tekstu."""
 
@@ -217,6 +231,7 @@ def _parse_claude_response(
         data = json.loads(text)
     except json.JSONDecodeError:
         # Fallback: weź pierwsze 2
+        print("[CLAUDE_VERIFIER] ⚠️ JSON parse error, using fallback")
         return {
             "selected": original_judgments[:2],
             "reasoning": "Nie udało się sparsować odpowiedzi Claude'a"
@@ -226,9 +241,15 @@ def _parse_claude_response(
     for item in data.get("selected", []):
         idx = item.get("index", 0) - 1  # Claude zwraca 1-indexed
         if 0 <= idx < len(original_judgments):
+            # Sprawdź czy przepis pasuje do tematu
+            if item.get("article_matches_topic", True) == False:
+                print(f"[CLAUDE_VERIFIER] ⚠️ Skipping [{idx+1}] - article doesn't match topic")
+                continue
+                
             judgment = original_judgments[idx].copy()
             judgment["direction"] = item.get("direction", "neutralny")
             judgment["claude_reason"] = item.get("reason", "")
+            judgment["article_cited"] = item.get("article_cited", "")
             judgment["verified_by_claude"] = True
             selected.append(judgment)
     
