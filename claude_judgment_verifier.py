@@ -130,9 +130,31 @@ def _build_verification_prompt(
     
     judgments_text = ""
     for i, j in enumerate(judgments, 1):
+        signature = j.get('signature', '')
         judgments_text += f"""
 [{i}] {j.get('citation', f'Orzeczenie {i}')}
+Sygnatura: {signature}
 Fragment: "{j.get('excerpt', '')[:300]}..."
+"""
+    
+    # Wykryj czy temat dotyczy przestępstwa
+    criminal_keywords = ["przestępstwo", "art. 209", "niealimentacja", "niepłacenie alimentów", 
+                         "kara", "wyrok karny", "skazany", "oskarżony"]
+    is_criminal = any(kw in topic.lower() for kw in criminal_keywords)
+    
+    division_hint = ""
+    if not is_criminal:
+        division_hint = """
+PRIORYTET WYDZIAŁÓW:
+- Sprawy rodzinne/cywilne → preferuj sygnatury: C, Ca, ACa, RC, NSA (wydziały Cywilne, Rodzinne)
+- UNIKAJ: Ka, K, Ks (wydziały Karne) - chyba że artykuł dotyczy przestępstwa
+- Sygnatura "III CZP" = uchwała SN (Izba Cywilna) → bardzo wartościowe!
+"""
+    else:
+        division_hint = """
+PRIORYTET WYDZIAŁÓW:
+- Temat dotyczy przestępstwa → preferuj sygnatury: K, Ka, AKa, KK (wydziały Karne)
+- Sygnatura "I KZP" = uchwała SN (Izba Karna) → bardzo wartościowe!
 """
     
     prompt = f"""Jesteś ekspertem prawnym. Analizujesz orzeczenia sądowe dla artykułu SEO.
@@ -149,7 +171,7 @@ KRYTERIA:
 1. Orzeczenie musi dotyczyć TEGO SAMEGO zagadnienia prawnego co artykuł
 2. Fragment musi zawierać wartościową tezę prawną (nie tylko procedurę)
 3. Preferuj orzeczenia Sądu Najwyższego i Sądów Apelacyjnych
-
+{division_hint}
 ODPOWIEDZ W FORMACIE JSON:
 {{
     "selected": [
