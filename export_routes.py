@@ -761,12 +761,27 @@ def export_docx(project_id):
     document.save(buffer)
     buffer.seek(0)
     
-    filename = re.sub(r'[^\w\s-]', '', topic)[:50] + ".docx"
+    # 🔧 FIX: Bezpieczna nazwa pliku (bez polskich znaków w HTTP header)
+    # Transliteracja polskich znaków
+    polish_map = str.maketrans({
+        'ą': 'a', 'ć': 'c', 'ę': 'e', 'ł': 'l', 'ń': 'n',
+        'ó': 'o', 'ś': 's', 'ź': 'z', 'ż': 'z',
+        'Ą': 'A', 'Ć': 'C', 'Ę': 'E', 'Ł': 'L', 'Ń': 'N',
+        'Ó': 'O', 'Ś': 'S', 'Ź': 'Z', 'Ż': 'Z'
+    })
+    safe_topic = topic.translate(polish_map)
+    filename = re.sub(r'[^\w\s-]', '', safe_topic)[:50] + ".docx"
+    
+    # RFC 5987: filename* dla UTF-8 w nagłówku
+    from urllib.parse import quote
+    filename_utf8 = quote(re.sub(r'[^\w\s-]', '', topic)[:50] + ".docx")
     
     return Response(
         buffer.getvalue(),
         mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f"attachment; filename={filename}"}
+        headers={
+            "Content-Disposition": f"attachment; filename={filename}; filename*=UTF-8''{filename_utf8}"
+        }
     )
 
 
@@ -838,12 +853,25 @@ def export_html(project_id):
 </body>
 </html>"""
     
-    filename = re.sub(r'[^\w\s-]', '', topic)[:50] + ".html"
+    # 🔧 FIX: Bezpieczna nazwa pliku
+    polish_map = str.maketrans({
+        'ą': 'a', 'ć': 'c', 'ę': 'e', 'ł': 'l', 'ń': 'n',
+        'ó': 'o', 'ś': 's', 'ź': 'z', 'ż': 'z',
+        'Ą': 'A', 'Ć': 'C', 'Ę': 'E', 'Ł': 'L', 'Ń': 'N',
+        'Ó': 'O', 'Ś': 'S', 'Ź': 'Z', 'Ż': 'Z'
+    })
+    safe_topic = topic.translate(polish_map)
+    filename = re.sub(r'[^\w\s-]', '', safe_topic)[:50] + ".html"
+    
+    from urllib.parse import quote
+    filename_utf8 = quote(re.sub(r'[^\w\s-]', '', topic)[:50] + ".html")
     
     return Response(
         html_content,
         mimetype="text/html",
-        headers={"Content-Disposition": f"attachment; filename={filename}"}
+        headers={
+            "Content-Disposition": f"attachment; filename={filename}; filename*=UTF-8''{filename_utf8}"
+        }
     )
 
 
@@ -883,12 +911,25 @@ def export_txt(project_id):
     txt += re.sub(r'^h2:\s*(.+)$', r'\n## \1\n', full_text, flags=re.MULTILINE)
     txt = re.sub(r'^h3:\s*(.+)$', r'\n### \1\n', txt, flags=re.MULTILINE)
     
-    filename = re.sub(r'[^\w\s-]', '', topic)[:50] + ".txt"
+    # 🔧 FIX: Bezpieczna nazwa pliku
+    polish_map = str.maketrans({
+        'ą': 'a', 'ć': 'c', 'ę': 'e', 'ł': 'l', 'ń': 'n',
+        'ó': 'o', 'ś': 's', 'ź': 'z', 'ż': 'z',
+        'Ą': 'A', 'Ć': 'C', 'Ę': 'E', 'Ł': 'L', 'Ń': 'N',
+        'Ó': 'O', 'Ś': 'S', 'Ź': 'Z', 'Ż': 'Z'
+    })
+    safe_topic = topic.translate(polish_map)
+    filename = re.sub(r'[^\w\s-]', '', safe_topic)[:50] + ".txt"
+    
+    from urllib.parse import quote
+    filename_utf8 = quote(re.sub(r'[^\w\s-]', '', topic)[:50] + ".txt")
     
     return Response(
         txt,
         mimetype="text/plain; charset=utf-8",
-        headers={"Content-Disposition": f"attachment; filename={filename}"}
+        headers={
+            "Content-Disposition": f"attachment; filename={filename}; filename*=UTF-8''{filename_utf8}"
+        }
     )
 
 
