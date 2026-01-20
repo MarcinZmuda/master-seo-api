@@ -499,9 +499,18 @@ def _build_article_instruction(judgments: List[Dict]) -> str:
         direction = j.get("direction", "")
         dir_marker = "✓" if direction == "za" else "✗" if direction == "przeciw" else "○"
         
-        lines.append(f"{i}. {j.get('citation', '')} [{dir_marker}]")
+        # Pokaż cytowany przepis jeśli dostępny
+        article = j.get("article_cited", "")
+        article_str = f" [{article}]" if article else ""
         
-        # 🆕 v3.2: Dodaj uzasadnienie Claude'a jeśli dostępne
+        lines.append(f"{i}. {j.get('citation', '')}{article_str} [{dir_marker}]")
+        
+        # Dodaj URL źródła
+        url = j.get("url", "")
+        if url:
+            lines.append(f"   🔗 Źródło: {url}")
+        
+        # Dodaj uzasadnienie Claude'a jeśli dostępne
         claude_reason = j.get("claude_reason", "")
         if claude_reason:
             lines.append(f"   Pasuje: {claude_reason}")
@@ -511,6 +520,7 @@ def _build_article_instruction(judgments: List[Dict]) -> str:
     lines.append("")
     lines.append("Wzór: \"Jak wskazał [Sąd] w wyroku z [data] (sygn. [X]), ...\"")
     lines.append("Jeśli [✗]: \"Warto zauważyć, że sądy oddalają gdy...\"")
+    lines.append("⚠️ PODLINKUJ sygnaturę do źródła SAOS!")
     lines.append("Koniec: *Nie stanowi porady prawnej.*")
     
     return "\n".join(lines)
