@@ -575,7 +575,7 @@ if __name__ == "__main__":
             {
                 "anchor": "fortepian",
                 "must_have_nearby": ["pasy", "ochronna", "instrument"],
-                "max_distance": 20
+                "max_distance": 25  # 🔧 FIX v34.3: było 20, teraz spójne z CONFIG.DEFAULT_MAX_DISTANCE
             }
         ],
         "classification_triplet": {
