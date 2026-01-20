@@ -1,5 +1,12 @@
 """
-PROJECT ROUTES - v29.2 BRAJEN SEO Engine
+PROJECT ROUTES - v30.0 BRAJEN SEO Engine
+
+ZMIANY v30.0:
+- 🆕 LEGAL MODULE: Auto-detekcja kategorii "prawo"
+- 🆕 SAOS Integration: Pobieranie orzeczeń sądowych
+- 🆕 Judgment Scoring: Wybór najlepszych orzeczeń (40+ pkt)
+- 🆕 Max 2 citations per article
+- 🆕 legal_instruction w response z project/create
 
 ZMIANY v29.2:
 - NOWY ENDPOINT: generateH2Plan - generuje H2 na podstawie Semantic HTML + Content Relevancy
@@ -73,6 +80,16 @@ try:
 except ImportError as e:
     BATCH_PLANNER_ENABLED = False
     print(f"[PROJECT] Batch Planner not available: {e}")
+
+# 🆕 v30.0: Legal Module integration
+try:
+    from legal_routes_v3 import enhance_project_with_legal, LEGAL_MODULE_ENABLED
+    print("[PROJECT] ✅ Legal Module v3.0 loaded")
+except ImportError as e:
+    LEGAL_MODULE_ENABLED = False
+    def enhance_project_with_legal(project_data, main_keyword, h2_list):
+        return project_data
+    print(f"[PROJECT] ⚠️ Legal Module not available: {e}")
 
 # v27.4: Polish language quality check
 try:
@@ -1464,6 +1481,22 @@ def create_project():
             import traceback
             traceback.print_exc()
     
+    # ================================================================
+    # 🆕 v30.0: Legal Module - auto-detekcja i pobieranie orzeczeń
+    # ================================================================
+    if LEGAL_MODULE_ENABLED:
+        try:
+            project_data = enhance_project_with_legal(
+                project_data=project_data,
+                main_keyword=topic,
+                h2_list=h2_structure
+            )
+            if project_data.get("detected_category") == "prawo":
+                judgments_count = len(project_data.get("legal_judgments", []))
+                print(f"[PROJECT] ⚖️ Legal module active: category=prawo, {judgments_count} judgments loaded")
+        except Exception as e:
+            print(f"[PROJECT] ⚠️ Legal module error: {e}")
+    
     doc_ref.set(project_data)
     
     # v27.2: Policz ile BASIC vs EXTENDED
@@ -1495,7 +1528,12 @@ def create_project():
         "source": source,
         "batch_plan": batch_plan_dict,
         "has_featured_snippet": bool(s1_data.get("featured_snippet")),
-        "version": "v27.2"
+        # 🆕 v30.0: Legal Module fields
+        "detected_category": project_data.get("detected_category", "inne"),
+        "legal_module_active": project_data.get("legal_context", {}).get("legal_module_active", False),
+        "legal_instruction": project_data.get("legal_instruction"),
+        "legal_judgments": project_data.get("legal_judgments", []),
+        "version": "v30.0"
     }), 201
 
 
