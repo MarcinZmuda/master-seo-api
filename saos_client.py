@@ -38,8 +38,8 @@ class SAOSConfig:
     SEARCH_ENDPOINT: str = "/search/judgments"
     JUDGMENT_ENDPOINT: str = "/judgments"
     DEFAULT_PAGE_SIZE: int = 15
-    MAX_PAGE_SIZE: int = 25
-    DEFAULT_MIN_YEAR: int = 2020
+    MAX_PAGE_SIZE: int = 50  # 🆕 v3.3: Zwiększono dla lepszego filtrowania
+    DEFAULT_MIN_YEAR: int = 2015  # 🆕 v3.3: Wcześniejszy rok = więcej orzeczeń
     TIMEOUT: int = 15
     
     COURT_TYPES = {
@@ -107,6 +107,64 @@ class SAOSConfig:
         "renta": ["ubezpieczenia"],
         "zasiłek": ["ubezpieczenia"],
         "niezdolność do pracy": ["ubezpieczenia"],
+    })
+    
+    # 🆕 v3.3: FRAZY POTWIERDZAJĄCE PRZEDMIOT SPRAWY
+    # Orzeczenie MUSI zawierać jedną z tych fraz żeby być uznane za trafne
+    # Bez tego = temat jest tylko KONTEKSTEM, nie przedmiotem!
+    TOPIC_CONFIRMATION_PHRASES: Dict[str, List[str]] = field(default_factory=lambda: {
+        "ubezwłasnowolnienie": [
+            "orzeka ubezwłasnowolnienie",
+            "wniosek o ubezwłasnowolnienie", 
+            "postępowanie o ubezwłasnowolnienie",
+            "ubezwłasnowolnić całkowicie",
+            "ubezwłasnowolnić częściowo",
+            "o ubezwłasnowolnienie całkowite",
+            "o ubezwłasnowolnienie częściowe",
+            "sprawa o ubezwłasnowolnienie",
+            "żądanie ubezwłasnowolnienia",
+            "przesłanki ubezwłasnowolnienia",
+            "art. 13 k.c",
+            "art. 16 k.c",
+            "art. 544 k.p.c",
+            "art. 545 k.p.c",
+            "art. 13 §",
+            "art. 16 §",
+        ],
+        "alimenty": [
+            "zasądza alimenty",
+            "obowiązek alimentacyjny",
+            "świadczenia alimentacyjne",
+            "podwyższenie alimentów",
+            "obniżenie alimentów",
+            "uchylenie alimentów",
+            "art. 133 k.r.o",
+            "art. 135 k.r.o",
+            "art. 133 §",
+            "art. 135 §",
+        ],
+        "rozwód": [
+            "orzeka rozwód",
+            "rozwiązanie małżeństwa",
+            "rozkład pożycia",
+            "wina rozkładu",
+            "art. 56 k.r.o",
+            "art. 57 k.r.o",
+        ],
+        "spadek": [
+            "stwierdzenie nabycia spadku",
+            "dział spadku",
+            "przyjęcie spadku",
+            "odrzucenie spadku",
+            "art. 922 k.c",
+            "art. 931 k.c",
+        ],
+        "zachowek": [
+            "roszczenie o zachowek",
+            "zapłata zachowku",
+            "uprawniony do zachowku",
+            "art. 991 k.c",
+        ],
     })
 
 
@@ -179,10 +237,12 @@ class SAOSClient:
         Zwraca PEŁNĄ TREŚĆ (full_text) dla każdego orzeczenia.
         
         🆕 v3.1: Filtruje orzeczenia po wydziale (sygnatura) zgodnie z tematem!
+        🆕 v3.3: Filtruje po PRZEDMIOCIE SPRAWY (nie tylko kontekst!)
         """
         
-        # Pobierz więcej niż max_results bo część odfiltrujemy
-        fetch_count = max_results * 2 if filter_by_topic else max_results
+        # 🆕 v3.3: Pobierz dużo więcej bo filtrowanie jest agresywne
+        fetch_count = max_results * 4 if filter_by_topic else max_results
+        print(f"[SAOS] 🔍 Szukam '{keyword}', pobieram {fetch_count} orzeczeń do filtrowania")
         
         raw_results = self.search_judgments(
             keyword=keyword,
@@ -221,7 +281,32 @@ class SAOSClient:
                         })
                         continue
                 
+                # 🆕 v3.3: Filtruj po PRZEDMIOCIE SPRAWY
+                if filter_by_topic:
+                    full_text = judgment.get("full_text", "")
+                    excerpt = judgment.get("excerpt", "")
+                    is_main, reason = self._is_main_subject(keyword, full_text, excerpt)
+                    
+                    if not is_main:
+                        filtered_out.append({
+                            "signature": judgment.get("signature", ""),
+                            "reason": f"KONTEKST, nie przedmiot: {reason}"
+                        })
+                        print(f"[SAOS] ⚠️ Odrzucam {judgment.get('signature', '')}: {reason}")
+                        continue
+                    else:
+                        judgment["subject_confirmed"] = reason  # Dodaj info o potwierdzeniu
+                
                 judgments.append(judgment)
+        
+        # 🆕 v3.3: Log statystyk filtrowania
+        print(f"[SAOS] ✅ Znaleziono {raw_results.get('info', {}).get('totalResults', 0)} → "
+              f"po filtrach: {len(judgments)} (odrzucono: {len(filtered_out)})")
+        
+        if len(judgments) == 0 and len(filtered_out) > 0:
+            print(f"[SAOS] ⚠️ WSZYSTKIE orzeczenia odrzucone! Powody:")
+            for f in filtered_out[:5]:
+                print(f"[SAOS]    - {f.get('signature', '?')}: {f.get('reason', '?')}")
         
         return {
             "status": "OK",
@@ -287,6 +372,54 @@ class SAOSClient:
                 return code.upper()
         
         return None
+    
+    def _is_main_subject(self, keyword: str, full_text: str, excerpt: str) -> tuple:
+        """
+        🆕 v3.3: Sprawdza czy temat jest PRZEDMIOTEM sprawy, nie tylko kontekstem.
+        
+        Returns:
+            (is_main_subject: bool, reason: str)
+        """
+        keyword_lower = keyword.lower()
+        text_to_check = (full_text[:2000] + " " + excerpt).lower()  # Początek + excerpt
+        
+        # Szukaj głównego tematu w mapowaniu
+        main_topic = None
+        for topic in CONFIG.TOPIC_CONFIRMATION_PHRASES.keys():
+            if topic in keyword_lower:
+                main_topic = topic
+                break
+        
+        if not main_topic:
+            # Brak zdefiniowanych fraz - przepuść (fallback)
+            return True, "Brak zdefiniowanych fraz potwierdzających"
+        
+        # Sprawdź czy którakolwiek fraza potwierdzająca występuje
+        confirmation_phrases = CONFIG.TOPIC_CONFIRMATION_PHRASES.get(main_topic, [])
+        
+        for phrase in confirmation_phrases:
+            if phrase.lower() in text_to_check:
+                return True, f"Znaleziono: '{phrase}'"
+        
+        # Dodatkowe sprawdzenie: czy temat jest w pierwszych 500 znakach sentencji?
+        # (jeśli tak, prawdopodobnie jest przedmiotem sprawy)
+        first_500 = text_to_check[:500]
+        if keyword_lower in first_500:
+            # Sprawdź kontekst - czy to przedmiot czy podmiot
+            # Frazy wskazujące na KONTEKST (nie przedmiot):
+            context_indicators = [
+                "ubezwłasnowolniony powód",
+                "ubezwłasnowolniona pozwana", 
+                "będąc ubezwłasnowolnion",
+                "jako ubezwłasnowolnion",
+                "osoby ubezwłasnowolnionej",  # w innych sprawach
+                "przedstawiciel ubezwłasnowolnionego",
+            ]
+            for indicator in context_indicators:
+                if indicator in text_to_check:
+                    return False, f"Temat to tylko kontekst: '{indicator}'"
+        
+        return False, f"Brak fraz potwierdzających przedmiot sprawy dla '{main_topic}'"
     
     def _format_judgment(self, item: Dict, keyword: str) -> Optional[Dict]:
         """Formatuje pojedyncze orzeczenie."""
