@@ -1,7 +1,12 @@
 """
 ===============================================================================
-🔍 UNIFIED VALIDATOR v32.0 (BRAJEN)
+🔍 UNIFIED VALIDATOR v35.0 (BRAJEN)
 ===============================================================================
+v35.0 ZMIANY (zgodnie z dokumentem f.pdf - badania NKJP):
+- Progi burstiness zgodne z CV: CRITICAL < 1.5 (CV 0.3), OK >= 2.5 (CV 0.5)
+- Dodano wartość CV w komunikatach diagnostycznych
+- Nowy poziom SUBOPTIMAL dla burstiness w strefie 2.0-2.5
+
 v32.0 ZMIANY:
 - Dwupoziomowe progi burstiness (CRITICAL/WARNING)
 - Severity.CRITICAL dodane
@@ -34,24 +39,34 @@ except ImportError:
 
 
 # ================================================================
-# 📊 STAŁE KONFIGURACYJNE - v32.0
+# 📊 STAŁE KONFIGURACYJNE - v35.0
+# 🔧 Progi zgodne z dokumentem f.pdf (badania NKJP)
 # ================================================================
 class ValidationConfig:
-    """Centralna konfiguracja wszystkich progów walidacji."""
+    """
+    Centralna konfiguracja wszystkich progów walidacji.
     
-    # 🆕 v32.0: DWUPOZIOMOWE PROGI BURSTINESS
-    # 🔧 FIX v34.3: Zsynchronizowane z ai_detection_metrics.py
-    BURSTINESS_CRITICAL_LOW = 2.0
-    BURSTINESS_WARNING_LOW = 2.8
-    BURSTINESS_OPTIMAL_MIN = 2.8   # było 3.2, teraz = WARNING_LOW (spójność z ai_detection)
-    BURSTINESS_OPTIMAL_MAX = 4.2   # było 3.8, teraz = WARNING_HIGH (spójność z ai_detection)
-    BURSTINESS_WARNING_HIGH = 4.2
-    BURSTINESS_CRITICAL_HIGH = 4.8
+    🆕 v35.0 - PROGI ZGODNE Z BADANIAMI NKJP (f.pdf):
+    - Burstiness: CV > 0.5 = ludzki, CV < 0.3 = AI
+    - Formuła: burstiness = CV * 5
+    """
+    
+    # ================================================================
+    # BURSTINESS - zgodnie z dokumentem f.pdf
+    # CV (współczynnik zmienności) = σ / μ
+    # System używa: burstiness = CV * 5
+    # ================================================================
+    BURSTINESS_CRITICAL_LOW = 1.5   # CV 0.3 - próg AI (było 2.0)
+    BURSTINESS_WARNING_LOW = 2.0    # CV 0.4 - strefa neutralna (było 2.8)
+    BURSTINESS_OPTIMAL_MIN = 2.5    # CV 0.5 - próg ludzkiego (było 2.8/3.2)
+    BURSTINESS_OPTIMAL_MAX = 4.0    # CV 0.8 - górna granica OK (było 4.2/3.8)
+    BURSTINESS_WARNING_HIGH = 4.5   # CV 0.9 (było 4.2)
+    BURSTINESS_CRITICAL_HIGH = 5.0  # CV 1.0 - tekst chaotyczny (było 4.8)
     
     # Stare aliasy dla kompatybilności
     BURSTINESS_MIN = BURSTINESS_WARNING_LOW
     BURSTINESS_MAX = BURSTINESS_WARNING_HIGH
-    BURSTINESS_OPTIMAL = 3.5
+    BURSTINESS_OPTIMAL = 3.25       # środek przedziału 2.5-4.0
     
     TRANSITION_RATIO_MIN = 0.25
     TRANSITION_RATIO_MAX = 0.50
@@ -271,44 +286,68 @@ def calculate_burstiness(text: str) -> float:
 
 
 def validate_burstiness(burstiness: float, issues: List[ValidationIssue]) -> Dict[str, Any]:
-    """🆕 v32.0: Dwupoziomowa walidacja burstiness."""
-    details = {"value": burstiness, "status": "OK", "level": None}
+    """
+    🆕 v35.0: Walidacja burstiness zgodna z dokumentem f.pdf (NKJP).
+    
+    Progi CV (współczynnik zmienności = burstiness / 5):
+    - CV < 0.3 = CRITICAL (silny sygnał AI)
+    - CV 0.3-0.4 = WARNING (strefa neutralna)
+    - CV 0.5-0.8 = OK (ludzki tekst)
+    - CV > 0.9 = WARNING (tekst chaotyczny)
+    - CV > 1.0 = CRITICAL
+    """
+    cv_value = burstiness / 5  # Konwersja na współczynnik zmienności
+    details = {
+        "value": burstiness, 
+        "cv": round(cv_value, 2),
+        "status": "OK", 
+        "level": None
+    }
     
     if burstiness < ValidationConfig.BURSTINESS_CRITICAL_LOW:
         details["status"] = "CRITICAL"
         details["level"] = "critical_low"
         issues.append(ValidationIssue(
             "CRITICAL_LOW_BURSTINESS", 
-            f"Burstiness KRYTYCZNIE niski: {burstiness:.2f} - silny sygnał AI!", 
+            f"Burstiness KRYTYCZNIE niski: {burstiness:.2f} (CV {cv_value:.2f} < 0.3) - silny sygnał AI!", 
             Severity.CRITICAL,
-            {"value": burstiness, "threshold": ValidationConfig.BURSTINESS_CRITICAL_LOW}
+            {"value": burstiness, "cv": cv_value, "threshold": ValidationConfig.BURSTINESS_CRITICAL_LOW}
         ))
     elif burstiness < ValidationConfig.BURSTINESS_WARNING_LOW:
         details["status"] = "WARNING"
         details["level"] = "warning_low"
         issues.append(ValidationIssue(
             "LOW_BURSTINESS", 
-            f"Burstiness za niski: {burstiness:.2f} - zdania zbyt podobnej długości", 
+            f"Burstiness za niski: {burstiness:.2f} (CV {cv_value:.2f} < 0.4) - strefa neutralna/podejrzana", 
             Severity.WARNING, 
-            {"value": burstiness, "threshold": ValidationConfig.BURSTINESS_WARNING_LOW}
+            {"value": burstiness, "cv": cv_value, "threshold": ValidationConfig.BURSTINESS_WARNING_LOW}
+        ))
+    elif burstiness < ValidationConfig.BURSTINESS_OPTIMAL_MIN:
+        details["status"] = "INFO"
+        details["level"] = "below_optimal"
+        issues.append(ValidationIssue(
+            "SUBOPTIMAL_BURSTINESS", 
+            f"Burstiness poniżej optymalnego: {burstiness:.2f} (CV {cv_value:.2f} < 0.5) - blisko progu", 
+            Severity.WARNING, 
+            {"value": burstiness, "cv": cv_value, "threshold": ValidationConfig.BURSTINESS_OPTIMAL_MIN}
         ))
     elif burstiness > ValidationConfig.BURSTINESS_CRITICAL_HIGH:
         details["status"] = "CRITICAL"
         details["level"] = "critical_high"
         issues.append(ValidationIssue(
             "CRITICAL_HIGH_BURSTINESS", 
-            f"Burstiness KRYTYCZNIE wysoki: {burstiness:.2f} - tekst chaotyczny!", 
+            f"Burstiness KRYTYCZNIE wysoki: {burstiness:.2f} (CV {cv_value:.2f} > 1.0) - tekst chaotyczny!", 
             Severity.CRITICAL, 
-            {"value": burstiness, "threshold": ValidationConfig.BURSTINESS_CRITICAL_HIGH}
+            {"value": burstiness, "cv": cv_value, "threshold": ValidationConfig.BURSTINESS_CRITICAL_HIGH}
         ))
     elif burstiness > ValidationConfig.BURSTINESS_WARNING_HIGH:
         details["status"] = "WARNING"
         details["level"] = "warning_high"
         issues.append(ValidationIssue(
             "HIGH_BURSTINESS", 
-            f"Burstiness za wysoki: {burstiness:.2f} - zdania zbyt zróżnicowane", 
+            f"Burstiness za wysoki: {burstiness:.2f} (CV {cv_value:.2f} > 0.9) - zdania zbyt zróżnicowane", 
             Severity.WARNING, 
-            {"value": burstiness, "threshold": ValidationConfig.BURSTINESS_WARNING_HIGH}
+            {"value": burstiness, "cv": cv_value, "threshold": ValidationConfig.BURSTINESS_WARNING_HIGH}
         ))
     else:
         if ValidationConfig.BURSTINESS_OPTIMAL_MIN <= burstiness <= ValidationConfig.BURSTINESS_OPTIMAL_MAX:
