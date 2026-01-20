@@ -103,13 +103,14 @@ class AIDetectionConfig:
     HUMANNESS_CRITICAL = 50
     HUMANNESS_WARNING = 70
     
-    # Wagi
+    # Wagi - 🔧 FIX v34.3: Zsynchronizowane z calculate_humanness_score
     WEIGHTS = {
         "burstiness": 0.25,
-        "vocabulary": 0.20,
-        "sophistication": 0.15,
+        "vocabulary": 0.15,      # było 0.20
+        "sophistication": 0.10,  # było 0.15
         "entropy": 0.20,
-        "repetition": 0.20
+        "repetition": 0.20,
+        "pos_diversity": 0.10    # 🆕 v33.3
     }
 
 
@@ -744,18 +745,10 @@ def calculate_word_repetition(text: str) -> Dict[str, Any]:
         status = Severity.OK
         message = "Brak nadmiernych powtórzeń"
     
-    SYNONYM_MAP = {
-        "firma": ["przedsiębiorstwo", "spółka", "wykonawca", "usługodawca"],
-        "usługa": ["świadczenie", "realizacja", "obsługa"],
-        "oferować": ["zapewniać", "proponować", "świadczyć"],
-        "klient": ["zleceniodawca", "usługobiorca", "zamawiający"],
-        "profesjonalny": ["doświadczony", "wykwalifikowany", "certyfikowany"],
-        "cena": ["koszt", "stawka", "wycena", "taryfa"],
-    }
-    
+    # 🔧 FIX v34.3: Usunięto lokalną SYNONYM_MAP - używamy globalnej (27 słów)
     suggestions = []
     for word in overused:
-        if word in SYNONYM_MAP:
+        if word in SYNONYM_MAP:  # Używa globalnej SYNONYM_MAP z linii 431
             suggestions.append(f"'{word}' → {', '.join(SYNONYM_MAP[word][:3])}")
     
     return {
@@ -848,17 +841,10 @@ def calculate_humanness_score(text: str) -> Dict[str, Any]:
         "pos_diversity": normalize_pos(pos_diversity.get("value", 0.5))  # v33.3
     }
     
-    # v33.3: Zaktualizowane wagi z POS diversity
-    weights = {
-        "burstiness": 0.25,      # było 0.30
-        "vocabulary": 0.15,
-        "sophistication": 0.10,
-        "entropy": 0.20,         # było 0.20
-        "repetition": 0.20,
-        "pos_diversity": 0.10    # v33.3: nowa metryka
-    }
+    # 🔧 FIX v34.3: Używamy wag z konfiguracji (jedno źródło prawdy)
+    weights = config.WEIGHTS
     
-    humanness = sum(scores[k] * weights[k] for k in scores)
+    humanness = sum(scores[k] * weights.get(k, 0) for k in scores)
     humanness_score = round(humanness * 100, 0)
     
     if humanness_score < config.HUMANNESS_CRITICAL:
