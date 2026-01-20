@@ -40,10 +40,11 @@ class ValidationConfig:
     """Centralna konfiguracja wszystkich progów walidacji."""
     
     # 🆕 v32.0: DWUPOZIOMOWE PROGI BURSTINESS
+    # 🔧 FIX v34.3: Zsynchronizowane z ai_detection_metrics.py
     BURSTINESS_CRITICAL_LOW = 2.0
     BURSTINESS_WARNING_LOW = 2.8
-    BURSTINESS_OPTIMAL_MIN = 3.2
-    BURSTINESS_OPTIMAL_MAX = 3.8
+    BURSTINESS_OPTIMAL_MIN = 2.8   # było 3.2, teraz = WARNING_LOW (spójność z ai_detection)
+    BURSTINESS_OPTIMAL_MAX = 4.2   # było 3.8, teraz = WARNING_HIGH (spójność z ai_detection)
     BURSTINESS_WARNING_HIGH = 4.2
     BURSTINESS_CRITICAL_HIGH = 4.8
     
