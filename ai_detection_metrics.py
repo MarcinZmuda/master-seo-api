@@ -1,6 +1,6 @@
 """
 ===============================================================================
-🤖 AI DETECTION METRICS v33.0
+🤖 AI DETECTION METRICS v35.0
 ===============================================================================
 Moduł do wykrywania tekstu wygenerowanego przez AI.
 
@@ -10,15 +10,25 @@ Metryki:
 - Lexical Sophistication (średnia częstość słów - Zipf)
 - Starter Entropy (różnorodność początków zdań)
 - Word Repetition (powtórzenia słów)
+- Sentence Distribution (rozkład długości zdań) 🆕
 
 Humanness Score = średnia ważona wszystkich metryk (0-100)
 
 CRITICAL validations:
 - Forbidden phrases check (BLOKUJE batch!)
-- Burstiness < 1.5 (BLOKUJE batch!)
+- Burstiness < 1.5 (CV < 0.3 - BLOKUJE batch!)
 - JITTER validation
 - Triplets validation
 - Word repetition > 8× (BLOKUJE batch!)
+
+v35.0 CHANGES (zgodnie z dokumentem f.pdf - badania NKJP):
+- Progi burstiness zgodne z badaniami: CV 0.3 = AI, CV 0.5 = ludzki
+- Nowe progi rozkładu zdań: krótkie 20-25%, średnie 50-60%, długie 15-25%
+- Krótkie zdania: 2-10 słów (było 5-8)
+- Dodano wykrywanie wzorca AI (koncentracja w przedziale 15-22 słów)
+- Dodano wartość CV w komunikatach diagnostycznych
+- Zwiększona waga burstiness (0.30 vs 0.25) jako kluczowy marker AI
+- Nowa metryka: sentence_distribution score
 
 v33.0 CHANGES:
 - Rozszerzono SHORT_INSERTS_LIBRARY (29 wtrąceń)
@@ -69,21 +79,65 @@ except ImportError:
 # 📊 KONFIGURACJA
 # ================================================================
 class AIDetectionConfig:
-    """Progi dla metryk AI detection."""
+    """
+    Progi dla metryk AI detection.
     
-    # Burstiness (zmienność długości zdań)
-    BURSTINESS_CRITICAL_LOW = 2.0
-    BURSTINESS_WARNING_LOW = 2.8
-    BURSTINESS_OK_MIN = 2.8
-    BURSTINESS_OK_MAX = 4.2
-    BURSTINESS_WARNING_HIGH = 4.8
-    BURSTINESS_CRITICAL_HIGH = 4.8
+    🆕 v35.0 - PROGI ZGODNE Z BADANIAMI NKJP (f.pdf):
+    - Burstiness: CV > 0.5 = ludzki, CV < 0.3 = AI (formuła: burstiness = CV * 5)
+    - TTR: 0.45-0.55 dla blogów/SEO (surowy na 1000 słów)
+    - Rozkład zdań: 20-25% krótkich, 50-60% średnich, 15-25% długich
+    """
     
-    # Vocabulary Richness (TTR)
-    TTR_CRITICAL = 0.40
-    TTR_WARNING = 0.48
-    TTR_OK = 0.55
+    # ================================================================
+    # BURSTINESS - zgodnie z dokumentem f.pdf
+    # Formuła: burstiness = (std / mean) * 5, czyli CV * 5
+    # CV 0.3 = 1.5, CV 0.5 = 2.5, CV 0.7 = 3.5
+    # ================================================================
+    BURSTINESS_CRITICAL_LOW = 1.5   # CV 0.3 - próg AI (było 2.0)
+    BURSTINESS_WARNING_LOW = 2.0    # CV 0.4 - strefa neutralna (było 2.8)
+    BURSTINESS_OK_MIN = 2.5         # CV 0.5 - próg ludzkiego tekstu (było 2.8)
+    BURSTINESS_OK_MAX = 4.0         # CV 0.8 - górna granica OK (było 4.2)
+    BURSTINESS_WARNING_HIGH = 4.5   # CV 0.9 (było 4.8)
+    BURSTINESS_CRITICAL_HIGH = 5.0  # CV 1.0 - tekst chaotyczny (było 4.8)
     
+    # ================================================================
+    # TTR (Type-Token Ratio) - zgodnie z dokumentem f.pdf
+    # Polskie blogi/SEO: TTR surowy 0.45-0.55 (na 1000 słów)
+    # ================================================================
+    TTR_CRITICAL = 0.42   # było 0.40
+    TTR_WARNING = 0.48    # bez zmian
+    TTR_OK = 0.55         # bez zmian
+    
+    # ================================================================
+    # ROZKŁAD ZDAŃ - zgodnie z dokumentem f.pdf (NOWE!)
+    # Krótkie (2-10 słów): 20-25%
+    # Średnie (12-18 słów): 50-60%
+    # Długie (20-30 słów): 15-25%
+    # ================================================================
+    SHORT_SENTENCE_MIN_WORDS = 2
+    SHORT_SENTENCE_MAX_WORDS = 10
+    SHORT_SENTENCE_TARGET_PCT_MIN = 20
+    SHORT_SENTENCE_TARGET_PCT_MAX = 25
+    
+    MEDIUM_SENTENCE_MIN_WORDS = 12
+    MEDIUM_SENTENCE_MAX_WORDS = 18
+    MEDIUM_SENTENCE_TARGET_PCT_MIN = 50
+    MEDIUM_SENTENCE_TARGET_PCT_MAX = 60
+    
+    LONG_SENTENCE_MIN_WORDS = 20
+    LONG_SENTENCE_MAX_WORDS = 30
+    LONG_SENTENCE_TARGET_PCT_MIN = 15
+    LONG_SENTENCE_TARGET_PCT_MAX = 25
+    
+    # Średnia długość zdania: 10-18 słów dla blogów/SEO
+    AVG_SENTENCE_LENGTH_MIN = 10
+    AVG_SENTENCE_LENGTH_MAX = 18
+    AVG_SENTENCE_LENGTH_AI_MIN = 15  # AI typowo 15-22 monotonnie
+    AVG_SENTENCE_LENGTH_AI_MAX = 22
+    
+    # ================================================================
+    # Pozostałe metryki (bez zmian)
+    # ================================================================
     # Lexical Sophistication (Zipf)
     ZIPF_CRITICAL = 5.5
     ZIPF_WARNING = 5.0
@@ -103,14 +157,15 @@ class AIDetectionConfig:
     HUMANNESS_CRITICAL = 50
     HUMANNESS_WARNING = 70
     
-    # Wagi - 🔧 FIX v34.3: Zsynchronizowane z calculate_humanness_score
+    # Wagi - 🔧 FIX v35.0: Zwiększona waga burstiness zgodnie z badaniami
     WEIGHTS = {
-        "burstiness": 0.25,
-        "vocabulary": 0.15,      # było 0.20
-        "sophistication": 0.10,  # było 0.15
-        "entropy": 0.20,
-        "repetition": 0.20,
-        "pos_diversity": 0.10    # 🆕 v33.3
+        "burstiness": 0.30,       # było 0.25 - zwiększone, kluczowy marker AI
+        "vocabulary": 0.15,
+        "sophistication": 0.10,
+        "entropy": 0.15,          # było 0.20
+        "repetition": 0.15,       # było 0.20
+        "pos_diversity": 0.10,
+        "sentence_distribution": 0.05  # 🆕 nowa metryka
     }
 
 
@@ -163,11 +218,21 @@ def tokenize_no_stopwords(text: str) -> List[str]:
 # 📊 METRYKI
 # ================================================================
 def calculate_burstiness(text: str) -> Dict[str, Any]:
+    """
+    Oblicza burstiness (zmienność długości zdań).
+    
+    🆕 v35.0: Formuła: burstiness = (std / mean) * 5 = CV * 5
+    Progi zgodne z dokumentem f.pdf (NKJP):
+    - CV < 0.3 (burstiness < 1.5) = CRITICAL (AI)
+    - CV 0.3-0.4 (burstiness 1.5-2.0) = WARNING
+    - CV 0.5-0.8 (burstiness 2.5-4.0) = OK (ludzki)
+    """
     sentences = split_into_sentences(text)
     
     if len(sentences) < 5:
         return {
             "value": 0,
+            "cv": 0,
             "status": Severity.WARNING.value,
             "message": "Za mało zdań do analizy (min 5)",
             "sentence_count": len(sentences)
@@ -177,35 +242,48 @@ def calculate_burstiness(text: str) -> Dict[str, Any]:
     mean_len = statistics.mean(lengths)
     std_len = statistics.stdev(lengths) if len(lengths) > 1 else 0
     
-    burstiness = (std_len / mean_len * 5) if mean_len > 0 else 0
-    burstiness = round(burstiness, 2)
+    # Współczynnik zmienności (CV) i burstiness
+    cv_value = std_len / mean_len if mean_len > 0 else 0
+    burstiness = round(cv_value * 5, 2)  # burstiness = CV * 5
     
     config = AIDetectionConfig()
     if burstiness < config.BURSTINESS_CRITICAL_LOW:
         status = Severity.CRITICAL
-        message = f"Tekst monotonny (burstiness {burstiness} < {config.BURSTINESS_CRITICAL_LOW}). Dodaj krótkie zdania 5-8 słów."
+        message = f"⚠️ SYGNAŁ AI: burstiness {burstiness} (CV {cv_value:.2f} < 0.3). Dodaj krótkie zdania 2-10 słów."
     elif burstiness < config.BURSTINESS_WARNING_LOW:
         status = Severity.WARNING
-        message = f"Niska zmienność zdań. Dodaj więcej krótkich zdań."
+        message = f"Strefa neutralna: burstiness {burstiness} (CV {cv_value:.2f} < 0.4). Dodaj więcej krótkich zdań."
+    elif burstiness < config.BURSTINESS_OK_MIN:
+        status = Severity.WARNING
+        message = f"Poniżej optymalnego: burstiness {burstiness} (CV {cv_value:.2f} < 0.5). Zwiększ zmienność."
     elif burstiness > config.BURSTINESS_CRITICAL_HIGH:
         status = Severity.CRITICAL
-        message = f"Tekst chaotyczny (burstiness {burstiness} > {config.BURSTINESS_CRITICAL_HIGH}). Wyrównaj rytm."
-    elif burstiness > config.BURSTINESS_OK_MAX:
+        message = f"Tekst chaotyczny: burstiness {burstiness} (CV {cv_value:.2f} > 1.0). Wyrównaj rytm."
+    elif burstiness > config.BURSTINESS_WARNING_HIGH:
         status = Severity.WARNING
-        message = f"Za duża zmienność. Wyrównaj długości zdań."
+        message = f"Za duża zmienność: burstiness {burstiness} (CV {cv_value:.2f} > 0.9). Wyrównaj długości."
     else:
         status = Severity.OK
-        message = "Burstiness w normie"
+        message = f"Burstiness OK: {burstiness} (CV {cv_value:.2f} w normie 0.5-0.8)"
     
     return {
         "value": burstiness,
+        "cv": round(cv_value, 2),
         "status": status.value,
         "message": message,
         "sentence_count": len(sentences),
         "mean_length": round(mean_len, 1),
         "std_length": round(std_len, 1),
         "min_length": min(lengths),
-        "max_length": max(lengths)
+        "max_length": max(lengths),
+        "thresholds": {
+            "critical_low": config.BURSTINESS_CRITICAL_LOW,
+            "warning_low": config.BURSTINESS_WARNING_LOW,
+            "ok_min": config.BURSTINESS_OK_MIN,
+            "ok_max": config.BURSTINESS_OK_MAX,
+            "warning_high": config.BURSTINESS_WARNING_HIGH,
+            "critical_high": config.BURSTINESS_CRITICAL_HIGH
+        }
     }
 
 
@@ -342,10 +420,16 @@ SHORT_INSERTS_LIBRARY = [
 
 # ================================================================
 # 🆕 v33.0: ANALYZE SENTENCE DISTRIBUTION
+# 🔧 v35.0: Progi zgodne z dokumentem f.pdf (NKJP)
 # ================================================================
 def analyze_sentence_distribution(text: str) -> Dict[str, Any]:
     """
     Analizuje rozkład długości zdań dla burstiness fix.
+    
+    🆕 v35.0 - Progi zgodne z badaniami NKJP (f.pdf):
+    - Krótkie (2-10 słów): 20-25%
+    - Średnie (12-18 słów): 50-60%  
+    - Długie (20-30 słów): 15-25%
     """
     sentences = split_into_sentences(text)
     
@@ -357,11 +441,16 @@ def analyze_sentence_distribution(text: str) -> Dict[str, Any]:
         }
     
     lengths = [len(s.split()) for s in sentences]
-    short = sum(1 for l in lengths if 5 <= l <= 8)
-    medium = sum(1 for l in lengths if 12 <= l <= 18)
-    long = sum(1 for l in lengths if l >= 20)
+    
+    # 🔧 v35.0: Nowe progi zgodne z dokumentem f.pdf
+    short = sum(1 for l in lengths if config.SHORT_SENTENCE_MIN_WORDS <= l <= config.SHORT_SENTENCE_MAX_WORDS)
+    medium = sum(1 for l in lengths if config.MEDIUM_SENTENCE_MIN_WORDS <= l <= config.MEDIUM_SENTENCE_MAX_WORDS)
+    long = sum(1 for l in lengths if config.LONG_SENTENCE_MIN_WORDS <= l <= config.LONG_SENTENCE_MAX_WORDS)
+    very_long = sum(1 for l in lengths if l > config.LONG_SENTENCE_MAX_WORDS)  # >30 słów
     
     total = len(lengths)
+    avg_length = sum(lengths) / total if total > 0 else 0
+    
     distribution = [
         round(short / total * 100, 1),
         round(medium / total * 100, 1),
@@ -369,33 +458,87 @@ def analyze_sentence_distribution(text: str) -> Dict[str, Any]:
     ]
     
     issues = []
-    if distribution[0] < 10:
-        issues.append(f"Za mało krótkich zdań: {distribution[0]}% vs cel 20%")
-    if distribution[2] < 15:
-        issues.append(f"Za mało długich zdań: {distribution[2]}% vs cel 30%")
+    
+    # 🔧 v35.0: Walidacja zgodna z dokumentem f.pdf
+    # Krótkie zdania: cel 20-25%
+    if distribution[0] < config.SHORT_SENTENCE_TARGET_PCT_MIN:
+        issues.append(f"Za mało krótkich zdań (2-10 słów): {distribution[0]}% vs cel {config.SHORT_SENTENCE_TARGET_PCT_MIN}-{config.SHORT_SENTENCE_TARGET_PCT_MAX}%")
+    elif distribution[0] > config.SHORT_SENTENCE_TARGET_PCT_MAX:
+        issues.append(f"Za dużo krótkich zdań: {distribution[0]}% vs cel {config.SHORT_SENTENCE_TARGET_PCT_MIN}-{config.SHORT_SENTENCE_TARGET_PCT_MAX}%")
+    
+    # Średnie zdania: cel 50-60% (NOWA WALIDACJA!)
+    if distribution[1] < config.MEDIUM_SENTENCE_TARGET_PCT_MIN:
+        issues.append(f"Za mało średnich zdań (12-18 słów): {distribution[1]}% vs cel {config.MEDIUM_SENTENCE_TARGET_PCT_MIN}-{config.MEDIUM_SENTENCE_TARGET_PCT_MAX}%")
+    elif distribution[1] > config.MEDIUM_SENTENCE_TARGET_PCT_MAX:
+        issues.append(f"Za dużo średnich zdań: {distribution[1]}% vs cel {config.MEDIUM_SENTENCE_TARGET_PCT_MIN}-{config.MEDIUM_SENTENCE_TARGET_PCT_MAX}%")
+    
+    # Długie zdania: cel 15-25%
+    if distribution[2] < config.LONG_SENTENCE_TARGET_PCT_MIN:
+        issues.append(f"Za mało długich zdań (20-30 słów): {distribution[2]}% vs cel {config.LONG_SENTENCE_TARGET_PCT_MIN}-{config.LONG_SENTENCE_TARGET_PCT_MAX}%")
+    elif distribution[2] > config.LONG_SENTENCE_TARGET_PCT_MAX:
+        issues.append(f"Za dużo długich zdań: {distribution[2]}% vs cel {config.LONG_SENTENCE_TARGET_PCT_MIN}-{config.LONG_SENTENCE_TARGET_PCT_MAX}%")
+    
+    # Ostrzeżenie o bardzo długich zdaniach (>30 słów)
+    if very_long > 0:
+        issues.append(f"{very_long} zdań >30 słów - mogą być trudne w odbiorze")
+    
+    # Walidacja średniej długości zdania
+    if avg_length < config.AVG_SENTENCE_LENGTH_MIN:
+        issues.append(f"Średnia długość zdań za niska: {avg_length:.1f} vs cel {config.AVG_SENTENCE_LENGTH_MIN}-{config.AVG_SENTENCE_LENGTH_MAX}")
+    elif avg_length > config.AVG_SENTENCE_LENGTH_MAX:
+        issues.append(f"Średnia długość zdań za wysoka: {avg_length:.1f} vs cel {config.AVG_SENTENCE_LENGTH_MIN}-{config.AVG_SENTENCE_LENGTH_MAX}")
+    
+    # Wykrywanie wzorca AI (monotonna długość 15-22)
+    ai_range_count = sum(1 for l in lengths if config.AVG_SENTENCE_LENGTH_AI_MIN <= l <= config.AVG_SENTENCE_LENGTH_AI_MAX)
+    ai_concentration = ai_range_count / total * 100 if total > 0 else 0
+    if ai_concentration > 60:
+        issues.append(f"⚠️ WZORZEC AI: {ai_concentration:.0f}% zdań w przedziale 15-22 słów (monotonia)")
+    
+    # Oblicz score rozkładu (0-100)
+    distribution_score = 100
+    if distribution[0] < config.SHORT_SENTENCE_TARGET_PCT_MIN:
+        distribution_score -= (config.SHORT_SENTENCE_TARGET_PCT_MIN - distribution[0]) * 2
+    if distribution[1] < config.MEDIUM_SENTENCE_TARGET_PCT_MIN:
+        distribution_score -= (config.MEDIUM_SENTENCE_TARGET_PCT_MIN - distribution[1])
+    if distribution[2] < config.LONG_SENTENCE_TARGET_PCT_MIN:
+        distribution_score -= (config.LONG_SENTENCE_TARGET_PCT_MIN - distribution[2]) * 2
+    distribution_score = max(0, min(100, distribution_score))
     
     return {
         "short_count": short,
         "medium_count": medium,
         "long_count": long,
+        "very_long_count": very_long,
         "total": total,
+        "avg_length": round(avg_length, 1),
         "distribution": distribution,
-        "distribution_label": f"[{distribution[0]}% krótkich, {distribution[1]}% średnich, {distribution[2]}% długich]",
-        "issues": issues
+        "distribution_label": f"[{distribution[0]}% krótkich (2-10), {distribution[1]}% średnich (12-18), {distribution[2]}% długich (20-30)]",
+        "distribution_score": distribution_score,
+        "ai_concentration": round(ai_concentration, 1),
+        "issues": issues,
+        "targets": {
+            "short": f"{config.SHORT_SENTENCE_TARGET_PCT_MIN}-{config.SHORT_SENTENCE_TARGET_PCT_MAX}%",
+            "medium": f"{config.MEDIUM_SENTENCE_TARGET_PCT_MIN}-{config.MEDIUM_SENTENCE_TARGET_PCT_MAX}%",
+            "long": f"{config.LONG_SENTENCE_TARGET_PCT_MIN}-{config.LONG_SENTENCE_TARGET_PCT_MAX}%"
+        }
     }
 
 
 # ================================================================
 # 🆕 v33.0: GENERATE BURSTINESS FIX INSTRUCTION
+# 🔧 v35.0: Progi zgodne z dokumentem f.pdf
 # ================================================================
 def generate_burstiness_fix(burstiness: float, sentence_distribution: Dict) -> Dict[str, Any]:
     """
     Generuje konkretne instrukcje naprawy burstiness.
+    
+    🔧 v35.0: Nowy próg >= 2.5 (CV 0.5) zgodnie z badaniami NKJP
     """
     import random
     
-    if burstiness >= 2.0:
-        return {"needed": False, "message": "Burstiness OK"}
+    # 🔧 v35.0: Nowy próg zgodny z dokumentem (CV 0.5 = 2.5)
+    if burstiness >= config.BURSTINESS_OK_MIN:
+        return {"needed": False, "message": "Burstiness OK (≥2.5, CV ≥0.5)"}
     
     inserts = random.sample(SHORT_INSERTS_LIBRARY, min(3, len(SHORT_INSERTS_LIBRARY)))
     
@@ -412,17 +555,34 @@ def generate_burstiness_fix(burstiness: float, sentence_distribution: Dict) -> D
     
     # Buduj fix_instruction bez backslashy w f-string
     quoted_inserts = ['"' + s + '"' for s in inserts]
-    fix_instruction = "Dodaj krótkie zdania: " + ", ".join(quoted_inserts)
+    fix_instruction = "Dodaj krótkie zdania (2-10 słów): " + ", ".join(quoted_inserts)
+    
+    # Określ poziom problemu
+    if burstiness < config.BURSTINESS_CRITICAL_LOW:
+        severity = "CRITICAL"
+        cv_value = burstiness / 5
+        explanation = f"CV {cv_value:.2f} < 0.3 = silny sygnał AI"
+    elif burstiness < config.BURSTINESS_WARNING_LOW:
+        severity = "WARNING"
+        cv_value = burstiness / 5
+        explanation = f"CV {cv_value:.2f} < 0.4 = strefa neutralna/podejrzana"
+    else:
+        severity = "INFO"
+        cv_value = burstiness / 5
+        explanation = f"CV {cv_value:.2f} < 0.5 = blisko progu ludzkiego"
     
     return {
         "needed": True,
+        "severity": severity,
         "burstiness": burstiness,
-        "target": "≥ 2.0",
+        "cv_value": round(cv_value, 2),
+        "target": f"≥ {config.BURSTINESS_OK_MIN} (CV ≥0.5)",
+        "explanation": explanation,
         "fix_instruction": fix_instruction,
         "insert_suggestions": inserts,
         "rewrite_example": random.choice(rewrite_examples),
         "distribution": sentence_distribution.get("distribution_label", ""),
-        "tip": "Wzór: KRÓTKIE (5-8 słów) → DŁUGIE (20-30 słów) → ŚREDNIE (10-15 słów)"
+        "tip": "Wzór wg NKJP: KRÓTKIE (2-10 słów, 20-25%) + ŚREDNIE (12-18 słów, 50-60%) + DŁUGIE (20-30 słów, 15-25%)"
     }
 
 
