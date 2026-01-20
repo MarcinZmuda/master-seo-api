@@ -126,7 +126,7 @@ def _build_verification_prompt(
     judgments: List[Dict],
     max_to_select: int
 ) -> str:
-    """Buduje prompt dla Claude'a."""
+    """Buduje prompt dla Claude'a - v3.2 z weryfikacją PRZEDMIOTU sprawy."""
     
     judgments_text = ""
     for i, j in enumerate(judgments, 1):
@@ -146,15 +146,16 @@ Fragment: "{excerpt}..."
     division_hint = ""
     if not is_criminal:
         division_hint = """
-PRIORYTET WYDZIAŁÓW:
-- Sprawy rodzinne/cywilne → preferuj sygnatury: C, Ca, ACa, RC, NSA (wydziały Cywilne, Rodzinne)
-- UNIKAJ: Ka, K, Ks (wydziały Karne) - chyba że artykuł dotyczy przestępstwa
-- Sygnatura "III CZP" = uchwała SN (Izba Cywilna) → bardzo wartościowe!
+PRIORYTET WYDZIAŁÓW (KRYTYCZNE!):
+- Sprawy rodzinne/cywilne → preferuj sygnatury: C, Ca, ACa, RC, CZP, CSK
+- ⛔ ODRZUĆ sygnatury: K, Ka (Karne), U, Ua (Ubezpieczenia społeczne)
+- Sygnatura "K" = sprawa KARNA → NIE PASUJE do tematu cywilnego!
+- Sygnatura "U" = sprawa UBEZPIECZEŃ SPOŁECZNYCH → NIE PASUJE!
 """
     else:
         division_hint = """
 PRIORYTET WYDZIAŁÓW:
-- Temat dotyczy przestępstwa → preferuj sygnatury: K, Ka, AKa, KK (wydziały Karne)
+- Temat dotyczy przestępstwa → preferuj sygnatury: K, Ka, AKa, KK, KZP
 - Sygnatura "I KZP" = uchwała SN (Izba Karna) → bardzo wartościowe!
 """
     
@@ -168,26 +169,39 @@ KANDYDACI (orzeczenia z SAOS):
 ZADANIE:
 Wybierz {max_to_select} orzeczenia które NAJLEPIEJ pasują do tematu artykułu.
 
+⛔ KRYTYCZNE KRYTERIUM - PRZEDMIOT SPRAWY vs KONTEKST UBOCZNY:
+
+Orzeczenie PASUJE tylko jeśli temat artykułu jest PRZEDMIOTEM sprawy (głównym zagadnieniem).
+Orzeczenie NIE PASUJE jeśli temat jest tylko KONTEKSTEM UBOCZNYM (wspomniany przy okazji).
+
+Przykłady dla tematu "ubezwłasnowolnienie":
+✅ PASUJE: Sprawa O ubezwłasnowolnienie (sygnatura C, Ca) - to jest przedmiot sprawy
+❌ NIE PASUJE: Sprawa karna (sygnatura K) gdzie oskarżony "jest ubezwłasnowolniony" - to tylko kontekst
+❌ NIE PASUJE: Sprawa o rentę (sygnatura U) gdzie wnioskodawca "został ubezwłasnowolniony" - to tylko kontekst
+
+Przykłady dla tematu "alimenty":
+✅ PASUJE: Sprawa O alimenty (art. 133 KRO) - przedmiot sprawy
+❌ NIE PASUJE: Sprawa karna o niealimentację (art. 209 KK) - to inna kategoria!
+❌ NIE PASUJE: Sprawa spadkowa gdzie wspomina "obowiązek alimentacyjny" - kontekst uboczny
+
 KRYTERIA WYBORU:
 
-1. WERYFIKACJA PRZEPISU (NAJWAŻNIEJSZE!):
+1. SYGNATURA (NAJWAŻNIEJSZE!):
+   - Sprawdź czy wydział pasuje do tematu
+   - "K" = karny, "U" = ubezpieczenia, "C/Ca/ACa" = cywilny
+{division_hint}
+
+2. WERYFIKACJA PRZEPISU:
    Znasz treść polskich kodeksów (KK, KC, KRO, KPC, KPK, KP).
    Sprawdź czy przepis cytowany w orzeczeniu PASUJE do tematu artykułu.
    
-   Przykłady:
-   - Temat "alimenty" + orzeczenie o art. 133 KRO → ✅ PASUJE (alimenty)
-   - Temat "alimenty" + orzeczenie o art. 178a KK → ❌ ODRZUĆ (to jazda po alkoholu!)
-   - Temat "jazda po alkoholu" + orzeczenie o art. 178a KK → ✅ PASUJE
-   - Temat "rozwód" + orzeczenie o art. 56 KRO → ✅ PASUJE (rozwód)
-   - Temat "spadek" + orzeczenie o art. 178a KK → ❌ ODRZUĆ (nie dotyczy spadków)
+   - Temat "ubezwłasnowolnienie" → art. 13, 16 KC (✅) | art. 178a KK (❌ to jazda po alkoholu!)
+   - Temat "alimenty" → art. 133 KRO (✅) | art. 209 KK (❌ to sprawa karna!)
 
-2. KONTEKST MERYTORYCZNY:
+3. KONTEKST MERYTORYCZNY:
    Fragment orzeczenia musi zawierać wartościową tezę prawną związaną z tematem.
-   NIE wybieraj orzeczeń czysto proceduralnych.
+   NIE wybieraj orzeczeń gdzie temat jest tylko wspomniany "przy okazji".
 
-3. PRIORYTET SĄDÓW:
-   Preferuj: Sąd Najwyższy > Sądy Apelacyjne > Sądy Okręgowe > Sądy Rejonowe
-{division_hint}
 ODPOWIEDZ W FORMACIE JSON:
 {{
     "selected": [
@@ -195,7 +209,8 @@ ODPOWIEDZ W FORMACIE JSON:
             "index": 1,
             "direction": "za|przeciw|neutralny",
             "article_cited": "art. X ustawy Y",
-            "article_matches_topic": true,
+            "is_main_subject": true,
+            "division_ok": true,
             "reason": "krótkie uzasadnienie (max 20 słów)"
         }}
     ],
@@ -203,10 +218,9 @@ ODPOWIEDZ W FORMACIE JSON:
 }}
 
 WAŻNE:
-- "direction": "za" = sąd uwzględnił roszczenie
-- "direction": "przeciw" = sąd oddalił (ale uzasadnienie może być wartościowe!)
-- "article_matches_topic": true TYLKO jeśli przepis dotyczy tematu artykułu!
-- Jeśli ŻADNE orzeczenie nie pasuje do tematu → zwróć pustą listę selected
+- "is_main_subject": true TYLKO jeśli temat jest PRZEDMIOTEM sprawy, nie kontekstem!
+- "division_ok": true TYLKO jeśli wydział (z sygnatury) pasuje do tematu!
+- Jeśli ŻADNE orzeczenie nie pasuje → zwróć pustą listę selected i wyjaśnij dlaczego
 
 Odpowiedz TYLKO JSON, bez dodatkowego tekstu."""
 
@@ -217,7 +231,7 @@ def _parse_claude_response(
     response_text: str,
     original_judgments: List[Dict]
 ) -> Dict[str, Any]:
-    """Parsuje odpowiedź Claude'a i mapuje na oryginalne orzeczenia."""
+    """Parsuje odpowiedź Claude'a i mapuje na oryginalne orzeczenia. v3.2"""
     
     # Wyczyść response z markdown
     text = response_text.strip()
@@ -241,9 +255,20 @@ def _parse_claude_response(
     for item in data.get("selected", []):
         idx = item.get("index", 0) - 1  # Claude zwraca 1-indexed
         if 0 <= idx < len(original_judgments):
-            # Sprawdź czy przepis pasuje do tematu
-            if item.get("article_matches_topic", True) == False:
-                print(f"[CLAUDE_VERIFIER] ⚠️ Skipping [{idx+1}] - article doesn't match topic")
+            # 🆕 v3.2: Sprawdź czy to PRZEDMIOT sprawy i czy wydział pasuje
+            is_main_subject = item.get("is_main_subject", True)
+            division_ok = item.get("division_ok", True)
+            article_matches = item.get("article_matches_topic", True)
+            
+            # Odrzuć jeśli którekolwiek kryterium nie jest spełnione
+            if is_main_subject == False:
+                print(f"[CLAUDE_VERIFIER] ⚠️ Skipping [{idx+1}] - temat to tylko kontekst uboczny")
+                continue
+            if division_ok == False:
+                print(f"[CLAUDE_VERIFIER] ⚠️ Skipping [{idx+1}] - wydział nie pasuje do tematu")
+                continue
+            if article_matches == False:
+                print(f"[CLAUDE_VERIFIER] ⚠️ Skipping [{idx+1}] - przepis nie pasuje do tematu")
                 continue
                 
             judgment = original_judgments[idx].copy()
@@ -251,6 +276,8 @@ def _parse_claude_response(
             judgment["claude_reason"] = item.get("reason", "")
             judgment["article_cited"] = item.get("article_cited", "")
             judgment["verified_by_claude"] = True
+            judgment["is_main_subject"] = is_main_subject
+            judgment["division_ok"] = division_ok
             selected.append(judgment)
     
     return {
