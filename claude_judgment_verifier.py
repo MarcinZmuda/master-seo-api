@@ -1,18 +1,25 @@
 # claude_judgment_verifier.py
-# BRAJEN Legal Module v3.2 - Weryfikacja orzeczeń przez Claude
-# Claude wybiera najlepsze orzeczenia zamiast prostego scoringu
+# BRAJEN Legal Module v3.3 - Weryfikacja orzeczeń przez Claude
+# Claude wnioskuje NA ŻYWO czy artykuł ustawy pasuje do tematu
 
 """
 ===============================================================================
-🤖 CLAUDE JUDGMENT VERIFIER v3.2
+🤖 CLAUDE JUDGMENT VERIFIER v3.3
 ===============================================================================
 
-Zamiast głupiego scoringu regex, Claude:
-1. Analizuje czy orzeczenie PASUJE do tematu artykułu
-2. Ocenia kierunek (za/przeciw)
-3. Wybiera 2 najlepsze z 10-15 kandydatów
+Claude używa swojej WIEDZY O KODEKSACH do oceny orzeczeń:
+1. Znajduje artykuł cytowany w orzeczeniu (np. "art. 13 KC")
+2. WNIOSKUJE co ten artykuł reguluje (zna treść kodeksów!)
+3. Ocenia czy PASUJE do tematu artykułu
+4. Sprawdza czy temat to PRZEDMIOT sprawy czy tylko kontekst
 
-Koszt: ~300 input + ~200 output = ~500 tokenów = ~$0.0003 per artykuł (Haiku)
+Przykład wnioskowania:
+- Temat: "ubezwłasnowolnienie"
+- Orzeczenie cytuje: "art. 178a KK"
+- Claude wie: art. 178a KK = jazda po alkoholu
+- Wniosek: ❌ NIE PASUJE!
+
+Koszt: ~500-700 tokenów = ~$0.0004 per artykuł (Haiku)
 
 ===============================================================================
 """
@@ -126,12 +133,12 @@ def _build_verification_prompt(
     judgments: List[Dict],
     max_to_select: int
 ) -> str:
-    """Buduje prompt dla Claude'a - v3.2 z weryfikacją PRZEDMIOTU sprawy."""
+    """Buduje prompt dla Claude'a - v3.3 z wnioskowaniem o artykułach na żywo."""
     
     judgments_text = ""
     for i, j in enumerate(judgments, 1):
         signature = j.get('signature', '')
-        excerpt = j.get('excerpt', '')[:400]
+        excerpt = j.get('excerpt', '')[:500]  # Więcej tekstu dla lepszej analizy
         judgments_text += f"""
 [{i}] {j.get('citation', f'Orzeczenie {i}')}
 Sygnatura: {signature}
@@ -146,20 +153,24 @@ Fragment: "{excerpt}..."
     division_hint = ""
     if not is_criminal:
         division_hint = """
-PRIORYTET WYDZIAŁÓW (KRYTYCZNE!):
-- Sprawy rodzinne/cywilne → preferuj sygnatury: C, Ca, ACa, RC, CZP, CSK
-- ⛔ ODRZUĆ sygnatury: K, Ka (Karne), U, Ua (Ubezpieczenia społeczne)
-- Sygnatura "K" = sprawa KARNA → NIE PASUJE do tematu cywilnego!
-- Sygnatura "U" = sprawa UBEZPIECZEŃ SPOŁECZNYCH → NIE PASUJE!
+⛔ FILTR WYDZIAŁÓW (sprawdź sygnaturę!):
+- Sygnatury C, Ca, ACa, RC, CZP = cywilne/rodzinne → ✅ OK dla tematów cywilnych
+- Sygnatury K, Ka, AKa = KARNE → ❌ ODRZUĆ dla tematów cywilnych!
+- Sygnatury U, Ua = UBEZPIECZENIA SPOŁECZNE → ❌ ODRZUĆ dla tematów cywilnych!
 """
     else:
         division_hint = """
-PRIORYTET WYDZIAŁÓW:
-- Temat dotyczy przestępstwa → preferuj sygnatury: K, Ka, AKa, KK, KZP
-- Sygnatura "I KZP" = uchwała SN (Izba Karna) → bardzo wartościowe!
+FILTR WYDZIAŁÓW:
+- Temat dotyczy przestępstwa → sygnatury K, Ka, AKa = ✅ OK
 """
     
-    prompt = f"""Jesteś ekspertem prawnym. Analizujesz orzeczenia sądowe dla artykułu SEO.
+    prompt = f"""Jesteś ekspertem prawa polskiego. Znasz WSZYSTKIE polskie kodeksy:
+- KC (Kodeks cywilny) - art. 1-1088
+- KRO (Kodeks rodzinny) - art. 1-184  
+- KK (Kodeks karny) - art. 1-363
+- KPC (Kodeks postępowania cywilnego)
+- KPK (Kodeks postępowania karnego)
+- KP (Kodeks pracy)
 
 TEMAT ARTYKUŁU: "{topic}"
 
@@ -169,60 +180,73 @@ KANDYDACI (orzeczenia z SAOS):
 ZADANIE:
 Wybierz {max_to_select} orzeczenia które NAJLEPIEJ pasują do tematu artykułu.
 
-⛔ KRYTYCZNE KRYTERIUM - PRZEDMIOT SPRAWY vs KONTEKST UBOCZNY:
+═══════════════════════════════════════════════════════════════
+🔴 KLUCZOWE KRYTERIUM: WERYFIKACJA ARTYKUŁU USTAWY
+═══════════════════════════════════════════════════════════════
 
-Orzeczenie PASUJE tylko jeśli temat artykułu jest PRZEDMIOTEM sprawy (głównym zagadnieniem).
-Orzeczenie NIE PASUJE jeśli temat jest tylko KONTEKSTEM UBOCZNYM (wspomniany przy okazji).
+Użyj swojej wiedzy o polskich kodeksach! Dla każdego orzeczenia:
+1. Znajdź cytowany artykuł (np. "art. 13 KC", "art. 178a KK")
+2. Przypomnij sobie CO TEN ARTYKUŁ REGULUJE
+3. Oceń czy to PASUJE do tematu artykułu
 
-Przykłady dla tematu "ubezwłasnowolnienie":
-✅ PASUJE: Sprawa O ubezwłasnowolnienie (sygnatura C, Ca) - to jest przedmiot sprawy
-❌ NIE PASUJE: Sprawa karna (sygnatura K) gdzie oskarżony "jest ubezwłasnowolniony" - to tylko kontekst
-❌ NIE PASUJE: Sprawa o rentę (sygnatura U) gdzie wnioskodawca "został ubezwłasnowolniony" - to tylko kontekst
+PRZYKŁADY WNIOSKOWANIA:
 
-Przykłady dla tematu "alimenty":
-✅ PASUJE: Sprawa O alimenty (art. 133 KRO) - przedmiot sprawy
-❌ NIE PASUJE: Sprawa karna o niealimentację (art. 209 KK) - to inna kategoria!
-❌ NIE PASUJE: Sprawa spadkowa gdzie wspomina "obowiązek alimentacyjny" - kontekst uboczny
+Temat: "ubezwłasnowolnienie"
+- art. 13 KC → "Osoba, która ukończyła lat trzynaście, może być ubezwłasnowolniona całkowicie..." → ✅ PASUJE!
+- art. 16 KC → "Osoba pełnoletnia może być ubezwłasnowolniona częściowo..." → ✅ PASUJE!
+- art. 178a KK → "Kto, znajdując się w stanie nietrzeźwości, prowadzi pojazd..." → ❌ NIE PASUJE (jazda po alkoholu!)
+- art. 209 KK → "Kto uchyla się od obowiązku alimentacyjnego..." → ❌ NIE PASUJE (to przestępstwo!)
 
-KRYTERIA WYBORU:
+Temat: "alimenty" (prawo rodzinne)
+- art. 133 KRO → "Rodzice obowiązani są do świadczeń alimentacyjnych..." → ✅ PASUJE!
+- art. 135 KRO → "Zakres świadczeń alimentacyjnych zależy od..." → ✅ PASUJE!
+- art. 209 KK → przestępstwo niealimentacji → ❌ INNA KATEGORIA (karna vs rodzinna)!
 
-1. SYGNATURA (NAJWAŻNIEJSZE!):
-   - Sprawdź czy wydział pasuje do tematu
-   - "K" = karny, "U" = ubezpieczenia, "C/Ca/ACa" = cywilny
+Temat: "rozwód"
+- art. 56 KRO → "Jeżeli między małżonkami nastąpił zupełny rozkład pożycia..." → ✅ PASUJE!
+- art. 57 KRO → "Orzekając rozwód sąd orzeka także..." → ✅ PASUJE!
+
+═══════════════════════════════════════════════════════════════
+🔴 DRUGIE KRYTERIUM: PRZEDMIOT SPRAWY vs KONTEKST UBOCZNY
+═══════════════════════════════════════════════════════════════
+
+Orzeczenie PASUJE tylko jeśli temat jest GŁÓWNYM PRZEDMIOTEM sprawy.
+NIE PASUJE jeśli temat jest tylko WSPOMNIANY przy okazji innej sprawy.
+
+Przykład dla "ubezwłasnowolnienie":
+✅ "Sąd orzeka ubezwłasnowolnienie całkowite Jana Kowalskiego..." → przedmiot sprawy
+❌ "Oskarżony, będący osobą ubezwłasnowolnioną, dopuścił się..." → tylko kontekst w sprawie karnej!
 {division_hint}
-
-2. WERYFIKACJA PRZEPISU:
-   Znasz treść polskich kodeksów (KK, KC, KRO, KPC, KPK, KP).
-   Sprawdź czy przepis cytowany w orzeczeniu PASUJE do tematu artykułu.
-   
-   - Temat "ubezwłasnowolnienie" → art. 13, 16 KC (✅) | art. 178a KK (❌ to jazda po alkoholu!)
-   - Temat "alimenty" → art. 133 KRO (✅) | art. 209 KK (❌ to sprawa karna!)
-
-3. KONTEKST MERYTORYCZNY:
-   Fragment orzeczenia musi zawierać wartościową tezę prawną związaną z tematem.
-   NIE wybieraj orzeczeń gdzie temat jest tylko wspomniany "przy okazji".
+═══════════════════════════════════════════════════════════════
 
 ODPOWIEDZ W FORMACIE JSON:
 {{
     "selected": [
         {{
             "index": 1,
-            "direction": "za|przeciw|neutralny",
-            "article_cited": "art. X ustawy Y",
+            "article_found": "art. X ustawy",
+            "article_meaning": "co ten artykuł reguluje (max 10 słów)",
+            "matches_topic": true,
             "is_main_subject": true,
-            "division_ok": true,
-            "reason": "krótkie uzasadnienie (max 20 słów)"
+            "division_code": "C/K/U/P",
+            "direction": "za|przeciw|neutralny",
+            "reason": "dlaczego pasuje (max 15 słów)"
         }}
     ],
-    "rejected_reason": "dlaczego pozostałe nie pasują (max 30 słów)"
+    "rejected": [
+        {{
+            "index": 2,
+            "reason": "dlaczego nie pasuje (max 15 słów)"
+        }}
+    ]
 }}
 
 WAŻNE:
-- "is_main_subject": true TYLKO jeśli temat jest PRZEDMIOTEM sprawy, nie kontekstem!
-- "division_ok": true TYLKO jeśli wydział (z sygnatury) pasuje do tematu!
-- Jeśli ŻADNE orzeczenie nie pasuje → zwróć pustą listę selected i wyjaśnij dlaczego
+- "matches_topic": true TYLKO jeśli artykuł ustawy dotyczy tematu!
+- "is_main_subject": true TYLKO jeśli temat to przedmiot sprawy, nie kontekst!
+- Jeśli ŻADNE nie pasuje → zwróć pustą listę "selected" i wyjaśnij w "rejected"
 
-Odpowiedz TYLKO JSON, bez dodatkowego tekstu."""
+Odpowiedz TYLKO JSON."""
 
     return prompt
 
@@ -231,7 +255,7 @@ def _parse_claude_response(
     response_text: str,
     original_judgments: List[Dict]
 ) -> Dict[str, Any]:
-    """Parsuje odpowiedź Claude'a i mapuje na oryginalne orzeczenia. v3.2"""
+    """Parsuje odpowiedź Claude'a i mapuje na oryginalne orzeczenia. v3.3"""
     
     # Wyczyść response z markdown
     text = response_text.strip()
@@ -248,41 +272,45 @@ def _parse_claude_response(
         print("[CLAUDE_VERIFIER] ⚠️ JSON parse error, using fallback")
         return {
             "selected": original_judgments[:2],
-            "reasoning": "Nie udało się sparsować odpowiedzi Claude'a"
+            "reasoning": "Nie udało się sparsować odpowiedzi Claude'a",
+            "rejected": []
         }
     
     selected = []
     for item in data.get("selected", []):
         idx = item.get("index", 0) - 1  # Claude zwraca 1-indexed
         if 0 <= idx < len(original_judgments):
-            # 🆕 v3.2: Sprawdź czy to PRZEDMIOT sprawy i czy wydział pasuje
+            # 🆕 v3.3: Sprawdź wszystkie kryteria
+            matches_topic = item.get("matches_topic", True)
             is_main_subject = item.get("is_main_subject", True)
-            division_ok = item.get("division_ok", True)
-            article_matches = item.get("article_matches_topic", True)
             
             # Odrzuć jeśli którekolwiek kryterium nie jest spełnione
+            if matches_topic == False:
+                print(f"[CLAUDE_VERIFIER] ⚠️ Skipping [{idx+1}] - artykuł ustawy nie pasuje do tematu")
+                continue
             if is_main_subject == False:
                 print(f"[CLAUDE_VERIFIER] ⚠️ Skipping [{idx+1}] - temat to tylko kontekst uboczny")
-                continue
-            if division_ok == False:
-                print(f"[CLAUDE_VERIFIER] ⚠️ Skipping [{idx+1}] - wydział nie pasuje do tematu")
-                continue
-            if article_matches == False:
-                print(f"[CLAUDE_VERIFIER] ⚠️ Skipping [{idx+1}] - przepis nie pasuje do tematu")
                 continue
                 
             judgment = original_judgments[idx].copy()
             judgment["direction"] = item.get("direction", "neutralny")
             judgment["claude_reason"] = item.get("reason", "")
-            judgment["article_cited"] = item.get("article_cited", "")
+            judgment["article_cited"] = item.get("article_found", "")
+            judgment["article_meaning"] = item.get("article_meaning", "")
             judgment["verified_by_claude"] = True
+            judgment["matches_topic"] = matches_topic
             judgment["is_main_subject"] = is_main_subject
-            judgment["division_ok"] = division_ok
+            judgment["division_code"] = item.get("division_code", "")
             selected.append(judgment)
+    
+    # 🆕 v3.3: Zbierz info o odrzuconych
+    rejected_info = data.get("rejected", [])
+    rejected_summary = "; ".join([f"[{r.get('index')}]: {r.get('reason', '')}" for r in rejected_info[:3]])
     
     return {
         "selected": selected,
-        "reasoning": data.get("rejected_reason", "")
+        "reasoning": rejected_summary if rejected_summary else data.get("rejected_reason", ""),
+        "rejected": rejected_info
     }
 
 
