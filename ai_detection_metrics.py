@@ -431,6 +431,7 @@ def analyze_sentence_distribution(text: str) -> Dict[str, Any]:
     - Średnie (12-18 słów): 50-60%  
     - Długie (20-30 słów): 15-25%
     """
+    config = AIDetectionConfig()  # 🔧 FIX: Dodano brakującą definicję
     sentences = split_into_sentences(text)
     
     if len(sentences) < 3:
@@ -535,6 +536,7 @@ def generate_burstiness_fix(burstiness: float, sentence_distribution: Dict) -> D
     🔧 v35.0: Nowy próg >= 2.5 (CV 0.5) zgodnie z badaniami NKJP
     """
     import random
+    config = AIDetectionConfig()  # 🔧 FIX: Dodano brakującą definicję
     
     # 🔧 v35.0: Nowy próg zgodny z dokumentem (CV 0.5 = 2.5)
     if burstiness >= config.BURSTINESS_OK_MIN:
