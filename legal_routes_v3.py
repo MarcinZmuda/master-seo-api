@@ -1,17 +1,20 @@
 # legal_routes_v3.py
-# BRAJEN Legal Module v3.0 - Endpointy ze scoringiem
+# BRAJEN Legal Module v3.5 - Z detektorem artykułów
+# Claude wykrywa przepisy, szukamy orzeczeń po artykułach
 
 """
 ===============================================================================
-🏛️ LEGAL ROUTES v3.0
+🏛️ LEGAL ROUTES v3.5
 ===============================================================================
 
 Endpointy:
 - GET  /api/legal/status
-- POST /api/legal/detect
-- POST /api/legal/get_context   ← główny endpoint
+- POST /api/legal/detect           ← wykrywa kategorię
+- POST /api/legal/detect_articles  ← 🆕 wykrywa przepisy (Claude)
+- POST /api/legal/get_judgments    ← 🆕 przepisy + orzeczenia
+- POST /api/legal/get_context      ← główny endpoint (legacy)
 - POST /api/legal/validate
-- POST /api/legal/test_scoring  ← do debugowania
+- POST /api/legal/test_scoring
 
 ===============================================================================
 """
@@ -19,6 +22,7 @@ Endpointy:
 from flask import Blueprint, request, jsonify
 from typing import Dict, Any, List
 
+# Import modułu v3.0 (legacy)
 try:
     from legal_module_v3 import (
         detect_category,
@@ -34,7 +38,20 @@ try:
 except ImportError as e:
     LEGAL_MODULE_ENABLED = False
     SAOS_AVAILABLE = False
+    LEGAL_DISCLAIMER = ""
     print(f"[LEGAL_ROUTES] ⚠️ Legal Module not available: {e}")
+
+# 🆕 v3.5: Import detektora artykułów (Claude)
+try:
+    from legal_article_detector import (
+        detect_legal_articles,
+        get_judgments_for_topic
+    )
+    ARTICLE_DETECTOR_AVAILABLE = True
+    print("[LEGAL_ROUTES] ✅ Article Detector v3.5 loaded (Claude)")
+except ImportError as e:
+    ARTICLE_DETECTOR_AVAILABLE = False
+    print(f"[LEGAL_ROUTES] ⚠️ Article Detector not available: {e}")
 
 
 # ============================================================================
@@ -53,9 +70,15 @@ def legal_status():
     """Status modułu prawnego."""
     return jsonify({
         "legal_module_enabled": LEGAL_MODULE_ENABLED,
+        "article_detector_enabled": ARTICLE_DETECTOR_AVAILABLE,
         "saos_available": SAOS_AVAILABLE,
-        "version": "3.0",
-        "features": ["auto_detection", "judgment_scoring", "quality_filtering"],
+        "version": "3.5",
+        "features": [
+            "auto_detection",
+            "judgment_scoring", 
+            "quality_filtering",
+            "article_detection_claude"  # 🆕
+        ],
         "max_citations_per_article": 2,
         "min_score_to_use": 40
     })
@@ -89,36 +112,111 @@ def detect_category_endpoint():
     return jsonify(result)
 
 
+# ============================================================================
+# 🆕 v3.5: NOWE ENDPOINTY - DETEKCJA ARTYKUŁÓW
+# ============================================================================
+
+@legal_routes.route("/api/legal/detect_articles", methods=["POST"])
+def detect_articles_endpoint():
+    """
+    🆕 v3.5: Wykrywa przepisy prawne dla tematu używając Claude.
+    
+    Request:
+    {
+        "topic": "ubezwłasnowolnienie całkowite"
+    }
+    
+    Response:
+    {
+        "status": "OK",
+        "articles": ["art. 13 k.c.", "art. 544 k.p.c."],
+        "main_act": "Kodeks cywilny",
+        "method": "claude",
+        "search_queries": ["art. 13 k.c.", "art 13 kc", ...]
+    }
+    """
+    if not ARTICLE_DETECTOR_AVAILABLE:
+        return jsonify({
+            "error": "Article detector not available",
+            "hint": "Check if legal_article_detector.py is in project and ANTHROPIC_API_KEY is set"
+        }), 503
+    
+    data = request.get_json() or {}
+    topic = data.get("topic", "")
+    
+    if not topic:
+        return jsonify({"error": "topic is required"}), 400
+    
+    result = detect_legal_articles(topic)
+    
+    return jsonify(result)
+
+
+@legal_routes.route("/api/legal/get_judgments", methods=["POST"])
+def get_judgments_endpoint():
+    """
+    🆕 v3.5: Pełny flow - wykrywa przepisy i zwraca orzeczenia.
+    
+    Request:
+    {
+        "topic": "ubezwłasnowolnienie całkowite",
+        "max_results": 5
+    }
+    
+    Response:
+    {
+        "status": "OK",
+        "topic": "ubezwłasnowolnienie całkowite",
+        "detected_articles": ["art. 13 k.c.", "art. 544 k.p.c."],
+        "main_act": "Kodeks cywilny",
+        "total_found": 5,
+        "judgments": [
+            {
+                "signature": "I Ns 36/23",
+                "date": "2024-06-20",
+                "court": "Sąd Okręgowy w Warszawie",
+                "matched_article": "art. 13 k.c.",
+                "excerpt": "...przesłanki z art. 13 k.c. wymagają...",
+                "url": "https://..."
+            }
+        ],
+        "instruction": "UŻYJ MAKSYMALNIE 2 ORZECZEŃ..."
+    }
+    """
+    if not ARTICLE_DETECTOR_AVAILABLE:
+        return jsonify({
+            "error": "Article detector not available",
+            "hint": "Check if legal_article_detector.py is in project and ANTHROPIC_API_KEY is set"
+        }), 503
+    
+    data = request.get_json() or {}
+    topic = data.get("topic", "")
+    max_results = data.get("max_results", 5)
+    
+    if not topic:
+        return jsonify({"error": "topic is required"}), 400
+    
+    result = get_judgments_for_topic(topic, max_results=max_results)
+    
+    return jsonify(result)
+
+
+# ============================================================================
+# LEGACY ENDPOINTY (v3.0)
+# ============================================================================
+
 @legal_routes.route("/api/legal/get_context", methods=["POST"])
 def get_context_endpoint():
     """
     Pobiera kontekst prawny - 2 najlepsze orzeczenia po scoringu.
+    
+    ⚠️ Legacy endpoint - preferuj /api/legal/get_judgments (v3.5)
     
     Request:
     {
         "main_keyword": "alimenty na dziecko",
         "additional_keywords": [],
         "force_enable": false
-    }
-    
-    Response:
-    {
-        "legal_module_active": true,
-        "stats": {
-            "total_found": 12543,
-            "analyzed": 15,
-            "passed_scoring": 8
-        },
-        "judgments": [
-            {
-                "citation": "wyrok SN z dnia 15.03.2023 (III CZP 12/23)",
-                "score": 90,
-                "score_details": ["✓ Zawiera przepisy", "✓ Wyrok merytoryczny", ...],
-                "articles_in_text": ["art. 133 KRO", "art. 135 KRO"],
-                "excerpt": "..."
-            }
-        ],
-        "instruction": "⚖️ MODUŁ PRAWNY..."
     }
     """
     if not LEGAL_MODULE_ENABLED:
@@ -193,7 +291,7 @@ def test_scoring_endpoint():
 def get_disclaimer():
     """Zwraca tekst disclaimera."""
     return jsonify({
-        "disclaimer": LEGAL_DISCLAIMER
+        "disclaimer": LEGAL_DISCLAIMER if LEGAL_MODULE_ENABLED else ""
     })
 
 
@@ -207,24 +305,93 @@ def enhance_project_with_legal(
     h2_list: List[str]
 ) -> Dict:
     """
-    Wzbogaca dane projektu o kontekst prawny.
-    Wywoływane w /api/project/create.
+    🆕 v3.5: Wzbogaca dane projektu o kontekst prawny.
+    
+    Używa nowego detektora artykułów (Claude określa przepisy).
+    Fallback na v3.0 jeśli detektor niedostępny.
     """
-    if not LEGAL_MODULE_ENABLED:
-        return project_data
     
-    legal_context = get_legal_context_for_article(
-        main_keyword=main_keyword,
-        additional_keywords=h2_list
-    )
+    # ================================================================
+    # 1. NAJPIERW SPRÓBUJ NOWY DETEKTOR (v3.5)
+    # ================================================================
+    if ARTICLE_DETECTOR_AVAILABLE:
+        try:
+            print(f"[LEGAL] v3.5: Wykrywam przepisy dla '{main_keyword}'")
+            
+            legal_data = get_judgments_for_topic(main_keyword, max_results=5)
+            
+            if legal_data.get("status") == "OK":
+                project_data["legal_context"] = {
+                    "legal_module_active": True,
+                    "version": "3.5",
+                    "method": "article_detector"
+                }
+                project_data["detected_category"] = "prawo"
+                project_data["detected_articles"] = legal_data.get("detected_articles", [])
+                project_data["legal_instruction"] = legal_data.get("instruction", "")
+                project_data["legal_judgments"] = legal_data.get("judgments", [])
+                project_data["legal_stats"] = {
+                    "total_found": legal_data.get("total_found", 0),
+                    "articles_searched": legal_data.get("detected_articles", []),
+                    "main_act": legal_data.get("main_act", "")
+                }
+                
+                judgments_count = len(legal_data.get("judgments", []))
+                articles = legal_data.get("detected_articles", [])
+                
+                if judgments_count > 0:
+                    print(f"[LEGAL] ✅ v3.5: {judgments_count} orzeczeń dla przepisów {articles}")
+                else:
+                    print(f"[LEGAL] ⚠️ v3.5: Brak orzeczeń dla przepisów {articles}")
+                
+                return project_data
+            
+            elif legal_data.get("status") == "NOT_LEGAL":
+                # Temat nie jest prawny
+                project_data["detected_category"] = "inne"
+                project_data["legal_context"] = {
+                    "legal_module_active": False,
+                    "reason": legal_data.get("reason", "Temat nie wymaga orzeczeń")
+                }
+                print(f"[LEGAL] ℹ️ Temat '{main_keyword}' nie jest prawny")
+                return project_data
+            
+            else:
+                # Status ERROR lub inny - spróbuj fallback
+                print(f"[LEGAL] ⚠️ v3.5 zwrócił status: {legal_data.get('status')}, fallback na v3.0")
+                
+        except Exception as e:
+            print(f"[LEGAL] ⚠️ Article detector error: {e}, fallback na v3.0")
     
-    project_data["legal_context"] = legal_context
-    project_data["detected_category"] = legal_context.get("category", {}).get("detected_category", "inne")
-    
-    if legal_context.get("legal_module_active"):
-        project_data["legal_instruction"] = legal_context.get("instruction", "")
-        project_data["legal_judgments"] = legal_context.get("judgments", [])
-        project_data["legal_stats"] = legal_context.get("stats", {})
+    # ================================================================
+    # 2. FALLBACK NA STARĄ WERSJĘ (v3.0)
+    # ================================================================
+    if LEGAL_MODULE_ENABLED:
+        print(f"[LEGAL] v3.0 fallback: '{main_keyword}'")
+        
+        legal_context = get_legal_context_for_article(
+            main_keyword=main_keyword,
+            additional_keywords=h2_list
+        )
+        
+        project_data["legal_context"] = legal_context
+        project_data["legal_context"]["version"] = "3.0"
+        project_data["detected_category"] = legal_context.get("category", {}).get("detected_category", "inne")
+        
+        if legal_context.get("legal_module_active"):
+            project_data["legal_instruction"] = legal_context.get("instruction", "")
+            project_data["legal_judgments"] = legal_context.get("judgments", [])
+            project_data["legal_stats"] = legal_context.get("stats", {})
+            
+            judgments_count = len(project_data.get("legal_judgments", []))
+            print(f"[LEGAL] ✅ v3.0: {judgments_count} orzeczeń")
+    else:
+        # Żaden moduł niedostępny
+        project_data["legal_context"] = {
+            "legal_module_active": False,
+            "reason": "Legal module not available"
+        }
+        project_data["detected_category"] = "inne"
     
     return project_data
 
