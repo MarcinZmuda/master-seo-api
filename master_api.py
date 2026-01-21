@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import requests
 from flask import Flask, jsonify, request
 from flask_cors import CORS
@@ -36,7 +37,7 @@ app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024  # 32 MB
 CORS(app)
 
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-VERSION = "v34.0"  # 🆕 Legal Module: SAOS integration, judgment scoring
+VERSION = "v35.5"  # 🆕 KEYWORD COUNTING FIX: Real-time validation in approveBatch
 
 # ================================================================
 # 🆕 v32.4: Firestore persistence for projects
@@ -115,6 +116,17 @@ try:
 except ImportError as e:
     SEMANTIC_ENHANCEMENT_ENABLED = False
     print(f"[MASTER] ⚠️ Semantic Enhancement not available: {e}")
+
+# ================================================================
+# 🆕 v35.5: KEYWORD COUNTER (OVERLAPPING - NeuronWriter compatible)
+# ================================================================
+try:
+    from keyword_counter import count_keywords_for_state, count_keywords
+    KEYWORD_COUNTER_ENABLED = True
+    print("[MASTER] ✅ Keyword Counter v24.3 loaded (OVERLAPPING mode)")
+except ImportError as e:
+    KEYWORD_COUNTER_ENABLED = False
+    print(f"[MASTER] ⚠️ Keyword Counter not available: {e}")
 
 # ================================================================
 # 🆕 v33.0: AI Detection Integration + Humanization
@@ -862,6 +874,100 @@ def internal_server_error(error):
 
 
 # ================================================================
+# 🆕 v35.5: VERIFY KEYWORDS ENDPOINT (dla GPT do sprawdzenia w locie)
+# ================================================================
+@app.post("/api/verify_keywords")
+def verify_keywords():
+    """
+    🆕 v35.5: Endpoint do weryfikacji użycia fraz w tekście.
+    
+    GPT może wywołać to w trakcie pisania aby sprawdzić ile razy użył każdej frazy.
+    
+    Request body:
+    {
+        "text": "tekst do sprawdzenia",
+        "keywords": {
+            "sąd": {"target_min": 5, "target_max": 9},
+            "demencja": {"target_min": 1, "target_max": 3},
+            ...
+        }
+    }
+    
+    Returns:
+    {
+        "counts": {"sąd": 7, "demencja": 2, ...},
+        "status": {"sąd": "OK", "demencja": "OK", ...},
+        "warnings": [...],
+        "blockers": [...]
+    }
+    """
+    data = request.get_json(force=True)
+    text = data.get("text", "")
+    keywords = data.get("keywords", {})
+    
+    if not text:
+        return jsonify({"error": "Missing text"}), 400
+    if not keywords:
+        return jsonify({"error": "Missing keywords"}), 400
+    
+    # Przelicz
+    counts = count_keywords_from_text(text, keywords)
+    
+    # Oceń status
+    status = {}
+    warnings = []
+    blockers = []
+    
+    for phrase, meta in keywords.items():
+        count = counts.get(phrase, 0)
+        if isinstance(meta, dict):
+            target_min = meta.get("target_min", 1)
+            target_max = meta.get("target_max", 999)
+        else:
+            target_min = 1
+            target_max = 999
+        
+        if count > target_max:
+            status[phrase] = "OVER"
+            blockers.append({
+                "phrase": phrase,
+                "count": count,
+                "max": target_max,
+                "message": f"🔴 '{phrase}' = {count}× (max {target_max})"
+            })
+        elif count == 0:
+            status[phrase] = "MISSING"
+            warnings.append({
+                "phrase": phrase,
+                "count": 0,
+                "min": target_min,
+                "message": f"⚠️ '{phrase}' = 0× (min {target_min})"
+            })
+        elif count < target_min:
+            status[phrase] = "UNDER"
+            warnings.append({
+                "phrase": phrase,
+                "count": count,
+                "min": target_min,
+                "message": f"⚠️ '{phrase}' = {count}× (min {target_min})"
+            })
+        elif count >= target_max:
+            status[phrase] = "LOCKED"
+        else:
+            status[phrase] = "OK"
+    
+    return jsonify({
+        "counts": counts,
+        "status": status,
+        "warnings": warnings,
+        "blockers": blockers,
+        "has_blockers": len(blockers) > 0,
+        "counting_method": "OVERLAPPING (NeuronWriter compatible)",
+        "word_count": len(text.split())
+    }), 200
+
+
+# ================================================================
 # 🏥 HEALTHCHECK
 # ================================================================
 @app.get("/health")
@@ -993,6 +1099,69 @@ def auto_final_review(project_id):
 
 
 # ================================================================
+# 🆕 v35.5: HELPER - Przelicz frazy z tekstu (OVERLAPPING)
+# ================================================================
+def count_keywords_from_text(text: str, keywords_state: dict) -> dict:
+    """
+    🆕 v35.5: Przelicza RZECZYWISTE użycia fraz z tekstu.
+    
+    Używa OVERLAPPING counting (zgodne z NeuronWriter):
+    - "ubezwłasnowolnienie osoby" liczy jako +1 "ubezwłasnowolnienie" + +1 "osoby"
+    
+    Args:
+        text: Pełny tekst do analizy
+        keywords_state: Dict z frazami {phrase: {target_min, target_max, ...}}
+    
+    Returns:
+        Dict {phrase: actual_count}
+    """
+    if not text or not keywords_state:
+        return {}
+    
+    if KEYWORD_COUNTER_ENABLED:
+        # Użyj keyword_counter z lemmatyzacją (OVERLAPPING mode)
+        # Konwertuj format na oczekiwany przez count_keywords_for_state
+        state_for_counter = {}
+        for phrase, data in keywords_state.items():
+            if isinstance(data, dict):
+                state_for_counter[phrase] = {
+                    "keyword": phrase,
+                    "type": data.get("type", "BASIC"),
+                    "target_min": data.get("target_min", 1),
+                    "target_max": data.get("target_max", 999)
+                }
+            else:
+                state_for_counter[phrase] = {
+                    "keyword": phrase,
+                    "type": "BASIC",
+                    "target_min": 1,
+                    "target_max": 999
+                }
+        
+        # use_exclusive_for_nested=False = OVERLAPPING (jak NeuronWriter)
+        counts = count_keywords_for_state(text, state_for_counter, use_exclusive_for_nested=False)
+        
+        # Mapuj z powrotem na phrase -> count
+        result = {}
+        for phrase in keywords_state.keys():
+            result[phrase] = counts.get(phrase, 0)
+        return result
+    else:
+        # Fallback: proste liczenie regex (case-insensitive)
+        clean_text = re.sub(r'<[^>]+>', ' ', text.lower())
+        clean_text = re.sub(r'\s+', ' ', clean_text)
+        
+        result = {}
+        for phrase in keywords_state.keys():
+            phrase_lower = phrase.lower()
+            # Użyj word boundaries dla bezpieczeństwa
+            pattern = r'\b' + re.escape(phrase_lower).replace(r'\ ', r'\s+') + r'\b'
+            matches = re.findall(pattern, clean_text, re.IGNORECASE)
+            result[phrase] = len(matches)
+        return result
+
+
+# ================================================================
 # 🆕 v31.3: APPROVE BATCH (z metrykami semantycznymi na bieżąco)
 # ================================================================
 @app.post("/api/approveBatch")
@@ -1041,56 +1210,140 @@ def approve_batch():
     request_previous_paragraphs = data.get("previous_paragraphs")
     
     # ============================================
-    # 1. WALIDACJA FRAZ (stuffing/missing)
+    # 🆕 v35.5: PRZELICZ FRAZY Z TEKSTU (nie ufaj GPT!)
     # ============================================
-    keyword_warnings = []
-    keyword_blockers = []
-    
     basic_kw = keywords_state.get("basic", {})
     extended_kw = keywords_state.get("extended", {})
     
-    # Sprawdź BASIC - stuffing = bloker
+    # Zbierz wszystkie frazy do przeliczenia
+    all_keywords = {}
     for phrase, state in basic_kw.items():
-        current = state.get("current", 0)
-        target_min = state.get("target_min", state.get("target", 1))
-        target_max = state.get("target_max", target_min * 4)  # domyślnie 4× min
+        all_keywords[phrase] = {
+            "type": "BASIC",
+            "target_min": state.get("target_min", state.get("target", 1)),
+            "target_max": state.get("target_max", state.get("target_min", 1) * 4),
+            "gpt_reported": state.get("current", 0)  # Co GPT myśli
+        }
+    for phrase, state in extended_kw.items():
+        all_keywords[phrase] = {
+            "type": "EXTENDED",
+            "target_min": 1,
+            "target_max": 1,
+            "gpt_reported": state.get("current", 0)
+        }
+    
+    # 🔥 PRZELICZ RZECZYWISTE UŻYCIA Z TEKSTU
+    real_counts = count_keywords_from_text(accumulated_content, all_keywords)
+    
+    print(f"[APPROVE_BATCH] 📊 Real keyword counting for {len(all_keywords)} phrases")
+    
+    # ============================================
+    # 1. WALIDACJA FRAZ (z RZECZYWISTYMI wartościami!)
+    # ============================================
+    keyword_warnings = []
+    keyword_blockers = []
+    keyword_details = []  # 🆕 Szczegóły dla GPT
+    
+    # Sprawdź BASIC
+    for phrase, meta in all_keywords.items():
+        if meta["type"] != "BASIC":
+            continue
+            
+        real_count = real_counts.get(phrase, 0)
+        gpt_count = meta["gpt_reported"]
+        target_min = meta["target_min"]
+        target_max = meta["target_max"]
         
-        if current > target_max:
+        # 🆕 Loguj różnice między GPT a rzeczywistością
+        if real_count != gpt_count:
+            print(f"[APPROVE_BATCH] ⚠️ '{phrase}': GPT={gpt_count}, REAL={real_count}")
+        
+        detail = {
+            "phrase": phrase,
+            "type": "BASIC",
+            "real_count": real_count,
+            "gpt_reported": gpt_count,
+            "target_min": target_min,
+            "target_max": target_max,
+            "remaining": max(0, target_max - real_count)
+        }
+        
+        if real_count > target_max:
+            detail["status"] = "OVER"
             keyword_blockers.append({
                 "type": "STUFFING",
                 "phrase": phrase,
-                "current": current,
+                "current": real_count,
                 "max": target_max,
-                "message": f"STUFFING: '{phrase}' użyte {current}× (max {target_max})"
+                "message": f"🔴 STUFFING: '{phrase}' = {real_count}× (max {target_max}) - PRZEKROCZONO!"
             })
-        elif current == 0:
+        elif real_count == 0:
+            detail["status"] = "MISSING"
             keyword_warnings.append({
                 "type": "MISSING",
                 "phrase": phrase,
                 "current": 0,
                 "target": target_min,
-                "message": f"BRAK: '{phrase}' nie użyte (cel: {target_min}×)"
+                "message": f"⚠️ BRAK: '{phrase}' nie użyte (cel: min {target_min}×)"
             })
+        elif real_count < target_min:
+            detail["status"] = "UNDER"
+            keyword_warnings.append({
+                "type": "UNDER_TARGET",
+                "phrase": phrase,
+                "current": real_count,
+                "target": target_min,
+                "message": f"⚠️ '{phrase}' = {real_count}× (cel: min {target_min}×)"
+            })
+        elif real_count >= target_max:
+            detail["status"] = "LOCKED"
+        else:
+            detail["status"] = "OK"
+        
+        keyword_details.append(detail)
     
-    # Sprawdź EXTENDED - dokładnie 1×
+    # Sprawdź EXTENDED
     extended_used = 0
-    extended_total = len(extended_kw)
+    extended_total = 0
     extended_missing = []
     
-    for phrase, state in extended_kw.items():
-        current = state.get("current", 0)
-        if current >= 1:
+    for phrase, meta in all_keywords.items():
+        if meta["type"] != "EXTENDED":
+            continue
+        
+        extended_total += 1
+        real_count = real_counts.get(phrase, 0)
+        gpt_count = meta["gpt_reported"]
+        
+        if real_count != gpt_count:
+            print(f"[APPROVE_BATCH] ⚠️ EXTENDED '{phrase}': GPT={gpt_count}, REAL={real_count}")
+        
+        detail = {
+            "phrase": phrase,
+            "type": "EXTENDED",
+            "real_count": real_count,
+            "gpt_reported": gpt_count,
+            "target_min": 1,
+            "target_max": 1
+        }
+        
+        if real_count >= 1:
             extended_used += 1
+            detail["status"] = "DONE"
+            
+            if real_count > 1:
+                detail["status"] = "OVER"
+                keyword_warnings.append({
+                    "type": "EXTENDED_OVERFLOW",
+                    "phrase": phrase,
+                    "current": real_count,
+                    "message": f"⚠️ EXTENDED '{phrase}' = {real_count}× (powinno być dokładnie 1×)"
+                })
         else:
             extended_missing.append(phrase)
+            detail["status"] = "MISSING"
         
-        if current > 1:
-            keyword_warnings.append({
-                "type": "EXTENDED_OVERFLOW",
-                "phrase": phrase,
-                "current": current,
-                "message": f"EXTENDED '{phrase}' użyte {current}× (powinno być 1×)"
-            })
+        keyword_details.append(detail)
     
     # ============================================
     # 2. METRYKI SEMANTYCZNE (na bieżąco)
@@ -1441,7 +1694,7 @@ def approve_batch():
         "batch_number": batch_number,
         "batch_total": total_batches,
         
-        # Walidacja fraz
+        # 🆕 v35.5: RZECZYWISTE użycia fraz (nie GPT!)
         "keyword_validation": {
             "blockers": keyword_blockers,
             "warnings": keyword_warnings,
@@ -1449,7 +1702,10 @@ def approve_batch():
                 "used": extended_used,
                 "total": extended_total,
                 "missing": extended_missing[:10]
-            }
+            },
+            # 🆕 SZCZEGÓŁY DLA GPT - pokazuje RZECZYWISTE wartości
+            "keyword_details": keyword_details,
+            "counting_method": "OVERLAPPING (NeuronWriter compatible)"
         },
         
         # Metryki semantyczne na bieżąco
@@ -1872,11 +2128,16 @@ if __name__ == "__main__":
     print(f"\n🚀 Starting Master SEO API {VERSION} on port {port}")
     print(f"🔧 Debug mode: {DEBUG_MODE}")
     print(f"🔗 S1 Proxy enabled → {NGRAM_ANALYSIS_ENDPOINT}")
+    print(f"📊 Keyword Counter: {'ENABLED ✅ (OVERLAPPING)' if KEYWORD_COUNTER_ENABLED else 'DISABLED ⚠️'}")
     print(f"🧠 Semantic analysis: {'ENABLED ✅' if SEMANTIC_ENABLED else 'DISABLED ⚠️'}")
     print(f"🆕 Semantic Enhancement v31.0: {'ENABLED ✅' if SEMANTIC_ENHANCEMENT_ENABLED else 'DISABLED ⚠️'}")
-    print(f"🤖 AI Detection v32.2 FULL: {'ENABLED ✅' if AI_DETECTION_ENABLED else 'DISABLED ⚠️'}")
+    print(f"🤖 AI Detection v33.0: {'ENABLED ✅' if AI_DETECTION_ENABLED else 'DISABLED ⚠️'}")
     print(f"⚖️ Legal Module v3.0: {'ENABLED ✅' if LEGAL_MODULE_ENABLED else 'DISABLED ⚠️'}")
-    print(f"📦 Features v34.0:")
+    print(f"📦 Features v35.5:")
+    print(f"   ─── 🆕 KEYWORD FIX (v35.5) ───")
+    print(f"   ✅ Real-time counting in approveBatch")
+    print(f"   ✅ OVERLAPPING mode (NeuronWriter)")
+    print(f"   ✅ /api/verify_keywords endpoint")
     print(f"   ─── Faza 1 (CRITICAL) ───")
     print(f"   ✅ AI Detection (humanness_score)")
     print(f"   ✅ Forbidden phrases check")
@@ -1890,19 +2151,12 @@ if __name__ == "__main__":
     print(f"   ✅ Per-sentence scoring")
     print(f"   ✅ N-gram naturalness check")
     print(f"   ✅ Full advanced analysis")
-    print(f"   ─── 🆕 Legal Module ───")
+    print(f"   ─── Legal Module ───")
     print(f"   ✅ Auto-detection (prawo category)")
     print(f"   ✅ SAOS integration (judgments)")
-    print(f"   ✅ Judgment scoring & filtering")
-    print(f"   ✅ Max 2 citations per article")
     print(f"   ─── Endpoints ───")
+    print(f"   /api/approveBatch (🆕 real counting)")
+    print(f"   /api/verify_keywords (🆕)")
     print(f"   /api/ai_detection")
-    print(f"   /api/quick_ai_check")
-    print(f"   /api/score_sentences")
-    print(f"   /api/ngram_naturalness")
-    print(f"   /api/full_analysis")
-    print(f"   /api/legal/status")
-    print(f"   /api/legal/detect")
-    print(f"   /api/legal/get_context")
-    print(f"   /api/legal/validate\n")
+    print(f"   /api/legal/status\n")
     app.run(host="0.0.0.0", port=port, debug=DEBUG_MODE)
