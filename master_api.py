@@ -37,7 +37,7 @@ app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024  # 32 MB
 CORS(app)
 
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-VERSION = "v35.5"  # 🆕 KEYWORD COUNTING FIX: Real-time validation in approveBatch
+VERSION = "v35.6"  # 🆕 KEYWORD FIX: Auto-load keywords from Firestore in approveBatch
 
 # ================================================================
 # 🆕 v32.4: Firestore persistence for projects
@@ -1210,8 +1210,46 @@ def approve_batch():
     request_previous_paragraphs = data.get("previous_paragraphs")
     
     # ============================================
-    # 🆕 v35.5: PRZELICZ FRAZY Z TEKSTU (nie ufaj GPT!)
+    # 🆕 v35.6: POBIERZ FRAZY Z FIRESTORE (nie ufaj GPT!)
     # ============================================
+    # GPT może nie wysłać keywords_state - pobierz z projektu!
+    if not keywords_state or (not keywords_state.get("basic") and not keywords_state.get("extended")):
+        print(f"[APPROVE_BATCH] ⚠️ keywords_state pusty/brak - pobieram z Firestore")
+        project_data = get_project(project_id)
+        if project_data:
+            # Pobierz frazy zapisane przy tworzeniu projektu
+            # Format Firestore: {row_id: {keyword, type, target_min, target_max, ...}}
+            stored_keywords = project_data.get("keywords_state", {})
+            if stored_keywords:
+                # Konwertuj z formatu Firestore na format {basic: {phrase: {...}}, extended: {...}}
+                basic_kw_tmp = {}
+                extended_kw_tmp = {}
+                
+                for row_id, meta in stored_keywords.items():
+                    phrase = meta.get("keyword", "")
+                    if not phrase:
+                        continue
+                    
+                    kw_type = meta.get("type", "BASIC").upper()
+                    target_min = meta.get("target_min", meta.get("min", 1))
+                    target_max = meta.get("target_max", meta.get("max", 10))
+                    
+                    if kw_type == "EXTENDED":
+                        extended_kw_tmp[phrase] = {
+                            "target_min": 1,
+                            "target_max": 1,
+                            "type": "EXTENDED"
+                        }
+                    else:  # BASIC lub MAIN
+                        basic_kw_tmp[phrase] = {
+                            "target_min": target_min,
+                            "target_max": target_max,
+                            "type": kw_type
+                        }
+                
+                keywords_state = {"basic": basic_kw_tmp, "extended": extended_kw_tmp}
+                print(f"[APPROVE_BATCH] ✅ Załadowano z Firestore: {len(basic_kw_tmp)} BASIC + {len(extended_kw_tmp)} EXTENDED")
+    
     basic_kw = keywords_state.get("basic", {})
     extended_kw = keywords_state.get("extended", {})
     
