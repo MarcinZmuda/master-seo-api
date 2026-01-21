@@ -388,21 +388,40 @@ def get_judgments_for_topic(
     articles = detection["articles"]
     print(f"[ARTICLE_DETECTOR] 📚 Wykryto przepisy: {articles}")
     
-    # 2. Szukaj orzeczeń
+    # 2. Szukaj orzeczeń - wielopoziomowy fallback
     search_result = search_by_articles(articles, max_results=max_results * 2)
     
     if not search_result.get("judgments"):
-        # Fallback: szukaj po temacie
-        print(f"[ARTICLE_DETECTOR] ⚠️ Brak orzeczeń po artykułach, fallback na temat")
+        # Fallback 1: szukaj po temacie w SAOS
+        print(f"[ARTICLE_DETECTOR] ⚠️ Brak orzeczeń po artykułach, fallback na SAOS temat")
         try:
             from saos_client import search_judgments
             fallback = search_judgments(topic, max_results=max_results)
             search_result = {
                 "judgments": fallback.get("judgments", []),
-                "fallback": True
+                "fallback": "saos_topic"
             }
         except:
             pass
+    
+    if not search_result.get("judgments"):
+        # Fallback 2: szukaj przez Google
+        print(f"[ARTICLE_DETECTOR] ⚠️ Brak wyników z SAOS, fallback na Google")
+        try:
+            from google_judgment_fallback import search_google_fallback
+            google_result = search_google_fallback(
+                articles=articles,
+                keyword=topic,
+                max_results=max_results
+            )
+            if google_result.get("judgments"):
+                search_result = {
+                    "judgments": google_result.get("judgments", []),
+                    "fallback": "google"
+                }
+                print(f"[ARTICLE_DETECTOR] ✅ Google fallback: {len(search_result['judgments'])} wyników")
+        except Exception as e:
+            print(f"[ARTICLE_DETECTOR] ⚠️ Google fallback error: {e}")
     
     judgments = search_result.get("judgments", [])[:max_results]
     
