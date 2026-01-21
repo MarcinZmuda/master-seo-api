@@ -1,18 +1,16 @@
 # keyword_counter.py
-# UNIFIED KEYWORD COUNTING - v24.2
+# UNIFIED KEYWORD COUNTING - v24.3 (NeuronWriter compatible)
 # 
 # Jedna funkcja do liczenia fraz w CAŁYM systemie.
 # 
-# HYBRYDOWE PODEJŚCIE:
-# - overlapping: jak Google widzi ("renta rodzinna" liczy się też jako "renta")
-# - exclusive: tylko samodzielne wystąpienia (longest-match-first)
+# v24.3: ZMIANA NA OVERLAPPING (zgodność z NeuronWriter)
+# - overlapping: jak NeuronWriter/Google widzi ("renta rodzinna" liczy się też jako "renta")
+# - exclusive: tylko samodzielne wystąpienia (longest-match-first) - OPCJONALNE
 # - inherited: ile pochodzi z dłuższych fraz
 #
-# Użycie:
-# - MAIN keyword: overlapping (chcemy pełne pokrycie)
-# - BASIC keyword (część MAIN): exclusive (user kontroluje tylko samodzielne)
-# - Density: overlapping (bo Google tak liczy)
-# - Stuffing: overlapping
+# DOMYŚLNIE: overlapping (use_exclusive_for_nested=False)
+# - Zgadza się z NeuronWriter
+# - "ubezwłasnowolnienie osoby" liczy jako: "ubezwłasnowolnienie" +1 ORAZ "osoby" +1
 
 from __future__ import annotations
 
@@ -366,7 +364,7 @@ def count_keywords(
 def count_keywords_for_state(
     text: str, 
     keywords_state: Dict[str, dict],
-    use_exclusive_for_nested: bool = True
+    use_exclusive_for_nested: bool = False
 ) -> Dict[str, int]:
     """
     Wersja kompatybilna z keywords_state z Firestore.
