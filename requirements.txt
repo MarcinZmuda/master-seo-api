@@ -51,3 +51,4 @@ rich>=13.0.0
 # 🆕 v33.0: OPCJONALNE - Polish WordNet (jeśli chcesz lokalnie)
 # plwordnet>=0.1.0  # Wymaga pobrania plwordnet_4_2.xml (~350MB)
 # ================================================
+beautifulsoup4>=4.12.0
