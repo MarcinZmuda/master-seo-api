@@ -60,7 +60,7 @@ def detect_missing_keywords(text, keywords_state):
         
         # v24.2: Unified counting
         if UNIFIED_COUNTER:
-            counts = count_keywords_for_state(text, keywords_state, use_exclusive_for_nested=True)
+            counts = count_keywords_for_state(text, keywords_state, use_exclusive_for_nested=False)
         
         for rid, meta in keywords_state.items():
             keyword = meta.get("keyword", "")
