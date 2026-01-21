@@ -312,7 +312,7 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         # 
         # EXCLUSIVE = longest-match-first, konsumuje tokeny
         # To jest zgodne z tym jak NeuronWriter liczy frazy
-        batch_counts = count_keywords_for_state(batch_text, keywords_state, use_exclusive_for_nested=True)
+        batch_counts = count_keywords_for_state(batch_text, keywords_state, use_exclusive_for_nested=False)
         
         # Stuffing warnings (zintegrowane z tym samym licznikiem)
         stuffing_warnings = get_stuffing_warnings(batch_text, keywords_state)
