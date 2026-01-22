@@ -2140,13 +2140,82 @@ def get_pre_batch_info(project_id):
     total_unused_extended = len(extended_this_batch) + len(extended_scheduled)
     total_unused = total_unused_basic + total_unused_extended
     
-    # Ile fraz na ten batch (proporcjonalnie)
-    if remaining_batches > 0:
-        basic_this_batch_count = max(3, math.ceil(total_unused_basic / remaining_batches))
-        extended_this_batch_count = max(2, math.ceil(total_unused_extended / remaining_batches))
-    else:
-        basic_this_batch_count = total_unused_basic
-        extended_this_batch_count = total_unused_extended
+    # 🆕 v35.8: UŻYJ keywords_budget z batch_plan jeśli dostępny!
+    basic_this_batch_count = None
+    extended_this_batch_count = None
+    used_batch_plan_budget = False
+    
+    if batch_plan and "batches" in batch_plan:
+        for bp in batch_plan.get("batches", []):
+            if bp.get("batch_number") == current_batch_num:
+                keywords_budget = bp.get("keywords_budget", {})
+                if keywords_budget:
+                    # Policz ile BASIC i EXTENDED w budżecie
+                    basic_in_budget = 0
+                    extended_in_budget = 0
+                    
+                    for kw, count in keywords_budget.items():
+                        if count > 0:
+                            # Sprawdź typ frazy
+                            for rid, meta in keywords_state.items():
+                                if meta.get("keyword", "").lower() == kw.lower():
+                                    kw_type = meta.get("type", "BASIC").upper()
+                                    if kw_type == "EXTENDED":
+                                        extended_in_budget += 1
+                                    else:
+                                        basic_in_budget += 1
+                                    break
+                    
+                    if basic_in_budget > 0 or extended_in_budget > 0:
+                        basic_this_batch_count = basic_in_budget
+                        extended_this_batch_count = extended_in_budget
+                        used_batch_plan_budget = True
+                        print(f"[PRE_BATCH] ✅ Używam keywords_budget z batch_plan: {basic_in_budget} BASIC, {extended_in_budget} EXTENDED")
+                break
+    
+    # FALLBACK: jeśli brak keywords_budget, użyj równomiernego podziału
+    if basic_this_batch_count is None:
+        if remaining_batches > 0:
+            basic_this_batch_count = max(3, math.ceil(total_unused_basic / remaining_batches))
+            extended_this_batch_count = max(2, math.ceil(total_unused_extended / remaining_batches))
+        else:
+            basic_this_batch_count = total_unused_basic
+            extended_this_batch_count = total_unused_extended
+        
+        if not used_batch_plan_budget:
+            print(f"[PRE_BATCH] ⚠️ Brak keywords_budget, używam fallback: {basic_this_batch_count} BASIC, {extended_this_batch_count} EXTENDED")
+    
+    # 🆕 v35.8: DOSTOSUJ liczbę fraz do profilu długości (jeśli batch_plan dostępny)
+    # Dłuższe batche = więcej fraz, krótsze = mniej
+    if batch_plan and "batches" in batch_plan:
+        for bp in batch_plan.get("batches", []):
+            if bp.get("batch_number") == current_batch_num:
+                lp = bp.get("length_profile", "medium")
+                
+                # Mnożniki dla profili
+                PROFILE_MULTIPLIERS = {
+                    "intro": 0.5,      # intro = mało fraz
+                    "short": 0.7,      # krótki = mniej fraz
+                    "medium": 1.0,     # medium = baseline
+                    "long": 1.3,       # długi = więcej fraz
+                    "extended": 1.6    # extended = dużo fraz
+                }
+                
+                multiplier = PROFILE_MULTIPLIERS.get(lp, 1.0)
+                
+                if multiplier != 1.0:
+                    original_basic = basic_this_batch_count
+                    original_extended = extended_this_batch_count
+                    
+                    basic_this_batch_count = max(2, int(basic_this_batch_count * multiplier))
+                    extended_this_batch_count = max(1, int(extended_this_batch_count * multiplier))
+                    
+                    # Nie więcej niż dostępne
+                    basic_this_batch_count = min(basic_this_batch_count, total_unused_basic)
+                    extended_this_batch_count = min(extended_this_batch_count, total_unused_extended)
+                    
+                    print(f"[PRE_BATCH] 📊 Profil '{lp}' (×{multiplier}): BASIC {original_basic}→{basic_this_batch_count}, EXTENDED {original_extended}→{extended_this_batch_count}")
+                break
     
     # Wybierz konkretne frazy do tego batcha
     basic_for_this_batch = basic_must_use[:basic_this_batch_count]
