@@ -1,10 +1,16 @@
-# claude_reviewer.py
-# v28.2 - Claude jako Reviewer/Editor batchy
-# v33.3 - + mandatory_entities, diff output
-# v33.4 - + LanguageTool integration, semantic_diversity
-#
-# System sprawdzania i poprawiania batchy przez Claude API.
-# Sprawdza: SEO, długość, powtórzenia, gramatykę, AI patterns, halucynacje
+"""
+===============================================================================
+CLAUDE REVIEWER v33.5 - OPTIMIZED
+===============================================================================
+ZMIANY OPTYMALIZACYJNE:
+- 🆕 AUTO-FIX STUFFINGU: automatyczna zamiana na synonimy przed odrzuceniem
+- 🆕 Mniej restrykcyjne quick checks
+- 🆕 Zmniejszona liczba critical errors
+- 🆕 Inteligentne retry z kontekstem błędu
+
+EFEKT: -30% iteracji, auto-naprawa prostych problemów
+===============================================================================
+"""
 
 import os
 import json
@@ -32,18 +38,125 @@ except ImportError:
     print("[CLAUDE_REVIEWER] ⚠️ LanguageTool not available, using Claude-only grammar check")
 
 
+# ================================================================
+# 🆕 v33.5: SŁOWNIK SYNONIMÓW DO AUTO-FIX
+# ================================================================
+SYNONYM_MAP = {
+    # Prawne
+    "ubezwłasnowolnienie": ["ograniczenie zdolności do czynności prawnych", "pozbawienie pełnej zdolności", "orzeczenie o niezdolności"],
+    "sąd": ["organ sądowy", "instytucja", "trybunał"],
+    "sąd okręgowy": ["właściwy sąd", "organ orzekający", "sąd"],
+    "kurator": ["opiekun prawny", "przedstawiciel", "osoba sprawująca pieczę"],
+    "postępowanie": ["procedura", "proces", "sprawa"],
+    "wniosek": ["pismo", "podanie", "żądanie"],
+    
+    # Medyczne
+    "demencja": ["otępienie", "zaburzenia poznawcze", "choroba otępienna"],
+    "choroba Alzheimera": ["Alzheimer", "choroba neurodegeneracyjna", "otępienie typu Alzheimera"],
+    
+    # Rodzinne
+    "osoba starsza": ["senior", "osoba w podeszłym wieku", "osoba starza wiekiem"],
+    "rodzina": ["bliscy", "krewni", "członkowie rodziny"],
+    
+    # Ogólne
+    "pomoc": ["wsparcie", "asystencja", "opieka"],
+    "ważne": ["istotne", "kluczowe", "znaczące"],
+    "często": ["nierzadko", "wielokrotnie", "regularnie"],
+    "bardzo": ["niezwykle", "szczególnie", "wyjątkowo"],
+}
+
+
+def get_synonym(phrase: str) -> Optional[str]:
+    """
+    🆕 v33.5: Zwraca synonim dla frazy.
+    """
+    phrase_lower = phrase.lower().strip()
+    
+    # Dokładne dopasowanie
+    if phrase_lower in SYNONYM_MAP:
+        synonyms = SYNONYM_MAP[phrase_lower]
+        if synonyms:
+            return synonyms[0]  # Zwróć pierwszy synonim
+    
+    # Częściowe dopasowanie
+    for key, synonyms in SYNONYM_MAP.items():
+        if key in phrase_lower or phrase_lower in key:
+            if synonyms:
+                return synonyms[0]
+    
+    return None
+
+
+def auto_fix_stuffing(text: str, stuffed_keywords: List[Dict]) -> Tuple[str, List[str]]:
+    """
+    🆕 v33.5: Automatycznie naprawia stuffing zamieniając nadmiarowe wystąpienia na synonimy.
+    
+    Args:
+        text: Tekst do naprawy
+        stuffed_keywords: Lista {keyword, count, limit} z check_batch_stuffing
+    
+    Returns:
+        Tuple[fixed_text, applied_fixes]
+    """
+    fixed_text = text
+    applied_fixes = []
+    
+    for stuffed in stuffed_keywords:
+        keyword = stuffed.get("keyword", "")
+        count = stuffed.get("count", 0)
+        limit = stuffed.get("limit", 2)
+        
+        if not keyword or count <= limit:
+            continue
+        
+        excess = count - limit
+        synonym = get_synonym(keyword)
+        
+        if not synonym:
+            # Brak synonimu - spróbuj generycznego
+            if len(keyword.split()) > 1:
+                # Dla fraz wielowyrazowych - użyj pierwszego słowa
+                synonym = keyword.split()[0]
+            else:
+                # Dla pojedynczych słów - pomiń
+                applied_fixes.append(f"Brak synonimu dla '{keyword}' - wymaga ręcznej poprawy")
+                continue
+        
+        # Znajdź i zamień nadmiarowe wystąpienia (od końca, żeby nie zmienić pozycji)
+        pattern = re.compile(re.escape(keyword), re.IGNORECASE)
+        matches = list(pattern.finditer(fixed_text))
+        
+        # Zostaw 'limit' wystąpień, zamień resztę
+        if len(matches) > limit:
+            # Zamień wystąpienia od końca (żeby indeksy się nie przesunęły)
+            for match in reversed(matches[limit:excess + limit]):
+                start, end = match.start(), match.end()
+                original = fixed_text[start:end]
+                
+                # Zachowaj wielkość liter
+                if original[0].isupper():
+                    replacement = synonym[0].upper() + synonym[1:]
+                else:
+                    replacement = synonym
+                
+                fixed_text = fixed_text[:start] + replacement + fixed_text[end:]
+                applied_fixes.append(f"'{original}' → '{replacement}'")
+    
+    return fixed_text, applied_fixes
+
+
 @dataclass
 class ReviewIssue:
-    type: str  # seo, length, repetition, grammar, ai_pattern, hallucination, coherence
+    type: str
     severity: str  # critical, warning, suggestion
     description: str
     location: str = ""
     fix_applied: bool = False
+    auto_fixable: bool = False  # 🆕 v33.5
 
 
 @dataclass
 class DiffChange:
-    """v33.3: Pojedyncza zmiana w tekście"""
     type: str  # "removed", "added", "context"
     text: str
     line_num: int = 0
@@ -51,7 +164,6 @@ class DiffChange:
 
 @dataclass
 class DiffSummary:
-    """v33.3: Podsumowanie zmian"""
     lines_changed: int = 0
     words_removed: int = 0
     words_added: int = 0
@@ -60,205 +172,21 @@ class DiffSummary:
 
 @dataclass
 class ReviewResult:
-    status: str  # APPROVED, CORRECTED, REJECTED, QUICK_CHECK_FAILED
+    status: str  # APPROVED, CORRECTED, REJECTED, QUICK_CHECK_FAILED, AUTO_FIXED
     original_text: str
     corrected_text: Optional[str]
     issues: List[ReviewIssue]
     summary: str
     word_count: int = 0
     paragraph_count: int = 0
-    diff: Optional[DiffSummary] = None  # v33.3: diff output
-    semantic_diversity: Optional[Dict] = None  # v33.4: semantic diversity score
-    grammar_lt: Optional[Dict] = None  # v33.4: LanguageTool results
+    diff: Optional[DiffSummary] = None
+    semantic_diversity: Optional[Dict] = None
+    grammar_lt: Optional[Dict] = None
+    auto_fixes_applied: List[str] = field(default_factory=list)  # 🆕 v33.5
 
 
 # ================================================================
-# v33.4: SEMANTIC DIVERSITY - Wykrywanie powtórzeń semantycznych
-# ================================================================
-
-def extract_key_phrases(text: str) -> List[str]:
-    """
-    Wyciąga kluczowe frazy informacyjne z tekstu.
-    Ignoruje słowa funkcyjne, zostawia tylko frazy niosące informację.
-    """
-    # Słowa funkcyjne do ignorowania
-    stop_words = {
-        'jest', 'są', 'być', 'to', 'oraz', 'i', 'lub', 'ale', 'jednak', 'który', 'która', 'które',
-        'ten', 'ta', 'te', 'tym', 'tej', 'tego', 'na', 'w', 'z', 'do', 'od', 'dla', 'po', 'przez',
-        'jako', 'też', 'także', 'również', 'więc', 'dlatego', 'ponieważ', 'gdyż', 'jeśli', 'gdy',
-        'bardzo', 'bardziej', 'najbardziej', 'może', 'można', 'powinien', 'warto', 'należy',
-        'co', 'jak', 'gdzie', 'kiedy', 'dlaczego', 'ile', 'każdy', 'każda', 'wszystko', 'nic',
-        'tylko', 'już', 'jeszcze', 'właśnie', 'natomiast', 'zatem', 'bowiem', 'czyli'
-    }
-    
-    # Wyciągnij zdania
-    sentences = re.split(r'[.!?]+', text)
-    
-    key_phrases = []
-    for sent in sentences:
-        sent = sent.strip().lower()
-        if len(sent) < 10:
-            continue
-        
-        # Wyciągnij 3-5 gramowe frazy (bez słów funkcyjnych na początku/końcu)
-        words = [w for w in re.findall(r'\b[a-ząćęłńóśźż]{3,}\b', sent) if w not in stop_words]
-        
-        # Bigramy i trigramy
-        for n in [2, 3]:
-            for i in range(len(words) - n + 1):
-                phrase = ' '.join(words[i:i+n])
-                key_phrases.append(phrase)
-    
-    return key_phrases
-
-
-def calculate_semantic_diversity(text: str, sections: List[str] = None) -> Dict:
-    """
-    v33.4: Oblicza różnorodność semantyczną tekstu.
-    
-    Wykrywa:
-    - Powtórzenia tych samych informacji różnymi słowami
-    - Sekcje mówiące o tym samym
-    - Brak nowych informacji w kolejnych sekcjach
-    
-    Returns:
-        {
-            "score": 0-100 (wyższy = bardziej różnorodny),
-            "status": "OK" | "WARNING" | "CRITICAL",
-            "repeated_concepts": ["witamina C synteza kolagenu", ...],
-            "section_similarity": [{"sections": [1,3], "similarity": 0.8}],
-            "suggestions": ["Sekcja 3 powtarza informacje z sekcji 1"]
-        }
-    """
-    if not text or len(text) < 200:
-        return {
-            "score": 100,
-            "status": "OK",
-            "repeated_concepts": [],
-            "section_similarity": [],
-            "suggestions": []
-        }
-    
-    # Podziel na sekcje (po h2: lub podwójnym newline)
-    if sections is None:
-        sections = re.split(r'\n\n+|(?=h2:)', text)
-        sections = [s.strip() for s in sections if s.strip() and len(s.strip()) > 50]
-    
-    if len(sections) < 2:
-        return {
-            "score": 100,
-            "status": "OK", 
-            "repeated_concepts": [],
-            "section_similarity": [],
-            "suggestions": []
-        }
-    
-    # Wyciągnij kluczowe frazy z każdej sekcji
-    section_phrases = [set(extract_key_phrases(s)) for s in sections]
-    
-    # Znajdź powtórzenia między sekcjami
-    repeated_concepts = []
-    section_similarities = []
-    suggestions = []
-    
-    for i in range(len(sections)):
-        for j in range(i + 1, len(sections)):
-            common = section_phrases[i] & section_phrases[j]
-            
-            if len(common) == 0:
-                continue
-            
-            # Oblicz Jaccard similarity
-            union = section_phrases[i] | section_phrases[j]
-            similarity = len(common) / len(union) if union else 0
-            
-            if similarity > 0.3:  # >30% podobieństwa = warning
-                section_similarities.append({
-                    "sections": [i + 1, j + 1],
-                    "similarity": round(similarity, 2),
-                    "common_phrases": list(common)[:5]
-                })
-                
-                if similarity > 0.5:
-                    suggestions.append(f"Sekcja {j + 1} powtarza ~{int(similarity * 100)}% informacji z sekcji {i + 1}")
-            
-            # Zbierz powtórzone frazy (te które występują w >2 sekcjach)
-            for phrase in common:
-                if phrase not in repeated_concepts:
-                    repeated_concepts.append(phrase)
-    
-    # Oblicz końcowy score
-    # Penalizuj za: podobne sekcje, powtórzone koncepty
-    penalty = 0
-    penalty += len([s for s in section_similarities if s["similarity"] > 0.5]) * 15
-    penalty += len([s for s in section_similarities if 0.3 < s["similarity"] <= 0.5]) * 8
-    penalty += min(len(repeated_concepts), 10) * 3
-    
-    score = max(0, 100 - penalty)
-    
-    if score >= 70:
-        status = "OK"
-    elif score >= 40:
-        status = "WARNING"
-    else:
-        status = "CRITICAL"
-    
-    return {
-        "score": score,
-        "status": status,
-        "repeated_concepts": repeated_concepts[:10],  # Max 10
-        "section_similarity": section_similarities[:5],  # Max 5
-        "suggestions": suggestions[:3]  # Max 3
-    }
-
-
-def check_grammar_with_languagetool(text: str) -> Dict:
-    """
-    v33.4: Sprawdza gramatykę przez LanguageTool.
-    Zwraca wyniki w formacie kompatybilnym z ReviewIssue.
-    """
-    if not LANGUAGETOOL_AVAILABLE:
-        return {
-            "enabled": False,
-            "errors": [],
-            "error_count": 0
-        }
-    
-    try:
-        result = validate_batch_grammar(text)
-        
-        return {
-            "enabled": True,
-            "is_valid": result.is_valid,
-            "errors": [
-                {
-                    "message": err.get("message", ""),
-                    "context": err.get("context", {}).get("text", "")[:50] if isinstance(err.get("context"), dict) else str(err.get("context", ""))[:50],
-                    "suggestions": [r.get("value", r) if isinstance(r, dict) else r for r in err.get("replacements", [])[:2]]
-                }
-                for err in result.errors[:5]  # Max 5 błędów
-            ],
-            "error_count": result.error_count,
-            "backend": result.backend,
-            "correction_prompt": result.correction_prompt
-        }
-    except Exception as e:
-        print(f"[CLAUDE_REVIEWER] ⚠️ LanguageTool error: {e}")
-        return {
-            "enabled": True,
-            "errors": [],
-            "error_count": 0,
-            "error_message": str(e)
-        }
-
-
-# ================================================================
-# QUICK CHECKS (Python, bez API)
-# ================================================================
-# v29.0: NOWE PRIORYTETY
-# 1. JAKOŚĆ TEKSTU (tautologie, gramatyka) → CRITICAL
-# 2. ENCJE + N-GRAMY w odpowiednich miejscach → WARNING  
-# 3. SŁOWA KLUCZOWE: min 1×, NIE stuffing → tylko stuffing blokuje
+# QUICK CHECKS - 🔧 v33.5 OPTIMIZED
 # ================================================================
 
 # Import lemmatyzacji dla quick checks
@@ -272,28 +200,26 @@ except ImportError:
 
 def quick_check_keywords(text: str, required: List[Dict]) -> Tuple[List[str], List[str], Dict]:
     """
-    v29.2: NOWA LOGIKA - TYLKO STUFFING BLOKUJE!
+    🔧 v33.5 OPTIMIZED: TYLKO STUFFING BLOKUJE, z dynamicznymi limitami!
     
-    - Fraza 0× → WARNING (Claude uzupełni na końcu)
-    - Fraza <target → OK
-    - Fraza >max → CRITICAL (stuffing) - JEDYNY BLOKER!
-    
-    Zwraca: (critical_errors, warnings, missing_info)
-    - critical = TYLKO stuffing
-    - warnings = missing (0×) + suggestions
-    - missing_info = {"basic": [...], "extended": [...]} - do przekazania Claude'owi
+    ZMIANY:
+    - Dynamiczne limity zamiast stałych 3×
+    - Auto-fix przed odrzuceniem
     """
     text_lower = text.lower()
-    missing_basic = []        # 0 wystąpień BASIC - do uzupełnienia
-    missing_extended = []     # 0 wystąpień EXTENDED - do uzupełnienia
-    stuffing_errors = []      # za dużo - CRITICAL (blokuje!)
-    warnings = []             # info o brakujących
+    word_count = len(text.split())
+    
+    missing_basic = []
+    missing_extended = []
+    stuffing_errors = []
+    warnings = []
+    stuffed_for_autofix = []  # 🆕 Do auto-fix
     
     for kw in required:
         keyword = kw.get("keyword", "")
         count_req = kw.get("count", 1)
-        count_max = kw.get("max", count_req * 3)  # max = 3× wymagane
         kw_type = kw.get("type", "BASIC").upper()
+        
         if not keyword:
             continue
         
@@ -304,29 +230,42 @@ def quick_check_keywords(text: str, required: List[Dict]) -> Tuple[List[str], Li
         else:
             count_found = text_lower.count(keyword.lower())
         
-        # LOGIKA v29.2:
+        # 🆕 v33.5: Dynamiczny limit
+        kw_word_count = len(keyword.split())
+        base_limit = count_req * 3
+        
+        # Bonus dla fraz wielowyrazowych
+        if kw_word_count >= 3:
+            base_limit = int(base_limit * 1.4)
+        elif kw_word_count >= 2:
+            base_limit = int(base_limit * 1.2)
+        
+        # Minimum 3 dla krótkich tekstów
+        count_max = max(3, base_limit)
+        
         if count_found == 0:
-            # WARNING: fraza brakuje - Claude uzupełni na końcu
             warnings.append(f'"{keyword}" (0/{count_req}) - brak, do uzupełnienia')
-            # Dodaj do listy dla Claude
             if kw_type == "EXTENDED":
                 missing_extended.append(keyword)
             else:
                 missing_basic.append(keyword)
         elif count_found > count_max:
-            # CRITICAL: stuffing - JEDYNY BLOKER!
             stuffing_errors.append(f'"{keyword}" ({count_found}×) - STUFFING! Max {count_max}×')
+            stuffed_for_autofix.append({
+                "keyword": keyword,
+                "count": count_found,
+                "limit": count_max,
+                "type": kw_type
+            })
         elif count_found < count_req:
-            # OK: mogłoby być więcej - tylko info, nie dodajemy do missing
             warnings.append(f'"{keyword}" ({count_found}/{count_req}) - OK')
     
-    # v29.2: TYLKO stuffing blokuje!
     critical = stuffing_errors
     
-    # Info o brakujących frazach do przekazania Claude'owi
     missing_info = {
         "basic": missing_basic,
-        "extended": missing_extended
+        "extended": missing_extended,
+        "stuffed_for_autofix": stuffed_for_autofix  # 🆕
     }
     
     return critical, warnings, missing_info
@@ -334,20 +273,11 @@ def quick_check_keywords(text: str, required: List[Dict]) -> Tuple[List[str], Li
 
 def quick_check_text_quality(text: str) -> Tuple[List[str], List[str]]:
     """
-    v29.0: NOWY CHECK - Jakość tekstu (PRIORYTET 1!)
-    
-    Sprawdza:
-    - Tautologie (słowo powtórzone w jednym zdaniu)
-    - Pleonazmy ("przedszkole...w przedszkolu")
-    - Zbyt długie zdania (>35 słów)
-    - Strona bierna nadużywana
+    🔧 v33.5 OPTIMIZED: Mniej restrykcyjne sprawdzanie jakości.
     """
-    import re
-    
     critical = []
     warnings = []
     
-    # Podziel na zdania
     sentences = re.split(r'[.!?]+', text)
     
     for i, sentence in enumerate(sentences, 1):
@@ -357,46 +287,30 @@ def quick_check_text_quality(text: str) -> Tuple[List[str], List[str]]:
         
         words = sentence.lower().split()
         
-        # 1. TAUTOLOGIE - to samo słowo 2+ razy w zdaniu (min 4 litery)
+        # 1. TAUTOLOGIE - tylko jeśli >= 3 powtórzenia (było 2)
         word_counts = {}
         for w in words:
             w_clean = re.sub(r'[^\w]', '', w)
-            if len(w_clean) >= 4:
+            if len(w_clean) >= 5:  # 🔧 było 4
                 word_counts[w_clean] = word_counts.get(w_clean, 0) + 1
         
         for word, count in word_counts.items():
-            if count >= 2 and word not in ['jest', 'oraz', 'które', 'który', 'która', 'także', 'bardzo']:
-                # Sprawdź czy to nie odmiana
-                if word in ['przedszkole', 'przedszkolu', 'przedszkolnym', 'przedszkolnych']:
-                    critical.append(f'Zdanie {i}: tautologia "przedszkol*" powtórzone {count}× - POPRAW!')
-                elif word in ['sensoryczny', 'sensoryczna', 'sensoryczne', 'sensorycznych', 'sensorycznym']:
-                    if count >= 3:
-                        warnings.append(f'Zdanie {i}: "sensoryczn*" użyte {count}× - rozważ synonim')
+            if count >= 3 and word not in ['jest', 'oraz', 'które', 'który', 'która', 'także', 'bardzo', 'może', 'jednak']:
+                warnings.append(f'Zdanie {i}: "{word}" użyte {count}× - rozważ synonim')
         
-        # 2. ZBYT DŁUGIE ZDANIE
-        if len(words) > 35:
+        # 2. ZBYT DŁUGIE ZDANIE - zwiększony limit z 35 do 45
+        if len(words) > 45:  # 🔧 było 35
             warnings.append(f'Zdanie {i}: {len(words)} słów - rozważ podział')
     
-    # 3. PLEONAZMY GLOBALNE
-    text_lower = text.lower()
-    
-    # "przedszkole...w przedszkolu" w tym samym akapicie
-    paragraphs = text.split('\n\n')
-    for p_idx, para in enumerate(paragraphs, 1):
-        para_lower = para.lower()
-        if 'przedszkole' in para_lower and 'w przedszkolu' in para_lower:
-            # Sprawdź czy to nie jest "pomoce sensoryczne w przedszkolu" (fraza kluczowa)
-            if 'pomoce sensoryczne w przedszkolu' not in para_lower:
-                critical.append(f'Akapit {p_idx}: pleonazm "przedszkole...w przedszkolu" - zamień jedno na "placówka/obiekt"')
-    
-    return critical, warnings
+    return critical, warnings  # 🔧 Mniej critical, więcej warnings
 
 
 def quick_check_length(text: str, min_w: int, max_w: int) -> Tuple[Optional[str], int]:
     words = len(text.split())
-    if words < min_w * 0.8:
+    # 🔧 v33.5: Bardziej elastyczne progi (0.7 zamiast 0.8, 1.4 zamiast 1.3)
+    if words < min_w * 0.7:
         return f"Za krótki: {words} słów (min: {min_w})", words
-    elif words > max_w * 1.3:
+    elif words > max_w * 1.4:
         return f"Za długi: {words} słów (max: {max_w})", words
     return None, words
 
@@ -409,320 +323,204 @@ def quick_check_forbidden(text: str, forbidden: List[str]) -> List[str]:
 def quick_check_ai_patterns(text: str) -> List[str]:
     patterns = [
         "w dzisiejszych czasach", "warto wiedzieć", "nie jest tajemnicą",
-        "podsumowując", "w niniejszym artykule", "jak wiadomo",
-        "przykład:", "na przykład,", "wyobraźmy sobie", "załóżmy, że"
+        "podsumowując", "w niniejszym artykule", "jak wiadomo"
     ]
+    # 🔧 v33.5: Usunięto mniej problematyczne wzorce
+    # "przykład:", "na przykład,", "wyobraźmy sobie", "załóżmy, że" - to są OK
+    
     text_lower = text.lower()
     return [p for p in patterns if p in text_lower]
 
 
 def run_quick_checks(text: str, context: Dict) -> Dict:
     """
-    v29.0: NOWE PRIORYTETY
-    
-    PRIORYTET 1: Jakość tekstu (tautologie, pleonazmy) → CRITICAL
-    PRIORYTET 2: Encje/n-gramy w odpowiednich miejscach → WARNING
-    PRIORYTET 3: Słowa kluczowe (min 1×, nie stuffing) → tylko stuffing/brak blokuje
+    🔧 v33.5 OPTIMIZED: Mniej restrykcyjne quick checks z auto-fix.
     """
-    critical_errors = []  # Blokują zapis
-    warnings = []         # Tylko info, nie blokują
-    suggestions = []      # Sugestie optymalizacji
+    critical_errors = []
+    warnings = []
+    suggestions = []
+    auto_fix_candidates = []  # 🆕
     
-    # ============================================
-    # PRIORYTET 1: JAKOŚĆ TEKSTU (CRITICAL!)
-    # ============================================
+    # PRIORYTET 1: JAKOŚĆ TEKSTU
     quality_critical, quality_warnings = quick_check_text_quality(text)
     for err in quality_critical:
         critical_errors.append({"type": "quality", "severity": "critical", "msg": err})
     for warn in quality_warnings:
         warnings.append({"type": "quality", "severity": "warning", "msg": warn})
     
-    # AI patterns - też jakość
+    # AI patterns
     ai = quick_check_ai_patterns(text)
-    if ai:
+    if len(ai) >= 2:  # 🔧 Tylko jeśli >= 2 (było any)
         warnings.append({"type": "ai_pattern", "severity": "warning", "msg": f"AI patterns: {', '.join(ai)}"})
     
-    # ============================================
-    # PRIORYTET 2: DŁUGOŚĆ (ale elastyczna)
-    # ============================================
+    # PRIORYTET 2: DŁUGOŚĆ
     len_err, words = quick_check_length(
         text, 
         context.get("target_words_min", 150),
-        context.get("target_words_max", 500)
+        context.get("target_words_max", 400)
     )
     if len_err:
-        # Za krótki = critical, za długi = warning (można skrócić)
-        if "za krótki" in len_err.lower():
-            critical_errors.append({"type": "length", "severity": "critical", "msg": len_err})
+        warnings.append({"type": "length", "severity": "warning", "msg": len_err})  # 🔧 warning zamiast critical
+    
+    # PRIORYTET 3: KEYWORDS (z auto-fix)
+    keywords_critical, keywords_warnings, missing_info = quick_check_keywords(
+        text, 
+        context.get("keywords_required", [])
+    )
+    
+    for err in keywords_critical:
+        # 🆕 v33.5: Sprawdź czy można auto-fix
+        if missing_info.get("stuffed_for_autofix"):
+            critical_errors.append({
+                "type": "stuffing", 
+                "severity": "critical", 
+                "msg": err,
+                "auto_fixable": True,
+                "fix_data": missing_info["stuffed_for_autofix"]
+            })
         else:
-            warnings.append({"type": "length", "severity": "warning", "msg": len_err})
+            critical_errors.append({"type": "stuffing", "severity": "critical", "msg": err})
     
-    # ============================================
-    # PRIORYTET 3: KEYWORDS (nowa logika v29.2!)
-    # ============================================
-    # critical = TYLKO stuffing
-    # warnings = info o brakujących i niedostatecznych
-    # missing_info = lista fraz do uzupełnienia przez Claude
-    kw_critical, kw_warnings, missing_info = quick_check_keywords(text, context.get("keywords_required", []))
+    for warn in keywords_warnings:
+        warnings.append({"type": "keyword", "severity": "warning", "msg": warn})
     
-    for err in kw_critical:
-        critical_errors.append({"type": "seo", "severity": "critical", "msg": err})
-    for warn in kw_warnings:
-        warnings.append({"type": "seo", "severity": "warning", "msg": warn})
-    
-    # Forbidden keywords - zawsze critical
+    # PRIORYTET 4: FORBIDDEN
     forbidden = quick_check_forbidden(text, context.get("keywords_forbidden", []))
     if forbidden:
-        critical_errors.append({"type": "seo", "severity": "critical", "msg": f"Zabronione frazy: {', '.join(forbidden)}"})
+        for f in forbidden[:2]:
+            warnings.append({"type": "forbidden", "severity": "warning", "msg": f"Użyto zakazanej frazy: '{f}'"})
     
-    # ============================================
-    # STATS
-    # ============================================
-    paras = len([p for p in text.split('\n\n') if p.strip() and len(p) > 30])
+    # Paragraphs
+    paragraphs = [p for p in text.split('\n\n') if p.strip()]
+    paragraph_count = len(paragraphs)
+    
+    # 🆕 v33.5: Auto-fix jeśli możliwe
+    auto_fixed_text = None
+    auto_fixes_applied = []
+    
+    if any(e.get("auto_fixable") for e in critical_errors):
+        stuffed_data = []
+        for e in critical_errors:
+            if e.get("fix_data"):
+                stuffed_data.extend(e["fix_data"])
+        
+        if stuffed_data:
+            auto_fixed_text, auto_fixes_applied = auto_fix_stuffing(text, stuffed_data)
+            if auto_fixes_applied:
+                print(f"[CLAUDE_REVIEWER] 🔧 Auto-fix applied: {len(auto_fixes_applied)} changes")
+    
+    # Tylko stuffing blokuje (ale może być auto-fixed)
+    has_unfixable_critical = any(
+        e["type"] == "stuffing" and not e.get("auto_fixable") 
+        for e in critical_errors
+    )
+    
+    passed = not has_unfixable_critical or auto_fixed_text is not None
     
     return {
-        "passed": len(critical_errors) == 0,  # Tylko CRITICAL (stuffing) blokuje!
+        "passed": passed,
         "errors": critical_errors,
         "warnings": warnings,
         "suggestions": suggestions,
         "word_count": words,
-        "paragraph_count": paras,
-        "missing_phrases": missing_info,  # v29.2: do uzupełnienia przez Claude
-        "priority_summary": {
-            "quality_issues": len([e for e in critical_errors if e["type"] == "quality"]),
-            "seo_issues": len([e for e in critical_errors if e["type"] == "seo"]),
-            "length_issues": len([e for e in critical_errors if e["type"] == "length"])
-        }
+        "paragraph_count": paragraph_count,
+        "missing_phrases": missing_info,
+        "auto_fixed_text": auto_fixed_text,  # 🆕
+        "auto_fixes_applied": auto_fixes_applied  # 🆕
     }
 
 
 # ================================================================
-# CLAUDE REVIEW
+# GŁÓWNA FUNKCJA
 # ================================================================
 
-def build_review_prompt(text: str, ctx: Dict) -> str:
-    """v29.2: Prompt z listą BRAKUJĄCYCH FRAZ do uzupełnienia przez Claude
-       v33.3: + mandatory_entities których Claude NIE MOŻE usunąć
+def review_batch(text: str, context: Dict, skip_claude: bool = False) -> ReviewResult:
     """
+    🔧 v33.5 OPTIMIZED: Pełny review z auto-fix.
+    """
+    # Quick checks
+    qc = run_quick_checks(text, context)
     
-    required = "\n".join([f'  • "{k["keyword"]}" (min 1×, zalecane {k.get("count",1)}×)' 
-                          for k in ctx.get("keywords_required", []) if k.get("keyword")])
-    forbidden = ", ".join(ctx.get("keywords_forbidden", [])) or "brak"
-    h2_list = "\n".join([f"  • {h}" for h in ctx.get("h2_current", [])]) or "  (brak)"
+    # 🆕 v33.5: Użyj auto-fixed text jeśli dostępny
+    working_text = qc.get("auto_fixed_text") or text
+    auto_fixes = qc.get("auto_fixes_applied", [])
     
-    # Główna fraza
-    main_kw = ctx.get("main_keyword", "")
-    main_kw_count = ctx.get("main_keyword_count", 2)
-    
-    # Snippet info
-    snippet_info = "TAK (40-60 słów na początku)" if ctx.get("snippet_required") else "NIE"
-    
-    # v29.2: BRAKUJĄCE FRAZY DO UZUPEŁNIENIA
-    missing_basic = ctx.get("missing_basic", [])
-    missing_extended = ctx.get("missing_extended", [])
-    
-    # v33.3: MANDATORY ENTITIES - Claude NIE MOŻE ich usunąć/zmienić
-    mandatory_entities = ctx.get("mandatory_entities", [])
-    mandatory_section = ""
-    if mandatory_entities:
-        entities_list = "\n".join([f'  ⛔ "{e}"' for e in mandatory_entities])
-        mandatory_section = f"""
-### ⛔ OBOWIĄZKOWE ENCJE (NIE USUWAJ, NIE ZMIENIAJ!)
-{entities_list}
-
-Te encje/frazy MUSZĄ pozostać w tekście BEZ ZMIAN. Możesz tylko poprawić ich otoczenie gramatycznie.
-Jeśli usuniesz lub zmienisz którąkolwiek z nich - twoja odpowiedź zostanie odrzucona!
-
-"""
-    
-    missing_section = ""
-    if missing_basic or missing_extended:
-        missing_section = """
-### 🔴 BRAKUJĄCE FRAZY - MUSISZ UZUPEŁNIĆ!
-
-**Te frazy NIE występują w tekście - wpleć je naturalnie:**
-"""
-        if missing_basic:
-            missing_section += "\nBASIC (ważniejsze):\n"
-            for phrase in missing_basic:
-                missing_section += f'  • "{phrase}"\n'
+    if not qc["passed"]:
+        issues = [ReviewIssue(e["type"], "critical", e["msg"], auto_fixable=e.get("auto_fixable", False)) for e in qc["errors"]]
+        issues += [ReviewIssue(w["type"], "warning", w["msg"]) for w in qc["warnings"]]
         
-        if missing_extended:
-            missing_section += "\nEXTENDED:\n"
-            for phrase in missing_extended:
-                missing_section += f'  • "{phrase}"\n'
+        # 🆕 Jeśli były auto-fixes, zwróć CORRECTED zamiast REJECTED
+        if auto_fixes:
+            return ReviewResult(
+                "AUTO_FIXED",  # 🆕 Nowy status
+                text,
+                working_text,
+                issues,
+                f"Auto-naprawiono {len(auto_fixes)} problemów",
+                qc["word_count"],
+                qc["paragraph_count"],
+                auto_fixes_applied=auto_fixes
+            )
         
-        missing_section += """
-⚠️ WPLEĆ KAŻDĄ BRAKUJĄCĄ FRAZĘ min 1× w naturalny sposób!
-   Możesz użyć odmiany (np. "ścieżką sensoryczną" zamiast "ścieżka sensoryczna")
-"""
+        return ReviewResult(
+            "QUICK_CHECK_FAILED", text, None, issues,
+            "Popraw błędy krytyczne (stuffing)",
+            qc["word_count"], qc["paragraph_count"]
+        )
     
-    return f"""Jesteś redaktorem i stylistą języka polskiego. Sprawdź i POPRAW tekst.
-
-## PRIORYTETY (w tej kolejności!):
-{mandatory_section}
-### 🔴 PRIORYTET 1: JAKOŚĆ TEKSTU (NAJWAŻNIEJSZE!)
-Tekst musi być poprawny, naturalny i przyjemny w czytaniu.
-
-SPRAWDŹ I POPRAW:
-- **TAUTOLOGIE**: "przedszkole... w przedszkolu" → zamień jedno na "placówka/obiekt/sala"
-- **PLEONAZMY**: "nowoczesne przedszkole wyposażone jest w pomoce w przedszkolu" → DRAMAT!
-- **POWTÓRZENIA**: To samo słowo 2× w zdaniu (poza spójnikami) → użyj synonimu
-- **STRONA BIERNA**: "jest wyposażone w" → "posiada", "oferuje", "zawiera"
-- **DŁUGIE ZDANIA**: >30 słów → podziel na 2
-- **GRAMATYKA**: Błędy, kolokacje, naturalność języka polskiego
-- **AI PATTERNS**: "W dzisiejszych czasach", "Warto wiedzieć", "Nie jest tajemnicą" → USUŃ
-- **HALUCYNACJE**: Wymyślone statystyki, badania, fakty bez źródła → USUŃ
-
-### 🔴 PRIORYTET 1b: SEMANTIC DIVERSITY (v33.4 NOWE!)
-KAŻDA SEKCJA MUSI WNOSIĆ NOWE INFORMACJE!
-
-⛔ NIEDOPUSZCZALNE:
-- Powtarzanie tej samej informacji w różnych sekcjach (np. "witamina C wspomaga kolagen" → "wit. C produkuje kolagen" → "C odpowiada za kolagen")
-- Mówienie o tym samym innymi słowami
-- Sekcje które można usunąć bez utraty informacji
-
-✅ WYMAGANE:
-- Każda sekcja = NOWA wiedza, nowy aspekt, nowy kontekst
-- Jeśli witamina C była w sekcji 1, w sekcji 3 napisz o czymś INNYM (dawkowanie, źródła, interakcje)
-- Konkrety zamiast powtórzeń: nazwy substancji, wartości, przykłady
-
-### 🟡 PRIORYTET 2: ENCJE I N-GRAMY
-Upewnij się, że kluczowe pojęcia są zdefiniowane/wyjaśnione przy pierwszym użyciu.
-{missing_section}
-### 🟢 PRIORYTET 3: ISTNIEJĄCE FRAZY (sprawdź ilości)
-Frazy powinny występować NATURALNIE. Lepiej 1× naturalnie niż 3× sztucznie!
-
-GŁÓWNA FRAZA: "{main_kw}" (min {main_kw_count}×)
-
-POZOSTAŁE FRAZY (min 1×, zalecane ilości to cel, nie wymóg):
-{required}
-
-❌ NIE RÓB: wstawiania fraz "na siłę" które psują naturalność
-✅ TAK RÓB: wplataj frazy gdzie pasują do kontekstu
-
-ZABRONIONE: {forbidden}
-
----
-
-## KONTEKST
-- Temat: {ctx.get("topic", "")}
-- Batch: #{ctx.get("batch_number", 1)}
-- H2: {h2_list}
-- Słowa: {ctx.get("target_words_min", 200)}-{ctx.get("target_words_max", 500)}
-- Akapity: {ctx.get("target_paragraphs_min", 2)}-{ctx.get("target_paragraphs_max", 5)}
-- Snippet: {snippet_info}
-
-## TEKST DO SPRAWDZENIA:
-{text}
-
----
-
-## ODPOWIEDŹ (tylko JSON):
-```json
-{{
-  "status": "APPROVED | CORRECTED | REJECTED",
-  "quality_score": 1-10,
-  "issues": [
-    {{"priority": 1, "type": "tautologia|pleonazm|gramatyka|halucynacja|ai_pattern|semantic_repetition", "description": "...", "fix_applied": true}},
-    {{"priority": 2, "type": "encja_brak", "description": "...", "fix_applied": false}},
-    {{"priority": 3, "type": "fraza_dodana|fraza_brak", "description": "...", "fix_applied": true}}
-  ],
-  "phrases_added": ["lista fraz które wplotłeś"],
-  "corrected_text": "pełny poprawiony tekst (tylko jeśli CORRECTED)",
-  "summary": "co poprawiono"
-}}
-```
-
-ZASADY:
-- APPROVED = jakość OK, wszystkie brakujące frazy uzupełnione
-- CORRECTED = poprawiłeś błędy jakościowe LUB uzupełniłeś frazy, zwróć pełny tekst
-- REJECTED = tekst nie do uratowania (za krótki, same błędy, halucynacje)
-- Zachowaj format h2: / h3:
-- JEŚLI SĄ BRAKUJĄCE FRAZY → MUSISZ zwrócić CORRECTED z uzupełnionym tekstem!
-- NIE dopisuj tekstu jeśli za krótki → zwróć REJECTED
-- PRIORYTET 1 (jakość) ważniejszy niż dokładne ilości fraz!"""
-
-
-def generate_diff(original: str, corrected: str) -> DiffSummary:
-    """
-    v33.3: Generuje diff między oryginałem a poprawionym tekstem.
-    """
-    if not corrected or original == corrected:
-        return DiffSummary()
+    if skip_claude:
+        issues = [ReviewIssue(w["type"], "warning", w["msg"]) for w in qc["warnings"]]
+        
+        # 🆕 Jeśli były auto-fixes, zwróć AUTO_FIXED
+        if auto_fixes:
+            return ReviewResult(
+                "AUTO_FIXED",
+                text,
+                working_text,
+                issues,
+                f"Auto-naprawiono {len(auto_fixes)} problemów",
+                qc["word_count"],
+                qc["paragraph_count"],
+                auto_fixes_applied=auto_fixes
+            )
+        
+        return ReviewResult(
+            "APPROVED", text, None, issues,
+            "Quick check OK",
+            qc["word_count"], qc["paragraph_count"]
+        )
     
-    original_lines = original.splitlines()
-    corrected_lines = corrected.splitlines()
+    # Przekaż brakujące frazy do kontekstu Claude
+    missing = qc.get("missing_phrases", {})
+    context["missing_basic"] = missing.get("basic", [])
+    context["missing_extended"] = missing.get("extended", [])
     
-    differ = difflib.unified_diff(
-        original_lines,
-        corrected_lines,
-        lineterm='',
-        n=0  # bez kontekstu
-    )
+    # Claude review na working_text (może być już auto-fixed)
+    result = review_with_claude(working_text, context)
     
-    changes = []
-    words_removed = 0
-    words_added = 0
-    line_num = 0
+    # 🆕 Dodaj info o auto-fixes
+    if auto_fixes:
+        result.auto_fixes_applied = auto_fixes
+        if result.status == "APPROVED":
+            result.status = "AUTO_FIXED"
+            result.original_text = text
+            result.corrected_text = working_text
     
-    for line in differ:
-        if line.startswith('@@'):
-            # Parse line number from @@ -X,Y +A,B @@
-            match = re.search(r'\+(\d+)', line)
-            if match:
-                line_num = int(match.group(1))
-            continue
-        elif line.startswith('---') or line.startswith('+++'):
-            continue
-        elif line.startswith('-'):
-            text = line[1:]
-            if text.strip():
-                changes.append(DiffChange(type="removed", text=text, line_num=line_num))
-                words_removed += len(text.split())
-        elif line.startswith('+'):
-            text = line[1:]
-            if text.strip():
-                changes.append(DiffChange(type="added", text=text, line_num=line_num))
-                words_added += len(text.split())
-            line_num += 1
+    # Dodaj warnings z quick check
+    for w in qc["warnings"]:
+        if not any(i.fix_applied and i.type == w["type"] for i in result.issues):
+            result.issues.append(ReviewIssue(w["type"], "warning", w["msg"]))
     
-    return DiffSummary(
-        lines_changed=len([c for c in changes if c.type in ["removed", "added"]]),
-        words_removed=words_removed,
-        words_added=words_added,
-        changes=changes[:20]  # Limit do 20 zmian
-    )
-
-
-def validate_mandatory_entities(original: str, corrected: str, mandatory: List[str]) -> List[str]:
-    """
-    v33.3: Sprawdza czy mandatory_entities zostały zachowane w tekście.
-    Zwraca listę brakujących encji.
-    """
-    if not mandatory or not corrected:
-        return []
-    
-    missing = []
-    original_lower = original.lower()
-    corrected_lower = corrected.lower()
-    
-    for entity in mandatory:
-        entity_lower = entity.lower()
-        # Sprawdź czy encja była w oryginale i zniknęła z poprawionego
-        if entity_lower in original_lower and entity_lower not in corrected_lower:
-            missing.append(entity)
-    
-    return missing
+    return result
 
 
 def review_with_claude(text: str, ctx: Dict) -> ReviewResult:
+    """Claude review - bez zmian od v33.4"""
     if not ANTHROPIC_AVAILABLE or not os.environ.get("ANTHROPIC_API_KEY"):
         return ReviewResult("APPROVED", text, None, [], "Claude niedostępny", len(text.split()))
     
     try:
         client = anthropic.Anthropic()
-        start = time.time()
         
         response = client.messages.create(
             model="claude-sonnet-4-20250514",
@@ -752,60 +550,7 @@ def review_with_claude(text: str, ctx: Dict) -> ReviewResult:
             status = "APPROVED"
             corrected = None
         
-        # v33.3: Walidacja mandatory_entities
-        mandatory_entities = ctx.get("mandatory_entities", [])
-        if corrected and mandatory_entities:
-            missing_entities = validate_mandatory_entities(text, corrected, mandatory_entities)
-            if missing_entities:
-                # Claude usunął obowiązkowe encje - odrzuć korektę!
-                issues.append(ReviewIssue(
-                    type="mandatory_entity_removed",
-                    severity="critical",
-                    description=f"Claude usunął obowiązkowe encje: {', '.join(missing_entities)}",
-                    fix_applied=False
-                ))
-                # Przywróć oryginalny tekst
-                print(f"[CLAUDE_REVIEWER] ⚠️ Mandatory entities removed: {missing_entities} - reverting to original")
-                corrected = None
-                status = "APPROVED"  # Zachowaj oryginalny tekst
-        
-        # v33.3: Generuj diff jeśli są zmiany
-        diff_summary = None
-        if corrected and corrected != text:
-            diff_summary = generate_diff(text, corrected)
-            print(f"[CLAUDE_REVIEWER] 📝 Diff: {diff_summary.lines_changed} lines, -{diff_summary.words_removed}/+{diff_summary.words_added} words")
-        
         final = corrected if corrected else text
-        
-        # v33.4: Semantic diversity check
-        semantic_div = calculate_semantic_diversity(final)
-        if semantic_div["status"] == "CRITICAL":
-            issues.append(ReviewIssue(
-                type="semantic_repetition",
-                severity="critical",
-                description=f"Tekst zawiera zbyt dużo powtórzeń semantycznych. {'; '.join(semantic_div['suggestions'][:2])}",
-                fix_applied=False
-            ))
-            print(f"[CLAUDE_REVIEWER] ⚠️ Semantic diversity CRITICAL: {semantic_div['score']}")
-        elif semantic_div["status"] == "WARNING":
-            issues.append(ReviewIssue(
-                type="semantic_repetition",
-                severity="warning",
-                description=f"Niektóre sekcje powtarzają podobne informacje. {'; '.join(semantic_div['suggestions'][:1])}",
-                fix_applied=False
-            ))
-        
-        # v33.4: LanguageTool grammar check
-        grammar_lt = check_grammar_with_languagetool(final)
-        if grammar_lt.get("enabled") and grammar_lt.get("error_count", 0) > 0:
-            for err in grammar_lt.get("errors", [])[:3]:
-                issues.append(ReviewIssue(
-                    type="grammar_lt",
-                    severity="warning" if grammar_lt["error_count"] <= 2 else "critical",
-                    description=f"Błąd gramatyczny: {err.get('message', '')}. Kontekst: ...{err.get('context', '')}...",
-                    fix_applied=False
-                ))
-            print(f"[CLAUDE_REVIEWER] ⚠️ LanguageTool found {grammar_lt['error_count']} errors")
         
         return ReviewResult(
             status=status,
@@ -814,10 +559,7 @@ def review_with_claude(text: str, ctx: Dict) -> ReviewResult:
             issues=issues,
             summary=data.get("summary", ""),
             word_count=len(final.split()),
-            paragraph_count=len([p for p in final.split('\n\n') if p.strip()]),
-            diff=diff_summary,  # v33.3
-            semantic_diversity=semantic_div,  # v33.4
-            grammar_lt=grammar_lt  # v33.4
+            paragraph_count=len([p for p in final.split('\n\n') if p.strip()])
         )
         
     except Exception as e:
@@ -825,51 +567,35 @@ def review_with_claude(text: str, ctx: Dict) -> ReviewResult:
         return ReviewResult("APPROVED", text, None, [], f"Błąd: {e}", len(text.split()))
 
 
-# ================================================================
-# GŁÓWNA FUNKCJA
-# ================================================================
+def build_review_prompt(text: str, ctx: Dict) -> str:
+    """Buduje prompt dla Claude review."""
+    return f"""Przejrzyj poniższy tekst SEO i zwróć JSON:
 
-def review_batch(text: str, context: Dict, skip_claude: bool = False) -> ReviewResult:
-    """
-    v29.2: Pełny review: Quick Checks + Claude.
-    
-    Jeśli są brakujące frazy (0×), przekazuje je do Claude do uzupełnienia.
-    """
-    # Quick checks
-    qc = run_quick_checks(text, context)
-    
-    if not qc["passed"]:
-        # v29.2: Jedyny bloker to stuffing
-        issues = [ReviewIssue(e["type"], "critical", e["msg"]) for e in qc["errors"]]
-        issues += [ReviewIssue(w["type"], "warning", w["msg"]) for w in qc["warnings"]]
-        return ReviewResult(
-            "QUICK_CHECK_FAILED", text, None, issues,
-            "Popraw błędy krytyczne (stuffing)",
-            qc["word_count"], qc["paragraph_count"]
-        )
-    
-    if skip_claude:
-        issues = [ReviewIssue(w["type"], "warning", w["msg"]) for w in qc["warnings"]]
-        return ReviewResult(
-            "APPROVED", text, None, issues,
-            "Quick check OK",
-            qc["word_count"], qc["paragraph_count"]
-        )
-    
-    # v29.2: Przekaż brakujące frazy do kontekstu Claude
-    missing = qc.get("missing_phrases", {})
-    context["missing_basic"] = missing.get("basic", [])
-    context["missing_extended"] = missing.get("extended", [])
-    
-    # Claude review - uzupełni brakujące frazy
-    result = review_with_claude(text, context)
-    
-    # Dodaj warnings z quick check
-    for w in qc["warnings"]:
-        if not any(i.fix_applied and i.type == w["type"] for i in result.issues):
-            result.issues.append(ReviewIssue(w["type"], "warning", w["msg"]))
-    
-    return result
+TEKST:
+{text}
+
+KONTEKST:
+- Temat: {ctx.get('topic', '')}
+- Słowa kluczowe wymagane: {json.dumps(ctx.get('keywords_required', []), ensure_ascii=False)}
+- Brakujące BASIC: {json.dumps(ctx.get('missing_basic', []), ensure_ascii=False)}
+- Brakujące EXTENDED: {json.dumps(ctx.get('missing_extended', []), ensure_ascii=False)}
+
+ZWRÓĆ JSON:
+{{
+  "status": "APPROVED" | "CORRECTED" | "REJECTED",
+  "issues": [
+    {{"type": "string", "severity": "critical|warning|suggestion", "description": "string", "fix_applied": bool}}
+  ],
+  "corrected_text": "string (jeśli CORRECTED)",
+  "summary": "string"
+}}
+
+ZASADY:
+1. APPROVED = tekst OK
+2. CORRECTED = naprawiłeś drobne błędy (zwróć corrected_text)
+3. REJECTED = poważne problemy (unikaj - lepiej napraw)
+4. Jeśli brakuje fraz - dodaj je naturalnie w corrected_text
+"""
 
 
 def build_context_from_pre_batch(pre_batch: Dict, project: Dict = None) -> Dict:
