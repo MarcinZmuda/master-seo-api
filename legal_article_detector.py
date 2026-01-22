@@ -115,12 +115,21 @@ def detect_legal_articles(topic: str) -> Dict[str, Any]:
             "search_queries": []
         }
     
-    # Użyj Claude do wykrycia przepisów
+    # 🆕 v35.7: PRE-CHECK - dla znanych tematów prawnych użyj regex od razu!
+    # Szybciej i pewniej niż Claude
+    regex_precheck = _detect_with_regex(topic)
+    if regex_precheck.get("status") == "OK":
+        print(f"[ARTICLE_DETECTOR] ✅ PRE-CHECK: '{topic}' → {regex_precheck.get('articles')}")
+        regex_precheck["method"] = "regex_precheck"
+        regex_precheck["search_queries"] = _format_search_queries(regex_precheck.get("articles", []))
+        return regex_precheck
+    
+    # Jeśli regex nie znalazł - użyj Claude
     if _anthropic_client:
         result = _detect_with_claude(topic)
     else:
-        # Fallback: proste wykrywanie regex
-        result = _detect_with_regex(topic)
+        # Fallback: regex już sprawdzony wyżej, więc NOT_LEGAL
+        result = regex_precheck
     
     # Dodaj search_queries (format do wyszukiwania)
     if result.get("articles"):
@@ -162,6 +171,13 @@ def _detect_with_claude(topic: str) -> Dict[str, Any]:
                     "method": "claude"
                 }
             else:
+                # 🆕 v35.7: SECOND CHANCE - Claude zwrócił puste, ale może regex znajdzie!
+                regex_result = _detect_with_regex(topic)
+                if regex_result.get("status") == "OK":
+                    print(f"[ARTICLE_DETECTOR] ⚠️ Claude: NOT_LEGAL, ale regex znalazł: {regex_result.get('articles')}")
+                    regex_result["method"] = "regex_override_claude"
+                    return regex_result
+                
                 return {
                     "status": "NOT_LEGAL",
                     "reason": data.get("reason", "Temat nie jest prawny"),
@@ -192,6 +208,10 @@ def _detect_with_regex(topic: str) -> Dict[str, Any]:
     # Podstawowe mapowanie (minimalny fallback)
     BASIC_MAP = {
         "ubezwłasnowolnienie": {
+            "articles": ["art. 13 k.c.", "art. 16 k.c.", "art. 544 k.p.c."],
+            "main_act": "Kodeks cywilny"
+        },
+        "alkoholik": {  # 🆕 Dodane dla ubezwłasnowolnienie alkoholika
             "articles": ["art. 13 k.c.", "art. 16 k.c."],
             "main_act": "Kodeks cywilny"
         },
@@ -218,6 +238,47 @@ def _detect_with_regex(topic: str) -> Dict[str, Any]:
         "zadośćuczynienie": {
             "articles": ["art. 445 k.c.", "art. 448 k.c."],
             "main_act": "Kodeks cywilny"
+        },
+        # 🆕 v35.7: Dodatkowe tematy prawne
+        "testament": {
+            "articles": ["art. 941 k.c.", "art. 949 k.c."],
+            "main_act": "Kodeks cywilny"
+        },
+        "darowizn": {
+            "articles": ["art. 888 k.c.", "art. 898 k.c."],
+            "main_act": "Kodeks cywilny"
+        },
+        "opieka": {
+            "articles": ["art. 145 k.r.o.", "art. 155 k.r.o."],
+            "main_act": "Kodeks rodzinny i opiekuńczy"
+        },
+        "kuratela": {
+            "articles": ["art. 178 k.r.o.", "art. 183 k.r.o."],
+            "main_act": "Kodeks rodzinny i opiekuńczy"
+        },
+        "władza rodzicielska": {
+            "articles": ["art. 92 k.r.o.", "art. 111 k.r.o."],
+            "main_act": "Kodeks rodzinny i opiekuńczy"
+        },
+        "adopcj": {
+            "articles": ["art. 114 k.r.o.", "art. 121 k.r.o."],
+            "main_act": "Kodeks rodzinny i opiekuńczy"
+        },
+        "nieruchomości": {
+            "articles": ["art. 46 k.c.", "art. 158 k.c."],
+            "main_act": "Kodeks cywilny"
+        },
+        "umowa": {
+            "articles": ["art. 353 k.c.", "art. 384 k.c."],
+            "main_act": "Kodeks cywilny"
+        },
+        "kredyt": {
+            "articles": ["art. 69 pr.bank.", "art. 75 pr.bank."],
+            "main_act": "Prawo bankowe"
+        },
+        "eksmisj": {
+            "articles": ["art. 222 k.c.", "art. 14 u.o.p.l."],
+            "main_act": "Kodeks cywilny / Ustawa o ochronie praw lokatorów"
         },
     }
     
