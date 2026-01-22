@@ -1554,6 +1554,58 @@ def create_project():
     # v27.2: Policz ile BASIC vs EXTENDED
     basic_count = sum(1 for k in firestore_keywords.values() if k.get("type", "BASIC").upper() in ["BASIC", "MAIN"])
     extended_count = sum(1 for k in firestore_keywords.values() if k.get("type", "").upper() == "EXTENDED")
+    total_keywords = basic_count + extended_count
+    
+    # 🆕 v35.7: AUTO-SCALING batchy na podstawie liczby fraz
+    # Więcej fraz = więcej batchy = dłuższy artykuł
+    auto_scaled = False
+    original_batches = total_planned_batches
+    original_length = target_length
+    
+    if total_keywords > 100:
+        # Bardzo dużo fraz (100+) → 9-10 batchy, 4500+ słów
+        min_batches = 9
+        min_length = 4500
+        auto_scaled = True
+    elif total_keywords > 80:
+        # Dużo fraz (80-100) → 8 batchy, 4000 słów
+        min_batches = 8
+        min_length = 4000
+        auto_scaled = True
+    elif total_keywords > 60:
+        # Sporo fraz (60-80) → 7 batchy, 3500 słów
+        min_batches = 7
+        min_length = 3500
+        auto_scaled = True
+    elif total_keywords > 40:
+        # Średnio fraz (40-60) → 6 batchy, 3000 słów
+        min_batches = 6
+        min_length = 3000
+        auto_scaled = True
+    else:
+        min_batches = total_planned_batches
+        min_length = target_length
+    
+    if auto_scaled:
+        total_planned_batches = max(total_planned_batches, min_batches)
+        target_length = max(target_length, min_length)
+        
+        # Zaktualizuj w Firestore
+        project_data["total_planned_batches"] = total_planned_batches
+        project_data["target_length"] = target_length
+        project_data["auto_scaled"] = {
+            "reason": f"{total_keywords} fraz wymaga więcej miejsca",
+            "original_batches": original_batches,
+            "scaled_batches": total_planned_batches,
+            "original_length": original_length,
+            "scaled_length": target_length
+        }
+        doc_ref.update({
+            "total_planned_batches": total_planned_batches,
+            "target_length": target_length,
+            "auto_scaled": project_data["auto_scaled"]
+        })
+        print(f"[PROJECT] 🔄 AUTO-SCALED: {total_keywords} fraz → {total_planned_batches} batchy, {target_length} słów (było: {original_batches} batchy, {original_length} słów)")
     
     print(f"[PROJECT] Created project {doc_ref.id}: {topic} ({len(firestore_keywords)} keywords: {basic_count} BASIC, {extended_count} EXTENDED, {total_planned_batches} planned batches)")
     
@@ -1572,11 +1624,14 @@ def create_project():
         "keywords_breakdown": {
             "basic": basic_count,
             "extended": extended_count,
+            "total": total_keywords,
             "warning": warning
         },
         "h2_sections": len(h2_structure),
         "total_planned_batches": total_planned_batches,
         "target_length": target_length,
+        # 🆕 v35.7: Auto-scaling info
+        "auto_scaled": project_data.get("auto_scaled") if auto_scaled else None,
         "source": source,
         "batch_plan": batch_plan_dict,
         "has_featured_snippet": bool(s1_data.get("featured_snippet")),
@@ -1585,7 +1640,7 @@ def create_project():
         "legal_module_active": project_data.get("legal_context", {}).get("legal_module_active", False),
         "legal_instruction": project_data.get("legal_instruction"),
         "legal_judgments": project_data.get("legal_judgments", []),
-        "version": "v30.0"
+        "version": "v35.7"
     }), 201
 
 
