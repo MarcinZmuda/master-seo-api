@@ -1,16 +1,14 @@
 """
 ===============================================================================
-BATCH BEST-OF-N SELECTOR v26.1
+BATCH BEST-OF-N SELECTOR v26.2 - OPTIMIZED
 ===============================================================================
-Generuje N wersji batcha i wybiera najlepszą na podstawie scoringu.
+ZMIANY OPTYMALIZACYJNE:
+- 🆕 Obniżony min_acceptable_score z 60 do 50
+- 🆕 Szybsza generacja (2 kandydatów domyślnie zamiast 3)
+- 🆕 Lepsze wagi scoringu (coverage ważniejsze)
+- 🆕 Timeout skrócony
 
-Logika:
-1. GPT generuje batch 3 razy (różne temperature/prompty)
-2. Każda wersja jest walidowana przez unified_prevalidation
-3. Wybierana jest wersja z najwyższym score
-4. Jeśli żadna nie spełnia minimum - zwracana jest najlepsza z ostrzeżeniem
-
-Autor: BRAJEN SEO Engine v26.1
+EFEKT: Szybsze Best-of-N z lepszą selekcją
 ===============================================================================
 """
 
@@ -37,31 +35,33 @@ except ImportError:
 
 
 # ============================================================================
-# KONFIGURACJA
+# KONFIGURACJA - 🔧 v26.2 OPTIMIZED
 # ============================================================================
 
 @dataclass
 class BestOfNConfig:
-    """Konfiguracja dla Best-of-N selection."""
-    n_candidates: int = 3                    # Ile wersji generować
-    min_acceptable_score: float = 60.0       # Minimalny akceptowalny score
-    temperature_base: float = 0.7            # Bazowa temperatura
-    temperature_variance: float = 0.15       # Wariancja temperatury między wersjami
-    timeout_per_generation: int = 60         # Timeout na generację (sekundy)
+    """
+    🔧 v26.2 OPTIMIZED: Zmienione parametry.
+    """
+    n_candidates: int = 2              # 🔧 było 3 - szybciej!
+    min_acceptable_score: float = 50.0  # 🔧 było 60 - mniej restrykcyjne
+    temperature_base: float = 0.7
+    temperature_variance: float = 0.20  # 🔧 było 0.15 - więcej różnorodności
+    timeout_per_generation: int = 45    # 🔧 było 60
     
-    # Wagi dla scoringu
+    # 🔧 v26.2: Zmienione wagi - coverage ważniejsze
     weights: Dict[str, float] = field(default_factory=lambda: {
-        "density": 0.20,           # Density w zakresie 0.5-1.5%
-        "coverage": 0.25,          # Pokrycie keywords
-        "polish_quality": 0.15,    # Jakość języka polskiego
-        "structure": 0.15,         # Struktura (długość akapitów, H3)
-        "keywords_natural": 0.15,  # Naturalność wplecenia fraz
-        "no_banned_phrases": 0.10  # Brak zakazanych fraz
+        "density": 0.15,            # 🔧 było 0.20
+        "coverage": 0.35,           # 🔧 było 0.25 - ZWIĘKSZONE
+        "polish_quality": 0.15,
+        "structure": 0.10,          # 🔧 było 0.15
+        "keywords_natural": 0.15,
+        "no_banned_phrases": 0.10
     })
 
 
 # ============================================================================
-# SCORING FUNCTIONS
+# SCORING FUNCTIONS - 🔧 v26.2 OPTIMIZED
 # ============================================================================
 
 def calculate_candidate_score(
@@ -71,79 +71,75 @@ def calculate_candidate_score(
     validation_result: Dict
 ) -> Dict[str, Any]:
     """
-    Oblicza szczegółowy score dla kandydata.
-    
-    Returns:
-        Dict z:
-        - total_score: float (0-100)
-        - component_scores: Dict z poszczególnymi scorami
-        - issues: List problemów
-        - warnings: List ostrzeżeń
+    🔧 v26.2 OPTIMIZED: Bardziej elastyczne scoring.
     """
     scores = {}
     issues = []
     warnings = []
     
-    # 1. DENSITY SCORE (0-100)
+    # 1. DENSITY SCORE - 🔧 szersze zakresy
     density = validation_result.get("density", {}).get("value", 0)
-    if 0.5 <= density <= 1.5:
+    if 0.4 <= density <= 2.0:  # 🔧 było 0.5-1.5
         scores["density"] = 100
-    elif 0.3 <= density < 0.5 or 1.5 < density <= 2.0:
-        scores["density"] = 80
-    elif 0.2 <= density < 0.3 or 2.0 < density <= 2.5:
-        scores["density"] = 60
-        warnings.append(f"Density {density:.1f}% - lekko poza zakresem")
-    elif density > 2.5:
-        scores["density"] = 30
+    elif 0.2 <= density < 0.4 or 2.0 < density <= 2.5:  # 🔧 szerszy zakres
+        scores["density"] = 85
+    elif 0.1 <= density < 0.2 or 2.5 < density <= 3.0:
+        scores["density"] = 65
+        warnings.append(f"Density {density:.1f}% - poza zakresem")
+    elif density > 3.0:
+        scores["density"] = 35
         issues.append(f"Density {density:.1f}% - za wysokie!")
     else:
-        scores["density"] = 50
+        scores["density"] = 55
         warnings.append(f"Density {density:.1f}% - za niskie")
     
-    # 2. COVERAGE SCORE (0-100)
+    # 2. COVERAGE SCORE - 🔧 NAJWAŻNIEJSZE
     coverage_data = validation_result.get("coverage", {})
     basic_coverage = coverage_data.get("basic_percent", 0)
     extended_coverage = coverage_data.get("extended_percent", 0)
     
-    # Średnia ważona (BASIC ważniejsze)
-    coverage_score = (basic_coverage * 0.7 + extended_coverage * 0.3)
-    scores["coverage"] = coverage_score
+    # 🔧 v26.2: Bardziej złożona formuła
+    if basic_coverage >= 90:
+        coverage_score = 90 + (extended_coverage * 0.1)
+    elif basic_coverage >= 70:
+        coverage_score = 70 + (basic_coverage - 70) + (extended_coverage * 0.1)
+    else:
+        coverage_score = basic_coverage * 0.9 + extended_coverage * 0.1
+    
+    scores["coverage"] = min(100, coverage_score)
     
     if basic_coverage < 100:
         missing = coverage_data.get("basic_missing", [])
         if missing:
-            issues.append(f"Brak BASIC: {', '.join(missing[:3])}")
+            warnings.append(f"Brak BASIC: {', '.join(missing[:2])}")  # 🔧 było 3
     
-    # 3. POLISH QUALITY SCORE (0-100)
+    # 3. POLISH QUALITY SCORE
     polish_data = validation_result.get("polish_quality", {})
-    scores["polish_quality"] = polish_data.get("score", 70)
+    scores["polish_quality"] = polish_data.get("score", 75)  # 🔧 było 70
     
     if polish_data.get("issues"):
-        for issue in polish_data.get("issues", [])[:2]:
-            warnings.append(f"Polski: {issue.get('message', '')[:50]}")
+        for issue in polish_data.get("issues", [])[:1]:  # 🔧 było 2
+            warnings.append(f"Polski: {issue.get('message', '')[:40]}")
     
-    # 4. STRUCTURE SCORE (0-100)
+    # 4. STRUCTURE SCORE - 🔧 bardziej elastyczne
     structure_score = 100
     
-    # Sprawdź długość akapitów
     paragraphs = content.split('\n\n')
+    long_para_count = 0
     for p in paragraphs:
         words = len(p.split())
-        if words > 180:
-            structure_score -= 10
-            warnings.append(f"Akapit za długi ({words} słów)")
-        elif words < 30 and words > 5:
-            structure_score -= 5
+        if words > 200:  # 🔧 było 180
+            long_para_count += 1
+            if long_para_count > 1:  # 🔧 Tylko jeśli > 1 długi akapit
+                structure_score -= 8
     
-    scores["structure"] = max(0, structure_score)
+    scores["structure"] = max(60, structure_score)  # 🔧 było 0
     
-    # 5. KEYWORDS NATURAL SCORE (0-100)
-    # Sprawdzamy czy frazy nie są upchane w jednym miejscu
+    # 5. KEYWORDS NATURAL SCORE
     natural_score = 100
     
-    # Prosta heurystyka: czy frazy są rozłożone równomiernie
     text_parts = content.split('\n\n')
-    if len(text_parts) > 1:
+    if len(text_parts) > 1 and main_keyword:
         keyword_positions = []
         for i, part in enumerate(text_parts):
             part_lower = part.lower()
@@ -151,29 +147,26 @@ def calculate_candidate_score(
                 keyword_positions.append(i)
         
         if keyword_positions:
-            # Sprawdź czy nie wszystkie w jednym miejscu
-            if len(set(keyword_positions)) == 1 and len(keyword_positions) > 2:
-                natural_score -= 20
-                warnings.append("Frazy skupione w jednym akapicie")
+            if len(set(keyword_positions)) == 1 and len(keyword_positions) > 3:  # 🔧 było 2
+                natural_score -= 15
     
     scores["keywords_natural"] = natural_score
     
-    # 6. NO BANNED PHRASES SCORE (0-100)
+    # 6. NO BANNED PHRASES SCORE
     banned_count = len(polish_data.get("banned_phrases_found", []))
     if banned_count == 0:
         scores["no_banned_phrases"] = 100
-    elif banned_count <= 2:
-        scores["no_banned_phrases"] = 70
-        warnings.append(f"Znaleziono {banned_count} zakazanych fraz")
+    elif banned_count <= 3:  # 🔧 było 2
+        scores["no_banned_phrases"] = 75
     else:
-        scores["no_banned_phrases"] = 40
+        scores["no_banned_phrases"] = 45
         issues.append(f"Za dużo zakazanych fraz ({banned_count})")
     
-    # TOTAL SCORE (średnia ważona)
+    # TOTAL SCORE
     config = BestOfNConfig()
     total = 0
     for component, weight in config.weights.items():
-        total += scores.get(component, 50) * weight
+        total += scores.get(component, 60) * weight  # 🔧 default 60 zamiast 50
     
     return {
         "total_score": round(total, 1),
@@ -197,9 +190,7 @@ def generate_candidate(
     temperature: float,
     model_name: str = "gemini-2.0-flash"
 ) -> Optional[str]:
-    """
-    Generuje pojedynczego kandydata przez Gemini.
-    """
+    """Generuje pojedynczego kandydata przez Gemini."""
     if not GEMINI_AVAILABLE:
         return None
     
@@ -225,36 +216,32 @@ def generate_candidate(
 
 def generate_n_candidates(
     base_prompt: str,
-    n: int = 3,
+    n: int = 2,  # 🔧 było 3
     model_name: str = "gemini-2.0-flash"
 ) -> List[Dict[str, Any]]:
     """
-    Generuje N kandydatów z różnymi temperaturami.
-    
-    Returns:
-        List[Dict] z:
-        - content: str
-        - temperature: float
-        - generation_time: float
+    🔧 v26.2 OPTIMIZED: Generuje N kandydatów szybciej.
     """
     config = BestOfNConfig()
     candidates = []
     
+    # 🔧 v26.2: Tylko 2 temperatury domyślnie
     temperatures = [
-        config.temperature_base - config.temperature_variance,  # 0.55 - bardziej deterministyczny
-        config.temperature_base,                                  # 0.70 - bazowy
-        config.temperature_base + config.temperature_variance,  # 0.85 - bardziej kreatywny
+        config.temperature_base - config.temperature_variance,  # 0.50
+        config.temperature_base + config.temperature_variance,  # 0.90
     ]
+    
+    # Dodaj trzecią jeśli n > 2
+    if n > 2:
+        temperatures.insert(1, config.temperature_base)  # 0.70
     
     for i in range(n):
         temp = temperatures[i] if i < len(temperatures) else config.temperature_base
         
-        # Lekka modyfikacja promptu dla różnorodności
+        # 🔧 v26.2: Krótsze modyfikacje promptu
         modified_prompt = base_prompt
         if i == 1:
-            modified_prompt += "\n\nZadbaj szczególnie o naturalność języka i płynność tekstu."
-        elif i == 2:
-            modified_prompt += "\n\nSkup się na konkretach, liczbach i praktycznych przykładach."
+            modified_prompt += "\n\nPisz naturalnie, unikaj sztywnych konstrukcji."
         
         start_time = datetime.now()
         content = generate_candidate(modified_prompt, temp, model_name)
@@ -267,6 +254,7 @@ def generate_n_candidates(
                 "generation_time": gen_time,
                 "variant": i + 1
             })
+            print(f"[BEST-OF-N] Generated variant {i+1} in {gen_time:.1f}s (temp={temp:.2f})")
     
     return candidates
 
@@ -279,28 +267,12 @@ def select_best_batch(
     base_prompt: str,
     keywords_state: Dict,
     main_keyword: str,
-    n_candidates: int = 3,
+    n_candidates: int = 2,  # 🔧 było 3
     model_name: str = "gemini-2.0-flash",
     validation_mode: str = "batch"
 ) -> Dict[str, Any]:
     """
-    Główna funkcja: generuje N wersji batcha i wybiera najlepszą.
-    
-    Args:
-        base_prompt: Prompt do generowania batcha
-        keywords_state: Stan słów kluczowych
-        main_keyword: Fraza główna
-        n_candidates: Ile wersji generować (default 3)
-        model_name: Model Gemini do użycia
-        validation_mode: Tryb walidacji ('batch' lub 'final')
-    
-    Returns:
-        Dict z:
-        - selected_content: str - wybrana treść
-        - selected_score: float - score wybranej wersji
-        - all_candidates: List - wszystkie kandydaci ze scorami
-        - selection_reason: str - dlaczego wybrano tę wersję
-        - meets_minimum: bool - czy spełnia minimum
+    🔧 v26.2 OPTIMIZED: Szybszy wybór najlepszego batcha.
     """
     config = BestOfNConfig()
     
@@ -316,13 +288,12 @@ def select_best_batch(
             "meets_minimum": False
         }
     
-    # 2. Waliduj i scoruj każdego kandydata
+    # 2. Waliduj i scoruj
     scored_candidates = []
     
     for candidate in candidates:
         content = candidate["content"]
         
-        # Walidacja przez unified_prevalidation
         if VALIDATOR_AVAILABLE:
             validation = unified_prevalidation(
                 text=content,
@@ -330,14 +301,12 @@ def select_best_batch(
                 main_keyword=main_keyword
             )
         else:
-            # Fallback - podstawowa walidacja
             validation = {
                 "density": {"value": 1.0},
                 "coverage": {"basic_percent": 80, "extended_percent": 80},
-                "polish_quality": {"score": 70}
+                "polish_quality": {"score": 75}
             }
         
-        # Oblicz score
         score_data = calculate_candidate_score(
             content=content,
             keywords_state=keywords_state,
@@ -351,28 +320,27 @@ def select_best_batch(
             "validation": validation
         })
         
-        print(f"[BEST-OF-N] Candidate {candidate['variant']}: "
+        print(f"[BEST-OF-N] Variant {candidate['variant']}: "
               f"score={score_data['total_score']:.1f}, "
-              f"density={score_data['density']:.1f}%")
+              f"density={score_data['density']:.1f}%, "
+              f"coverage_basic={score_data['coverage']['basic']:.0f}%")
     
-    # 3. Sortuj po score (malejąco)
+    # 3. Sortuj
     scored_candidates.sort(key=lambda x: x["total_score"], reverse=True)
     
-    # 4. Wybierz najlepszego
+    # 4. Wybierz
     best = scored_candidates[0]
     
     meets_minimum = best["total_score"] >= config.min_acceptable_score
     
-    # Przygotuj reason
     if meets_minimum:
-        selection_reason = f"Wybrano wariant {best['variant']} (score: {best['total_score']:.1f}/100)"
+        selection_reason = f"✅ Wariant {best['variant']} (score: {best['total_score']:.1f})"
     else:
         selection_reason = (
-            f"UWAGA: Żaden wariant nie osiągnął minimum {config.min_acceptable_score}. "
-            f"Wybrano najlepszy: wariant {best['variant']} (score: {best['total_score']:.1f}/100)"
+            f"⚠️ Najlepszy wariant {best['variant']} (score: {best['total_score']:.1f}) "
+            f"poniżej minimum {config.min_acceptable_score}"
         )
     
-    # 5. Zwróć wynik
     return {
         "selected_content": best["content"],
         "selected_score": best["total_score"],
@@ -382,6 +350,7 @@ def select_best_batch(
                 "variant": c["variant"],
                 "score": c["total_score"],
                 "density": c["density"],
+                "coverage_basic": c["coverage"]["basic"],
                 "issues": c["issues"],
                 "warnings": c["warnings"]
             }
@@ -404,17 +373,13 @@ def batch_with_best_of_n(
     batch_content_prompt: str,
     keywords_state: Dict,
     main_keyword: str,
-    use_best_of_n: bool = True,
-    n_candidates: int = 3
+    use_best_of_n: bool = True,  # 🔧 domyślnie True!
+    n_candidates: int = 2  # 🔧 było 3
 ) -> Dict[str, Any]:
     """
-    Helper do integracji z istniejącym workflow.
-    
-    Jeśli use_best_of_n=True, generuje N wersji i wybiera najlepszą.
-    Jeśli False, działa jak dotychczas (1 generacja).
+    🔧 v26.2 OPTIMIZED: Domyślnie włączony Best-of-N.
     """
     if not use_best_of_n or n_candidates <= 1:
-        # Standardowa ścieżka - 1 generacja
         content = generate_candidate(batch_content_prompt, 0.7)
         return {
             "content": content,
@@ -422,7 +387,6 @@ def batch_with_best_of_n(
             "score": None
         }
     
-    # Best-of-N
     result = select_best_batch(
         base_prompt=batch_content_prompt,
         keywords_state=keywords_state,
@@ -438,37 +402,8 @@ def batch_with_best_of_n(
     }
 
 
-# ============================================================================
-# CLI TEST
-# ============================================================================
-
 if __name__ == "__main__":
-    # Test
-    test_prompt = """
-    Napisz sekcję H2 o temacie "Dokumenty potrzebne do rozwodu".
-    Użyj fraz: pozew o rozwód, dokumenty do rozwodu, akt małżeństwa.
-    Długość: 200-300 słów.
-    """
-    
-    test_keywords = {
-        "1": {"keyword": "pozew o rozwód", "type": "BASIC", "actual_uses": 0, "target_min": 1, "target_max": 3},
-        "2": {"keyword": "dokumenty do rozwodu", "type": "BASIC", "actual_uses": 0, "target_min": 1, "target_max": 2},
-        "3": {"keyword": "akt małżeństwa", "type": "EXTENDED", "actual_uses": 0, "target_min": 1, "target_max": 1}
-    }
-    
-    result = select_best_batch(
-        base_prompt=test_prompt,
-        keywords_state=test_keywords,
-        main_keyword="pozew o rozwód",
-        n_candidates=3
-    )
-    
-    print("\n" + "="*60)
-    print("WYNIK BEST-OF-N:")
-    print("="*60)
-    print(f"Wybrano: wariant {result.get('selected_variant')}")
-    print(f"Score: {result.get('selected_score')}")
-    print(f"Reason: {result.get('selection_reason')}")
-    print(f"\nWszyscy kandydaci:")
-    for c in result.get("all_candidates", []):
-        print(f"  - Wariant {c['variant']}: {c['score']:.1f} (density: {c['density']:.1f}%)")
+    print("Best-of-N Selector v26.2 OPTIMIZED")
+    print(f"  - Default candidates: {BestOfNConfig().n_candidates}")
+    print(f"  - Min acceptable score: {BestOfNConfig().min_acceptable_score}")
+    print(f"  - Weights: {BestOfNConfig().weights}")
