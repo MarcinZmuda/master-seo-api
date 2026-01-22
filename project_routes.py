@@ -1,5 +1,11 @@
 """
-PROJECT ROUTES - v30.0 BRAJEN SEO Engine
+PROJECT ROUTES - v30.1 BRAJEN SEO Engine - OPTIMIZED
+
+ZMIANY v30.1 OPTIMIZED:
+- 🆕 Best-of-N domyślnie WŁĄCZONE (use_best_of_n=True)
+- 🆕 Auto-approve po 2 próbach (było 3)
+- 🆕 Funkcja distribute_extended_keywords dla lepszego rozłożenia fraz
+- 🆕 Timeout 45s (było 60s)
 
 ZMIANY v30.0:
 - 🆕 LEGAL MODULE: Auto-detekcja kategorii "prawo"
@@ -301,6 +307,52 @@ def get_synonyms_for_overused(previous_texts: list, main_keyword: str) -> dict:
                 result[phrase] = synonyms
     
     return result
+
+
+# ================================================================
+# 🆕 v30.1: DISTRIBUTE EXTENDED KEYWORDS
+# ================================================================
+def distribute_extended_keywords(extended_keywords: List[Dict], total_batches: int) -> Dict[int, List[Dict]]:
+    """
+    🆕 v30.1: Rozdziela EXTENDED frazy równomiernie między batche.
+    
+    Zamiast wymagać wszystkich 25 EXTENDED w każdym batchu,
+    rozdziela je tak, żeby każdy batch miał 3-5 unikalnych.
+    
+    Args:
+        extended_keywords: Lista fraz EXTENDED
+        total_batches: Liczba batchów w artykule
+    
+    Returns:
+        Dict {batch_num: [keywords_for_this_batch]}
+    """
+    if not extended_keywords or total_batches < 1:
+        return {}
+    
+    distribution = {i: [] for i in range(1, total_batches + 1)}
+    
+    # Rozdziel równomiernie
+    keywords_per_batch = max(3, len(extended_keywords) // total_batches)
+    
+    for i, kw in enumerate(extended_keywords):
+        batch_num = (i // keywords_per_batch) + 1
+        if batch_num > total_batches:
+            batch_num = total_batches
+        distribution[batch_num].append(kw)
+    
+    # Upewnij się, że każdy batch ma min 2 i max 6
+    for batch_num in distribution:
+        if len(distribution[batch_num]) > 6:
+            # Przenieś nadmiar do następnych batchów
+            excess = distribution[batch_num][6:]
+            distribution[batch_num] = distribution[batch_num][:6]
+            
+            for j, kw in enumerate(excess):
+                next_batch = ((batch_num + j) % total_batches) + 1
+                if len(distribution[next_batch]) < 6:
+                    distribution[next_batch].append(kw)
+    
+    return distribution
 
 
 def get_section_length_guidance(batch_num: int, total_batches: int, batch_type: str) -> dict:
@@ -2502,7 +2554,7 @@ def approve_batch_with_review(project_id):
     v28.3: Approve batch z automatycznym review przez Claude.
     
     NOWOŚĆ v28.3:
-    - Auto-approve po 3 próbach (attempt >= 3)
+    - Auto-approve po 2 próbach (attempt >= 2)
     - Lemmatyzacja fraz (ścieżka sensoryczna = ścieżką sensoryczną)
     - Wykrywanie tautologii przez Claude
     
@@ -2521,7 +2573,7 @@ def approve_batch_with_review(project_id):
         "attempt": 1           // NOWE! numer próby (1, 2, 3...)
     }
     
-    Po attempt >= 3: automatyczne force_save=True (auto-approve)
+    Po attempt >= 2: automatyczne force_save=True (auto-approve)
     """
     from dataclasses import asdict
     
@@ -2537,8 +2589,8 @@ def approve_batch_with_review(project_id):
     force_save = data.get("force_save", False)
     attempt = data.get("attempt", 1)  # v28.3: numer próby
     
-    # v28.3: AUTO-APPROVE po 3 próbach
-    if attempt >= 3 and not force_save:
+    # v30.1 OPTIMIZED: AUTO-APPROVE po 2 próbach (było 3)
+    if attempt >= 2 and not force_save:
         print(f"[APPROVE_BATCH] ⚡ Auto-approve: attempt={attempt} >= 3, force_save=True")
         force_save = True
     
@@ -2659,7 +2711,7 @@ def approve_batch_with_review(project_id):
                 "word_count": result.word_count,
                 "attempt": attempt,
                 "next_attempt": attempt + 1,  # v28.3: GPT powinien przekazać to w następnym requeście
-                "auto_approve_at": 3  # v28.3: info że po 3 próbie będzie auto-approve
+                "auto_approve_at": 2  # v30.1: info że po 2 próbie będzie auto-approve
             }), 200
         
         # REJECTED - wymaga przepisania
@@ -2673,7 +2725,7 @@ def approve_batch_with_review(project_id):
                 "message": result.summary,
                 "attempt": attempt,
                 "next_attempt": attempt + 1,
-                "auto_approve_at": 3
+                "auto_approve_at": 2
             }), 200
         
         # CORRECTED - Claude poprawił
@@ -2695,7 +2747,7 @@ def approve_batch_with_review(project_id):
                     "instruction": "Użyj corrected_text i wyślij ponownie z force_save=true",
                     "attempt": attempt,
                     "next_attempt": attempt + 1,
-                    "auto_approve_at": 3
+                    "auto_approve_at": 2
                 }), 200
         
         # APPROVED lub force_save - zapisz
@@ -3052,7 +3104,7 @@ def preview_batch_v2(project_id):
     if not data:
         return jsonify({"error": "No JSON data provided"}), 400
     
-    use_best_of_n = data.get("use_best_of_n", False)
+    use_best_of_n = data.get("use_best_of_n", True)  # 🔧 v30.1: Domyślnie WŁĄCZONE
     prompt = data.get("prompt")
     batch_text = data.get("text") or data.get("batch_text")
     
