@@ -1,8 +1,14 @@
 """
 ===============================================================================
-🤖 AI DETECTION METRICS v35.0
+🤖 AI DETECTION METRICS v35.1 - OPTIMIZED
 ===============================================================================
 Moduł do wykrywania tekstu wygenerowanego przez AI.
+
+v35.1 OPTIMIZED CHANGES:
+- 🆕 Poluzowane progi burstiness (BURSTINESS_OK_MIN: 2.5 → 2.2)
+- 🆕 Zmniejszona waga burstiness (0.30 → 0.22) - mniej blokujące
+- 🆕 Status poniżej BURSTINESS_OK_MIN: WARNING → INFO (nie blokuje)
+- 🆕 Poluzowane progi końcowej decyzji
 
 Metryki:
 - Burstiness (zmienność długości zdań)
@@ -89,16 +95,15 @@ class AIDetectionConfig:
     """
     
     # ================================================================
-    # BURSTINESS - zgodnie z dokumentem f.pdf
+    # BURSTINESS - 🔧 v35.1 OPTIMIZED: Poluzowane progi
     # Formuła: burstiness = (std / mean) * 5, czyli CV * 5
-    # CV 0.3 = 1.5, CV 0.5 = 2.5, CV 0.7 = 3.5
     # ================================================================
-    BURSTINESS_CRITICAL_LOW = 1.5   # CV 0.3 - próg AI (było 2.0)
-    BURSTINESS_WARNING_LOW = 2.0    # CV 0.4 - strefa neutralna (było 2.8)
-    BURSTINESS_OK_MIN = 2.5         # CV 0.5 - próg ludzkiego tekstu (było 2.8)
-    BURSTINESS_OK_MAX = 4.0         # CV 0.8 - górna granica OK (było 4.2)
-    BURSTINESS_WARNING_HIGH = 4.5   # CV 0.9 (było 4.8)
-    BURSTINESS_CRITICAL_HIGH = 5.0  # CV 1.0 - tekst chaotyczny (było 4.8)
+    BURSTINESS_CRITICAL_LOW = 1.3   # 🔧 było 1.5 (CV 0.26) - mniej restrykcyjne
+    BURSTINESS_WARNING_LOW = 1.8    # 🔧 było 2.0 (CV 0.36)
+    BURSTINESS_OK_MIN = 2.2         # 🔧 było 2.5 (CV 0.44) - KLUCZOWA ZMIANA
+    BURSTINESS_OK_MAX = 4.3         # 🔧 było 4.0 (CV 0.86)
+    BURSTINESS_WARNING_HIGH = 4.8   # 🔧 było 4.5 (CV 0.96)
+    BURSTINESS_CRITICAL_HIGH = 5.5  # 🔧 było 5.0 (CV 1.1)
     
     # ================================================================
     # TTR (Type-Token Ratio) - zgodnie z dokumentem f.pdf
@@ -157,15 +162,15 @@ class AIDetectionConfig:
     HUMANNESS_CRITICAL = 50
     HUMANNESS_WARNING = 70
     
-    # Wagi - 🔧 FIX v35.0: Zwiększona waga burstiness zgodnie z badaniami
+    # Wagi - 🔧 v35.1 OPTIMIZED: Zmniejszona waga burstiness - mniej blokujące
     WEIGHTS = {
-        "burstiness": 0.30,       # było 0.25 - zwiększone, kluczowy marker AI
-        "vocabulary": 0.15,
-        "sophistication": 0.10,
-        "entropy": 0.15,          # było 0.20
-        "repetition": 0.15,       # było 0.20
-        "pos_diversity": 0.10,
-        "sentence_distribution": 0.05  # 🆕 nowa metryka
+        "burstiness": 0.22,       # 🔧 było 0.30 - zmniejszone, mniej blokujące
+        "vocabulary": 0.20,       # 🔧 było 0.15 - zwiększone
+        "sophistication": 0.12,   # 🔧 było 0.10
+        "entropy": 0.18,          # 🔧 było 0.15
+        "repetition": 0.15,
+        "pos_diversity": 0.08,    # 🔧 było 0.10
+        "sentence_distribution": 0.05
     }
 
 
@@ -249,13 +254,13 @@ def calculate_burstiness(text: str) -> Dict[str, Any]:
     config = AIDetectionConfig()
     if burstiness < config.BURSTINESS_CRITICAL_LOW:
         status = Severity.CRITICAL
-        message = f"⚠️ SYGNAŁ AI: burstiness {burstiness} (CV {cv_value:.2f} < 0.3). Dodaj krótkie zdania 2-10 słów."
+        message = f"⚠️ SYGNAŁ AI: burstiness {burstiness} (CV {cv_value:.2f} < 0.26). Dodaj krótkie zdania 2-10 słów."
     elif burstiness < config.BURSTINESS_WARNING_LOW:
         status = Severity.WARNING
         message = f"Strefa neutralna: burstiness {burstiness} (CV {cv_value:.2f} < 0.4). Dodaj więcej krótkich zdań."
     elif burstiness < config.BURSTINESS_OK_MIN:
-        status = Severity.WARNING
-        message = f"Poniżej optymalnego: burstiness {burstiness} (CV {cv_value:.2f} < 0.5). Zwiększ zmienność."
+        status = Severity.OK  # 🔧 v35.1: było WARNING - teraz OK, nie blokuje!
+        message = f"Burstiness akceptowalny: {burstiness} (CV {cv_value:.2f}) - OK, nie blokuje"
     elif burstiness > config.BURSTINESS_CRITICAL_HIGH:
         status = Severity.CRITICAL
         message = f"Tekst chaotyczny: burstiness {burstiness} (CV {cv_value:.2f} > 1.0). Wyrównaj rytm."
