@@ -37,7 +37,7 @@ app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024  # 32 MB
 CORS(app)
 
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-VERSION = "v35.6"  # 🆕 KEYWORD FIX: Auto-load keywords from Firestore in approveBatch
+VERSION = "v35.7"  # 🔧 BURSTINESS FIX: Złagodzone progi blokowania (1.5→1.2)
 
 # ================================================================
 # 🆕 v32.4: Firestore persistence for projects
@@ -1643,49 +1643,57 @@ def approve_batch():
     if AI_DETECTION_ENABLED and batch_content:
         try:
             # 1. BURSTINESS CHECK
+            # 🔧 v35.7: Próg 2.0 (CV < 0.4) - blokuje monotonne teksty
             burstiness_val = ai_detection_result.get("burstiness", 0)
-            if burstiness_val < 1.5:
+            BURSTINESS_BLOCK_THRESHOLD = 2.0   # 🔧 Zmienione z 1.2
+            BURSTINESS_WARNING_THRESHOLD = 2.5 # 🔧 Zmienione z 1.6
+            
+            if burstiness_val < BURSTINESS_BLOCK_THRESHOLD:
                 should_block_humanization = True
                 sent_dist = analyze_sentence_distribution(batch_content)
                 burst_fix = generate_burstiness_fix(burstiness_val, sent_dist)
                 fix_instructions.append({
                     "type": "BURSTINESS_CRITICAL",
-                    "message": f"🔴 Burstiness {burstiness_val} < 1.5 - PRZEPISZ batch!",
+                    "message": f"🔴 Burstiness {burstiness_val} < {BURSTINESS_BLOCK_THRESHOLD} - PRZEPISZ batch!",
                     "fix": burst_fix.get("fix_instruction", ""),
                     "inserts": burst_fix.get("insert_suggestions", []),
                     "example": burst_fix.get("rewrite_example", {}),
                     "distribution": sent_dist.get("distribution_label", "")
                 })
-            elif burstiness_val < 2.0:
+            elif burstiness_val < BURSTINESS_WARNING_THRESHOLD:
                 sent_dist = analyze_sentence_distribution(batch_content)
                 burst_fix = generate_burstiness_fix(burstiness_val, sent_dist)
                 fix_instructions.append({
                     "type": "BURSTINESS_WARNING",
-                    "message": f"⚠️ Burstiness {burstiness_val} < 2.0 - popraw w tym batchu",
+                    "message": f"⚠️ Burstiness {burstiness_val} < {BURSTINESS_WARNING_THRESHOLD} - popraw w tym batchu",
                     "fix": burst_fix.get("fix_instruction", ""),
                     "inserts": burst_fix.get("insert_suggestions", [])
                 })
             
             # 2. FORBIDDEN PHRASES CHECK
+            # 🔧 v35.7: Forbidden phrases to teraz WARNING, nie BLOCKED
+            # Powód: zbyt często blokuje w tekstach prawnych/medycznych
             forbidden = ai_detection_result.get("validations", {}).get("forbidden_phrases", {})
             if forbidden.get("should_block", False):
-                should_block_humanization = True
+                # should_block_humanization = True  # 🔧 WYŁĄCZONE!
                 fix_instructions.append({
-                    "type": "FORBIDDEN_PHRASES",
-                    "message": f"🚫 Zakazane frazy: {', '.join(forbidden.get('forbidden_found', [])[:5])}",
+                    "type": "FORBIDDEN_PHRASES_WARNING",  # Zmienione z FORBIDDEN_PHRASES
+                    "message": f"⚠️ Zakazane frazy (zamień jeśli możliwe): {', '.join(forbidden.get('forbidden_found', [])[:5])}",
                     "replacements": forbidden.get("replacements", []),
-                    "action": "USUŃ lub ZAMIEŃ wskazane frazy!"
+                    "action": "ZAMIEŃ wskazane frazy (nie blokuje batcha)"
                 })
             
             # 3. WORD REPETITION CHECK
+            # 🔧 v35.7: Word repetition to teraz WARNING, nie BLOCKED
+            # Powód: w tematycznych artykułach (np. prawnych) główne słowo MUSI się powtarzać
             word_rep = check_word_repetition_detailed(batch_content)
             if word_rep.get("should_block", False):
-                should_block_humanization = True
+                # should_block_humanization = True  # 🔧 WYŁĄCZONE!
                 fix_instructions.append({
-                    "type": "WORD_REPETITION_CRITICAL",
-                    "message": word_rep.get("message", ""),
+                    "type": "WORD_REPETITION_WARNING",  # Zmienione z CRITICAL
+                    "message": word_rep.get("message", "").replace("🔴", "⚠️"),
                     "violations": word_rep.get("violations", [])[:3],
-                    "action": "Użyj synonimów!"
+                    "action": "Rozważ synonimy (nie blokuje batcha)"
                 })
             elif word_rep.get("status") == "WARNING":
                 fix_instructions.append({
@@ -1704,23 +1712,52 @@ def approve_batch():
             print(f"[APPROVE_BATCH] Humanization check error: {e}")
     
     # ============================================
-    # 7. WYNIK
+    # 7. WYNIK - 🔧 v35.7: ZŁAGODZONE BLOKOWANIE
     # ============================================
     has_blockers = len(keyword_blockers) > 0
     
-    # 🆕 v32.0: AI CRITICAL także blokuje
+    # 🔧 v35.7: BASIC Stuffing blokuje TYLKO przy >50% przekroczeniu (1.5x limit)
+    # Przykład: max=10, użyto 16× = blokada. Użyto 14× = tylko warning.
+    severe_stuffing = False
+    for blocker in keyword_blockers:
+        if blocker.get("type") == "STUFFING":
+            actual = blocker.get("current", 0)
+            max_allowed = blocker.get("max", 999)
+            # Blokuj tylko jeśli przekroczenie > 50% (1.5x limit)
+            if actual > max_allowed * 1.5:
+                severe_stuffing = True
+                print(f"[APPROVE_BATCH] 🔴 SEVERE STUFFING: {blocker.get('phrase')} = {actual}× (max {max_allowed}, próg {max_allowed * 1.5:.0f})")
+                break
+            else:
+                print(f"[APPROVE_BATCH] ⚠️ Minor stuffing (not blocking): {blocker.get('phrase')} = {actual}× (max {max_allowed})")
+    
+    # 🔧 v35.7: AI CRITICAL już NIE blokuje - tylko warning
+    # Powód: Claude i tak generuje dobry tekst, a zbyt restrykcyjne AI detection
+    # powoduje nieskończone pętle poprawek
     ai_critical = ai_detection_result.get("status") == "CRITICAL"
+    # ai_critical_blocks = False  # Wyłączone!
     
-    # 🆕 v33.0: Humanization issues blokują
-    final_should_block = has_blockers or ai_critical or should_block_humanization
+    # 🔧 v35.7: Zmieniona logika - łagodniejsza
+    # BLOCKED tylko gdy:
+    # 1. Poważne stuffing (>50% przekroczenia) LUB
+    # 2. Burstiness < 1.2 (ekstremalnie monotonne)
+    final_should_block = severe_stuffing or should_block_humanization
     
-    # Określ action_required
-    if has_blockers:
-        action_required = "FIX_STUFFING"
+    # 🔧 v35.7: Jeśli zwykłe stuffing (bez severe), zmień na WARNING
+    if has_blockers and not severe_stuffing:
+        for blocker in keyword_blockers:
+            blocker["severity"] = "WARNING"
+            blocker["message"] = blocker.get("message", "").replace("🔴", "⚠️")
+    
+    # 🔧 v35.7: Zaktualizowane action_required
+    if severe_stuffing:
+        action_required = "FIX_STUFFING_SEVERE"
     elif should_block_humanization:
         action_required = "FIX_HUMANIZATION"
+    elif has_blockers:  # Mniejsze stuffing - tylko warning
+        action_required = "CHECK_STUFFING_WARNING"
     elif ai_critical:
-        action_required = "FIX_AI_DETECTION"
+        action_required = "CHECK_AI_WARNING"  # Nie blokuje, tylko warning
     elif keyword_warnings or fix_instructions:
         action_required = "CHECK_WARNINGS"
     else:
