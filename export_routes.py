@@ -1,24 +1,27 @@
 """
-Export Routes - v27.1
+Export Routes - v29.0
 Eksport artykułów do DOCX/HTML/TXT + Editorial Review (Claude API)
 
+ZMIANY v29.0:
+- DIFF-BASED: Claude zwraca tylko zmiany, nie przepisuje całości
+- BURSTINESS VALIDATION: Sprawdza CV przed/po
+- AUTO-ROLLBACK: Automatycznie przywraca oryginał jeśli CV spadło
+- DIFF OUTPUT: Szczegółowa lista zmian applied/failed
+- MANUAL ROLLBACK: Nowy endpoint /editorial_review/rollback
+
 ZMIANY v27.1:
-- NOWE: rescan_keywords_after_editorial() - przelicza frazy po Claude review
-- Naprawia bug gdzie keywords_state nie był aktualizowany po edycji Claude
-- Teraz raport pokazuje RZECZYWISTE pokrycie fraz, nie stare dane
+- rescan_keywords_after_editorial() - przelicza frazy po Claude review
 
 ZMIANY v27.0:
-- Zmiana z Gemini na Claude API (dokładniejsza analiza)
-- Uniwersalny prompt (bez specyficznych przykładów branżowych)
-- Zwraca analizę + poprawiony tekst
+- Zmiana z Gemini na Claude API
 - Wplata nieużyte frazy BASIC/EXTENDED
-- Wymusza minimalną długość tekstu (nie skraca)
 """
 
 import os
 import re
 import io
 import json
+import statistics
 from datetime import datetime
 from flask import Blueprint, request, jsonify, Response
 
@@ -41,6 +44,15 @@ try:
 except ImportError:
     KEYWORD_COUNTER_OK = False
     print("[EXPORT] ⚠️ keyword_counter not available - rescan will use fallback")
+
+# v29.0: Burstiness validation for editorial review
+try:
+    from ai_detection_metrics import calculate_burstiness
+    BURSTINESS_CHECK_OK = True
+    print("[EXPORT] ✅ Burstiness validation enabled")
+except ImportError:
+    BURSTINESS_CHECK_OK = False
+    print("[EXPORT] ⚠️ Burstiness validation not available")
 
 # v27.1: Ładowanie promptu z pliku (opcjonalne)
 EDITORIAL_PROMPT_TEMPLATE = None
@@ -70,10 +82,13 @@ else:
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 genai = None
 if GEMINI_API_KEY:
-    import google.generativeai as genai
-    genai.configure(api_key=GEMINI_API_KEY)
-    if not ANTHROPIC_API_KEY:
-        print("[EXPORT] ℹ️ Using Gemini as fallback")
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=GEMINI_API_KEY)
+        if not ANTHROPIC_API_KEY:
+            print("[EXPORT] ℹ️ Using Gemini as fallback")
+    except ImportError:
+        genai = None
 
 
 def html_to_text(html: str) -> str:
@@ -165,20 +180,6 @@ def extract_text_from_batches(batches: list) -> tuple:
 def rescan_keywords_after_editorial(project_id: str, corrected_article: str) -> dict:
     """
     v27.1: Przelicza frazy od ZERA po edycji Claude.
-    
-    PROBLEM który to rozwiązuje:
-    - S3 (approve_batch) zlicza frazy → actual_uses = X
-    - S5 (Claude) może USUNĄĆ frazy z tekstu
-    - ALE keywords_state nie był aktualizowany!
-    - Raport pokazywał "100% coverage" mimo że frazy zniknęły
-    
-    ROZWIĄZANIE:
-    - Po Claude review przeliczamy WSZYSTKIE frazy od zera
-    - Nadpisujemy actual_uses RZECZYWISTYMI wartościami
-    - Teraz raport i NeuronWriter się zgadzają!
-    
-    Returns:
-        dict z wynikami rescanu i listą zmian
     """
     db = firestore.client()
     doc = db.collection("seo_projects").document(project_id).get()
@@ -212,7 +213,6 @@ def rescan_keywords_after_editorial(project_id: str, corrected_article: str) -> 
     new_counts = {}
     
     if KEYWORD_COUNTER_OK:
-        # Użyj keyword_counter (z lemmatyzacją)
         new_counts = count_keywords_for_state(corrected_article, keywords_state, use_exclusive_for_nested=False)
         print(f"[RESCAN] Using keyword_counter for {len(keywords)} keywords")
     else:
@@ -315,13 +315,152 @@ def rescan_keywords_after_editorial(project_id: str, corrected_article: str) -> 
 
 
 # ================================================================
-# EDITORIAL REVIEW - v27.0 (Claude API + poprawiony tekst)
+# v29.0: DIFF PARSING HELPERS
+# ================================================================
+def parse_diff_response(response_text: str) -> list:
+    """
+    Parsuje odpowiedź Claude w formacie DIFF.
+    
+    Format wejściowy:
+    [ZMIANA 1]
+    ZNAJDŹ: "dokładny cytat"
+    ZAMIEŃ: "poprawiona wersja"
+    POWÓD: wyjaśnienie
+    
+    Zwraca: [{"find": "...", "replace": "...", "reason": "..."}]
+    """
+    changes = []
+    
+    # Wzorzec dla pojedynczej zmiany
+    pattern = r'\[ZMIANA \d+\]\s*\n\s*ZNAJDŹ:\s*["\'](.+?)["\']\s*\n\s*ZAMIEŃ:\s*["\'](.+?)["\']\s*\n\s*POWÓD:\s*(.+?)(?=\n\s*\[ZMIANA|\Z)'
+    
+    matches = re.findall(pattern, response_text, re.DOTALL | re.IGNORECASE)
+    
+    for match in matches:
+        find_text = match[0].strip()
+        replace_text = match[1].strip()
+        reason = match[2].strip()
+        
+        if find_text and len(find_text) > 5:
+            changes.append({
+                "find": find_text,
+                "replace": replace_text,
+                "reason": reason,
+                "applied": False
+            })
+    
+    # Fallback: prostszy wzorzec
+    if not changes:
+        simple_pattern = r'ZNAJDŹ:\s*["\']?(.+?)["\']?\s*\n\s*ZAMIEŃ:\s*["\']?(.+?)["\']?\s*(?:\n|$)'
+        simple_matches = re.findall(simple_pattern, response_text, re.DOTALL)
+        
+        for match in simple_matches:
+            find_text = match[0].strip().strip('"\'')
+            replace_text = match[1].strip().strip('"\'')
+            
+            if find_text and len(find_text) > 5:
+                changes.append({
+                    "find": find_text,
+                    "replace": replace_text,
+                    "reason": "auto-parsed",
+                    "applied": False
+                })
+    
+    return changes
+
+
+def apply_diffs(original_text: str, changes: list) -> tuple:
+    """
+    Aplikuje zmiany diff do tekstu.
+    
+    Zwraca: (modified_text, applied_changes, failed_changes)
+    """
+    modified = original_text
+    applied = []
+    failed = []
+    
+    for change in changes:
+        find_text = change["find"]
+        replace_text = change["replace"]
+        
+        # Próba 1: Dokładne dopasowanie
+        if find_text in modified:
+            modified = modified.replace(find_text, replace_text, 1)
+            change["applied"] = True
+            applied.append(change)
+            continue
+        
+        # Próba 2: Dopasowanie ignorujące whitespace
+        find_normalized = ' '.join(find_text.split())
+        text_lines = modified.split('\n')
+        found = False
+        
+        for i, line in enumerate(text_lines):
+            line_normalized = ' '.join(line.split())
+            if find_normalized in line_normalized:
+                # Zamień w tej linii
+                text_lines[i] = line.replace(find_text.strip(), replace_text.strip())
+                modified = '\n'.join(text_lines)
+                change["applied"] = True
+                change["match_type"] = "normalized"
+                applied.append(change)
+                found = True
+                break
+        
+        if found:
+            continue
+        
+        # Nie udało się
+        change["applied"] = False
+        change["error"] = "Fragment nie znaleziony w tekście"
+        failed.append(change)
+    
+    return modified, applied, failed
+
+
+def calculate_diff_stats(original: str, modified: str) -> dict:
+    """Oblicza statystyki różnic między tekstami."""
+    original_words = original.split()
+    modified_words = modified.split()
+    
+    original_sentences = [s for s in re.split(r'[.!?]+', original) if s.strip()]
+    modified_sentences = [s for s in re.split(r'[.!?]+', modified) if s.strip()]
+    
+    words_added = len(modified_words) - len(original_words)
+    sentences_diff = len(modified_sentences) - len(original_sentences)
+    
+    # Procent zmian
+    if len(original) > 0:
+        changes = sum(1 for a, b in zip(original, modified) if a != b)
+        changes += abs(len(original) - len(modified))
+        change_percent = round((changes / len(original)) * 100, 1)
+    else:
+        change_percent = 100
+    
+    return {
+        "words_original": len(original_words),
+        "words_modified": len(modified_words),
+        "words_diff": words_added,
+        "sentences_original": len(original_sentences),
+        "sentences_modified": len(modified_sentences),
+        "sentences_diff": sentences_diff,
+        "change_percent": min(change_percent, 100)
+    }
+
+
+# ================================================================
+# EDITORIAL REVIEW - v29.0 (DIFF-BASED + BURSTINESS VALIDATION)
 # ================================================================
 @export_routes.post("/api/project/<project_id>/editorial_review")
 def editorial_review(project_id):
     """
-    v27.0: Weryfikacja przez Claude jako redaktora naczelnego.
-    Zwraca: analiza + poprawiony tekst + wplecione nieużyte frazy.
+    v29.0: DIFF-BASED Editorial Review z walidacją burstiness.
+    
+    NOWOŚCI:
+    - DIFF-BASED: Claude zwraca tylko zmiany, nie przepisuje całości
+    - BURSTINESS VALIDATION: Sprawdza CV przed/po
+    - AUTO-ROLLBACK: Automatycznie przywraca oryginał jeśli CV spadło
+    - DIFF OUTPUT: Szczegółowa lista zmian
     """
     db = firestore.client()
     doc = db.collection("seo_projects").document(project_id).get()
@@ -331,7 +470,7 @@ def editorial_review(project_id):
     
     project_data = doc.to_dict()
     
-    # v32.4: Priorytet źródeł treści
+    # Pobierz treść
     full_text = None
     debug_info = {}
     
@@ -351,11 +490,10 @@ def editorial_review(project_id):
             "project_keys": list(project_data.keys())
         }), 400
     
-    # Sprawdź czy mamy API
-    if not claude_client and not GEMINI_API_KEY:
+    # Sprawdź API
+    if not claude_client and not genai:
         return jsonify({"error": "No AI API configured (need ANTHROPIC_API_KEY or GEMINI_API_KEY)"}), 500
     
-    # v32.4: full_text już mamy z wcześniejszego kodu
     word_count = len(full_text.split()) if full_text else 0
     
     if word_count < 50:
@@ -365,8 +503,18 @@ def editorial_review(project_id):
             "hint": "Użyj save_full_article lub addBatch aby zapisać treść."
         }), 400
     
-    # Pobierz temat z projektu
     topic = project_data.get("topic") or project_data.get("main_keyword", "artykuł")
+    
+    # ================================================================
+    # v29.0: BURSTINESS CHECK - PRZED
+    # ================================================================
+    burstiness_before = None
+    if BURSTINESS_CHECK_OK:
+        try:
+            burstiness_before = calculate_burstiness(full_text)
+            print(f"[EDITORIAL_REVIEW] 📊 Burstiness PRZED: CV={burstiness_before.get('cv', 0)}")
+        except Exception as e:
+            print(f"[EDITORIAL_REVIEW] ⚠️ Burstiness check failed: {e}")
     
     # v27.0: Pobierz nieużyte frazy BASIC i EXTENDED
     keywords_state = project_data.get("keywords_state", {})
@@ -387,24 +535,24 @@ def editorial_review(project_id):
     # Sekcja nieużytych fraz dla promptu
     unused_keywords_section = ""
     if unused_basic or unused_extended:
-        unused_keywords_section = "\n=== ⚠️ NIEWYKORZYSTANE FRAZY SEO - MUSISZ JE WPLEŚĆ! ===\n"
+        unused_keywords_section = "\n=== ⚠️ NIEWYKORZYSTANE FRAZY SEO ===\n"
         if unused_basic:
-            unused_keywords_section += f"\n**BASIC (KRYTYCZNE - muszą być w tekście min. 1x):**\n"
-            unused_keywords_section += "\n".join(f"• {kw}" for kw in unused_basic)
-            unused_keywords_section += "\n"
+            unused_keywords_section += f"BASIC: {', '.join(unused_basic[:15])}\n"
         if unused_extended:
-            unused_keywords_section += f"\n**EXTENDED (dodaj naturalnie 1x każdą):**\n"
-            unused_keywords_section += "\n".join(f"• {kw}" for kw in unused_extended)
-            unused_keywords_section += "\n"
-        unused_keywords_section += "\nINSTRUKCJA: Wpleć te frazy NATURALNIE w poprawiony tekst. Rozbuduj istniejące akapity lub dodaj nowe zdania.\n"
+            unused_keywords_section += f"EXTENDED: {', '.join(unused_extended[:15])}\n"
     
     try:
-        # ============================================================
-        # v27.2: DWA WYWOŁANIA CLAUDE - osobno analiza, osobno tekst
-        # ============================================================
+        analysis = None
+        corrected_article = ""
+        ai_model = "unknown"
+        applied_changes = []
+        failed_changes = []
         
-        # WYWOŁANIE 1: ANALIZA
-        analysis_prompt = f"""Jesteś REDAKTOREM NACZELNYM i EKSPERTEM MERYTORYCZNYM.
+        if claude_client:
+            # ============================================================
+            # WYWOŁANIE 1: ANALIZA
+            # ============================================================
+            analysis_prompt = f"""Jesteś REDAKTOREM NACZELNYM i EKSPERTEM MERYTORYCZNYM.
 
 Przeanalizuj artykuł pt. "{topic}" i znajdź błędy do poprawy.
 {unused_keywords_section}
@@ -426,24 +574,16 @@ Przeanalizuj artykuł pt. "{topic}" i znajdź błędy do poprawy.
   "errors_to_fix": [
     {{"type": "<TYP>", "original": "<cytat z tekstu>", "replacement": "<poprawka>"}}
   ],
-  "keywords_to_add": {unused_basic + unused_extended if (unused_basic or unused_extended) else []},
+  "keywords_to_add": {json.dumps(unused_basic + unused_extended, ensure_ascii=False)},
   "summary": "<2-3 zdania podsumowania>"
 }}
 
 === ARTYKUŁ ({word_count} słów) ===
 
-{full_text}"""
+{full_text[:12000]}"""
 
-        print(f"[EDITORIAL_REVIEW] ========== CALL 1: ANALYSIS ==========")
-        print(f"[EDITORIAL_REVIEW] Analysis prompt length: {len(analysis_prompt)} chars")
-        
-        analysis = None
-        corrected_article = ""
-        ai_model = "unknown"
-        
-        if claude_client:
-            # WYWOŁANIE 1: Analiza
-            print(f"[EDITORIAL_REVIEW] Calling Claude for ANALYSIS...")
+            print(f"[EDITORIAL_REVIEW] ========== CALL 1: ANALYSIS ==========")
+            
             response1 = claude_client.messages.create(
                 model="claude-sonnet-4-20250514",
                 max_tokens=4000,
@@ -451,9 +591,6 @@ Przeanalizuj artykuł pt. "{topic}" i znajdź błędy do poprawy.
             )
             analysis_text = response1.content[0].text.strip()
             ai_model = "claude"
-            
-            print(f"[EDITORIAL_REVIEW] Analysis response: {len(analysis_text)} chars")
-            print(f"[EDITORIAL_REVIEW] Analysis preview: {analysis_text[:500]}")
             
             # Parsuj JSON analizy
             try:
@@ -473,74 +610,81 @@ Przeanalizuj artykuł pt. "{topic}" i znajdź błędy do poprawy.
                 print(f"[EDITORIAL_REVIEW] ⚠️ Analysis parse error: {e}")
                 analysis = {"overall_score": 5, "summary": "Analiza nie sparsowana", "raw": analysis_text[:500]}
             
-            # WYWOŁANIE 2: Poprawiony tekst
+            # ============================================================
+            # WYWOŁANIE 2: DIFF-BASED CORRECTION (v29.0)
+            # ============================================================
             errors_list = analysis.get("errors_to_fix", []) if analysis else []
             keywords_to_add = analysis.get("keywords_to_add", []) if analysis else []
             
-            correction_prompt = f"""Popraw poniższy artykuł pt. "{topic}".
+            diff_prompt = f"""Przeanalizuj artykuł pt. "{topic}" i zwróć TYLKO ZMIANY w formacie diff.
 
-=== PRIORYTETY (w tej kolejności!) ===
+⛔ KRYTYCZNE ZASADY:
+- Zwróć MAX 15 zmian (tylko najważniejsze!)
+- NIE przepisuj całego artykułu
+- Krótkie zdania (2-5 słów) są CELOWE - NIE łącz ich!
+- Zachowaj styl i rytm tekstu
+- Cytat w ZNAJDŹ musi być DOKŁADNY (min 10 słów dla kontekstu)
 
-🔴 PRIORYTET 1: JAKOŚĆ TEKSTU
-- Tautologie ("przedszkole...w przedszkolu") → zamień na synonim
-- Pleonazmy i powtórzenia → usuń lub zamień
-- Strona bierna → zamień na czynną gdzie możliwe
-- AI patterns ("W dzisiejszych czasach") → USUŃ
-- Halucynacje (wymyślone fakty) → USUŃ
+=== BŁĘDY DO POPRAWY ===
+{json.dumps(errors_list[:10], ensure_ascii=False, indent=2) if errors_list else "Brak krytycznych błędów - sprawdź tylko frazy AI i kolokacje."}
 
-🟡 PRIORYTET 2: ENCJE I N-GRAMY
-- Kluczowe pojęcia zdefiniowane przy pierwszym użyciu
+=== FRAZY DO WPLECENIA (naturalnie, w istniejące zdania - rozwiń je) ===
+{', '.join(keywords_to_add[:10]) if keywords_to_add else "Wszystkie frazy są w tekście."}
 
-🟢 PRIORYTET 3: FRAZY SEO (elastycznie!)
-- Wpleć naturalnie, NIE "na siłę"
-- Lepiej 1× naturalnie niż 3× sztucznie
+=== FORMAT ODPOWIEDZI ===
 
-=== POPRAWKI DO WPROWADZENIA ===
-{json.dumps(errors_list, ensure_ascii=False, indent=2) if errors_list else "Brak krytycznych błędów."}
+[ZMIANA 1]
+ZNAJDŹ: "dokładny cytat z artykułu (min 10 słów dla kontekstu)"
+ZAMIEŃ: "poprawiona wersja z zachowaniem stylu"
+POWÓD: krótkie wyjaśnienie (max 10 słów)
 
-=== FRAZY DO WPLECENIA (jeśli brakuje, wpleć naturalnie) ===
-{', '.join(keywords_to_add) if keywords_to_add else "Wszystkie frazy są w tekście."}
+[ZMIANA 2]
+ZNAJDŹ: "..."
+ZAMIEŃ: "..."
+POWÓD: ...
 
-=== WYMAGANIA TECHNICZNE ===
-- Zachowaj strukturę HTML/Markdown (H2, H3)
-- MINIMUM {word_count} słów (nie skracaj!)
-- NIE dodawaj linków
-- Zachowaj naturalny, płynny styl
+(kontynuuj do max 15 zmian)
 
-=== ZWRÓĆ TYLKO POPRAWIONY TEKST (bez komentarzy, bez JSON) ===
-
-=== ORYGINALNY ARTYKUŁ ===
+=== ARTYKUŁ DO ANALIZY ===
 
 {full_text}"""
 
-            print(f"[EDITORIAL_REVIEW] ========== CALL 2: CORRECTION ==========")
-            print(f"[EDITORIAL_REVIEW] Correction prompt length: {len(correction_prompt)} chars")
+            print(f"[EDITORIAL_REVIEW] ========== CALL 2: DIFF-BASED CORRECTION ==========")
             
             response2 = claude_client.messages.create(
                 model="claude-sonnet-4-20250514",
-                max_tokens=16000,
-                messages=[{"role": "user", "content": correction_prompt}]
+                max_tokens=8000,
+                messages=[{"role": "user", "content": diff_prompt}]
             )
-            corrected_article = response2.content[0].text.strip()
+            diff_response = response2.content[0].text.strip()
             
-            print(f"[EDITORIAL_REVIEW] ✅ Corrected article: {len(corrected_article)} chars, {len(corrected_article.split())} words")
+            # Parsuj diffy
+            changes = parse_diff_response(diff_response)
+            print(f"[EDITORIAL_REVIEW] 📝 Parsed {len(changes)} changes from Claude response")
+            
+            # Aplikuj diffy
+            if changes:
+                corrected_article, applied_changes, failed_changes = apply_diffs(full_text, changes)
+                print(f"[EDITORIAL_REVIEW] ✅ Applied: {len(applied_changes)}, ❌ Failed: {len(failed_changes)}")
+            else:
+                corrected_article = full_text
+                print(f"[EDITORIAL_REVIEW] ℹ️ No changes parsed, using original text")
             
         elif genai:
+            # Gemini fallback (stary sposób - przepisuje całość)
             print(f"[EDITORIAL_REVIEW] Using Gemini (fallback) for project {project_id}")
             model = genai.GenerativeModel("gemini-2.0-flash")
             
-            # Gemini: jeden prompt (stary sposób)
             old_prompt = f"""Jesteś REDAKTOREM. Popraw artykuł i zwróć JSON:
 {{"analysis": {{"overall_score": <0-10>, "summary": "<podsumowanie>"}}, "corrected_article": "<cały poprawiony tekst>"}}
 
 Artykuł ({word_count} słów):
-{full_text}"""
+{full_text[:10000]}"""
             
             response = model.generate_content(old_prompt)
             review_text = response.text.strip()
             ai_model = "gemini"
             
-            # Parsuj Gemini response
             try:
                 clean = review_text
                 if "```json" in clean:
@@ -566,23 +710,60 @@ Artykuł ({word_count} słów):
             print(f"[EDITORIAL_REVIEW] ⚠️ Using original text as fallback")
             corrected_article = full_text
         
-        # v28.1: GRAMMAR CORRECTION - popraw błędy gramatyczne + usuń banned phrases
+        # ================================================================
+        # v29.0: BURSTINESS CHECK - PO + AUTO-ROLLBACK
+        # ================================================================
+        burstiness_after = None
+        rollback_triggered = False
+        rollback_reason = None
+        
+        if BURSTINESS_CHECK_OK and burstiness_before and corrected_article != full_text:
+            try:
+                burstiness_after = calculate_burstiness(corrected_article)
+                cv_before = burstiness_before.get("cv", 0)
+                cv_after = burstiness_after.get("cv", 0)
+                
+                print(f"[EDITORIAL_REVIEW] 📊 Burstiness PO: CV={cv_after}")
+                
+                # ROLLBACK jeśli CV spadło o więcej niż 0.1 LUB spadło poniżej 0.3
+                cv_drop = cv_before - cv_after
+                
+                if cv_drop > 0.1:
+                    rollback_triggered = True
+                    rollback_reason = f"CV spadło o {cv_drop:.2f} (z {cv_before:.2f} do {cv_after:.2f}) - tekst stał się zbyt monotonny"
+                    print(f"[EDITORIAL_REVIEW] ⚠️ AUTO-ROLLBACK: {rollback_reason}")
+                    corrected_article = full_text
+                    
+                elif cv_after < 0.3 and cv_before >= 0.3:
+                    rollback_triggered = True
+                    rollback_reason = f"CV spadło poniżej progu AI ({cv_after:.2f} < 0.3) - tekst wygląda na wygenerowany przez AI"
+                    print(f"[EDITORIAL_REVIEW] ⚠️ AUTO-ROLLBACK: {rollback_reason}")
+                    corrected_article = full_text
+                    
+            except Exception as e:
+                print(f"[EDITORIAL_REVIEW] ⚠️ Burstiness after check failed: {e}")
+        
+        # Statystyki diff
+        diff_stats = calculate_diff_stats(full_text, corrected_article)
+        
+        # v28.1: GRAMMAR CORRECTION (jeśli nie było rollbacku)
         grammar_stats = {"fixes": 0, "removed": []}
-        try:
-            from grammar_checker import full_correction
-            grammar_result = full_correction(corrected_article)
-            corrected_article = grammar_result["corrected"]
-            grammar_stats = {
-                "fixes": grammar_result["grammar_fixes"],
-                "removed": grammar_result["phrases_removed"],
-                "backend": grammar_result["backend"]
-            }
-            if grammar_stats["fixes"] > 0 or grammar_stats["removed"]:
-                print(f"[EDITORIAL_REVIEW] ✅ Grammar: {grammar_stats['fixes']} fixes, {len(grammar_stats['removed'])} phrases removed")
-        except ImportError:
-            print(f"[EDITORIAL_REVIEW] ⚠️ grammar_checker not available, skipping grammar correction")
-        except Exception as e:
-            print(f"[EDITORIAL_REVIEW] ⚠️ Grammar correction error: {e}")
+        if not rollback_triggered:
+            try:
+                from grammar_checker import full_correction
+                grammar_result = full_correction(corrected_article)
+                corrected_article = grammar_result["corrected"]
+                grammar_stats = {
+                    "fixes": grammar_result["grammar_fixes"],
+                    "removed": grammar_result["phrases_removed"],
+                    "backend": grammar_result.get("backend", "unknown")
+                }
+                if grammar_stats["fixes"] > 0 or grammar_stats["removed"]:
+                    print(f"[EDITORIAL_REVIEW] ✅ Grammar: {grammar_stats['fixes']} fixes, {len(grammar_stats['removed'])} phrases removed")
+            except ImportError:
+                print(f"[EDITORIAL_REVIEW] ⚠️ grammar_checker not available, skipping grammar correction")
+            except Exception as e:
+                print(f"[EDITORIAL_REVIEW] ⚠️ Grammar correction error: {e}")
         
         corrected_word_count = len(corrected_article.split())
         
@@ -591,33 +772,75 @@ Artykuł ({word_count} słów):
             "editorial_review": {
                 "analysis": analysis,
                 "corrected_article": corrected_article,
+                "original_article": full_text,  # v29.0: Zawsze zachowuj oryginał!
                 "original_word_count": word_count,
                 "corrected_word_count": corrected_word_count,
                 "unused_keywords": {
                     "basic": unused_basic,
                     "extended": unused_extended
                 },
-                "grammar_correction": grammar_stats,  # v28.1
+                # v29.0: Nowe pola
+                "applied_changes": applied_changes[:20],
+                "failed_changes": failed_changes[:10],
+                "burstiness_before": burstiness_before,
+                "burstiness_after": burstiness_after,
+                "rollback_triggered": rollback_triggered,
+                "rollback_reason": rollback_reason,
+                "diff_stats": diff_stats,
+                "grammar_correction": grammar_stats,
                 "ai_model": ai_model,
+                "version": "v29.0",
                 "created_at": firestore.SERVER_TIMESTAMP
             }
         })
         
-        # v27.1: RESCAN KEYWORDS - przelicz frazy od zera po edycji Claude!
+        # v27.1: RESCAN KEYWORDS
         rescan_result = {"rescanned": False, "reason": "no_corrected_article"}
-        if corrected_article and len(corrected_article.strip()) > 50:
+        if not rollback_triggered and corrected_article and len(corrected_article.strip()) > 50:
             print(f"[EDITORIAL_REVIEW] Running rescan_keywords for project {project_id}...")
             rescan_result = rescan_keywords_after_editorial(project_id, corrected_article)
             print(f"[EDITORIAL_REVIEW] Rescan result: {rescan_result.get('changes_count', 0)} changes")
         
         return jsonify({
-            "status": analysis.get("recommendation", "REVIEWED"),
-            "overall_score": analysis.get("overall_score"),
-            "scores": analysis.get("scores", {}),
-            "critical_errors": analysis.get("critical_errors_found", []),
-            "keywords_added": analysis.get("keywords_added", []),
-            "minor_fixes": analysis.get("minor_fixes", []),
-            "summary": analysis.get("summary", ""),
+            "status": "REVIEWED",
+            "version": "v29.0-DIFF",
+            "overall_score": analysis.get("overall_score") if analysis else None,
+            "scores": analysis.get("scores", {}) if analysis else {},
+            "summary": analysis.get("summary", "") if analysis else "",
+            
+            # v29.0: DIFF OUTPUT
+            "diff_result": {
+                "total_changes_parsed": len(applied_changes) + len(failed_changes),
+                "applied": len(applied_changes),
+                "failed": len(failed_changes),
+                "applied_changes": applied_changes[:10],  # Max 10 w response
+                "failed_changes": failed_changes[:5]
+            },
+            "diff_stats": diff_stats,
+            
+            # v29.0: BURSTINESS VALIDATION
+            "burstiness_check": {
+                "enabled": BURSTINESS_CHECK_OK,
+                "before": {
+                    "cv": burstiness_before.get("cv") if burstiness_before else None,
+                    "value": burstiness_before.get("value") if burstiness_before else None,
+                    "status": burstiness_before.get("status") if burstiness_before else None
+                },
+                "after": {
+                    "cv": burstiness_after.get("cv") if burstiness_after else None,
+                    "value": burstiness_after.get("value") if burstiness_after else None,
+                    "status": burstiness_after.get("status") if burstiness_after else None
+                },
+                "cv_change": round((burstiness_after.get("cv", 0) - burstiness_before.get("cv", 0)), 3) if (burstiness_before and burstiness_after) else None
+            },
+            
+            # v29.0: ROLLBACK INFO
+            "rollback": {
+                "triggered": rollback_triggered,
+                "reason": rollback_reason,
+                "original_preserved": True  # Zawsze zachowujemy oryginał
+            },
+            
             "corrected_article": corrected_article,
             "word_count": {
                 "original": word_count,
@@ -628,9 +851,8 @@ Artykuł ({word_count} słów):
                 "extended": unused_extended
             },
             "ai_model": ai_model,
-            "version": "v28.1",
-            "grammar_correction": grammar_stats,  # v28.1: statystyki korekty gramatycznej
-            "rescan_result": rescan_result  # v27.1: wynik przeliczenia fraz
+            "grammar_correction": grammar_stats,
+            "rescan_result": rescan_result
         }), 200
         
     except Exception as e:
@@ -642,6 +864,57 @@ Artykuł ({word_count} słów):
             "word_count": word_count,
             "debug": debug_info
         }), 500
+
+
+# ================================================================
+# v29.0: MANUAL ROLLBACK ENDPOINT
+# ================================================================
+@export_routes.post("/api/project/<project_id>/editorial_review/rollback")
+def editorial_rollback(project_id):
+    """
+    v29.0: Ręczny rollback do oryginalnego tekstu.
+    Użyj gdy automatyczny rollback nie zadziałał lub chcesz przywrócić oryginał.
+    """
+    db = firestore.client()
+    doc = db.collection("seo_projects").document(project_id).get()
+    
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+    
+    project_data = doc.to_dict()
+    editorial = project_data.get("editorial_review", {})
+    
+    original = editorial.get("original_article")
+    if not original:
+        return jsonify({
+            "error": "No original article saved",
+            "hint": "Original article is only available after editorial_review v29.0+"
+        }), 400
+    
+    current = editorial.get("corrected_article", "")
+    
+    if original == current:
+        return jsonify({
+            "status": "NO_CHANGE",
+            "message": "Tekst już jest oryginalny (poprzedni rollback lub brak zmian)"
+        }), 200
+    
+    # Przywróć oryginał
+    db.collection("seo_projects").document(project_id).update({
+        "editorial_review.corrected_article": original,
+        "editorial_review.manual_rollback": True,
+        "editorial_review.rollback_at": firestore.SERVER_TIMESTAMP,
+        "editorial_review.pre_rollback_article": current
+    })
+    
+    return jsonify({
+        "status": "ROLLED_BACK",
+        "message": "Przywrócono oryginalny tekst",
+        "word_count": {
+            "original": len(original.split()),
+            "was_corrected": len(current.split())
+        }
+    }), 200
 
 
 # ================================================================
@@ -658,7 +931,6 @@ def export_status(project_id):
     
     project_data = doc.to_dict()
     
-    # v32.4: Priorytet źródeł treści
     full_text = None
     debug_info = {"source": "none"}
     batches_count = 0
@@ -679,25 +951,29 @@ def export_status(project_id):
     
     return jsonify({
         "project_id": project_id,
-        "topic": project_data.get("topic"),
-        "status": project_data.get("status", "UNKNOWN"),
-        "batches_count": batches_count,
+        "topic": project_data.get("topic", ""),
+        "has_content": bool(full_text),
         "word_count": word_count,
-        "debug": debug_info,
+        "batches_count": batches_count,
+        "content_source": debug_info.get("source", "none"),
         "editorial_review": {
             "done": bool(editorial),
-            "score": editorial.get("analysis", {}).get("overall_score"),
-            "corrected_word_count": editorial.get("corrected_word_count"),
-            "ai_model": editorial.get("ai_model")
+            "score": editorial.get("analysis", {}).get("overall_score") if editorial else None,
+            "version": editorial.get("version", "unknown"),
+            "rollback_triggered": editorial.get("rollback_triggered", False),
+            "burstiness_cv_before": editorial.get("burstiness_before", {}).get("cv") if editorial.get("burstiness_before") else None,
+            "burstiness_cv_after": editorial.get("burstiness_after", {}).get("cv") if editorial.get("burstiness_after") else None
         },
-        "ready_for_export": word_count >= 500,
-        "actions": {
+        "available_exports": {
+            "docx": f"/api/project/{project_id}/export/docx",
+            "html": f"/api/project/{project_id}/export/html",
+            "txt": f"/api/project/{project_id}/export/txt"
+        },
+        "next_steps": {
             "editorial_review": f"POST /api/project/{project_id}/editorial_review",
             "export_docx": f"GET /api/project/{project_id}/export/docx",
-            "export_html": f"GET /api/project/{project_id}/export/html",
-            "export_txt": f"GET /api/project/{project_id}/export/txt"
-        },
-        "version": "v32.4"
+            "export_html": f"GET /api/project/{project_id}/export/html"
+        }
     }), 200
 
 
@@ -718,7 +994,7 @@ def export_docx(project_id):
     # v32.4: Priorytet źródeł treści
     # 1. editorial_review.corrected_article (po Claude review)
     # 2. full_article.content (zapisany przez save_full_article)
-    # 3. batches[] (stary sposób)
+    # 3. batches (surowe batche)
     editorial = project_data.get("editorial_review", {})
     corrected = editorial.get("corrected_article", "")
     
@@ -761,8 +1037,7 @@ def export_docx(project_id):
     document.save(buffer)
     buffer.seek(0)
     
-    # 🔧 FIX: Bezpieczna nazwa pliku (bez polskich znaków w HTTP header)
-    # Transliteracja polskich znaków
+    # Bezpieczna nazwa pliku
     polish_map = str.maketrans({
         'ą': 'a', 'ć': 'c', 'ę': 'e', 'ł': 'l', 'ń': 'n',
         'ó': 'o', 'ś': 's', 'ź': 'z', 'ż': 'z',
@@ -772,7 +1047,6 @@ def export_docx(project_id):
     safe_topic = topic.translate(polish_map)
     filename = re.sub(r'[^\w\s-]', '', safe_topic)[:50] + ".docx"
     
-    # RFC 5987: filename* dla UTF-8 w nagłówku
     from urllib.parse import quote
     filename_utf8 = quote(re.sub(r'[^\w\s-]', '', topic)[:50] + ".docx")
     
@@ -799,7 +1073,6 @@ def export_html(project_id):
     
     project_data = doc.to_dict()
     
-    # v32.4: Priorytet źródeł treści
     editorial = project_data.get("editorial_review", {})
     corrected = editorial.get("corrected_article", "")
     
@@ -853,7 +1126,6 @@ def export_html(project_id):
 </body>
 </html>"""
     
-    # 🔧 FIX: Bezpieczna nazwa pliku
     polish_map = str.maketrans({
         'ą': 'a', 'ć': 'c', 'ę': 'e', 'ł': 'l', 'ń': 'n',
         'ó': 'o', 'ś': 's', 'ź': 'z', 'ż': 'z',
@@ -889,7 +1161,6 @@ def export_txt(project_id):
     
     project_data = doc.to_dict()
     
-    # v32.4: Priorytet źródeł treści
     editorial = project_data.get("editorial_review", {})
     corrected = editorial.get("corrected_article", "")
     
@@ -911,7 +1182,6 @@ def export_txt(project_id):
     txt += re.sub(r'^h2:\s*(.+)$', r'\n## \1\n', full_text, flags=re.MULTILINE)
     txt = re.sub(r'^h3:\s*(.+)$', r'\n### \1\n', txt, flags=re.MULTILINE)
     
-    # 🔧 FIX: Bezpieczna nazwa pliku
     polish_map = str.maketrans({
         'ą': 'a', 'ć': 'c', 'ę': 'e', 'ł': 'l', 'ń': 'n',
         'ó': 'o', 'ś': 's', 'ź': 'z', 'ż': 'z',
