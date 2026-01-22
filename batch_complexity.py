@@ -16,6 +16,7 @@ Score 0-100 → mapowany na profil: short/medium/long/extended
 """
 
 import re
+import random
 from typing import Dict, List, Any, Tuple, Optional
 from dataclasses import dataclass, asdict
 
@@ -470,14 +471,29 @@ def calculate_batch_complexity(
     # ========================================
     score = min(100, max(0, score))  # clamp 0-100
     
-    if score >= 65:
+    # 🆕 v35.8: VARIABILITY JITTER - żeby batche były zróżnicowane
+    # Losowe odchylenie ±12 punktów
+    jitter = random.randint(-12, 12)
+    score_with_jitter = min(100, max(0, score + jitter))
+    
+    # Zapamiętaj oryginalny score ale użyj score_with_jitter do profilu
+    factors["original_score"] = score
+    factors["jitter"] = jitter
+    factors["score_with_jitter"] = score_with_jitter
+    
+    reasoning.append(f"VARIABILITY: base {score} + jitter {jitter:+d} = {score_with_jitter}")
+    
+    if score_with_jitter >= 65:
         profile = PROFILES["extended"]
-    elif score >= 45:
+    elif score_with_jitter >= 45:
         profile = PROFILES["long"]
-    elif score >= 30:
+    elif score_with_jitter >= 28:
         profile = PROFILES["medium"]
     else:
         profile = PROFILES["short"]
+    
+    # Użyj score_with_jitter jako final score
+    score = score_with_jitter
     
     factors["final_score"] = score
     
