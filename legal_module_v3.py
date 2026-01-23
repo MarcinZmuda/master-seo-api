@@ -1,721 +1,965 @@
-# legal_module_v3.py
-# BRAJEN Legal Module v3.0 - Ze scoringiem orzeczeń
-# Max 2 sygnatury na artykuł + weryfikacja jakości
-
 """
-===============================================================================
-🏛️ BRAJEN LEGAL MODULE v3.0
-===============================================================================
-
-Ulepszona wersja:
-- Max 2 sygnatury na artykuł
-- SCORING orzeczeń (wybór najlepszych)
-- Weryfikacja: zawiera przepis? merytoryczny? ma tezę?
-
-===============================================================================
+SEO Content Tracker Routes - v27.0 BRAJEN SEO Engine
++ v27.0: approve_batch fallback z last_preview
++ Minimal approve_batch response (~500B instead of 220KB)
++ Morfeusz2 lemmatization (with spaCy fallback)
++ Burstiness validation (3.2-3.8)
++ Transition words validation (25-50%)
++ v24.0: Per-batch keyword validation
++ v24.0: Fixed density limit (3.0% from seo_rules.json)
++ v24.0: Rozróżnienie EXCEEDED TOTAL vs per-batch warnings
 """
 
-from typing import Dict, List, Any, Optional
-from dataclasses import dataclass, field
+from flask import Blueprint, request, jsonify
+from firebase_admin import firestore
 import re
+import math
+import datetime
+from rapidfuzz import fuzz
+from seo_optimizer import unified_prevalidation
+from google.api_core.exceptions import InvalidArgument
+import google.generativeai as genai
+import os
 
-# Import klienta SAOS
+# v24.0: Współdzielony model spaCy (oszczędność RAM)
 try:
-    from saos_client import search_judgments, get_saos_client
-    SAOS_AVAILABLE = True
+    from shared_nlp import get_nlp
+    nlp = get_nlp()
 except ImportError:
-    SAOS_AVAILABLE = False
-    print("[LEGAL_MODULE] ⚠️ SAOS Client not available")
+    import spacy
+    try:
+        nlp = spacy.load("pl_core_news_md")
+    except OSError:
+        from spacy.cli import download
+        download("pl_core_news_md")
+        nlp = spacy.load("pl_core_news_md")
 
-# 🆕 v3.2: Import weryfikatora Claude
+# v23.8: Import polish_lemmatizer (Morfeusz2 + spaCy fallback)
 try:
-    from claude_judgment_verifier import select_best_judgments, CLAUDE_MODEL
-    CLAUDE_VERIFIER_AVAILABLE = True
-    print(f"[LEGAL_MODULE] ✅ Claude Verifier loaded ({CLAUDE_MODEL})")
-except ImportError:
-    CLAUDE_VERIFIER_AVAILABLE = False
-    print("[LEGAL_MODULE] ⚠️ Claude Verifier not available, using fallback scoring")
+    from polish_lemmatizer import count_phrase_occurrences, get_backend_info, init_backend
+    LEMMATIZER_ENABLED = True
+    LEMMATIZER_BACKEND = init_backend()
+    print(f"[TRACKER] Lemmatizer loaded: {LEMMATIZER_BACKEND}")
+except ImportError as e:
+    LEMMATIZER_ENABLED = False
+    LEMMATIZER_BACKEND = "PREFIX"
+    print(f"[TRACKER] Lemmatizer not available, using prefix matching: {e}")
+
+# v24.0: Hierarchical keyword deduplication
+try:
+    from hierarchical_keyword_dedup import deduplicate_keyword_counts
+    DEDUP_ENABLED = True
+    print("[TRACKER] Hierarchical keyword dedup loaded")
+except ImportError as e:
+    DEDUP_ENABLED = False
+    print(f"[TRACKER] Hierarchical dedup not available: {e}")
+
+# v24.1: Semantic analyzer - wykrywa semantyczne pokrycie fraz
+try:
+    from semantic_analyzer import semantic_validation, find_semantic_gaps
+    SEMANTIC_ENABLED = True
+    print("[TRACKER] Semantic Analyzer loaded")
+except ImportError as e:
+    SEMANTIC_ENABLED = False
+    print(f"[TRACKER] Semantic Analyzer not available: {e}")
+
+tracker_routes = Blueprint("tracker_routes", __name__)
+
+# v24.0: Density limit from seo_rules.json (was hardcoded 1.5%)
+DENSITY_MAX = 3.0
+
+# --- Gemini Config ---
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    print("[TRACKER] ✅ Gemini API aktywny")
+else:
+    print("[TRACKER] ⚠️ Brak GEMINI_API_KEY")
 
 
 # ============================================================================
-# KONFIGURACJA
+# v33.3: DELTA-S2 - Mierzy przyrost pokrycia encji po każdym batchu
 # ============================================================================
-
-@dataclass
-class LegalConfig:
-    """Konfiguracja modułu prawnego."""
-    
-    MAX_CITATIONS_PER_ARTICLE: int = 2
-    MIN_SCORE_TO_USE: int = 40  # Minimalna jakość orzeczenia
-    FETCH_COUNT: int = 15       # Pobierz więcej, wybierz najlepsze
-    MIN_YEAR: int = 2022        # v3.1: Tylko ostatnie 3 lata
-    
-    # Priorytet sądów
-    COURT_PRIORITY: Dict[str, int] = field(default_factory=lambda: {
-        "SUPREME": 100,
-        "CONSTITUTIONAL": 90,
-        "ADMINISTRATIVE": 80,
-        "COMMON": 50
-    })
-    
-    # Słowa kluczowe kategorii PRAWO (do detekcji)
-    LEGAL_KEYWORDS: List[str] = field(default_factory=lambda: [
-        "alimenty", "rozwód", "separacja", "opieka nad dzieckiem",
-        "władza rodzicielska", "spadek", "testament", "dziedziczenie",
-        "zachowek", "umowa", "odszkodowanie", "zadośćuczynienie",
-        "pozew", "roszczenie", "wyrok", "kara", "przestępstwo",
-        "wypowiedzenie", "mobbing", "sąd", "adwokat", "komornik"
-    ])
-    
-    # 🆕 v3.2: Mapowanie TEMAT → USTAWA (do weryfikacji kontekstu)
-    TOPIC_TO_ACT: Dict[str, List[str]] = field(default_factory=lambda: {
-        # Prawo rodzinne → KRO
-        "alimenty": ["kro", "k.r.o", "kodeks rodzinny"],
-        "rozwód": ["kro", "k.r.o", "kodeks rodzinny"],
-        "separacja": ["kro", "k.r.o", "kodeks rodzinny"],
-        "opieka nad dzieckiem": ["kro", "k.r.o", "kodeks rodzinny"],
-        "władza rodzicielska": ["kro", "k.r.o", "kodeks rodzinny"],
-        
-        # Prawo spadkowe → KC (księga 4)
-        "spadek": ["kc", "k.c", "kodeks cywilny"],
-        "testament": ["kc", "k.c", "kodeks cywilny"],
-        "dziedziczenie": ["kc", "k.c", "kodeks cywilny"],
-        "zachowek": ["kc", "k.c", "kodeks cywilny"],
-        
-        # Prawo cywilne → KC
-        "umowa": ["kc", "k.c", "kodeks cywilny"],
-        "odszkodowanie": ["kc", "k.c", "kodeks cywilny"],
-        "zadośćuczynienie": ["kc", "k.c", "kodeks cywilny"],
-        
-        # Prawo pracy → KP
-        "wypowiedzenie": ["kp", "k.p", "kodeks pracy"],
-        "mobbing": ["kp", "k.p", "kodeks pracy"],
-        
-        # Prawo karne → KK
-        "przestępstwo": ["kk", "k.k", "kodeks karny"],
-        "kara": ["kk", "k.k", "kodeks karny"],
-    })
-
-
-CONFIG = LegalConfig()
-
-
-# ============================================================================
-# SCORING ORZECZEŃ
-# ============================================================================
-
-def score_judgment(text: str, keyword: str) -> Dict[str, Any]:
+def calculate_delta_s2(
+    batch_text: str,
+    accumulated_text: str,
+    s1_entities: list,
+    batch_number: int,
+    total_batches: int = 7
+) -> dict:
     """
-    Ocenia jakość orzeczenia.
+    v33.3: Mierzy ile nowych encji z S1 zostało pokrytych w tym batchu.
     
-    Kryteria v3.2:
-    - Zawiera artykuł ustawy (art. X) → +40 pkt
-    - Ma tezę/uzasadnienie prawne → +30 pkt
-    - NIE jest czysto proceduralne → +20 pkt
-    - Keyword występuje często → +10 pkt
-    - 🆕 Przepisy z WŁAŚCIWEJ ustawy → +15 pkt bonus / -20 pkt kara
-    
-    Dodatkowo: wykrywa KIERUNEK wyroku (za/przeciw/neutralny)
+    Pozwala śledzić czy "przyrost wiedzy" jest równomierny.
     
     Args:
-        text: Pełna treść orzeczenia
-        keyword: Słowo kluczowe którego szukamy
-        
+        batch_text: Tekst bieżącego batcha
+        accumulated_text: Tekst wszystkich poprzednich batchów
+        s1_entities: Lista encji z S1 analysis
+        batch_number: Numer bieżącego batcha (1-7)
+        total_batches: Planowana liczba batchów
+    
     Returns:
-        Dict ze score i szczegółami
+        Dict z: delta_entities, coverage_percent, on_track
     """
-    text_lower = text.lower()
-    first_500 = text_lower[:500]  # Początek = sentencja
+    if not s1_entities:
+        return {
+            "enabled": False,
+            "message": "Brak encji z S1"
+        }
     
-    score = 0
-    details = []
-    
-    # 1. Czy zawiera artykuł ustawy? (+40 pkt) - KLUCZOWE
-    article_pattern = r'art\.\s*\d+[a-z]?\s*(?:§\s*\d+)?(?:\s*(?:k\.?[rcpk]\.?|kro|kpc|kpk|kc|kk|kp))?'
-    articles_found = re.findall(article_pattern, text_lower, re.IGNORECASE)
-    
-    if articles_found:
-        score += 40
-        details.append(f"✓ Zawiera przepisy ({len(articles_found)}x)")
-    else:
-        details.append("✗ Brak przepisów")
-    
-    # 2. Czy ma tezę/uzasadnienie prawne? (+30 pkt)
-    thesis_phrases = [
-        "należy uznać", "zdaniem sądu", "sąd zważył", "w ocenie sądu",
-        "nie ulega wątpliwości", "bezspornym jest", "jak słusznie",
-        "trafnie wskazał", "prawidłowo ustalił", "słuszne jest stanowisko",
-        "przyjąć należy", "sąd podziela", "zasadny jest pogląd"
-    ]
-    if any(phrase in text_lower for phrase in thesis_phrases):
-        score += 30
-        details.append("✓ Zawiera uzasadnienie/tezę")
-    else:
-        details.append("✗ Brak tezy")
-    
-    # 3. Czy NIE jest czysto proceduralne? (+20 pkt)
-    # (umorzenie, odrzucenie z przyczyn formalnych - BEZ meritum)
-    procedural_only = [
-        "umarza postępowanie", "odrzuca pozew", "odrzuca apelację",
-        "zwraca sprawę", "brak opłaty", "niedopuszczalny", "przekazuje sprawę"
-    ]
-    is_procedural = any(phrase in first_500 for phrase in procedural_only)
-    
-    if not is_procedural:
-        score += 20
-        details.append("✓ Nie jest czysto proceduralne")
-    else:
-        details.append("✗ Czysto proceduralne")
-    
-    # 4. BONUS: Keyword występuje często (+10 pkt)
-    keyword_count = text_lower.count(keyword.lower())
-    if keyword_count >= 5:
-        score += 10
-        details.append(f"✓ Keyword występuje {keyword_count}x")
-    
-    # 5. 🆕 v3.2: Czy przepisy są z WŁAŚCIWEJ ustawy dla tematu?
-    # (+15 pkt bonus jeśli pasują, -20 pkt kara jeśli nie pasują)
-    expected_acts = CONFIG.TOPIC_TO_ACT.get(keyword.lower(), [])
-    
-    if articles_found and expected_acts:
-        # Sprawdź czy którykolwiek znaleziony przepis jest z oczekiwanej ustawy
-        articles_text = " ".join(articles_found).lower()
-        
-        has_matching_act = any(act in articles_text for act in expected_acts)
-        # Sprawdź też w całym tekście (czasem "kodeks rodzinny" jest osobno)
-        has_matching_act = has_matching_act or any(act in text_lower for act in expected_acts)
-        
-        if has_matching_act:
-            score += 15
-            details.append(f"✓ Przepisy z właściwej ustawy ({expected_acts[0].upper()})")
+    # Normalizuj encje do listy stringów
+    entity_names = []
+    for e in s1_entities:
+        if isinstance(e, dict):
+            name = e.get("entity", e.get("name", ""))
         else:
-            # Kara za przepisy z INNEJ ustawy (np. KK w artykule o alimentach)
-            score -= 20
-            details.append(f"✗ Przepisy z INNEJ ustawy (oczekiwano: {expected_acts[0].upper()})")
+            name = str(e)
+        if name:
+            entity_names.append(name.lower())
     
-    # ================================================================
-    # KIERUNEK WYROKU (za/przeciw/neutralny) - BEZ wpływu na score
-    # GPT dostaje tę info żeby wiedzieć jak użyć
-    # ================================================================
-    direction = "neutralny"
-    direction_details = ""
+    if not entity_names:
+        return {
+            "enabled": False,
+            "message": "Brak nazw encji"
+        }
     
-    # Wyroki "za" (uwzględniające roszczenie)
-    positive_phrases = ["zasądza", "uwzględnia", "zobowiązuje", "nakazuje", "orzeka zgodnie"]
-    # Wyroki "przeciw" (oddalające roszczenie, ale z uzasadnieniem!)
-    negative_phrases = ["oddala powództwo", "oddala apelację", "nie uwzględnia", "odmawia"]
+    # Funkcja pomocnicza - które encje są pokryte w tekście
+    def get_covered_entities(text: str) -> set:
+        text_lower = text.lower()
+        covered = set()
+        for entity in entity_names:
+            if entity in text_lower:
+                covered.add(entity)
+        return covered
     
-    if any(phrase in first_500 for phrase in positive_phrases):
-        direction = "za"
-        direction_details = "Sąd uwzględnił roszczenie"
-    elif any(phrase in first_500 for phrase in negative_phrases):
-        direction = "przeciw"
-        direction_details = "Sąd oddalił roszczenie (ale uzasadnienie może być wartościowe!)"
-    else:
-        direction = "neutralny"
-        direction_details = "Brak jasnego rozstrzygnięcia w sentencji"
+    # Encje pokryte przed tym batchem
+    covered_before = get_covered_entities(accumulated_text) if accumulated_text else set()
+    
+    # Encje pokryte po tym batchu
+    full_text = (accumulated_text + "\n\n" + batch_text) if accumulated_text else batch_text
+    covered_after = get_covered_entities(full_text)
+    
+    # Delta - nowe encje w tym batchu
+    new_entities = covered_after - covered_before
+    
+    # Oblicz oczekiwany przyrost
+    total_entities = len(entity_names)
+    expected_per_batch = total_entities / total_batches
+    expected_by_now = expected_per_batch * batch_number
+    
+    # Status
+    coverage_percent = len(covered_after) / total_entities * 100 if total_entities > 0 else 0
+    on_track = len(covered_after) >= (expected_by_now * 0.8)  # 80% oczekiwanego = OK
+    
+    # Pozostałe do pokrycia
+    remaining = set(entity_names) - covered_after
     
     return {
-        "score": score,
-        "max_score": 115,  # 40+30+20+10+15
-        "details": details,
-        "articles_found": articles_found[:3] if articles_found else [],
-        "is_usable": score >= CONFIG.MIN_SCORE_TO_USE,
-        # 🆕 Kierunek wyroku
-        "direction": direction,
-        "direction_details": direction_details
+        "enabled": True,
+        "batch_number": batch_number,
+        "delta_entities": list(new_entities),
+        "delta_count": len(new_entities),
+        "total_covered": len(covered_after),
+        "total_entities": total_entities,
+        "coverage_percent": round(coverage_percent, 1),
+        "expected_by_now": round(expected_by_now, 1),
+        "on_track": on_track,
+        "remaining_entities": list(remaining)[:10],  # Max 10
+        "remaining_count": len(remaining),
+        "status": "OK" if on_track else "BEHIND",
+        "message": f"Pokryto {len(covered_after)}/{total_entities} encji ({coverage_percent:.0f}%)" + 
+                   ("" if on_track else f" - poniżej oczekiwań ({expected_by_now:.0f})")
     }
 
 
-def extract_best_excerpt(text: str, keyword: str, context_chars: int = 300) -> str:
-    """
-    Wyciąga fragment zawierający keyword, starając się zachować PEŁNE ZDANIA.
-    v3.2: Poprawione cięcie na granicach zdań + szukanie form pochodnych.
-    """
+# ============================================================================
+# 1. COUNTING FUNCTIONS
+# ============================================================================
+def count_all_forms(text: str, keyword: str) -> int:
+    """Liczy WSZYSTKIE odmiany słowa/frazy w tekście."""
+    if not text or not keyword:
+        return 0
+    
+    if LEMMATIZER_ENABLED:
+        result = count_phrase_occurrences(text, keyword)
+        return result.get("count", 0)
+    
+    # Fallback: prefix matching
     text_lower = text.lower()
-    keyword_lower = keyword.lower()
+    keyword_lower = keyword.lower().strip()
+    words = keyword_lower.split()
     
-    # Szukaj też form pochodnych (alimenty → alimentacyjny, alimentów)
-    keyword_base = keyword_lower[:min(6, len(keyword_lower))]  # Pierwsze 6 liter
-    
-    # 1. Znajdź keyword (preferuj pozycję z przepisem w pobliżu)
-    article_pattern = r'art\.\s*\d+'
-    
-    # Szukaj pełnego słowa lub bazy
-    keyword_positions = []
-    start_search = 0
-    while True:
-        # Najpierw szukaj pełnego słowa
-        pos = text_lower.find(keyword_lower, start_search)
-        if pos == -1:
-            # Jeśli nie ma, szukaj bazy (np. "aliment" znajdzie "alimentacyjny")
-            pos = text_lower.find(keyword_base, start_search)
-        if pos == -1:
-            break
-        keyword_positions.append(pos)
-        start_search = pos + 1
-    
-    if not keyword_positions:
-        # Fallback: zwróć początek jeśli nie znaleziono
-        end = text.find('.', 0, context_chars)
-        if end != -1:
-            return text[:end + 1].strip()
-        return text[:context_chars].strip() + "..."
-    
-    # Preferuj pozycję z przepisem w pobliżu
-    best_pos = keyword_positions[0]
-    for pos in keyword_positions:
-        context_start = max(0, pos - 150)
-        context_end = min(len(text), pos + 150)
-        context = text[context_start:context_end]
-        
-        if re.search(article_pattern, context, re.IGNORECASE):
-            best_pos = pos
-            break
-    
-    # 2. Ustal wstępny zakres
-    start = max(0, best_pos - context_chars // 2)
-    end = min(len(text), best_pos + context_chars // 2)
-    
-    # 3. Rozszerz do granic zdań (szukamy kropki)
-    # Szukamy w lewo początku zdania
-    sent_start = text.rfind('.', 0, start)
-    if sent_start != -1:
-        start = sent_start + 2  # +2 żeby pominąć kropkę i spację
+    if len(words) == 1:
+        word = words[0]
+        stem = word[:6] if len(word) > 6 else word[:len(word)-1] if len(word) > 4 else word
+        pattern = rf'\b{re.escape(stem)}\w*\b'
+        return len(re.findall(pattern, text_lower))
     else:
-        start = 0
-    
-    # Szukamy w prawo końca zdania
-    sent_end = text.find('.', end)
-    if sent_end != -1 and sent_end < end + 100:  # max 100 znaków dalej
-        end = sent_end + 1
-    
-    # 4. Wyczyść i zwróć
-    excerpt = text[start:end].strip()
-    
-    # Usuń ewentualne śmieci na początku (np. fragment numeracji)
-    excerpt = re.sub(r'^\d+\.\s*', '', excerpt)
-    excerpt = re.sub(r'^[a-z]\)\s*', '', excerpt)
-    
-    # Dodaj elipsy jeśli to nie początek/koniec
-    if start > 0:
-        excerpt = "..." + excerpt
-    if end < len(text) - 1:
-        excerpt = excerpt + "..."
-    
-    return excerpt
-
-
-# ============================================================================
-# DETEKCJA KATEGORII
-# ============================================================================
-
-def detect_category(
-    main_keyword: str,
-    additional_keywords: List[str] = None
-) -> Dict[str, Any]:
-    """Wykrywa czy artykuł dotyczy tematyki prawnej."""
-    
-    all_text = main_keyword.lower()
-    if additional_keywords:
-        all_text += " " + " ".join([kw.lower() for kw in additional_keywords])
-    
-    matched = []
-    for keyword in CONFIG.LEGAL_KEYWORDS:
-        if keyword.lower() in all_text:
-            matched.append(keyword)
-    
-    is_legal = len(matched) >= 1
-    confidence = "HIGH" if len(matched) >= 3 else "MEDIUM" if len(matched) >= 1 else "LOW"
-    
-    return {
-        "detected_category": "prawo" if is_legal else "inne",
-        "is_legal": is_legal,
-        "confidence": confidence,
-        "matched_keywords": matched[:5],
-        "legal_module_active": is_legal and SAOS_AVAILABLE
-    }
-
-
-# ============================================================================
-# POBIERANIE NAJLEPSZYCH ORZECZEŃ
-# ============================================================================
-
-def get_best_judgments_for_article(
-    main_keyword: str,
-    max_results: int = 2
-) -> Dict[str, Any]:
-    """
-    Pobiera najlepsze orzeczenia dla artykułu.
-    
-    🆕 v3.2: Używa Claude do weryfikacji kontekstowej!
-    
-    Proces:
-    1. Pobierz 15 orzeczeń z SAOS (full-text search)
-    2. Claude weryfikuje i wybiera 2 najlepsze (kontekstowo!)
-    3. Fallback na prosty scoring jeśli Claude niedostępny
-    """
-    if not SAOS_AVAILABLE:
-        return {
-            "status": "DISABLED",
-            "message": "SAOS module not available",
-            "judgments": []
-        }
-    
-    # Wyciągnij keyword
-    search_keyword = _extract_legal_keyword(main_keyword)
-    
-    if not search_keyword:
-        return {
-            "status": "NO_KEYWORD",
-            "message": f"Nie znaleziono słowa prawnego w: {main_keyword}",
-            "judgments": []
-        }
-    
-    # Pobierz orzeczenia z SAOS
-    results = search_judgments(
-        keyword=search_keyword,
-        max_results=CONFIG.FETCH_COUNT,
-        min_year=CONFIG.MIN_YEAR
-    )
-    
-    if results.get("status") != "OK":
-        return results
-    
-    all_judgments = results.get("judgments", [])
-    
-    # ================================================================
-    # 🆕 v36.1: LOCAL COURT SCRAPER FALLBACK
-    # Gdy SAOS zwraca < 3 wyniki, szukaj w lokalnych portalach sądów
-    # ================================================================
-    local_court_used = False
-    if len(all_judgments) < 3:
-        try:
-            from local_court_scraper import search_local_courts
-            
-            print(f"[LEGAL_MODULE] 🏛️ SAOS zwrócił tylko {len(all_judgments)} orzeczeń - próbuję lokalne sądy")
-            local_results = search_local_courts(search_keyword, max_results=10)
-            
-            if local_results.get("status") == "OK":
-                local_judgments = local_results.get("judgments", [])
-                if local_judgments:
-                    # Dodaj źródło do każdego orzeczenia
-                    for lj in local_judgments:
-                        lj["source"] = "LOCAL_COURT"
-                        lj["source_portal"] = local_results.get("portal", "unknown")
-                    
-                    all_judgments.extend(local_judgments)
-                    local_court_used = True
-                    print(f"[LEGAL_MODULE] ✅ Dodano {len(local_judgments)} orzeczeń z lokalnych sądów (łącznie: {len(all_judgments)})")
+        stems = []
+        for word in words:
+            if len(word) <= 3:
+                stems.append(re.escape(word))
+            elif len(word) <= 5:
+                stems.append(re.escape(word[:len(word)-1]) + r'\w*')
             else:
-                print(f"[LEGAL_MODULE] ⚠️ Lokalne sądy: {local_results.get('message', 'brak wyników')}")
-        except ImportError:
-            print("[LEGAL_MODULE] ⚠️ local_court_scraper not available")
-        except Exception as e:
-            print(f"[LEGAL_MODULE] ⚠️ Local court scraper error: {e}")
+                stems.append(re.escape(word[:5]) + r'\w*')
+        pattern = r'\b' + r'\s+(?:\w+\s+){0,2}'.join(stems) + r'\b'
+        return len(re.findall(pattern, text_lower))
+
+
+# ============================================================================
+# 2. VALIDATIONS
+# ============================================================================
+def validate_structure(text):
+    if "##" in text or "###" in text:
+        return {"valid": False, "error": "❌ Markdown (##) zabroniony — użyj h2:"}
+    banned = ["wstęp", "podsumowanie", "wprowadzenie", "zakończenie"]
+    for h2 in re.findall(r'<h2[^>]*>(.*?)</h2>', text, re.IGNORECASE | re.DOTALL):
+        if any(b in h2.lower() for b in banned):
+            return {"valid": False, "error": f"❌ Niedozwolony nagłówek: '{h2.strip()}'"}
+    return {"valid": True}
+
+
+def calculate_burstiness(text):
+    """Target: 3.2-3.8"""
+    sentences = re.split(r'[.!?]+', text)
+    sentences = [s.strip() for s in sentences if s.strip()]
+    if len(sentences) < 3:
+        return 0.0
+    lengths = [len(s.split()) for s in sentences]
+    mean = sum(lengths) / len(lengths)
+    variance = sum((x - mean) ** 2 for x in lengths) / len(lengths)
+    if not mean:
+        return 0.0
+    raw_score = math.sqrt(variance) / mean
+    return round(raw_score * 5, 2)
+
+
+TRANSITION_WORDS_PL = [
+    "również", "także", "ponadto", "dodatkowo", "co więcej",
+    "jednak", "jednakże", "natomiast", "ale", "z drugiej strony",
+    "mimo to", "niemniej", "pomimo", "choć", "chociaż",
+    "dlatego", "w związku z tym", "w rezultacie", "ponieważ",
+    "zatem", "więc", "stąd", "w konsekwencji",
+    "na przykład", "przykładowo", "między innymi", "np.",
+    "po pierwsze", "po drugie", "następnie", "potem", "na koniec",
+]
+
+
+def calculate_transition_score(text: str) -> dict:
+    """Target: 25-50% zdań z transition words"""
+    text_lower = text.lower()
+    sentences = [s.strip() for s in re.split(r'[.!?]+', text) if s.strip()]
     
-    if not all_judgments:
-        return {
-            "status": "NO_RESULTS",
-            "message": f"Brak orzeczeń dla: {search_keyword} (sprawdzono SAOS + lokalne sądy)",
-            "judgments": [],
-            "local_court_checked": True
-        }
+    if len(sentences) < 2:
+        return {"ratio": 1.0, "count": 0, "total": len(sentences), "warnings": []}
     
-    # Przygotuj excerpty dla każdego orzeczenia
-    for j in all_judgments:
-        text = j.get("full_text", "") or j.get("excerpt", "")
-        j["excerpt"] = extract_best_excerpt(text, search_keyword)
+    transition_count = sum(1 for s in sentences if any(tw in s.lower()[:100] for tw in TRANSITION_WORDS_PL))
+    ratio = transition_count / len(sentences)
     
-    # ================================================================
-    # 🆕 v3.2: CLAUDE WERYFIKUJE ORZECZENIA
-    # ================================================================
-    if CLAUDE_VERIFIER_AVAILABLE:
-        print(f"[LEGAL_MODULE] 🤖 Claude weryfikuje {len(all_judgments)} orzeczeń dla '{main_keyword}'")
+    warnings = []
+    if ratio < 0.20:
+        warnings.append(f"⚠️ Za mało transition words: {ratio:.0%} (min 25%)")
+    elif ratio > 0.55:
+        warnings.append(f"⚠️ Za dużo transition words: {ratio:.0%} (max 50%)")
+    
+    return {"ratio": round(ratio, 3), "count": transition_count, "total": len(sentences), "warnings": warnings}
+
+
+def validate_metrics(burstiness: float, transition_data: dict, density: float) -> list:
+    """Waliduje metryki"""
+    warnings = []
+    
+    if burstiness < 3.2:
+        warnings.append(f"⚠️ Burstiness za niski: {burstiness} (min 3.2)")
+    elif burstiness > 3.8:
+        warnings.append(f"⚠️ Burstiness za wysoki: {burstiness} (max 3.8)")
+    
+    # v24.0: Fixed density limit (was 1.5%, now 3.0% from seo_rules.json)
+    if density > DENSITY_MAX:
+        warnings.append(f"⚠️ Keyword density za wysoka: {density}% (max {DENSITY_MAX}%)")
+    
+    warnings.extend(transition_data.get("warnings", []))
+    return warnings
+
+
+# ============================================================================
+# 3. FIRESTORE PROCESSOR
+# ============================================================================
+def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=False):
+    db = firestore.client()
+    doc_ref = db.collection("seo_projects").document(project_id)
+    doc = doc_ref.get()
+    if not doc.exists:
+        return {"error": "Project not found", "status_code": 404}
+
+    project_data = doc.to_dict()
+    keywords_state = project_data.get("keywords_state", {})
+    
+    # v24.2: UNIFIED COUNTING - jedna funkcja dla całego systemu
+    # Zastępuje: count_all_forms + deduplicate_keyword_counts + stuffing detection
+    try:
+        from keyword_counter import count_keywords_for_state, get_stuffing_warnings, count_keywords
         
-        claude_result = select_best_judgments(
-            article_topic=main_keyword,
-            judgments=all_judgments,
-            max_to_select=max_results,
-            use_claude=True
-        )
+        # Zbierz keywordy do analizy szczegółowej
+        keywords = [meta.get("keyword", "").strip() for meta in keywords_state.values() if meta.get("keyword")]
         
-        if claude_result["status"] == "OK" and claude_result["selected"]:
-            best_judgments = claude_result["selected"]
-            method = claude_result["method"]
-            reasoning = claude_result.get("reasoning", "")
-            
-            print(f"[LEGAL_MODULE] ✅ Claude wybrał {len(best_judgments)} orzeczeń (method: {method})")
-            
-            return {
-                "status": "OK",
-                "keyword_used": search_keyword,
-                "total_found": results.get("total_found", 0),
-                "analyzed": len(all_judgments),
-                "selection_method": method,
-                "claude_reasoning": reasoning,
-                "judgments": best_judgments,
-                "instruction": _build_article_instruction(best_judgments),
-                "local_court_used": local_court_used  # 🆕 v36.1
-            }
-        elif claude_result["status"] == "OK" and not claude_result["selected"]:
-            # 🆕 v3.3: Claude odrzucił WSZYSTKIE orzeczenia - NIE fallback!
-            reasoning = claude_result.get("reasoning", "Brak pasujących orzeczeń")
-            print(f"[LEGAL_MODULE] ⚠️ Claude odrzucił wszystkie orzeczenia: {reasoning}")
-            
-            return {
-                "status": "NO_MATCHING",
-                "keyword_used": search_keyword,
-                "total_found": results.get("total_found", 0),
-                "analyzed": len(all_judgments),
-                "message": f"Żadne z {len(all_judgments)} orzeczeń nie pasuje do tematu. {reasoning}",
-                "judgments": [],
-                "instruction": "",
-                "local_court_used": local_court_used  # 🆕 v36.1
-            }
-    
-    # ================================================================
-    # FALLBACK: Prosty scoring (gdy Claude niedostępny)
-    # ================================================================
-    print(f"[LEGAL_MODULE] ⚠️ Fallback na prosty scoring")
-    
-    scored_judgments = []
-    for j in all_judgments:
-        text = j.get("full_text", "") or j.get("excerpt", "")
-        scoring = score_judgment(text, search_keyword)
+        # v27.2: Policz z EXCLUSIVE dla actual_uses (jak NeuronWriter!)
+        # "spadek po rodzicach" liczy się TYLKO jako:
+        #   +1 dla "spadek po rodzicach"
+        # NIE liczy się jako +1 dla "spadek" (to byłoby OVERLAPPING)
+        # 
+        # EXCLUSIVE = longest-match-first, konsumuje tokeny
+        # To jest zgodne z tym jak NeuronWriter liczy frazy
+        batch_counts = count_keywords_for_state(batch_text, keywords_state, use_exclusive_for_nested=False)
         
-        if scoring["is_usable"]:
-            scored_judgments.append({
-                **j,
-                "score": scoring["score"],
-                "direction": scoring["direction"],
-                "verified_by_claude": False
+        # Stuffing warnings (zintegrowane z tym samym licznikiem)
+        stuffing_warnings = get_stuffing_warnings(batch_text, keywords_state)
+        
+        # Szczegóły do diagnostyki
+        full_result = count_keywords(batch_text, keywords)
+        in_headers = full_result.get("in_headers", {})
+        in_intro = full_result.get("in_intro", {})
+        
+        UNIFIED_COUNTING = True
+    except ImportError as e:
+        print(f"[TRACKER] keyword_counter not available, using legacy: {e}")
+        UNIFIED_COUNTING = False
+        
+        # LEGACY FALLBACK - stara metoda
+        clean_text_original = re.sub(r"<[^>]+>", " ", batch_text)
+        clean_text_original = re.sub(r"\s+", " ", clean_text_original)
+        
+        batch_counts = {}
+        for rid, meta in keywords_state.items():
+            keyword = meta.get("keyword", "").strip()
+            if not keyword:
+                batch_counts[rid] = 0
+                continue
+            batch_counts[rid] = count_all_forms(clean_text_original, keyword)
+        
+        # Legacy deduplikacja
+        if DEDUP_ENABLED:
+            raw_counts = {meta.get("keyword", ""): batch_counts.get(rid, 0) 
+                          for rid, meta in keywords_state.items() if meta.get("keyword")}
+            adjusted = deduplicate_keyword_counts(raw_counts)
+            for rid, meta in keywords_state.items():
+                kw = meta.get("keyword", "")
+                if kw in adjusted:
+                    batch_counts[rid] = adjusted[kw]
+        
+        # Legacy stuffing
+        stuffing_warnings = []
+        paragraphs = batch_text.split('\n\n')
+        for rid, meta in keywords_state.items():
+            if meta.get("type", "BASIC").upper() not in ["BASIC", "MAIN"]:
+                continue
+            keyword = meta.get("keyword", "").lower()
+            if not keyword:
+                continue
+            for para in paragraphs:
+                if para.lower().count(keyword) > 3:
+                    stuffing_warnings.append(f"⚠️ '{meta.get('keyword')}' występuje >3x w jednym akapicie")
+                    break
+        
+        in_headers = {}
+        in_intro = {}
+    
+    # v24.0: Walidacja pierwszego zdania (dla INTRO batcha)
+    batches_done = len(project_data.get("batches", []))
+    main_keyword = project_data.get("main_keyword", project_data.get("topic", ""))
+    first_sentence_warning = None
+    
+    if batches_done == 0 and main_keyword:  # To jest INTRO
+        first_sentence = batch_text.split('.')[0] if batch_text else ""
+        if main_keyword.lower() not in first_sentence.lower():
+            first_sentence_warning = f"⚠️ Pierwsze zdanie nie zawiera głównej frazy '{main_keyword}' - kluczowe dla featured snippet!"
+    
+    # v24.0: Pobierz info o batchach do walidacji per-batch
+    total_batches = project_data.get("total_planned_batches", 4)
+    remaining_batches = max(1, total_batches - batches_done)
+    
+    # v24.0: Per-batch warnings (informacyjne, nie blokują)
+    per_batch_warnings = []
+    for rid, batch_count in batch_counts.items():
+        if batch_count == 0:
+            continue
+        meta = keywords_state[rid]
+        kw_type = meta.get("type", "BASIC").upper()
+        if kw_type not in ["BASIC", "MAIN"]:
+            continue
+        
+        keyword = meta.get("keyword", "")
+        target_max = meta.get("target_max", 999)
+        actual = meta.get("actual_uses", 0)
+        remaining_to_max = max(0, target_max - actual)
+        
+        # Oblicz suggested per batch
+        if remaining_to_max > 0 and remaining_batches > 0:
+            suggested = math.ceil(remaining_to_max / remaining_batches)
+        else:
+            suggested = 0
+        
+        # Warning jeśli batch_count > suggested * 1.5 (ale nie blokuje)
+        if suggested > 0 and batch_count > suggested * 1.5:
+            per_batch_warnings.append(
+                f"ℹ️ '{keyword}': użyto {batch_count}x w batchu (sugerowano ~{suggested}x). "
+                f"Zostało {max(0, remaining_to_max - batch_count)}/{target_max} dla artykułu."
+            )
+    
+    # Check EXCEEDED TOTAL (całkowity limit artykułu - to jest KRYTYCZNE)
+    exceeded_keywords = []
+    for rid, batch_count in batch_counts.items():
+        meta = keywords_state[rid]
+        if meta.get("type", "BASIC").upper() not in ["BASIC", "MAIN"]:
+            continue
+        current = meta.get("actual_uses", 0)
+        target_max = meta.get("target_max", 999)
+        new_total = current + batch_count
+        if new_total > target_max:
+            exceeded_keywords.append({
+                "keyword": meta.get("keyword"),
+                "current": current,
+                "batch_uses": batch_count,
+                "would_be": new_total,
+                "target_max": target_max,
+                "exceeded_by": new_total - target_max
             })
     
-    # 🆕 v3.3: NIE fallbackuj na złe orzeczenia!
-    if not scored_judgments:
-        print(f"[LEGAL_MODULE] ⚠️ Żadne orzeczenie nie przeszło scoringu")
-        return {
-            "status": "NO_MATCHING",
-            "keyword_used": search_keyword,
-            "total_found": results.get("total_found", 0),
-            "analyzed": len(all_judgments),
-            "message": f"Żadne z {len(all_judgments)} orzeczeń nie przeszło weryfikacji merytorycznej.",
-            "judgments": [],
-            "instruction": "",
-            "local_court_used": local_court_used  # 🆕 v36.1
-        }
+    # ================================================================
+    # 🆕 v36.0: RESERVED KEYWORDS VALIDATION
+    # Sprawdź czy batch używa fraz zarezerwowanych dla innych sekcji
+    # ================================================================
+    reserved_keyword_warnings = []
+    semantic_plan = project_data.get("semantic_keyword_plan", {})
+    if semantic_plan:
+        current_batch_num = batches_done + 1  # Bo to jest batch który właśnie dodajemy
+        batch_plans = semantic_plan.get("batch_plans", [])
+        
+        # Znajdź plan dla bieżącego batcha
+        current_batch_plan = None
+        for bp in batch_plans:
+            if bp.get("batch_number") == current_batch_num:
+                current_batch_plan = bp
+                break
+        
+        if current_batch_plan:
+            # Pobierz reserved_keywords dla tego batcha
+            reserved_kws = current_batch_plan.get("reserved_keywords", [])
+            assigned_kws = set([k.lower() for k in current_batch_plan.get("assigned_keywords", [])])
+            universal_kws = set([k.lower() for k in current_batch_plan.get("universal_keywords", [])])
+            
+            # Sprawdź czy batch używa reserved keywords
+            batch_text_lower = batch_text.lower()
+            for reserved_info in reserved_kws:
+                if isinstance(reserved_info, dict):
+                    reserved_kw = reserved_info.get("keyword", "")
+                    reserved_for_batch = reserved_info.get("reserved_for_batch", 0)
+                    reserved_for_h2 = reserved_info.get("reserved_for_h2", "")
+                else:
+                    reserved_kw = str(reserved_info)
+                    reserved_for_batch = 0
+                    reserved_for_h2 = ""
+                
+                reserved_kw_lower = reserved_kw.lower()
+                
+                # Pomiń jeśli jest też w assigned lub universal
+                if reserved_kw_lower in assigned_kws or reserved_kw_lower in universal_kws:
+                    continue
+                
+                # Sprawdź czy fraza jest użyta w batchu
+                if reserved_kw_lower and reserved_kw_lower in batch_text_lower:
+                    reserved_keyword_warnings.append(
+                        f"⚠️ RESERVED: '{reserved_kw}' jest zarezerwowana dla batcha {reserved_for_batch}"
+                        + (f" ({reserved_for_h2})" if reserved_for_h2 else "")
+                        + " - użyj jej tam gdzie pasuje tematycznie"
+                    )
     
-    # Sortuj i weź najlepsze
-    sorted_judgments = sorted(
-        scored_judgments,
-        key=lambda x: (
-            x.get("score", 0),
-            CONFIG.COURT_PRIORITY.get(x.get("court_type", "COMMON"), 0),
-            x.get("date", "2000-01-01")
-        ),
-        reverse=True
-    )
+    # Update keywords state
+    for rid, batch_count in batch_counts.items():
+        meta = keywords_state[rid]
+        meta["actual_uses"] = meta.get("actual_uses", 0) + batch_count
+        
+        min_t = meta.get("target_min", 0)
+        max_t = meta.get("target_max", 999)
+        actual = meta["actual_uses"]
+        
+        if actual < min_t:
+            meta["status"] = "UNDER"
+        elif actual == max_t:
+            meta["status"] = "OPTIMAL"
+        elif min_t <= actual < max_t:
+            meta["status"] = "OK"
+        else:
+            meta["status"] = "OVER"
+        
+        if meta.get("type", "BASIC").upper() == "BASIC":
+            meta["remaining_max"] = max(0, max_t - actual)
+        
+        keywords_state[rid] = meta
+
+    # Prevalidation
+    precheck = unified_prevalidation(batch_text, keywords_state)
+    warnings = precheck.get("warnings", [])
+    semantic_score = precheck.get("semantic_score", 1.0)
+    density = precheck.get("density", 0.0)
     
-    best_judgments = sorted_judgments[:max_results]
+    # v24.1: Semantic validation - czy frazy są semantycznie pokryte
+    semantic_gaps = []
+    if SEMANTIC_ENABLED:
+        try:
+            sem_result = semantic_validation(batch_text, keywords_state, min_coverage=0.4)
+            if sem_result.get("semantic_enabled"):
+                semantic_gaps = sem_result.get("gaps", [])
+                overall_coverage = sem_result.get("overall_coverage", 1.0)
+                if overall_coverage < 0.4:
+                    warnings.append(f"⚠️ Semantyczne pokrycie {overall_coverage:.0%} < 40% - rozwiń tematy: {', '.join(semantic_gaps[:3])}")
+                elif semantic_gaps:
+                    # Info, nie warning - są luki ale ogólne pokrycie OK
+                    pass
+        except Exception as e:
+            print(f"[TRACKER] Semantic validation error: {e}")
     
-    return {
-        "status": "OK",
-        "keyword_used": search_keyword,
-        "total_found": results.get("total_found", 0),
-        "analyzed": len(all_judgments),
-        "selection_method": "fallback_scoring",
-        "judgments": best_judgments,
-        "instruction": _build_article_instruction(best_judgments),
-        "local_court_used": local_court_used  # 🆕 v36.1
+    # ================================================================
+    # 🆕 v36.1: SEMANTIC PROXIMITY VALIDATION
+    # Sprawdza czy frazy są otoczone kontekstem (nie w "próżni")
+    # Używa danych z S1 zamiast concept_map
+    # ================================================================
+    isolated_keywords = []
+    proximity_score = 100
+    try:
+        from semantic_proximity_validator import full_semantic_validation
+        
+        # Pobierz dane z S1
+        s1_data_for_proximity = project_data.get("s1_data", {})
+        entity_seo = s1_data_for_proximity.get("entity_seo", {})
+        entities = entity_seo.get("entities", [])
+        relationships = entity_seo.get("entity_relationships", [])
+        
+        # Zbuduj proximity_clusters z entity_relationships
+        proximity_clusters = []
+        for rel in relationships[:10]:
+            if isinstance(rel, dict):
+                subject = rel.get("subject", "")
+                obj = rel.get("object", "")
+                if subject and obj:
+                    proximity_clusters.append({
+                        "anchor": subject,
+                        "must_have_nearby": [obj],
+                        "max_distance": 30
+                    })
+        
+        # Zbuduj supporting_entities z entities
+        entity_names = []
+        for e in entities[:20]:
+            if isinstance(e, dict):
+                entity_names.append(e.get("name", ""))
+            else:
+                entity_names.append(str(e))
+        
+        supporting_entities = {"all": [n for n in entity_names if n]}
+        
+        # Pobierz keywords do walidacji
+        keywords_to_check = [
+            meta.get("keyword", "") 
+            for meta in keywords_state.values() 
+            if meta.get("keyword") and meta.get("type", "BASIC").upper() in ["BASIC", "MAIN"]
+        ][:15]  # Max 15 keywords
+        
+        if proximity_clusters or supporting_entities.get("all"):
+            proximity_result = full_semantic_validation(
+                text=batch_text,
+                keywords=keywords_to_check,
+                proximity_clusters=proximity_clusters,
+                supporting_entities=supporting_entities
+            )
+            
+            isolated_keywords = proximity_result.get("isolated_keywords", [])
+            proximity_score = proximity_result.get("overall_score", 100)
+            
+            # Dodaj warnings dla izolowanych fraz (max 3)
+            for isolated in isolated_keywords[:3]:
+                keyword_name = isolated.get("keyword", isolated) if isinstance(isolated, dict) else isolated
+                warnings.append(f"⚠️ ISOLATED: '{keyword_name}' - fraza bez kontekstu semantycznego")
+            
+            if proximity_score < 60:
+                warnings.append(f"⚠️ Semantic proximity score: {proximity_score}/100 - dodaj więcej kontekstu")
+                
+            print(f"[TRACKER] 🔗 Semantic proximity: score={proximity_score}, isolated={len(isolated_keywords)}")
+    except ImportError:
+        print("[TRACKER] ⚠️ semantic_proximity_validator not available")
+    except Exception as e:
+        print(f"[TRACKER] Semantic proximity error: {e}")
+    
+    # v24.0: Walidacja pierwszego zdania (WAŻNE dla SEO)
+    if first_sentence_warning:
+        warnings.insert(0, first_sentence_warning)  # Na początku - ważne!
+    
+    # v24.0: Keyword stuffing warnings
+    warnings.extend(stuffing_warnings)
+    
+    # 🆕 v36.0: Reserved keyword warnings (informacyjne)
+    warnings.extend(reserved_keyword_warnings)
+    
+    # v24.0: EXCEEDED TOTAL warnings (KRYTYCZNE - przekroczono limit całkowity)
+    for ek in exceeded_keywords:
+        warnings.append(f"❌ EXCEEDED TOTAL: '{ek['keyword']}' = {ek['would_be']}x (limit {ek['target_max']}x dla CAŁEGO artykułu)")
+    
+    # Metrics
+    burstiness = calculate_burstiness(batch_text)
+    transition_data = calculate_transition_score(batch_text)
+    metrics_warnings = validate_metrics(burstiness, transition_data, density)
+    warnings.extend(metrics_warnings)
+
+    struct_check = validate_structure(batch_text)
+    valid_struct = struct_check["valid"]
+
+    status = "APPROVED"
+    if warnings or not valid_struct:
+        status = "WARN"
+    if forced:
+        status = "FORCED"
+    
+    # v24.0: Jeśli tylko per_batch warnings (nie EXCEEDED TOTAL) - status APPROVED
+    has_critical = any("EXCEEDED TOTAL" in w for w in warnings)
+    has_density_issue = any("density" in w.lower() and density > DENSITY_MAX for w in warnings)
+    if not has_critical and not has_density_issue and not exceeded_keywords:
+        status = "APPROVED"
+
+    # Save batch
+    batch_entry = {
+        "text": batch_text,
+        "meta_trace": meta_trace or {},
+        "timestamp": datetime.datetime.now(datetime.timezone.utc),
+        "burstiness": burstiness,
+        "transition_ratio": transition_data.get("ratio", 0),
+        "batch_counts": batch_counts,  # v24.0: zapisuj counts dla debug
+        "per_batch_info": per_batch_warnings,  # v24.0: info per batch
+        "semantic_gaps": semantic_gaps,  # v24.1: luki semantyczne
+        "language_audit": {
+            "semantic_score": semantic_score,
+            "density": density,
+            "burstiness": burstiness
+        },
+        "warnings": warnings,
+        "status": status
     }
 
+    project_data.setdefault("batches", []).append(batch_entry)
+    project_data["keywords_state"] = keywords_state
+    
+    try:
+        doc_ref.set(project_data)
+    except Exception as e:
+        print(f"[FIRESTORE] ⚠️ Błąd zapisu: {e}")
 
-def _extract_legal_keyword(text: str) -> Optional[str]:
-    """Wyciąga słowo prawne do wyszukania."""
-    text_lower = text.lower()
-    
-    for keyword in CONFIG.LEGAL_KEYWORDS:
-        if keyword.lower() in text_lower:
-            return keyword
-    
-    words = text_lower.split()[:2]
-    return " ".join(words) if words else None
+    # =========================================================================
+    # v33.3: Przygotuj keywords_state_after do response
+    # GPT od razu widzi aktualny stan keywords bez dodatkowego GET /status
+    # =========================================================================
+    keywords_state_after = {}
+    for rid, meta in keywords_state.items():
+        keywords_state_after[rid] = {
+            "keyword": meta.get("keyword", ""),
+            "type": meta.get("type", "BASIC"),
+            "actual_uses": meta.get("actual_uses", 0),
+            "target_min": meta.get("target_min", 1),
+            "target_max": meta.get("target_max", 999),
+            "remaining_max": meta.get("remaining_max", 0),
+            "status": meta.get("status", "UNDER")
+        }
 
-
-def _build_article_instruction(judgments: List[Dict]) -> str:
-    """Buduje MINIMALNĄ instrukcję dla GPT."""
-    
-    if not judgments:
-        return ""
-    
-    # Skondensowana instrukcja - minimum pól w prompcie
-    lines = [
-        f"⚖️ ORZECZENIA (max {CONFIG.MAX_CITATIONS_PER_ARTICLE}, skopiuj dokładnie sygnaturę):"
-    ]
-    
-    for i, j in enumerate(judgments, 1):
-        direction = j.get("direction", "")
-        dir_marker = "✓" if direction == "za" else "✗" if direction == "przeciw" else "○"
+    # =========================================================================
+    # v33.3: Delta-S2 - mierz przyrost pokrycia encji
+    # =========================================================================
+    delta_s2 = None
+    try:
+        s1_data = project_data.get("s1_data", {})
+        entity_seo = s1_data.get("entity_seo", {})
+        s1_entities = entity_seo.get("entities", [])
         
-        # Pokaż cytowany przepis jeśli dostępny
-        article = j.get("article_cited", "")
-        article_str = f" [{article}]" if article else ""
+        # Zbuduj accumulated_text z poprzednich batchów (bez bieżącego)
+        previous_batches = project_data.get("batches", [])[:-1]  # Bez właśnie dodanego
+        accumulated_text = "\n\n".join([b.get("text", "") for b in previous_batches])
         
-        lines.append(f"{i}. {j.get('citation', '')}{article_str} [{dir_marker}]")
+        # Oblicz batch_number
+        batch_number = len(project_data.get("batches", []))
+        total_batches = project_data.get("total_planned_batches", 7)
         
-        # Dodaj URL źródła
-        url = j.get("url", "")
-        if url:
-            lines.append(f"   🔗 Źródło: {url}")
-        
-        # Dodaj uzasadnienie Claude'a jeśli dostępne
-        claude_reason = j.get("claude_reason", "")
-        if claude_reason:
-            lines.append(f"   Pasuje: {claude_reason}")
-        
-        lines.append(f"   \"{j.get('excerpt', '')[:120]}...\"")
-    
-    lines.append("")
-    lines.append("Wzór: \"Jak wskazał [Sąd] w wyroku z [data] (sygn. [X]), ...\"")
-    lines.append("Jeśli [✗]: \"Warto zauważyć, że sądy oddalają gdy...\"")
-    lines.append("⚠️ PODLINKUJ sygnaturę do źródła SAOS!")
-    lines.append("Koniec: *Nie stanowi porady prawnej.*")
-    
-    return "\n".join(lines)
+        if s1_entities:
+            delta_s2 = calculate_delta_s2(
+                batch_text=batch_text,
+                accumulated_text=accumulated_text,
+                s1_entities=s1_entities,
+                batch_number=batch_number,
+                total_batches=total_batches
+            )
+            print(f"[TRACKER] 📊 Delta-S2: +{delta_s2.get('delta_count', 0)} encji, total {delta_s2.get('coverage_percent', 0)}%")
+    except Exception as e:
+        print(f"[TRACKER] Delta-S2 error: {e}")
+        delta_s2 = {"enabled": False, "error": str(e)}
 
-
-# ============================================================================
-# WALIDACJA CAŁEGO ARTYKUŁU
-# ============================================================================
-
-def validate_article_citations(full_text: str) -> Dict[str, Any]:
-    """Waliduje liczbę sygnatur w całym artykule."""
-    
-    patterns = [
-        r'\b[IVX]+\s+[A-Z]+\s+\d+/\d+\b',
-        r'\bsygn\.\s*[IVX\d]+\s*[A-Za-z]+\s*\d+/\d+',
-        r'\b[IVX]?\s*(?:C|K|Ca|Ka|ACa|AKa|CZP)\s*\d+/\d+',
-    ]
-    
-    found = set()
-    for pattern in patterns:
-        matches = re.findall(pattern, full_text, re.IGNORECASE)
-        found.update(matches)
-    
-    count = len(found)
-    
-    if count == 0:
-        status = "INFO"
-        message = "Brak sygnatur - rozważ dodanie 1-2 orzeczeń"
-    elif count <= CONFIG.MAX_CITATIONS_PER_ARTICLE:
-        status = "OK"
-        message = f"Znaleziono {count} sygnatur ✓"
-    else:
-        status = "WARNING"
-        message = f"Za dużo sygnatur ({count}), max {CONFIG.MAX_CITATIONS_PER_ARTICLE}"
-    
-    has_disclaimer = any(phrase in full_text.lower() for phrase in [
-        "nie stanowi porady prawnej",
-        "charakter informacyjny"
-    ])
-    
     return {
         "status": status,
-        "message": message,
-        "citations_found": count,
-        "citations_limit": CONFIG.MAX_CITATIONS_PER_ARTICLE,
-        "citations": list(found)[:5],
-        "has_disclaimer": has_disclaimer,
-        "disclaimer_reminder": None if has_disclaimer else "⚠️ Dodaj disclaimer!"
+        "semantic_score": semantic_score,
+        "density": density,
+        "burstiness": burstiness,
+        "warnings": warnings,
+        "per_batch_warnings": per_batch_warnings,  # v24.0: osobno
+        "semantic_gaps": semantic_gaps,  # v24.1: frazy bez pokrycia
+        "exceeded_keywords": exceeded_keywords,
+        "batch_counts": batch_counts,
+        "unified_counting": UNIFIED_COUNTING if 'UNIFIED_COUNTING' in dir() else False,  # v24.2
+        "in_headers": in_headers if 'in_headers' in dir() else {},  # v24.2: frazy w H2/H3
+        "in_intro": in_intro if 'in_intro' in dir() else {},  # v24.2: frazy w intro
+        "keywords_state_after": keywords_state_after,  # v33.3: Aktualny stan keywords po zapisie batcha
+        "delta_s2": delta_s2,  # v33.3: Przyrost pokrycia encji
+        # 🆕 v36.1: Semantic proximity validation
+        "semantic_proximity": {
+            "score": proximity_score,
+            "isolated_keywords": isolated_keywords[:5]
+        },
+        "status_code": 200
     }
 
 
 # ============================================================================
-# GŁÓWNA FUNKCJA
+# 4. MINIMAL RESPONSE (v24.0 - rozróżnia EXCEEDED TOTAL vs per-batch)
 # ============================================================================
-
-def get_legal_context_for_article(
-    main_keyword: str,
-    additional_keywords: List[str] = None,
-    force_enable: bool = False
-) -> Dict[str, Any]:
+def _minimal_batch_response(result: dict, project_data: dict = None) -> dict:
     """
-    Główna funkcja - zwraca kontekst prawny dla artykułu.
+    v24.0: Rozróżnia EXCEEDED TOTAL (blokuje) vs per-batch warnings (info).
     """
-    category = detect_category(main_keyword, additional_keywords)
+    problems = []  # Krytyczne - wymagają reakcji
+    info = []  # Informacyjne - można zignorować
     
-    if not category["is_legal"] and not force_enable:
-        return {
-            "legal_module_active": False,
-            "category": category,
-            "judgments": [],
-            "instruction": None
+    # EXCEEDED TOTAL - KRYTYCZNE
+    exceeded = result.get("exceeded_keywords", [])
+    for ex in exceeded:
+        problems.append(f"❌ '{ex['keyword']}' PRZEKROCZYŁA CAŁKOWITY LIMIT ({ex['would_be']}/{ex['target_max']})")
+    
+    # Per-batch warnings - tylko INFO
+    for w in result.get("per_batch_warnings", []):
+        info.append(w)
+    
+    # Inne ważne warnings (density)
+    for w in result.get("warnings", []):
+        if "EXCEEDED TOTAL" in str(w):
+            if w not in problems:
+                problems.append(w)
+        elif "density" in str(w).lower():
+            problems.append(w)
+    
+    # Status
+    status = "OK"
+    if problems:
+        status = "WARN"
+    if result.get("status") == "FORCED":
+        status = "FORCED"
+    # v24.0: Jeśli status APPROVED z process_batch - zachowaj
+    if result.get("status") == "APPROVED":
+        status = "OK"
+    
+    # Batch info
+    batch_number = 1
+    remaining_batches = 0
+    if project_data:
+        batches_done = len(project_data.get("batches", []))
+        batches_planned = len(project_data.get("batches_plan", [])) or project_data.get("total_planned_batches", 4)
+        batch_number = batches_done
+        remaining_batches = max(0, batches_planned - batches_done)
+    
+    # Next action
+    if exceeded:
+        next_action = {
+            "action": "ask_user",
+            "question": f"Przekroczono CAŁKOWITY limit dla {len(exceeded)} fraz. A) Przepisać batch B) Kontynuować (forced)?"
+        }
+    elif remaining_batches > 0:
+        next_action = {
+            "action": "continue",
+            "call": "GET /pre_batch_info → pisz kolejny batch"
+        }
+    else:
+        next_action = {
+            "action": "review",
+            "call": "POST /editorial_review → oceń całość"
         }
     
-    judgments_result = get_best_judgments_for_article(main_keyword)
-    
-    return {
-        "legal_module_active": True,
-        "category": category,
-        "keyword_used": judgments_result.get("keyword_used"),
-        "stats": {
-            "total_found": judgments_result.get("total_found", 0),
-            "analyzed": judgments_result.get("analyzed", 0),
-            "passed_scoring": judgments_result.get("passed_scoring", 0)
-        },
-        "judgments": judgments_result.get("judgments", []),
-        "instruction": judgments_result.get("instruction", ""),
-        "max_citations": CONFIG.MAX_CITATIONS_PER_ARTICLE,
-        "disclaimer_required": True
+    response = {
+        "saved": True,
+        "batch": batch_number,
+        "status": status,
+        "next": next_action,
+        "remaining_batches": remaining_batches
     }
-
-
-# ============================================================================
-# DISCLAIMER
-# ============================================================================
-
-LEGAL_DISCLAIMER = "*Artykuł ma charakter informacyjny i nie stanowi porady prawnej.*"
-
-
-# ============================================================================
-# TEST
-# ============================================================================
-
-if __name__ == "__main__":
-    print("🏛️ BRAJEN Legal Module v3.0 Test\n")
     
-    # Test scoringu
-    print("=" * 50)
-    print("TEST: Scoring orzeczenia")
-    print("=" * 50)
+    # v24.0: Osobno problems (krytyczne) i info (per-batch)
+    if problems:
+        response["problems"] = problems
+    if info:
+        response["info"] = info  # Per-batch to tylko info
     
-    sample_text = """
-    Sąd Najwyższy orzeka, że na podstawie art. 133 KRO obowiązek alimentacyjny 
-    polega na dostarczaniu środków utrzymania. Zdaniem Sądu, przy ustalaniu 
-    wysokości alimentów należy brać pod uwagę możliwości zarobkowe zobowiązanego
-    zgodnie z art. 135 § 1 KRO. Powództwo zasługuje na uwzględnienie.
+    return response
+
+@tracker_routes.post("/api/project/<project_id>/approve_batch")
+def approve_batch(project_id):
     """
-    
-    result = score_judgment(sample_text, "alimenty")
-    print(f"Score: {result['score']}/{result['max_score']}")
-    for detail in result['details']:
-        print(f"  {detail}")
-    print(f"Przepisy: {result['articles_found']}")
-    print(f"Użyteczne: {result['is_usable']}")
-    
-    # Test złego orzeczenia
-    print("\n" + "=" * 50)
-    print("TEST: Słabe orzeczenie")
-    print("=" * 50)
-    
-    bad_text = """
-    Sąd oddala powództwo w całości. Apelacja nie zasługuje na uwzględnienie.
-    Koszty postępowania ponosi powód.
+    v28.1: Grammar validation before save + fallback z ostatniego preview.
+    Obsługuje: corrected_text, text, content, batch_text
+    Fallback: Pobiera tekst z ostatniego preview jeśli nie wysłano w body.
     """
+    data = request.get_json(force=True) if request.is_json else {}
     
-    result2 = score_judgment(bad_text, "alimenty")
-    print(f"Score: {result2['score']}/{result2['max_score']}")
-    for detail in result2['details']:
-        print(f"  {detail}")
-    print(f"Użyteczne: {result2['is_usable']}")
+    # v27.0: Próbuj różne nazwy pól
+    text = None
+    source = None
+    for field in ["corrected_text", "text", "content", "batch_text"]:
+        if field in data and data[field]:
+            text = data[field].strip()
+            source = f"body.{field}"
+            print(f"[APPROVE_BATCH] Znaleziono tekst w polu '{field}' ({len(text)} znaków)")
+            break
+    
+    # v27.0: FALLBACK - pobierz z ostatniego preview jeśli brak tekstu
+    if not text:
+        print(f"[APPROVE_BATCH] ⚠️ Brak tekstu w body, próbuję fallback z last_preview...")
+        db = firestore.client()
+        doc = db.collection("seo_projects").document(project_id).get()
+        
+        if doc.exists:
+            project_data = doc.to_dict()
+            last_preview = project_data.get("last_preview", {})
+            preview_text = last_preview.get("text", "")
+            
+            if preview_text:
+                text = preview_text.strip()
+                source = "fallback.last_preview"
+                print(f"[APPROVE_BATCH] ✅ Fallback OK - użyto tekstu z last_preview ({len(text)} znaków)")
+            else:
+                # Próbuj też z ostatniego batcha w trybie "approve again"
+                batches = project_data.get("batches", [])
+                if batches:
+                    last_batch_text = batches[-1].get("text", "")
+                    if last_batch_text:
+                        text = last_batch_text.strip()
+                        source = "fallback.last_batch"
+                        print(f"[APPROVE_BATCH] ✅ Fallback OK - użyto tekstu z ostatniego batcha ({len(text)} znaków)")
+    
+    if not text:
+        return jsonify({
+            "error": "No text provided",
+            "hint": "Wyślij tekst w polu 'corrected_text' lub 'text'. Możesz też najpierw wywołać preview_batch.",
+            "received_fields": list(data.keys()),
+            "fallback_tried": True,
+            "fallback_failed": "Brak last_preview w projekcie"
+        }), 400
+    
+    meta_trace = data.get("meta_trace", {})
+    if source:
+        meta_trace["text_source"] = source
+    forced = data.get("forced", False)
+    
+    # v28.1: GRAMMAR VALIDATION - sprawdź przed zapisem (chyba że forced=true)
+    if not forced:
+        try:
+            from grammar_middleware import validate_batch_full
+            grammar_check = validate_batch_full(text)
+            
+            if not grammar_check["is_valid"]:
+                print(f"[APPROVE_BATCH] ⚠️ Grammar issues found, returning for correction")
+                return jsonify({
+                    "saved": False,
+                    "status": "NEEDS_CORRECTION",
+                    "needs_correction": True,
+                    "grammar": grammar_check["grammar"],
+                    "banned_phrases": grammar_check["banned_phrases"],
+                    "correction_prompt": grammar_check["correction_prompt"],
+                    "instruction": "Popraw błędy i wyślij ponownie. Użyj forced=true aby zapisać mimo błędów.",
+                    "hint": "Możesz też wywołać z 'forced': true aby wymusić zapis"
+                }), 200  # 200, nie 400 - to nie jest błąd, to walidacja
+                
+        except ImportError:
+            print(f"[APPROVE_BATCH] ⚠️ grammar_middleware not available, skipping validation")
+        except Exception as e:
+            print(f"[APPROVE_BATCH] ⚠️ Grammar check error: {e}, proceeding with save")
+
+    result = process_batch_in_firestore(project_id, text, meta_trace, forced)
+
+    db = firestore.client()
+    doc = db.collection("seo_projects").document(project_id).get()
+    project_data = doc.to_dict() if doc.exists else None
+    
+    response = _minimal_batch_response(result, project_data)
+    response["text_source"] = source
+    response["grammar_validated"] = not forced  # v28.1
+    
+    return jsonify(response), 200
+
+
+@tracker_routes.get("/api/debug/<project_id>")
+def debug_keywords(project_id):
+    db = firestore.client()
+    doc = db.collection("seo_projects").document(project_id).get()
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+    
+    data = doc.to_dict()
+    keywords = data.get("keywords_state", {})
+    batches = data.get("batches", [])
+    
+    stats = []
+    for rid, meta in keywords.items():
+        stats.append({
+            "keyword": meta.get("keyword"),
+            "type": meta.get("type", "BASIC"),
+            "actual": meta.get("actual_uses", 0),
+            "target": f"{meta.get('target_min', 0)}-{meta.get('target_max', 999)}",
+            "status": meta.get("status"),
+            "remaining": meta.get("remaining_max", 0)
+        })
+    
+    return jsonify({
+        "project_id": project_id,
+        "keywords": stats,
+        "batches": len(batches)
+    }), 200
+
+
+@tracker_routes.delete("/api/project/<project_id>")
+def delete_project(project_id):
+    """Usuwa projekt z Firestore."""
+    db = firestore.client()
+    doc_ref = db.collection("seo_projects").document(project_id)
+    doc = doc_ref.get()
+    
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+    
+    doc_ref.delete()
+    return jsonify({"status": "DELETED", "project_id": project_id}), 200
+
+
+@tracker_routes.post("/api/project/<project_id>/reset")
+def reset_project(project_id):
+    """Resetuje projekt - usuwa batche, zeruje keywords."""
+    db = firestore.client()
+    doc_ref = db.collection("seo_projects").document(project_id)
+    doc = doc_ref.get()
+    
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+    
+    project_data = doc.to_dict()
+    
+    doc_ref.update({
+        "batches": [],
+        "final_review": None,
+        "keywords_state": {
+            rid: {**meta, "actual_uses": 0, "status": "UNDER", "remaining_max": meta.get("target_max", 999)}
+            for rid, meta in project_data.get("keywords_state", {}).items()
+        }
+    })
+    
+    return jsonify({"status": "RESET", "project_id": project_id}), 200
