@@ -273,6 +273,92 @@ def distribute_keywords(
 # 🎯 GŁÓWNA FUNKCJA - CREATE ARTICLE PLAN
 # ================================================================
 
+def convert_semantic_plan_to_distribution(
+    semantic_plan: Dict,
+    keywords_state: Dict,
+    total_batches: int
+) -> Dict[str, Dict]:
+    """
+    🆕 v36.0: Konwertuje semantic_keyword_plan na format keywords_distribution.
+    
+    semantic_plan.batch_plans[i].assigned_keywords → per_batch array
+    """
+    distribution = {}
+    
+    batch_plans = semantic_plan.get("batch_plans", [])
+    universal_keywords = set(semantic_plan.get("universal_keywords", []))
+    keyword_assignments = semantic_plan.get("keyword_assignments", {})
+    
+    # Zbierz wszystkie keywords z keywords_state
+    for rid, meta in keywords_state.items():
+        keyword = meta.get("keyword", "")
+        if not keyword:
+            continue
+            
+        kw_type = meta.get("type", "BASIC").upper()
+        is_main = meta.get("is_main_keyword", False)
+        target_min = meta.get("target_min", 1)
+        target_max = meta.get("target_max", 5)
+        
+        per_batch = [0] * total_batches
+        
+        # Sprawdź czy keyword jest uniwersalny
+        if keyword in universal_keywords or keyword.lower() in [u.lower() for u in universal_keywords]:
+            # Uniwersalne: rozłóż równomiernie
+            per_batch_target = max(1, math.ceil(target_max / total_batches))
+            for i in range(total_batches):
+                per_batch[i] = per_batch_target
+            # Dostosuj do target_max
+            current_sum = sum(per_batch)
+            if current_sum > target_max:
+                diff = current_sum - target_max
+                for i in range(total_batches - 1, -1, -1):
+                    reduce = min(diff, per_batch[i] - 1)
+                    per_batch[i] -= reduce
+                    diff -= reduce
+                    if diff <= 0:
+                        break
+        else:
+            # Sprawdź przypisanie z semantic_plan
+            assignment = keyword_assignments.get(keyword) or keyword_assignments.get(keyword.lower())
+            
+            if assignment and assignment.get("batch"):
+                # Przypisany do konkretnego batcha
+                assigned_batch = assignment["batch"] - 1  # 0-indexed
+                if 0 <= assigned_batch < total_batches:
+                    # Daj wszystkie użycia w przypisanym batchu
+                    per_batch[assigned_batch] = target_max
+                else:
+                    # Fallback: ostatni batch
+                    per_batch[total_batches - 1] = target_max
+            else:
+                # Brak przypisania - szukaj w batch_plans
+                found = False
+                for bp in batch_plans:
+                    batch_idx = bp.get("batch_number", 1) - 1
+                    assigned_kws = bp.get("assigned_keywords", [])
+                    if keyword in assigned_kws or keyword.lower() in [k.lower() for k in assigned_kws]:
+                        if 0 <= batch_idx < total_batches:
+                            per_batch[batch_idx] = target_max
+                            found = True
+                            break
+                
+                if not found:
+                    # Fallback: hash distribution
+                    batch_idx = hash(keyword) % total_batches
+                    per_batch[batch_idx] = target_max
+        
+        distribution[keyword] = {
+            "total_target": target_max,
+            "target_min": target_min,
+            "type": kw_type,
+            "is_main": is_main,
+            "per_batch": per_batch
+        }
+    
+    return distribution
+
+
 def create_article_plan(
     h2_structure: List[str],
     keywords_state: Dict,
@@ -281,7 +367,8 @@ def create_article_plan(
     ngrams: List[str] = None,
     entities: List[Dict] = None,
     paa_questions: List[str] = None,
-    max_batches: int = 6
+    max_batches: int = 6,
+    semantic_keyword_plan: Dict = None  # 🆕 v36.0
 ) -> ArticlePlan:
     """
     🎯 Tworzy kompletny plan artykułu Z GÓRY.
@@ -292,6 +379,9 @@ def create_article_plan(
     - Encji do zdefiniowania
     - Keywords do wplecenia
     - PAA match (snippet potential)
+    
+    🆕 v36.0: Jeśli semantic_keyword_plan jest dostępny, używa go
+    zamiast mechanicznego distribute_keywords().
     """
     ngrams = ngrams or []
     entities = entities or []
@@ -313,7 +403,16 @@ def create_article_plan(
     h2_per_batch = distribute_items(h2_structure, total_batches)
     
     # 3. ROZDZIEL KEYWORDS NA BATCHE
-    keywords_distribution = distribute_keywords(keywords_state, total_batches, main_keyword)
+    # 🆕 v36.0: Użyj semantic_keyword_plan jeśli dostępny
+    if semantic_keyword_plan and semantic_keyword_plan.get("batch_plans"):
+        print(f"[BATCH_PLANNER] 🎯 Using semantic_keyword_plan for keyword distribution")
+        keywords_distribution = convert_semantic_plan_to_distribution(
+            semantic_plan=semantic_keyword_plan,
+            keywords_state=keywords_state,
+            total_batches=total_batches
+        )
+    else:
+        keywords_distribution = distribute_keywords(keywords_state, total_batches, main_keyword)
     
     # 4. ROZDZIEL N-GRAMY NA BATCHE
     ngrams_per_batch = distribute_items(ngrams, total_batches)
