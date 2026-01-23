@@ -384,11 +384,42 @@ def get_best_judgments_for_article(
     
     all_judgments = results.get("judgments", [])
     
+    # ================================================================
+    # 🆕 v36.1: LOCAL COURT SCRAPER FALLBACK
+    # Gdy SAOS zwraca < 3 wyniki, szukaj w lokalnych portalach sądów
+    # ================================================================
+    local_court_used = False
+    if len(all_judgments) < 3:
+        try:
+            from local_court_scraper import search_local_courts
+            
+            print(f"[LEGAL_MODULE] 🏛️ SAOS zwrócił tylko {len(all_judgments)} orzeczeń - próbuję lokalne sądy")
+            local_results = search_local_courts(search_keyword, max_results=10)
+            
+            if local_results.get("status") == "OK":
+                local_judgments = local_results.get("judgments", [])
+                if local_judgments:
+                    # Dodaj źródło do każdego orzeczenia
+                    for lj in local_judgments:
+                        lj["source"] = "LOCAL_COURT"
+                        lj["source_portal"] = local_results.get("portal", "unknown")
+                    
+                    all_judgments.extend(local_judgments)
+                    local_court_used = True
+                    print(f"[LEGAL_MODULE] ✅ Dodano {len(local_judgments)} orzeczeń z lokalnych sądów (łącznie: {len(all_judgments)})")
+            else:
+                print(f"[LEGAL_MODULE] ⚠️ Lokalne sądy: {local_results.get('message', 'brak wyników')}")
+        except ImportError:
+            print("[LEGAL_MODULE] ⚠️ local_court_scraper not available")
+        except Exception as e:
+            print(f"[LEGAL_MODULE] ⚠️ Local court scraper error: {e}")
+    
     if not all_judgments:
         return {
             "status": "NO_RESULTS",
-            "message": f"Brak orzeczeń dla: {search_keyword}",
-            "judgments": []
+            "message": f"Brak orzeczeń dla: {search_keyword} (sprawdzono SAOS + lokalne sądy)",
+            "judgments": [],
+            "local_court_checked": True
         }
     
     # Przygotuj excerpty dla każdego orzeczenia
@@ -424,7 +455,8 @@ def get_best_judgments_for_article(
                 "selection_method": method,
                 "claude_reasoning": reasoning,
                 "judgments": best_judgments,
-                "instruction": _build_article_instruction(best_judgments)
+                "instruction": _build_article_instruction(best_judgments),
+                "local_court_used": local_court_used  # 🆕 v36.1
             }
         elif claude_result["status"] == "OK" and not claude_result["selected"]:
             # 🆕 v3.3: Claude odrzucił WSZYSTKIE orzeczenia - NIE fallback!
@@ -438,7 +470,8 @@ def get_best_judgments_for_article(
                 "analyzed": len(all_judgments),
                 "message": f"Żadne z {len(all_judgments)} orzeczeń nie pasuje do tematu. {reasoning}",
                 "judgments": [],
-                "instruction": ""
+                "instruction": "",
+                "local_court_used": local_court_used  # 🆕 v36.1
             }
     
     # ================================================================
@@ -469,7 +502,8 @@ def get_best_judgments_for_article(
             "analyzed": len(all_judgments),
             "message": f"Żadne z {len(all_judgments)} orzeczeń nie przeszło weryfikacji merytorycznej.",
             "judgments": [],
-            "instruction": ""
+            "instruction": "",
+            "local_court_used": local_court_used  # 🆕 v36.1
         }
     
     # Sortuj i weź najlepsze
@@ -492,7 +526,8 @@ def get_best_judgments_for_article(
         "analyzed": len(all_judgments),
         "selection_method": "fallback_scoring",
         "judgments": best_judgments,
-        "instruction": _build_article_instruction(best_judgments)
+        "instruction": _build_article_instruction(best_judgments),
+        "local_court_used": local_court_used  # 🆕 v36.1
     }
 
 
