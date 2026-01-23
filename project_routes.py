@@ -1861,6 +1861,50 @@ def create_project():
         "s1_data": s1_data
     }
     
+    # ================================================================
+    # 🆕 v36.1: E-E-A-T ANALYSIS (entity_ngram_analyzer)
+    # Wykrywa sygnały ekspertyzji, autorytetu i zaufania
+    # ================================================================
+    try:
+        from entity_ngram_analyzer import analyze_eeat, analyze_content_semantics
+        
+        # Zbierz teksty konkurencji z S1
+        competitor_analysis = s1_data.get("competitor_analysis", [])
+        competitor_texts = []
+        for comp in competitor_analysis:
+            if isinstance(comp, dict):
+                content = comp.get("content", "") or comp.get("text", "")
+                if content:
+                    competitor_texts.append(content)
+        
+        combined_text = "\n\n".join(competitor_texts[:5])  # Max 5 konkurentów
+        
+        if combined_text and len(combined_text) > 500:
+            eeat_analysis = analyze_eeat(combined_text)
+            
+            # Zapisz wyniki
+            if hasattr(eeat_analysis, 'to_dict'):
+                project_data["eeat_analysis"] = eeat_analysis.to_dict()
+            else:
+                project_data["eeat_analysis"] = {
+                    "expertise_score": getattr(eeat_analysis, 'expertise_score', 0),
+                    "authority_score": getattr(eeat_analysis, 'authority_score', 0),
+                    "trust_score": getattr(eeat_analysis, 'trust_score', 0),
+                    "expertise_signals": getattr(eeat_analysis, 'expertise_signals', []),
+                    "authority_signals": getattr(eeat_analysis, 'authority_signals', []),
+                    "trust_signals": getattr(eeat_analysis, 'trust_signals', [])
+                }
+            
+            print(f"[PROJECT] 🏆 E-E-A-T analysis: expertise={project_data['eeat_analysis'].get('expertise_score', 0)}, "
+                  f"authority={project_data['eeat_analysis'].get('authority_score', 0)}, "
+                  f"trust={project_data['eeat_analysis'].get('trust_score', 0)}")
+        else:
+            print(f"[PROJECT] ⚠️ E-E-A-T skipped: insufficient competitor text ({len(combined_text)} chars)")
+    except ImportError:
+        print("[PROJECT] ⚠️ entity_ngram_analyzer not available")
+    except Exception as e:
+        print(f"[PROJECT] ⚠️ E-E-A-T analysis error: {e}")
+    
     batch_plan_dict = None
     semantic_plan = None
     
