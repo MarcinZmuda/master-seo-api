@@ -1601,6 +1601,51 @@ def approve_batch():
             print(f"[APPROVE_BATCH] Entity Split/Topic error: {e}")
     
     # ============================================
+    # 🆕 v36.0: SEMANTIC KEYWORD PLAN VALIDATION
+    # Sprawdź czy assigned_keywords dla tego batcha zostały użyte
+    # ============================================
+    semantic_plan_warnings = []
+    assigned_keywords_used = []
+    assigned_keywords_missing = []
+    
+    try:
+        project_data = get_project(project_id) or {}
+        semantic_plan = project_data.get("semantic_keyword_plan", {})
+        
+        if semantic_plan:
+            batch_plans = semantic_plan.get("batch_plans", [])
+            
+            # Znajdź plan dla bieżącego batcha
+            current_batch_plan = None
+            for bp in batch_plans:
+                if bp.get("batch_number") == batch_number:
+                    current_batch_plan = bp
+                    break
+            
+            if current_batch_plan:
+                assigned_kws = current_batch_plan.get("assigned_keywords", [])
+                content_lower = accumulated_content.lower()
+                
+                for kw in assigned_kws:
+                    if kw.lower() in content_lower:
+                        assigned_keywords_used.append(kw)
+                    else:
+                        assigned_keywords_missing.append(kw)
+                
+                # Warning dla nieużytych assigned_keywords
+                if assigned_keywords_missing and batch_number < total_batches:
+                    semantic_plan_warnings.append({
+                        "type": "SEMANTIC_ASSIGNED_MISSING",
+                        "message": f"⚠️ Przypisane frazy dla tego batcha nieużyte: {', '.join(assigned_keywords_missing[:5])}",
+                        "missing": assigned_keywords_missing,
+                        "h2": current_batch_plan.get("h2"),
+                        "batch": batch_number
+                    })
+                    print(f"[APPROVE_BATCH] 🎯 Semantic: {len(assigned_keywords_used)} assigned used, {len(assigned_keywords_missing)} missing")
+    except Exception as e:
+        print(f"[APPROVE_BATCH] Semantic plan validation error: {e}")
+    
+    # ============================================
     # 6. 🆕 FAZA 2: BATCH HISTORY TRACKING
     # ============================================
     batch_history = []
@@ -1743,6 +1788,9 @@ def approve_batch():
     # 2. Burstiness < 1.2 (ekstremalnie monotonne)
     final_should_block = severe_stuffing or should_block_humanization
     
+    # 🆕 v36.0: Dodaj semantic_plan_warnings do keyword_warnings
+    keyword_warnings.extend(semantic_plan_warnings)
+    
     # 🔧 v35.7: Jeśli zwykłe stuffing (bez severe), zmień na WARNING
     if has_blockers and not severe_stuffing:
         for blocker in keyword_blockers:
@@ -1797,6 +1845,13 @@ def approve_batch():
         
         # 🆕 Faza 2: Topic Completeness (szczegóły)
         "topic_completeness": topic_completeness_result,
+        
+        # 🆕 v36.0: Semantic Keyword Plan validation
+        "semantic_plan_validation": {
+            "assigned_used": assigned_keywords_used,
+            "assigned_missing": assigned_keywords_missing,
+            "warnings": semantic_plan_warnings
+        },
         
         # 🆕 Faza 2: Batch History & Trend
         "batch_trend": batch_trend,
