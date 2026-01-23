@@ -21,6 +21,17 @@ from google.api_core.exceptions import InvalidArgument
 import google.generativeai as genai
 import os
 
+# 🆕 v36.2: Anti-Frankenstein System
+try:
+    from anti_frankenstein_integration import (
+        update_project_after_batch,
+        validate_batch_with_soft_caps
+    )
+    ANTI_FRANKENSTEIN_ENABLED = True
+except ImportError:
+    ANTI_FRANKENSTEIN_ENABLED = False
+    print("[TRACKER] ⚠️ Anti-Frankenstein modules not available")
+
 # v24.0: Współdzielony model spaCy (oszczędność RAM)
 try:
     from shared_nlp import get_nlp
@@ -521,6 +532,77 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         except Exception as e:
             print(f"[TRACKER] Semantic validation error: {e}")
     
+    # ================================================================
+    # 🆕 v36.1: SEMANTIC PROXIMITY VALIDATION
+    # Sprawdza czy frazy są otoczone kontekstem (nie w "próżni")
+    # Używa danych z S1 zamiast concept_map
+    # ================================================================
+    isolated_keywords = []
+    proximity_score = 100
+    try:
+        from semantic_proximity_validator import full_semantic_validation
+        
+        # Pobierz dane z S1
+        s1_data_for_proximity = project_data.get("s1_data", {})
+        entity_seo = s1_data_for_proximity.get("entity_seo", {})
+        entities = entity_seo.get("entities", [])
+        relationships = entity_seo.get("entity_relationships", [])
+        
+        # Zbuduj proximity_clusters z entity_relationships
+        proximity_clusters = []
+        for rel in relationships[:10]:
+            if isinstance(rel, dict):
+                subject = rel.get("subject", "")
+                obj = rel.get("object", "")
+                if subject and obj:
+                    proximity_clusters.append({
+                        "anchor": subject,
+                        "must_have_nearby": [obj],
+                        "max_distance": 30
+                    })
+        
+        # Zbuduj supporting_entities z entities
+        entity_names = []
+        for e in entities[:20]:
+            if isinstance(e, dict):
+                entity_names.append(e.get("name", ""))
+            else:
+                entity_names.append(str(e))
+        
+        supporting_entities = {"all": [n for n in entity_names if n]}
+        
+        # Pobierz keywords do walidacji
+        keywords_to_check = [
+            meta.get("keyword", "") 
+            for meta in keywords_state.values() 
+            if meta.get("keyword") and meta.get("type", "BASIC").upper() in ["BASIC", "MAIN"]
+        ][:15]  # Max 15 keywords
+        
+        if proximity_clusters or supporting_entities.get("all"):
+            proximity_result = full_semantic_validation(
+                text=batch_text,
+                keywords=keywords_to_check,
+                proximity_clusters=proximity_clusters,
+                supporting_entities=supporting_entities
+            )
+            
+            isolated_keywords = proximity_result.get("isolated_keywords", [])
+            proximity_score = proximity_result.get("overall_score", 100)
+            
+            # Dodaj warnings dla izolowanych fraz (max 3)
+            for isolated in isolated_keywords[:3]:
+                keyword_name = isolated.get("keyword", isolated) if isinstance(isolated, dict) else isolated
+                warnings.append(f"⚠️ ISOLATED: '{keyword_name}' - fraza bez kontekstu semantycznego")
+            
+            if proximity_score < 60:
+                warnings.append(f"⚠️ Semantic proximity score: {proximity_score}/100 - dodaj więcej kontekstu")
+                
+            print(f"[TRACKER] 🔗 Semantic proximity: score={proximity_score}, isolated={len(isolated_keywords)}")
+    except ImportError:
+        print("[TRACKER] ⚠️ semantic_proximity_validator not available")
+    except Exception as e:
+        print(f"[TRACKER] Semantic proximity error: {e}")
+    
     # v24.0: Walidacja pierwszego zdania (WAŻNE dla SEO)
     if first_sentence_warning:
         warnings.insert(0, first_sentence_warning)  # Na początku - ważne!
@@ -578,6 +660,43 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
     project_data.setdefault("batches", []).append(batch_entry)
     project_data["keywords_state"] = keywords_state
     
+    # ================================================================
+    # 🆕 v36.2: ANTI-FRANKENSTEIN - Update Memory & Style
+    # ================================================================
+    if ANTI_FRANKENSTEIN_ENABLED:
+        try:
+            batch_number = len(project_data.get("batches", []))
+            h2_structure = project_data.get("h2_structure", [])
+            
+            # Wykryj H2 w tym batchu
+            h2_in_batch = re.findall(r'(?:^h2:\s*(.+)$|<h2[^>]*>([^<]+)</h2>)', batch_text, re.MULTILINE | re.IGNORECASE)
+            h2_sections = [(m[0] or m[1]).strip() for m in h2_in_batch if m[0] or m[1]]
+            if not h2_sections and h2_structure:
+                # Fallback - użyj następnego nieużytego H2
+                used_h2 = []
+                for b in project_data.get("batches", [])[:-1]:
+                    h2_match = re.findall(r'(?:^h2:\s*(.+)$|<h2[^>]*>([^<]+)</h2>)', b.get("text", ""), re.MULTILINE | re.IGNORECASE)
+                    used_h2.extend([(m[0] or m[1]).strip() for m in h2_match if m[0] or m[1]])
+                remaining = [h for h in h2_structure if h not in used_h2]
+                h2_sections = remaining[:1] if remaining else []
+            
+            # Zbierz użyte encje
+            entity_seo = project_data.get("s1_data", {}).get("entity_seo", {})
+            all_entities = [e.get("name", "") for e in entity_seo.get("entities", [])]
+            entities_used = [e for e in all_entities if e.lower() in batch_text.lower()]
+            
+            project_data = update_project_after_batch(
+                project_data=project_data,
+                batch_text=batch_text,
+                batch_number=batch_number,
+                h2_sections=h2_sections,
+                entities_used=entities_used,
+                humanness_score=100.0  # TODO: pobierz z ai_detection jeśli dostępne
+            )
+            print(f"[TRACKER] 🧟 Anti-Frankenstein updated: batch {batch_number}, memory claims: {len(project_data.get('article_memory', {}).get('key_claims', []))}")
+        except Exception as e:
+            print(f"[TRACKER] ⚠️ Anti-Frankenstein update error: {e}")
+    
     try:
         doc_ref.set(project_data)
     except Exception as e:
@@ -629,6 +748,39 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         print(f"[TRACKER] Delta-S2 error: {e}")
         delta_s2 = {"enabled": False, "error": str(e)}
 
+    # ================================================================
+    # 🆕 v36.2: SOFT CAP VALIDATION
+    # ================================================================
+    soft_cap_result = None
+    if ANTI_FRANKENSTEIN_ENABLED:
+        try:
+            # Przekształć batch_counts na format {keyword: count}
+            keyword_counts = {}
+            for rid, count in batch_counts.items():
+                meta = keywords_state.get(rid, {})
+                keyword = meta.get("keyword", "")
+                if keyword:
+                    keyword_counts[keyword] = count
+            
+            soft_cap_result = validate_batch_with_soft_caps(
+                batch_counts=keyword_counts,
+                keywords_state=keywords_state,
+                humanness_score=100.0,  # TODO: użyj rzeczywistego humanness jeśli dostępny
+                total_batches=project_data.get("total_planned_batches", 7)
+            )
+            
+            if soft_cap_result.get("available"):
+                soft_exceeded = soft_cap_result.get("soft_exceeded", [])
+                if soft_exceeded:
+                    accepted = [e["keyword"] for e in soft_exceeded if e.get("accepted")]
+                    rejected = [e["keyword"] for e in soft_exceeded if not e.get("accepted")]
+                    if accepted:
+                        print(f"[TRACKER] 🎚️ Soft cap: {len(accepted)} exceeded but accepted (natural text)")
+                    if rejected:
+                        print(f"[TRACKER] ⚠️ Soft cap: {len(rejected)} exceeded and rejected")
+        except Exception as e:
+            print(f"[TRACKER] ⚠️ Soft cap validation error: {e}")
+
     return {
         "status": status,
         "semantic_score": semantic_score,
@@ -644,6 +796,13 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         "in_intro": in_intro if 'in_intro' in dir() else {},  # v24.2: frazy w intro
         "keywords_state_after": keywords_state_after,  # v33.3: Aktualny stan keywords po zapisie batcha
         "delta_s2": delta_s2,  # v33.3: Przyrost pokrycia encji
+        # 🆕 v36.1: Semantic proximity validation
+        "semantic_proximity": {
+            "score": proximity_score,
+            "isolated_keywords": isolated_keywords[:5]
+        },
+        # 🆕 v36.2: Soft cap validation
+        "soft_cap_validation": soft_cap_result,
         "status_code": 200
     }
 
