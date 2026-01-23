@@ -68,10 +68,13 @@ def calculate_candidate_score(
     content: str,
     keywords_state: Dict,
     main_keyword: str,
-    validation_result: Dict
+    validation_result: Dict,
+    semantic_keyword_plan: Dict = None,  # 🆕 v36.0
+    batch_number: int = 1  # 🆕 v36.0
 ) -> Dict[str, Any]:
     """
     🔧 v26.2 OPTIMIZED: Bardziej elastyczne scoring.
+    🆕 v36.0: Bonus za użycie assigned_keywords z semantic_keyword_plan.
     """
     scores = {}
     issues = []
@@ -106,6 +109,40 @@ def calculate_candidate_score(
     else:
         coverage_score = basic_coverage * 0.9 + extended_coverage * 0.1
     
+    # ================================================================
+    # 🆕 v36.0: BONUS za assigned_keywords z semantic_keyword_plan
+    # ================================================================
+    semantic_bonus = 0
+    assigned_used_count = 0
+    assigned_total_count = 0
+    
+    if semantic_keyword_plan and batch_number:
+        batch_plans = semantic_keyword_plan.get("batch_plans", [])
+        for bp in batch_plans:
+            if bp.get("batch_number") == batch_number:
+                assigned_kws = bp.get("assigned_keywords", [])
+                assigned_total_count = len(assigned_kws)
+                
+                content_lower = content.lower()
+                for kw in assigned_kws:
+                    if kw.lower() in content_lower:
+                        assigned_used_count += 1
+                
+                # Bonus: +5 jeśli >50% assigned_keywords użyte
+                if assigned_total_count > 0:
+                    assigned_ratio = assigned_used_count / assigned_total_count
+                    if assigned_ratio >= 0.8:
+                        semantic_bonus = 8
+                    elif assigned_ratio >= 0.5:
+                        semantic_bonus = 5
+                    elif assigned_ratio >= 0.3:
+                        semantic_bonus = 2
+                    
+                    if semantic_bonus > 0:
+                        print(f"[BEST_OF_N] 🎯 Semantic bonus: +{semantic_bonus} ({assigned_used_count}/{assigned_total_count} assigned keywords used)")
+                break
+    
+    coverage_score += semantic_bonus
     scores["coverage"] = min(100, coverage_score)
     
     if basic_coverage < 100:
@@ -177,6 +214,12 @@ def calculate_candidate_score(
         "coverage": {
             "basic": basic_coverage,
             "extended": extended_coverage
+        },
+        # 🆕 v36.0: Semantic keyword plan info
+        "semantic_bonus": semantic_bonus,
+        "assigned_keywords": {
+            "used": assigned_used_count,
+            "total": assigned_total_count
         }
     }
 
