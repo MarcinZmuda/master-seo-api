@@ -689,6 +689,52 @@ Zwróć TYLKO poprawiony artykuł."""
             "correction_timestamp": firestore.SERVER_TIMESTAMP
         })
         
+        # ================================================================
+        # 🆕 v36.1: VERSION MANAGER - zapisz wersję przed i po korekcie
+        # ================================================================
+        try:
+            from version_manager import VersionManager, VersionSource, create_version_manager_for_project
+            
+            # Pobierz lub utwórz version_manager dla projektu
+            vm_data = data.get("version_manager")
+            if vm_data:
+                vm = VersionManager.from_dict(vm_data)
+            else:
+                vm = create_version_manager_for_project(project_id, batches)
+            
+            # Zapisz wersję PRZED korektą (jeśli jeszcze nie zapisana)
+            if not vm_data:
+                # Pierwszy raz - zapisz oryginalny tekst
+                vm.create_version(
+                    batch_number=0,  # 0 = cały artykuł
+                    text=full_text,
+                    source=VersionSource.MANUAL,
+                    metadata={"type": "original_before_corrections"}
+                )
+            
+            # Zapisz wersję PO korekcie
+            new_version = vm.create_version(
+                batch_number=0,  # 0 = cały artykuł
+                text=corrected,
+                source=VersionSource.FINAL_CORRECTIONS,
+                metadata={
+                    "corrections_count": len(corrections),
+                    "keywords_added": list(verification.keys()),
+                    "word_count_change": len(corrected.split()) - len(full_text.split())
+                }
+            )
+            
+            # Zapisz version_manager do projektu
+            doc_ref.update({
+                "version_manager": vm.to_dict()
+            })
+            
+            print(f"[FINAL_REVIEW] 📚 Version saved: v{new_version.version_number} (source: FINAL_CORRECTIONS)")
+        except ImportError:
+            print("[FINAL_REVIEW] ⚠️ version_manager not available")
+        except Exception as e:
+            print(f"[FINAL_REVIEW] ⚠️ Version tracking error: {e}")
+        
         print(f"[FINAL_REVIEW] ✅ Corrections applied")
         
         return jsonify({
@@ -730,3 +776,124 @@ def health_check():
 def apply_final_corrections_alias(project_id):
     """Alias dla apply_corrections."""
     return apply_final_corrections(project_id)
+
+
+# ================================================================
+# 🆕 v36.1: VERSION MANAGEMENT ENDPOINTS
+# ================================================================
+
+@final_review_routes.get("/api/project/<project_id>/versions")
+def get_version_history(project_id):
+    """Pobiera historię wersji artykułu."""
+    try:
+        db = firestore.client()
+        doc = db.collection("seo_projects").document(project_id).get()
+        
+        if not doc.exists:
+            return jsonify({"error": "Project not found"}), 404
+        
+        data = doc.to_dict()
+        vm_data = data.get("version_manager")
+        
+        if not vm_data:
+            return jsonify({
+                "status": "NO_VERSIONS",
+                "message": "Brak zapisanych wersji dla tego projektu",
+                "versions": []
+            }), 200
+        
+        try:
+            from version_manager import VersionManager
+            vm = VersionManager.from_dict(vm_data)
+            
+            # Pobierz historię dla całego artykułu (batch_number=0)
+            history = vm.get_batch_history(0)
+            
+            if history:
+                versions_summary = []
+                for v in history.versions:
+                    versions_summary.append({
+                        "version_id": v.version_id,
+                        "version_number": v.version_number,
+                        "source": v.source.value if hasattr(v.source, 'value') else str(v.source),
+                        "created_at": v.created_at,
+                        "word_count": v.word_count,
+                        "is_current": v.is_current,
+                        "metadata": v.metadata
+                    })
+                
+                return jsonify({
+                    "status": "OK",
+                    "project_id": project_id,
+                    "total_versions": len(versions_summary),
+                    "current_version_id": history.current_version_id,
+                    "versions": versions_summary
+                }), 200
+            else:
+                return jsonify({
+                    "status": "NO_VERSIONS",
+                    "message": "Brak zapisanych wersji",
+                    "versions": []
+                }), 200
+                
+        except ImportError:
+            return jsonify({"error": "version_manager not available"}), 500
+            
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@final_review_routes.post("/api/project/<project_id>/rollback/<version_id>")
+def rollback_to_version(project_id, version_id):
+    """Przywraca artykuł do wybranej wersji."""
+    try:
+        db = firestore.client()
+        doc = db.collection("seo_projects").document(project_id).get()
+        
+        if not doc.exists:
+            return jsonify({"error": "Project not found"}), 404
+        
+        data = doc.to_dict()
+        vm_data = data.get("version_manager")
+        
+        if not vm_data:
+            return jsonify({"error": "Brak historii wersji"}), 400
+        
+        try:
+            from version_manager import VersionManager, VersionSource
+            vm = VersionManager.from_dict(vm_data)
+            
+            # Wykonaj rollback
+            result = vm.rollback_to_version(batch_number=0, version_id=version_id)
+            
+            if result.get("status") != "OK":
+                return jsonify(result), 400
+            
+            restored_text = result.get("restored_text", "")
+            
+            # Zapisz przywrócony tekst
+            doc_ref = db.collection("seo_projects").document(project_id)
+            doc_ref.update({
+                "corrected_article": restored_text,
+                "version_manager": vm.to_dict(),
+                "rollback_timestamp": firestore.SERVER_TIMESTAMP
+            })
+            
+            print(f"[FINAL_REVIEW] 🔄 Rollback to version {version_id} successful")
+            
+            return jsonify({
+                "status": "ROLLED_BACK",
+                "project_id": project_id,
+                "restored_version_id": version_id,
+                "word_count": len(restored_text.split()),
+                "message": f"Przywrócono wersję {result.get('restored_version_number', '?')}"
+            }), 200
+            
+        except ImportError:
+            return jsonify({"error": "version_manager not available"}), 500
+            
+    except Exception as e:
+        import traceback
+        print(f"[FINAL_REVIEW] ❌ Rollback error: {e}")
+        print(traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
