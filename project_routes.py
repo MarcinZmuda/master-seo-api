@@ -55,6 +55,19 @@ from firestore_tracker_routes import process_batch_in_firestore
 import google.generativeai as genai
 from seo_optimizer import unified_prevalidation
 
+# 🆕 v36.2: Anti-Frankenstein System
+try:
+    from anti_frankenstein_integration import (
+        enhance_project_with_anti_frankenstein,
+        get_anti_frankenstein_context,
+        generate_anti_frankenstein_gpt_section,
+        update_project_after_batch
+    )
+    ANTI_FRANKENSTEIN_ENABLED = True
+except ImportError:
+    ANTI_FRANKENSTEIN_ENABLED = False
+    print("[PROJECT_ROUTES] ⚠️ Anti-Frankenstein modules not available")
+
 # v26.1: Keyword synonyms for exceeded keywords
 try:
     from keyword_synonyms import (
@@ -1985,6 +1998,25 @@ def create_project():
         except Exception as e:
             print(f"[PROJECT] ⚠️ Legal module error: {e}")
     
+    # ================================================================
+    # 🆕 v36.2: ANTI-FRANKENSTEIN SYSTEM
+    # Token Budgeting, Article Memory, Style Fingerprint, Soft Caps
+    # ================================================================
+    if ANTI_FRANKENSTEIN_ENABLED:
+        try:
+            project_data = enhance_project_with_anti_frankenstein(
+                project_data=project_data,
+                h2_structure=h2_structure,
+                keywords_state=firestore_keywords,
+                s1_data=s1_data,
+                main_keyword=topic,
+                target_length=target_length
+            )
+            print(f"[PROJECT] 🧟 Anti-Frankenstein: dynamic_plan={project_data.get('dynamic_batch_plan') is not None}, "
+                  f"memory={project_data.get('article_memory') is not None}")
+        except Exception as e:
+            print(f"[PROJECT] ⚠️ Anti-Frankenstein error: {e}")
+    
     doc_ref.set(project_data)
     
     # v27.2: Policz ile BASIC vs EXTENDED
@@ -3271,6 +3303,33 @@ def get_pre_batch_info(project_id):
     prompt_sections.append("   • Format: h2: / h3:")
     prompt_sections.append("="*50)
     
+    # ================================================================
+    # 🆕 v36.2: ANTI-FRANKENSTEIN CONTEXT
+    # Token Budgeting sections, Article Memory, Style Instructions
+    # ================================================================
+    anti_frankenstein_section = ""
+    dynamic_sections_data = None
+    if ANTI_FRANKENSTEIN_ENABLED:
+        try:
+            anti_frankenstein_section = generate_anti_frankenstein_gpt_section(
+                project_data=data,
+                current_batch_num=current_batch_num,
+                current_h2=remaining_h2[0] if remaining_h2 else ""
+            )
+            if anti_frankenstein_section:
+                prompt_sections.insert(0, anti_frankenstein_section)  # Na początku promptu
+                print(f"[PRE_BATCH] 🧟 Anti-Frankenstein context added ({len(anti_frankenstein_section)} chars)")
+            
+            # Pobierz dynamic sections dla response
+            af_context = get_anti_frankenstein_context(
+                project_data=data,
+                current_batch_num=current_batch_num,
+                current_h2=remaining_h2[0] if remaining_h2 else ""
+            )
+            dynamic_sections_data = af_context.get("dynamic_sections")
+        except Exception as e:
+            print(f"[PRE_BATCH] ⚠️ Anti-Frankenstein context error: {e}")
+    
     gpt_prompt = "\n".join(prompt_sections)
     
     return jsonify({
@@ -3393,9 +3452,12 @@ def get_pre_batch_info(project_id):
         # 🆕 v36.0: Semantic batch plan
         "semantic_batch_plan": semantic_batch_plan if semantic_batch_plan else None,
         
+        # 🆕 v36.2: Anti-Frankenstein dynamic sections (Token Budgeting)
+        "dynamic_sections": dynamic_sections_data,
+        
         "gpt_prompt": gpt_prompt,
         
-        "version": "v36.0"
+        "version": "v36.2"
     }), 200
 
 
