@@ -427,6 +427,55 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
                 "exceeded_by": new_total - target_max
             })
     
+    # ================================================================
+    # 🆕 v36.0: RESERVED KEYWORDS VALIDATION
+    # Sprawdź czy batch używa fraz zarezerwowanych dla innych sekcji
+    # ================================================================
+    reserved_keyword_warnings = []
+    semantic_plan = project_data.get("semantic_keyword_plan", {})
+    if semantic_plan:
+        current_batch_num = batches_done + 1  # Bo to jest batch który właśnie dodajemy
+        batch_plans = semantic_plan.get("batch_plans", [])
+        
+        # Znajdź plan dla bieżącego batcha
+        current_batch_plan = None
+        for bp in batch_plans:
+            if bp.get("batch_number") == current_batch_num:
+                current_batch_plan = bp
+                break
+        
+        if current_batch_plan:
+            # Pobierz reserved_keywords dla tego batcha
+            reserved_kws = current_batch_plan.get("reserved_keywords", [])
+            assigned_kws = set([k.lower() for k in current_batch_plan.get("assigned_keywords", [])])
+            universal_kws = set([k.lower() for k in current_batch_plan.get("universal_keywords", [])])
+            
+            # Sprawdź czy batch używa reserved keywords
+            batch_text_lower = batch_text.lower()
+            for reserved_info in reserved_kws:
+                if isinstance(reserved_info, dict):
+                    reserved_kw = reserved_info.get("keyword", "")
+                    reserved_for_batch = reserved_info.get("reserved_for_batch", 0)
+                    reserved_for_h2 = reserved_info.get("reserved_for_h2", "")
+                else:
+                    reserved_kw = str(reserved_info)
+                    reserved_for_batch = 0
+                    reserved_for_h2 = ""
+                
+                reserved_kw_lower = reserved_kw.lower()
+                
+                # Pomiń jeśli jest też w assigned lub universal
+                if reserved_kw_lower in assigned_kws or reserved_kw_lower in universal_kws:
+                    continue
+                
+                # Sprawdź czy fraza jest użyta w batchu
+                if reserved_kw_lower and reserved_kw_lower in batch_text_lower:
+                    reserved_keyword_warnings.append(
+                        f"⚠️ RESERVED: '{reserved_kw}' jest zarezerwowana dla batcha {reserved_for_batch}"
+                        + (f" ({reserved_for_h2})" if reserved_for_h2 else "")
+                        + " - użyj jej tam gdzie pasuje tematycznie"
+                    )
+    
     # Update keywords state
     for rid, batch_count in batch_counts.items():
         meta = keywords_state[rid]
@@ -478,6 +527,9 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
     
     # v24.0: Keyword stuffing warnings
     warnings.extend(stuffing_warnings)
+    
+    # 🆕 v36.0: Reserved keyword warnings (informacyjne)
+    warnings.extend(reserved_keyword_warnings)
     
     # v24.0: EXCEEDED TOTAL warnings (KRYTYCZNE - przekroczono limit całkowity)
     for ek in exceeded_keywords:
