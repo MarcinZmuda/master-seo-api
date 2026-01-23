@@ -1326,6 +1326,371 @@ def update_h2_plan(project_id):
 # ================================================================
 #  PROJECT CREATE - v25.0
 # ================================================================
+# ================================================================
+# 🆕 v36.0: SEMANTIC KEYWORD PLANNER
+# Dopasowuje frazy, encje i n-gramy do konkretnych H2/batchy
+# ================================================================
+
+def create_semantic_keyword_plan(
+    h2_structure: List[str],
+    keywords_state: Dict,
+    s1_data: Dict,
+    main_keyword: str,
+    total_batches: int
+) -> Dict:
+    """
+    🆕 v36.0: Tworzy semantyczny plan rozmieszczenia fraz w artykule.
+    
+    Zamiast dawać GPT wszystkie frazy w każdym batchu,
+    przypisujemy frazy do KONKRETNYCH sekcji H2 na podstawie:
+    - Dopasowania słów (keyword matching)
+    - N-gramów (co-occurrence z S1)
+    - Encji (semantic context)
+    - Heurystyk tematycznych
+    
+    Returns:
+        {
+            "batch_plans": [
+                {
+                    "batch_number": 1,
+                    "h2": "Czym jest ubezwłasnowolnienie",
+                    "assigned_keywords": [...],
+                    "assigned_entities": [...],
+                    "assigned_ngrams": [...],
+                    "universal_keywords": [...],
+                    "forbidden_keywords": [...]
+                },
+                ...
+            ],
+            "keyword_assignments": {
+                "fraza1": {"batch": 2, "reason": "keyword match"},
+                "fraza2": {"batch": 4, "reason": "entity context"},
+                ...
+            }
+        }
+    """
+    
+    # Pobierz dane z S1
+    ngrams = s1_data.get("ngrams", [])
+    entities = s1_data.get("entity_seo", {}).get("entities", []) or s1_data.get("entities", [])
+    
+    # Normalizuj encje
+    entity_names = []
+    for e in entities:
+        if isinstance(e, dict):
+            entity_names.append(e.get("name", "").lower())
+        else:
+            entity_names.append(str(e).lower())
+    
+    # Normalizuj n-gramy
+    ngram_list = []
+    for n in ngrams:
+        if isinstance(n, dict):
+            ngram_list.append(n.get("ngram", "").lower())
+        else:
+            ngram_list.append(str(n).lower())
+    
+    # Zbierz wszystkie frazy
+    all_keywords = {}
+    for rid, meta in keywords_state.items():
+        keyword = meta.get("keyword", "")
+        if keyword:
+            all_keywords[keyword.lower()] = {
+                "rid": rid,
+                "keyword": keyword,
+                "type": meta.get("type", "BASIC").upper(),
+                "target_min": meta.get("target_min", 1),
+                "target_max": meta.get("target_max", 5),
+                "is_main": meta.get("is_main_keyword", False)
+            }
+    
+    # ================================================================
+    # KROK 1: Heurystyki tematyczne (ręczne reguły)
+    # ================================================================
+    THEMATIC_RULES = {
+        # Frazy o definicji → pierwsza sekcja "czym jest"
+        "definition": {
+            "h2_patterns": ["czym jest", "co to", "definicja", "pojęcie"],
+            "keyword_patterns": ["oznacza", "definicja", "pojęcie", "istota", "jest instytucją"]
+        },
+        # Frazy o przesłankach/warunkach → sekcja "kiedy można"
+        "conditions": {
+            "h2_patterns": ["kiedy", "przesłanki", "warunki", "w jakich"],
+            "keyword_patterns": ["przesłanka", "warunek", "choroba psychiczna", "niedorozwój", "zaburzenia"]
+        },
+        # Frazy o procedurze → sekcja "jak złożyć"/"jak wygląda"
+        "procedure": {
+            "h2_patterns": ["jak", "procedura", "postępowanie", "wniosek", "krok po kroku"],
+            "keyword_patterns": ["wniosek", "złożyć", "sąd okręgowy", "dokumenty", "postępowanie"]
+        },
+        # Frazy o skutkach → sekcja "skutki"
+        "effects": {
+            "h2_patterns": ["skutki", "konsekwencje", "prawa", "co oznacza"],
+            "keyword_patterns": ["opiekun", "przedstawiciel", "utrata", "ograniczenie", "zdolność"]
+        },
+        # Frazy o rodzajach → sekcja "rodzaje"/"typy"
+        "types": {
+            "h2_patterns": ["rodzaje", "typy", "całkowite", "częściowe", "różnice"],
+            "keyword_patterns": ["całkowite", "częściowe", "różnica", "rodzaj"]
+        }
+    }
+    
+    # ================================================================
+    # KROK 2: Dopasuj H2 do kategorii tematycznych
+    # ================================================================
+    h2_categories = {}
+    for i, h2 in enumerate(h2_structure):
+        h2_lower = h2.lower()
+        h2_words = set(h2_lower.split())
+        
+        best_category = None
+        best_score = 0
+        
+        for category, rules in THEMATIC_RULES.items():
+            score = 0
+            for pattern in rules["h2_patterns"]:
+                if pattern in h2_lower:
+                    score += 2
+                for word in pattern.split():
+                    if word in h2_words:
+                        score += 1
+            
+            if score > best_score:
+                best_score = score
+                best_category = category
+        
+        h2_categories[i] = {
+            "h2": h2,
+            "category": best_category,
+            "score": best_score
+        }
+    
+    # ================================================================
+    # KROK 3: Przypisz frazy do H2
+    # ================================================================
+    keyword_assignments = {}
+    batch_keywords = {i: [] for i in range(len(h2_structure) + 1)}  # +1 dla intro
+    
+    # Frazy główne i uniwersalne (mogą być wszędzie)
+    universal_keywords = []
+    
+    for kw_lower, kw_data in all_keywords.items():
+        keyword = kw_data["keyword"]
+        kw_type = kw_data["type"]
+        is_main = kw_data["is_main"]
+        target_max = kw_data["target_max"]
+        
+        # Fraza główna → uniwersalna (wszystkie batche)
+        if is_main or keyword.lower() == main_keyword.lower():
+            universal_keywords.append(keyword)
+            keyword_assignments[keyword] = {"batches": "all", "reason": "main_keyword"}
+            continue
+        
+        # Frazy z wysokim limitem (>= batche) → uniwersalne
+        if target_max >= total_batches:
+            universal_keywords.append(keyword)
+            keyword_assignments[keyword] = {"batches": "all", "reason": f"high_limit ({target_max})"}
+            continue
+        
+        # Dopasuj do H2 na podstawie heurystyk i keyword matching
+        best_h2_idx = None
+        best_match_score = 0
+        best_reason = ""
+        
+        kw_words = set(kw_lower.split())
+        
+        for h2_idx, h2_info in h2_categories.items():
+            h2 = h2_info["h2"]
+            h2_lower = h2.lower()
+            h2_words = set(h2_lower.split())
+            category = h2_info["category"]
+            
+            score = 0
+            reason_parts = []
+            
+            # 1. Bezpośrednie dopasowanie słów
+            common_words = kw_words.intersection(h2_words)
+            if common_words:
+                score += len(common_words) * 3
+                reason_parts.append(f"common_words:{list(common_words)}")
+            
+            # 2. Substring match
+            if kw_lower in h2_lower or h2_lower in kw_lower:
+                score += 5
+                reason_parts.append("substring_match")
+            
+            # 3. Heurystyki tematyczne
+            if category:
+                rules = THEMATIC_RULES.get(category, {})
+                for pattern in rules.get("keyword_patterns", []):
+                    if pattern in kw_lower:
+                        score += 4
+                        reason_parts.append(f"thematic:{category}")
+                        break
+            
+            # 4. N-gram co-occurrence (czy fraza występuje z H2 w n-gramach)
+            for ngram in ngram_list[:30]:
+                if kw_lower in ngram and any(w in ngram for w in h2_words):
+                    score += 2
+                    reason_parts.append("ngram_cooccur")
+                    break
+            
+            if score > best_match_score:
+                best_match_score = score
+                best_h2_idx = h2_idx
+                best_reason = ", ".join(reason_parts) if reason_parts else "default"
+        
+        # Przypisz do najlepszego H2 (lub rozłóż równomiernie jeśli brak dopasowania)
+        if best_match_score > 0 and best_h2_idx is not None:
+            # Mapuj H2 index na batch number (batch 1 = intro, batch 2+ = H2)
+            batch_num = best_h2_idx + 2  # H2[0] → batch 2
+            if batch_num > total_batches:
+                batch_num = total_batches
+            
+            batch_keywords[batch_num].append(keyword)
+            keyword_assignments[keyword] = {
+                "batch": batch_num,
+                "h2": h2_structure[best_h2_idx] if best_h2_idx < len(h2_structure) else None,
+                "score": best_match_score,
+                "reason": best_reason
+            }
+        else:
+            # Brak dopasowania → rozłóż równomiernie (hash-based)
+            keyword_hash = hash(keyword) % total_batches
+            batch_num = keyword_hash + 1
+            
+            batch_keywords[batch_num].append(keyword)
+            keyword_assignments[keyword] = {
+                "batch": batch_num,
+                "h2": None,
+                "score": 0,
+                "reason": "hash_distribution"
+            }
+    
+    # ================================================================
+    # KROK 4: Przypisz encje do H2
+    # ================================================================
+    entity_assignments = {}
+    batch_entities = {i: [] for i in range(total_batches + 1)}
+    
+    for entity in entity_names[:20]:
+        entity_words = set(entity.split())
+        best_h2_idx = None
+        best_score = 0
+        
+        for h2_idx, h2_info in h2_categories.items():
+            h2_words = set(h2_info["h2"].lower().split())
+            common = entity_words.intersection(h2_words)
+            score = len(common) * 2
+            
+            if score > best_score:
+                best_score = score
+                best_h2_idx = h2_idx
+        
+        if best_score > 0 and best_h2_idx is not None:
+            batch_num = min(best_h2_idx + 2, total_batches)
+            batch_entities[batch_num].append(entity)
+            entity_assignments[entity] = {"batch": batch_num, "score": best_score}
+        else:
+            # Rozłóż równomiernie
+            batch_num = (hash(entity) % total_batches) + 1
+            batch_entities[batch_num].append(entity)
+            entity_assignments[entity] = {"batch": batch_num, "score": 0}
+    
+    # ================================================================
+    # KROK 5: Przypisz n-gramy do H2
+    # ================================================================
+    ngram_assignments = {}
+    batch_ngrams = {i: [] for i in range(total_batches + 1)}
+    
+    for ngram in ngram_list[:30]:
+        ngram_words = set(ngram.split())
+        best_h2_idx = None
+        best_score = 0
+        
+        for h2_idx, h2_info in h2_categories.items():
+            h2_words = set(h2_info["h2"].lower().split())
+            common = ngram_words.intersection(h2_words)
+            score = len(common)
+            
+            if score > best_score:
+                best_score = score
+                best_h2_idx = h2_idx
+        
+        if best_score > 0 and best_h2_idx is not None:
+            batch_num = min(best_h2_idx + 2, total_batches)
+            batch_ngrams[batch_num].append(ngram)
+            ngram_assignments[ngram] = {"batch": batch_num}
+        else:
+            batch_num = (hash(ngram) % total_batches) + 1
+            batch_ngrams[batch_num].append(ngram)
+            ngram_assignments[ngram] = {"batch": batch_num}
+    
+    # ================================================================
+    # KROK 6: Zbuduj finalne batch_plans
+    # ================================================================
+    batch_plans = []
+    
+    for batch_num in range(1, total_batches + 1):
+        h2_idx = batch_num - 2  # batch 2 → H2[0]
+        h2_for_batch = h2_structure[h2_idx] if 0 <= h2_idx < len(h2_structure) else None
+        
+        # Frazy przypisane do tego batcha
+        assigned_kws = batch_keywords.get(batch_num, [])
+        
+        # Frazy z innych batchy (zarezerwowane)
+        reserved_kws = []
+        for other_batch, kws in batch_keywords.items():
+            if other_batch != batch_num and other_batch > 0:
+                for kw in kws:
+                    if kw not in universal_keywords:
+                        reserved_kws.append({
+                            "keyword": kw,
+                            "reserved_for_batch": other_batch,
+                            "reserved_for_h2": h2_structure[other_batch - 2] if 0 <= other_batch - 2 < len(h2_structure) else None
+                        })
+        
+        batch_plan = {
+            "batch_number": batch_num,
+            "batch_type": "intro" if batch_num == 1 else ("final" if batch_num == total_batches else "content"),
+            "h2": h2_for_batch,
+            "h2_category": h2_categories.get(h2_idx, {}).get("category") if h2_idx >= 0 else None,
+            
+            # Frazy PRZYPISANE do tego batcha (UŻYJ TU)
+            "assigned_keywords": assigned_kws,
+            
+            # Frazy UNIWERSALNE (możesz użyć)
+            "universal_keywords": universal_keywords,
+            
+            # Frazy ZAREZERWOWANE (NIE UŻYWAJ, inne sekcje)
+            "reserved_keywords": reserved_kws[:20],  # max 20 do wyświetlenia
+            
+            # Encje do wprowadzenia
+            "assigned_entities": batch_entities.get(batch_num, []),
+            
+            # N-gramy do użycia
+            "assigned_ngrams": batch_ngrams.get(batch_num, [])
+        }
+        
+        batch_plans.append(batch_plan)
+    
+    return {
+        "batch_plans": batch_plans,
+        "keyword_assignments": keyword_assignments,
+        "entity_assignments": entity_assignments,
+        "ngram_assignments": ngram_assignments,
+        "universal_keywords": universal_keywords,
+        "h2_categories": h2_categories,
+        "stats": {
+            "total_keywords": len(all_keywords),
+            "universal_count": len(universal_keywords),
+            "assigned_count": len(keyword_assignments) - len(universal_keywords),
+            "total_entities": len(entity_names),
+            "total_ngrams": len(ngram_list)
+        }
+    }
+
+
 @project_routes.post("/api/project/create")
 def create_project():
     """Tworzy nowy projekt SEO w Firestore."""
@@ -1497,6 +1862,31 @@ def create_project():
     }
     
     batch_plan_dict = None
+    semantic_plan = None
+    
+    # ================================================================
+    # 🆕 v36.0: SEMANTIC KEYWORD PLAN (NAJPIERW!)
+    # Musi być przed create_article_plan żeby przekazać mu plan
+    # ================================================================
+    if h2_structure:
+        try:
+            semantic_plan = create_semantic_keyword_plan(
+                h2_structure=h2_structure,
+                keywords_state=firestore_keywords,
+                s1_data=s1_data,
+                main_keyword=topic,
+                total_batches=total_planned_batches
+            )
+            project_data["semantic_keyword_plan"] = semantic_plan
+            
+            stats = semantic_plan.get("stats", {})
+            print(f"[PROJECT] 🎯 Semantic plan created: {stats.get('assigned_count', 0)} keywords assigned, "
+                  f"{stats.get('universal_count', 0)} universal")
+        except Exception as e:
+            print(f"[PROJECT] ⚠️ Semantic keyword plan error: {e}")
+            import traceback
+            traceback.print_exc()
+    
     if BATCH_PLANNER_ENABLED and h2_structure:
         try:
             # v28.1: Zbierz dane dla batch_complexity
@@ -1513,6 +1903,7 @@ def create_project():
             # v28.1: PAA z S1
             paa_questions = [p.get("question", "") for p in s1_data.get("paa", [])]
             
+            # 🆕 v36.0: Przekaż semantic_plan do create_article_plan
             article_plan = create_article_plan(
                 h2_structure=h2_structure,
                 keywords_state=firestore_keywords,
@@ -1521,7 +1912,8 @@ def create_project():
                 ngrams=ngrams[:20],
                 entities=entities[:15],  # v28.1
                 paa_questions=paa_questions[:10],  # v28.1
-                max_batches=6
+                max_batches=6,
+                semantic_keyword_plan=semantic_plan  # 🆕 v36.0
             )
             batch_plan_dict = article_plan.to_dict()
             project_data["batch_plan"] = batch_plan_dict
@@ -1821,7 +2213,7 @@ def get_project_status(project_id):
 # ================================================================
 @project_routes.get("/api/project/<project_id>/pre_batch_info")
 def get_pre_batch_info(project_id):
-    """v28.1: Używa batch_plan dla zróżnicowanych długości batchy."""
+    """v36.0: Używa semantic_keyword_plan dla inteligentnego rozmieszczenia fraz."""
     db = firestore.client()
     doc = db.collection("seo_projects").document(project_id).get()
     if not doc.exists:
@@ -1838,6 +2230,9 @@ def get_pre_batch_info(project_id):
     
     # v28.1: Pobierz batch_plan
     batch_plan = data.get("batch_plan", {})
+    
+    # 🆕 v36.0: Pobierz semantic_keyword_plan
+    semantic_plan = data.get("semantic_keyword_plan", {})
     
     current_batch_num = len(batches) + 1
     remaining_batches = max(1, total_planned_batches - len(batches))
@@ -2021,6 +2416,30 @@ def get_pre_batch_info(project_id):
         suggested_use = suggested_info["suggested"]
         hard_max = suggested_info["hard_max_this_batch"]
         
+        # 🆕 v35.9: NISKI LIMIT - sprawdź czy fraza jest przypisana do TEGO batcha
+        remaining_to_max = max(0, target_max - actual)
+        if remaining_to_max > 0 and remaining_to_max < remaining_batches and not is_main:
+            # Fraza z niskim limitem - użyj hash aby określić które batche
+            keyword_hash = hash(keyword) % 1000
+            batch_spacing = remaining_batches // remaining_to_max if remaining_to_max > 0 else remaining_batches
+            
+            is_assigned_to_this_batch = False
+            for i in range(remaining_to_max):
+                batch_offset = (keyword_hash + i * batch_spacing) % remaining_batches
+                assigned_batch = current_batch_num + batch_offset
+                if assigned_batch == current_batch_num:
+                    is_assigned_to_this_batch = True
+                    break
+            
+            if not is_assigned_to_this_batch:
+                # Ta fraza NIE jest przypisana do tego batcha
+                suggested_use = 0
+                hard_max = 0
+                suggested_info["suggested"] = 0
+                suggested_info["hard_max_this_batch"] = 0
+                suggested_info["priority"] = "SCHEDULED"
+                suggested_info["instruction"] = f"⏳ Zaplanowana na inny batch (limit {target_max}× na cały artykuł)"
+        
         kw_info = {
             "keyword": keyword,
             "type": kw_type,
@@ -2040,17 +2459,22 @@ def get_pre_batch_info(project_id):
             main_keyword_info = kw_info
         elif suggested_info["priority"] in ["EXCEEDED", "LOCKED"]:
             locked_exceeded.append(kw_info)
+        elif suggested_info["priority"] == "SCHEDULED":
+            # 🆕 v35.9: SCHEDULED frazy (niski limit, inny batch) - NIE dodawaj do must_use
+            if kw_type == "EXTENDED":
+                extended_scheduled.append(keyword)
+            else:
+                # BASIC SCHEDULED - dodaj do osobnej listy (nie must_use!)
+                basic_done.append(kw_info)  # Traktuj jak "done" dla tego batcha
         elif kw_type == "EXTENDED":
             if suggested_info["priority"] == "DONE":
                 extended_done.append(keyword)
-            elif suggested_info["priority"] == "SCHEDULED":
-                extended_scheduled.append(keyword)
             else:
                 extended_this_batch.append(kw_info)
         else:
-            if actual == 0:
+            if actual == 0 and hard_max > 0:  # 🆕 v35.9: tylko jeśli można użyć
                 basic_must_use.append(kw_info)
-            elif actual < target_min:
+            elif actual < target_min and hard_max > 0:  # 🆕 v35.9: tylko jeśli można użyć
                 basic_target.append(kw_info)
             else:
                 basic_done.append(kw_info)
@@ -2133,6 +2557,112 @@ def get_pre_batch_info(project_id):
     
     if ratio_warning:
         prompt_sections.append(f"⚠️ {ratio_warning}")
+        prompt_sections.append("")
+    
+    # ================================================================
+    # 🆕 v36.0: SEMANTIC CONTEXT DLA TEGO BATCHA
+    # ================================================================
+    semantic_batch_plan = None
+    if semantic_plan and "batch_plans" in semantic_plan:
+        for bp in semantic_plan.get("batch_plans", []):
+            if bp.get("batch_number") == current_batch_num:
+                semantic_batch_plan = bp
+                break
+    
+    if semantic_batch_plan:
+        prompt_sections.append("=" * 60)
+        prompt_sections.append("🎯 KONTEKST SEMANTYCZNY TEJ SEKCJI")
+        prompt_sections.append("=" * 60)
+        prompt_sections.append("")
+        
+        # H2 i kategoria
+        batch_h2 = semantic_batch_plan.get("h2")
+        batch_category = semantic_batch_plan.get("h2_category")
+        if batch_h2:
+            prompt_sections.append(f"📌 H2: \"{batch_h2}\"")
+            if batch_category:
+                prompt_sections.append(f"📂 KATEGORIA: {batch_category}")
+            prompt_sections.append("")
+        
+        # Encje do wprowadzenia
+        assigned_entities = semantic_batch_plan.get("assigned_entities", [])
+        if assigned_entities:
+            prompt_sections.append("🧠 ENCJE DO WPROWADZENIA W TEJ SEKCJI:")
+            for entity in assigned_entities[:6]:
+                prompt_sections.append(f"   • {entity}")
+            prompt_sections.append("")
+        
+        # N-gramy powiązane
+        assigned_ngrams = semantic_batch_plan.get("assigned_ngrams", [])
+        if assigned_ngrams:
+            prompt_sections.append("🔗 N-GRAMY/FRAZY POWIĄZANE:")
+            for ngram in assigned_ngrams[:5]:
+                prompt_sections.append(f"   • \"{ngram}\"")
+            prompt_sections.append("")
+        
+        # Frazy PRZYPISANE do tej sekcji (główna lista)
+        assigned_keywords = semantic_batch_plan.get("assigned_keywords", [])
+        if assigned_keywords:
+            prompt_sections.append("✅ FRAZY PRZYPISANE DO TEJ SEKCJI (użyj tu!):")
+            for kw in assigned_keywords[:15]:
+                # Pobierz info o limicie
+                kw_meta = None
+                for rid, meta in keywords_state.items():
+                    if meta.get("keyword", "").lower() == kw.lower():
+                        kw_meta = meta
+                        break
+                
+                if kw_meta:
+                    actual = kw_meta.get("actual_uses", 0)
+                    target_max = kw_meta.get("target_max", 5)
+                    remaining = max(0, target_max - actual)
+                    if remaining > 0:
+                        prompt_sections.append(f"   ✅ \"{kw}\" ({actual}/{target_max}) → użyj 1×")
+                else:
+                    prompt_sections.append(f"   ✅ \"{kw}\" → użyj 1×")
+            prompt_sections.append("")
+        
+        # Frazy UNIWERSALNE
+        universal_keywords = semantic_batch_plan.get("universal_keywords", [])
+        if universal_keywords:
+            prompt_sections.append("🔄 FRAZY UNIWERSALNE (możesz użyć w każdym batchu):")
+            for kw in universal_keywords[:8]:
+                # Pobierz info o limicie
+                kw_meta = None
+                for rid, meta in keywords_state.items():
+                    if meta.get("keyword", "").lower() == kw.lower():
+                        kw_meta = meta
+                        break
+                
+                if kw_meta:
+                    actual = kw_meta.get("actual_uses", 0)
+                    target_max = kw_meta.get("target_max", 99)
+                    remaining = max(0, target_max - actual)
+                    max_here = min(3, math.ceil(remaining / remaining_batches)) if remaining_batches > 0 else remaining
+                    if remaining > 0:
+                        prompt_sections.append(f"   🔄 \"{kw}\" ({actual}/{target_max}) → max {max_here}× tu")
+                    else:
+                        prompt_sections.append(f"   🛑 \"{kw}\" ({actual}/{target_max}) → LIMIT PEŁNY!")
+                else:
+                    prompt_sections.append(f"   🔄 \"{kw}\"")
+            prompt_sections.append("")
+        
+        # Frazy ZAREZERWOWANE na inne sekcje
+        reserved_keywords = semantic_batch_plan.get("reserved_keywords", [])
+        if reserved_keywords:
+            prompt_sections.append("⏳ ZAREZERWOWANE NA INNE SEKCJE (nie używaj tu!):")
+            for rk in reserved_keywords[:10]:
+                kw = rk.get("keyword", "")
+                reserved_h2 = rk.get("reserved_for_h2", "")
+                if reserved_h2:
+                    prompt_sections.append(f"   ⏳ \"{kw}\" → sekcja \"{reserved_h2[:40]}...\"")
+                else:
+                    prompt_sections.append(f"   ⏳ \"{kw}\" → inny batch")
+            if len(reserved_keywords) > 10:
+                prompt_sections.append(f"   ... i {len(reserved_keywords) - 10} więcej")
+            prompt_sections.append("")
+        
+        prompt_sections.append("=" * 60)
         prompt_sections.append("")
     
     # v27.4: Oblicz ile fraz MUSI być użytych w tym batchu
@@ -2247,6 +2777,116 @@ def get_pre_batch_info(project_id):
             prompt_sections.append(f"   {i}. \"{kw['keyword']}\" ← OBOWIĄZKOWO 1x")
         prompt_sections.append("")
     
+    # ================================================================
+    # 🆕 v35.9: WYRAŹNE LIMITY NA BATCH
+    # ================================================================
+    prompt_sections.append("")
+    prompt_sections.append("=" * 60)
+    prompt_sections.append("📊 LIMITY FRAZ - SPRAWDŹ ZANIM NAPISZESZ!")
+    prompt_sections.append("=" * 60)
+    prompt_sections.append("")
+    
+    # Zbierz wszystkie frazy z limitami
+    all_keywords_limits = []
+    
+    for rid, meta in keywords_state.items():
+        keyword = meta.get("keyword", "")
+        if not keyword:
+            continue
+            
+        kw_type = meta.get("type", "BASIC").upper()
+        actual = meta.get("actual_uses", 0)
+        target_min = meta.get("target_min", 1)
+        target_max = meta.get("target_max", 999)
+        
+        remaining_to_max = max(0, target_max - actual)
+        
+        # 🆕 v35.9: INTELIGENTNE PRZYPISANIE FRAZ DO BATCHY
+        # Frazy z niskim limitem (remaining < remaining_batches) są przypisane do KONKRETNYCH batchy
+        if remaining_batches > 0:
+            if remaining_to_max == 0:
+                # Limit wyczerpany
+                max_this_batch = 0
+            elif remaining_to_max < remaining_batches:
+                # NISKI LIMIT: przypisz do konkretnych batchy
+                # Używamy hash aby deterministycznie wybrać które batche
+                keyword_hash = hash(keyword) % 1000
+                
+                # Oblicz które batche "należą" do tej frazy
+                # np. remaining=2, batches=6 → fraza należy do batcha 2 i 5
+                batch_spacing = remaining_batches // remaining_to_max if remaining_to_max > 0 else remaining_batches
+                assigned_batches = []
+                for i in range(remaining_to_max):
+                    # Rozłóż równomiernie + offset z hash
+                    batch_offset = (keyword_hash + i * batch_spacing) % remaining_batches
+                    assigned_batch = current_batch_num + batch_offset
+                    if assigned_batch <= total_planned_batches:
+                        assigned_batches.append(assigned_batch)
+                
+                # Czy TEN batch jest przypisany do tej frazy?
+                if current_batch_num in assigned_batches:
+                    max_this_batch = 1
+                else:
+                    max_this_batch = 0
+            else:
+                # NORMALNY LIMIT: podziel równo
+                max_this_batch = math.ceil(remaining_to_max / remaining_batches)
+        else:
+            max_this_batch = remaining_to_max
+        
+        # Status
+        if actual >= target_max:
+            status = "🛑 STOP"
+            max_this_batch = 0
+        elif remaining_to_max <= 2 and remaining_to_max > 0:
+            status = "⚠️ OSTROŻNIE"
+        elif actual >= target_min:
+            status = "✅ OK"
+        else:
+            status = "📌 UŻYJ"
+        
+        all_keywords_limits.append({
+            "keyword": keyword,
+            "type": kw_type,
+            "actual": actual,
+            "target_max": target_max,
+            "remaining": remaining_to_max,
+            "max_this_batch": max_this_batch,
+            "status": status
+        })
+    
+    # Sortuj: STOP na górze, potem OSTROŻNIE
+    priority_order = {"🛑 STOP": 0, "⚠️ OSTROŻNIE": 1, "📌 UŻYJ": 2, "✅ OK": 3}
+    all_keywords_limits.sort(key=lambda x: (priority_order.get(x["status"], 99), -x["actual"]))
+    
+    # Pokaż STOP (limit wyczerpany)
+    stop_keywords = [k for k in all_keywords_limits if k["status"] == "🛑 STOP"]
+    caution_keywords = [k for k in all_keywords_limits if k["status"] == "⚠️ OSTROŻNIE"]
+    
+    if stop_keywords:
+        prompt_sections.append("🛑🛑🛑 STOP! NIE UŻYWAJ TYCH FRAZ (limit wyczerpany):")
+        for kw in stop_keywords[:15]:
+            prompt_sections.append(f"   ❌ \"{kw['keyword']}\" = {kw['actual']}/{kw['target_max']} → NIE UŻYWAJ!")
+        prompt_sections.append("")
+    
+    if caution_keywords:
+        prompt_sections.append("⚠️ OSTROŻNIE - bliskie limitu:")
+        for kw in caution_keywords[:10]:
+            prompt_sections.append(f"   ⚠️ \"{kw['keyword']}\" = {kw['actual']}/{kw['target_max']} → max {kw['max_this_batch']}× więcej")
+        prompt_sections.append("")
+    
+    # Top 10 fraz z zapasem
+    available_keywords = [k for k in all_keywords_limits if k["max_this_batch"] > 0 and k["status"] not in ["🛑 STOP"]]
+    available_keywords.sort(key=lambda x: -x["remaining"])
+    
+    if available_keywords[:10]:
+        prompt_sections.append("✅ BEZPIECZNE DO UŻYCIA (duży zapas):")
+        for kw in available_keywords[:10]:
+            prompt_sections.append(f"   ✅ \"{kw['keyword']}\" = {kw['actual']}/{kw['target_max']} → max {kw['max_this_batch']}× w tym batchu")
+        prompt_sections.append("")
+    
+    prompt_sections.append("=" * 60)
+    
     # Pokaż pozostałe nieużyte (info)
     basic_remaining = basic_must_use[basic_this_batch_count:]
     extended_remaining = extended_this_batch[extended_this_batch_count:] + extended_scheduled
@@ -2269,23 +2909,74 @@ def get_pre_batch_info(project_id):
             prompt_sections.append(f"   • \"{kw['keyword']}\" → {kw['use_this_batch']}x")
         prompt_sections.append("")
     
+    # 🆕 v35.9: FILTRUJ ngrams i entities które już są w keywords
+    # Żeby GPT nie dostał podwójnej instrukcji używania tej samej frazy
+    all_keyword_phrases = set()
+    for rid, meta in keywords_state.items():
+        kw = meta.get("keyword", "").lower()
+        if kw:
+            all_keyword_phrases.add(kw)
+            # Dodaj też poszczególne słowa dla częściowego matchowania
+            for word in kw.split():
+                if len(word) > 4:  # Tylko znaczące słowa
+                    all_keyword_phrases.add(word)
+    
+    # Filtruj n-gramy
+    filtered_ngrams = []
+    skipped_ngrams = []
     if batch_ngrams:
-        prompt_sections.append("💡 N-GRAMY (wpleć naturalnie):")
-        for ngram in batch_ngrams[:4]:
+        for ngram in batch_ngrams:
+            ngram_lower = ngram.lower()
+            # Sprawdź czy n-gram pokrywa się z keyword
+            is_keyword = ngram_lower in all_keyword_phrases
+            # Sprawdź czy n-gram zawiera keyword lub odwrotnie
+            overlaps_keyword = any(kw in ngram_lower or ngram_lower in kw for kw in all_keyword_phrases if len(kw) > 4)
+            
+            if is_keyword or overlaps_keyword:
+                skipped_ngrams.append(ngram)
+            else:
+                filtered_ngrams.append(ngram)
+    
+    # Filtruj encje
+    filtered_entities = []
+    skipped_entities = []
+    if top_entities:
+        for ent in top_entities:
+            ent_text = ent.get("text", "").lower()
+            # Sprawdź czy encja pokrywa się z keyword
+            is_keyword = ent_text in all_keyword_phrases
+            overlaps_keyword = any(kw in ent_text or ent_text in kw for kw in all_keyword_phrases if len(kw) > 4)
+            
+            if is_keyword or overlaps_keyword:
+                skipped_entities.append(ent.get("text", ""))
+            else:
+                filtered_entities.append(ent)
+    
+    if filtered_ngrams:
+        prompt_sections.append("💡 N-GRAMY (wpleć naturalnie - NIE LICZONE w limitach):")
+        for ngram in filtered_ngrams[:4]:
             prompt_sections.append(f"   • \"{ngram}\"")
         prompt_sections.append("")
     
+    if skipped_ngrams:
+        prompt_sections.append(f"ℹ️ N-gramy pominięte (już w keywords): {', '.join(skipped_ngrams[:5])}")
+        prompt_sections.append("")
+    
     # v28.0: Entity SEO - encje do wspomnienia
-    if top_entities:
-        prompt_sections.append("🏢 ENCJE DO WSPOMNIENIA (Entity SEO):")
+    if filtered_entities:
+        prompt_sections.append("🏢 ENCJE DO WSPOMNIENIA (NIE LICZONE w limitach):")
         prompt_sections.append("   Wspomnij te nazwy własne naturalnie w tekście:")
-        for ent in top_entities[:5]:
+        for ent in filtered_entities[:5]:
             ent_type = ent.get("type", "")
             type_label = {"ORGANIZATION": "firma/inst.", "PERSON": "osoba", "LOCATION": "miejsce"}.get(ent_type, "")
             if type_label:
                 prompt_sections.append(f"   • {ent.get('text', '')} ({type_label})")
             else:
                 prompt_sections.append(f"   • {ent.get('text', '')}")
+        prompt_sections.append("")
+    
+    if skipped_entities:
+        prompt_sections.append(f"ℹ️ Encje pominięte (już w keywords): {', '.join(skipped_entities[:5])}")
         prompt_sections.append("")
     
     if top_relationships:
@@ -2643,9 +3334,24 @@ def get_pre_batch_info(project_id):
         "h2_plan": data.get("h2_plan", []),
         "h2_plan_meta": data.get("h2_plan_meta", {}),
         
+        # 🆕 v35.9: Wyraźne limity fraz na batch
+        "keyword_limits": {
+            "stop_keywords": [k for k in all_keywords_limits if k["status"] == "🛑 STOP"][:15],
+            "caution_keywords": [k for k in all_keywords_limits if k["status"] == "⚠️ OSTROŻNIE"][:10],
+            "safe_keywords": [k for k in all_keywords_limits if k["max_this_batch"] > 0 and k["status"] not in ["🛑 STOP"]][:10],
+            "summary": {
+                "total_stop": len([k for k in all_keywords_limits if k["status"] == "🛑 STOP"]),
+                "total_caution": len([k for k in all_keywords_limits if k["status"] == "⚠️ OSTROŻNIE"]),
+                "message": f"🛑 {len([k for k in all_keywords_limits if k['status'] == '🛑 STOP'])} fraz z wyczerpanym limitem - NIE UŻYWAJ!"
+            }
+        },
+        
+        # 🆕 v36.0: Semantic batch plan
+        "semantic_batch_plan": semantic_batch_plan if semantic_batch_plan else None,
+        
         "gpt_prompt": gpt_prompt,
         
-        "version": "v29.2"
+        "version": "v36.0"
     }), 200
 
 
