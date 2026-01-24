@@ -897,3 +897,158 @@ def rollback_to_version(project_id, version_id):
         print(f"[FINAL_REVIEW] ❌ Rollback error: {e}")
         print(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
+
+
+# ================================================================
+# 🆕 v36.6: MERGE BATCHES - Scala wszystkie batche w finalny artykuł
+# ================================================================
+@final_review_routes.post("/api/project/<project_id>/merge_batches")
+def merge_batches(project_id):
+    """
+    🆕 v36.6: Scala wszystkie batche w jeden spójny artykuł.
+    
+    Co robi:
+    1. Pobiera wszystkie batche z projektu
+    2. Łączy teksty w odpowiedniej kolejności
+    3. Normalizuje formatowanie H2/H3
+    4. Dodaje disclaimer (dla tematów prawnych)
+    5. Zapisuje jako corrected_article
+    
+    Returns:
+        {
+            "status": "MERGED",
+            "article": "pełny tekst artykułu",
+            "word_count": 3500,
+            "h2_count": 6,
+            "batches_merged": 7
+        }
+    """
+    try:
+        db = firestore.client()
+        doc = db.collection("seo_projects").document(project_id).get()
+        
+        if not doc.exists:
+            return jsonify({"error": "Project not found"}), 404
+        
+        data = doc.to_dict()
+        batches = data.get("batches", [])
+        
+        if not batches:
+            return jsonify({"error": "No batches to merge"}), 400
+        
+        main_keyword = data.get("main_keyword", data.get("topic", ""))
+        detected_category = data.get("detected_category", "general")
+        
+        # ================================================================
+        # KROK 1: Zbierz teksty ze wszystkich batchy
+        # ================================================================
+        merged_parts = []
+        
+        for i, batch in enumerate(batches):
+            batch_text = batch.get("text", "")
+            if not batch_text:
+                continue
+            
+            # Oczyść tekst
+            clean_text = batch_text.strip()
+            
+            # Normalizuj formatowanie H2
+            # h2: Tytuł → ## Tytuł (markdown) lub zachowaj oryginalne
+            clean_text = re.sub(r'^h2:\s*(.+)$', r'## \1', clean_text, flags=re.MULTILINE)
+            clean_text = re.sub(r'^h3:\s*(.+)$', r'### \1', clean_text, flags=re.MULTILINE)
+            
+            merged_parts.append(clean_text)
+        
+        # Połącz części z podwójnym newline
+        merged_article = "\n\n".join(merged_parts)
+        
+        # ================================================================
+        # KROK 2: Dodaj disclaimer dla tematów prawnych
+        # ================================================================
+        if detected_category == "prawo":
+            legal_disclaimer = data.get("legal_disclaimer", "")
+            if not legal_disclaimer:
+                legal_disclaimer = (
+                    "\n\n---\n\n"
+                    "**Zastrzeżenie prawne:** Niniejszy artykuł ma charakter wyłącznie informacyjny "
+                    "i nie stanowi porady prawnej. W indywidualnych sprawach zalecamy konsultację "
+                    "z wykwalifikowanym prawnikiem."
+                )
+            
+            # Dodaj disclaimer na końcu jeśli jeszcze nie ma
+            if "Zastrzeżenie prawne" not in merged_article and "zastrzeżenie" not in merged_article.lower():
+                merged_article += legal_disclaimer
+        
+        # ================================================================
+        # KROK 3: Policz metryki
+        # ================================================================
+        word_count = len(merged_article.split())
+        h2_matches = re.findall(r'^##\s+.+$|^h2:\s*.+$|<h2[^>]*>.+</h2>', merged_article, re.MULTILINE | re.IGNORECASE)
+        h2_count = len(h2_matches)
+        
+        # ================================================================
+        # KROK 4: Zapisz jako corrected_article
+        # ================================================================
+        doc_ref = db.collection("seo_projects").document(project_id)
+        doc_ref.update({
+            "corrected_article": merged_article,
+            "merged_at": firestore.SERVER_TIMESTAMP,
+            "merge_stats": {
+                "batches_merged": len(batches),
+                "word_count": word_count,
+                "h2_count": h2_count,
+                "has_disclaimer": detected_category == "prawo"
+            }
+        })
+        
+        print(f"[FINAL_REVIEW] ✅ Merged {len(batches)} batches → {word_count} words, {h2_count} H2")
+        
+        return jsonify({
+            "status": "MERGED",
+            "project_id": project_id,
+            "article": merged_article,
+            "word_count": word_count,
+            "h2_count": h2_count,
+            "batches_merged": len(batches),
+            "has_disclaimer": detected_category == "prawo",
+            "message": f"Scalono {len(batches)} batchy w artykuł ({word_count} słów)"
+        }), 200
+        
+    except Exception as e:
+        import traceback
+        print(f"[FINAL_REVIEW] ❌ Merge error: {e}")
+        print(traceback.format_exc())
+        return jsonify({"error": str(e)}), 500
+
+
+@final_review_routes.get("/api/project/<project_id>/merged_article")
+def get_merged_article(project_id):
+    """
+    🆕 v36.6: Pobiera scalony artykuł (jeśli istnieje).
+    """
+    try:
+        db = firestore.client()
+        doc = db.collection("seo_projects").document(project_id).get()
+        
+        if not doc.exists:
+            return jsonify({"error": "Project not found"}), 404
+        
+        data = doc.to_dict()
+        corrected_article = data.get("corrected_article", "")
+        merge_stats = data.get("merge_stats", {})
+        
+        if not corrected_article:
+            return jsonify({
+                "status": "NOT_MERGED",
+                "message": "Artykuł nie został jeszcze scalony. Użyj POST /merge_batches"
+            }), 200
+        
+        return jsonify({
+            "status": "MERGED",
+            "article": corrected_article,
+            "word_count": len(corrected_article.split()),
+            "stats": merge_stats
+        }), 200
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
