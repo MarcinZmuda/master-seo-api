@@ -2532,19 +2532,114 @@ def get_pre_batch_info(project_id):
     semantic_keyphrases = s1_data.get("semantic_keyphrases", [])
     lsi_keywords = [kp.get("phrase", "") for kp in semantic_keyphrases if kp.get("score", 0) > 0.7][:6]
     
-    # Keyword categorization
-    basic_must_use = []
-    basic_target = []
-    basic_done = []
-    extended_this_batch = []
-    extended_done = []
-    extended_scheduled = []
-    locked_exceeded = []
+    # ================================================================
+    # 🆕 v36.6: UNIFIED KEYWORD DISTRIBUTION
+    # Używa semantic_plan jako ŹRÓDŁO PRAWDY, z dynamicznym sprawdzaniem limitów
+    # ================================================================
+    semantic_batch_plan_early = None
+    semantic_assigned = []      # Frazy PRZYPISANE tematycznie do tego batcha
+    semantic_universal = []     # Frazy UNIWERSALNE (wysoki limit)
+    semantic_reserved = []      # Frazy ZAREZERWOWANE na inne batche
     
-    main_keyword_info = None
+    if semantic_plan and "batch_plans" in semantic_plan:
+        for bp in semantic_plan.get("batch_plans", []):
+            if bp.get("batch_number") == current_batch_num:
+                semantic_batch_plan_early = bp
+                semantic_assigned = bp.get("assigned_keywords", [])
+                semantic_universal = bp.get("universal_keywords", [])
+                semantic_reserved = bp.get("reserved_keywords", [])
+                print(f"[PRE_BATCH] 🎯 Semantic plan: {len(semantic_assigned)} assigned + {len(semantic_universal)} universal")
+                break
     
+    # Zbuduj słownik keyword → meta dla szybkiego lookup
+    keyword_meta_map = {}
     for rid, meta in keywords_state.items():
         keyword = meta.get("keyword", "")
+        if keyword:
+            keyword_meta_map[keyword.lower()] = {
+                "rid": rid,
+                "meta": meta,
+                "keyword": keyword
+            }
+    
+    # ================================================================
+    # KROK 1: Przetwórz ASSIGNED keywords z semantic_plan
+    # To są frazy TEMATYCZNIE dopasowane do tego H2/batcha
+    # ================================================================
+    basic_must_use = []
+    extended_this_batch = []
+    main_keyword_info = None
+    
+    for kw in semantic_assigned:
+        kw_lower = kw.lower()
+        if kw_lower not in keyword_meta_map:
+            continue
+        
+        data = keyword_meta_map[kw_lower]
+        meta = data["meta"]
+        keyword = data["keyword"]
+        
+        kw_type = meta.get("type", "BASIC").upper()
+        actual = meta.get("actual_uses", 0)
+        target_min = meta.get("target_min", 1)
+        target_max = meta.get("target_max", 999)
+        is_main = meta.get("is_main_keyword", False)
+        is_synonym = meta.get("is_synonym_of_main", False)
+        
+        # Oblicz suggested dla tego batcha
+        suggested_info = calculate_suggested_v25(
+            keyword=keyword,
+            kw_type=kw_type,
+            actual=actual,
+            target_min=target_min,
+            target_max=target_max,
+            remaining_batches=remaining_batches,
+            total_batches=total_planned_batches,
+            current_batch=current_batch_num,
+            is_main=is_main
+        )
+        
+        suggested_use = suggested_info["suggested"]
+        hard_max = suggested_info["hard_max_this_batch"]
+        
+        # Pomiń jeśli limit już przekroczony
+        if actual >= target_max:
+            continue
+        
+        kw_info = {
+            "keyword": keyword,
+            "type": kw_type,
+            "actual": actual,
+            "target_total": f"{target_min}-{target_max}",
+            "use_this_batch": f"{suggested_use}-{hard_max}" if suggested_use > 0 else "1",
+            "suggested": max(1, suggested_use),  # Min 1 dla assigned
+            "priority": "ASSIGNED",  # Tematycznie przypisane!
+            "instruction": f"✅ Przypisana do tej sekcji - użyj 1×",
+            "hard_max_this_batch": max(1, hard_max),
+            "flexibility": "LOW",
+            "is_main": is_main,
+            "is_synonym": is_synonym,
+            "source": "semantic_assigned"
+        }
+        
+        if kw_type == "EXTENDED":
+            extended_this_batch.append(kw_info)
+        else:
+            basic_must_use.append(kw_info)
+    
+    # ================================================================
+    # KROK 2: Przetwórz UNIVERSAL keywords
+    # To są frazy z wysokim limitem które mogą być wszędzie
+    # ================================================================
+    for kw in semantic_universal:
+        kw_lower = kw.lower()
+        if kw_lower not in keyword_meta_map:
+            continue
+        
+        data = keyword_meta_map[kw_lower]
+        meta = data["meta"]
+        keyword = data["keyword"]
+        
         kw_type = meta.get("type", "BASIC").upper()
         actual = meta.get("actual_uses", 0)
         target_min = meta.get("target_min", 1)
@@ -2564,102 +2659,125 @@ def get_pre_batch_info(project_id):
             is_main=is_main
         )
         
-        # v27.2: Jasne instrukcje ile użyć W TYM BATCHU
         suggested_use = suggested_info["suggested"]
         hard_max = suggested_info["hard_max_this_batch"]
         
-        # 🆕 v35.9: NISKI LIMIT - sprawdź czy fraza jest przypisana do TEGO batcha
-        remaining_to_max = max(0, target_max - actual)
-        if remaining_to_max > 0 and remaining_to_max < remaining_batches and not is_main:
-            # Fraza z niskim limitem - użyj hash aby określić które batche
-            keyword_hash = hash(keyword) % 1000
-            batch_spacing = remaining_batches // remaining_to_max if remaining_to_max > 0 else remaining_batches
-            
-            is_assigned_to_this_batch = False
-            for i in range(remaining_to_max):
-                batch_offset = (keyword_hash + i * batch_spacing) % remaining_batches
-                assigned_batch = current_batch_num + batch_offset
-                if assigned_batch == current_batch_num:
-                    is_assigned_to_this_batch = True
-                    break
-            
-            if not is_assigned_to_this_batch:
-                # Ta fraza NIE jest przypisana do tego batcha
-                suggested_use = 0
-                hard_max = 0
-                suggested_info["suggested"] = 0
-                suggested_info["hard_max_this_batch"] = 0
-                suggested_info["priority"] = "SCHEDULED"
-                suggested_info["instruction"] = f"⏳ Zaplanowana na inny batch (limit {target_max}× na cały artykuł)"
+        if actual >= target_max:
+            continue
         
         kw_info = {
             "keyword": keyword,
             "type": kw_type,
             "actual": actual,
-            "target_total": f"{target_min}-{target_max}",  # cel na CAŁY artykuł
-            "use_this_batch": f"{suggested_use}-{hard_max}" if suggested_use > 0 else "0",  # użyj W TYM BATCHU
+            "target_total": f"{target_min}-{target_max}",
+            "use_this_batch": f"{suggested_use}-{hard_max}",
             "suggested": suggested_use,
-            "priority": suggested_info["priority"],
-            "instruction": suggested_info["instruction"],
+            "priority": "UNIVERSAL" if is_main else "HIGH",
+            "instruction": f"🔄 Uniwersalna - użyj {suggested_use}-{hard_max}×" if not is_main else f"🎯 GŁÓWNA - użyj {suggested_use}-{hard_max}×",
             "hard_max_this_batch": hard_max,
-            "flexibility": suggested_info["flexibility"],
+            "flexibility": "MEDIUM",
             "is_main": is_main,
-            "is_synonym": is_synonym
+            "is_synonym": is_synonym,
+            "source": "semantic_universal"
         }
         
         if is_main:
             main_keyword_info = kw_info
-        elif suggested_info["priority"] in ["EXCEEDED", "LOCKED"]:
-            locked_exceeded.append(kw_info)
-        elif suggested_info["priority"] == "SCHEDULED":
-            # 🆕 v35.9: SCHEDULED frazy (niski limit, inny batch) - NIE dodawaj do must_use
-            if kw_type == "EXTENDED":
-                extended_scheduled.append(keyword)
-            else:
-                # BASIC SCHEDULED - dodaj do osobnej listy (nie must_use!)
-                basic_done.append(kw_info)  # Traktuj jak "done" dla tego batcha
         elif kw_type == "EXTENDED":
-            if suggested_info["priority"] == "DONE":
-                extended_done.append(keyword)
-            else:
+            # Universal EXTENDED - dodaj tylko jeśli nie ma jeszcze dużo
+            if len(extended_this_batch) < 5:
                 extended_this_batch.append(kw_info)
         else:
-            if actual == 0 and hard_max > 0:  # 🆕 v35.9: tylko jeśli można użyć
-                basic_must_use.append(kw_info)
-            elif actual < target_min and hard_max > 0:  # 🆕 v35.9: tylko jeśli można użyć
-                basic_target.append(kw_info)
-            else:
-                basic_done.append(kw_info)
+            # Universal BASIC - dodaj do must_use
+            basic_must_use.append(kw_info)
     
-    # v27.2: Wymuszenie proporcjonalnego użycia EXTENDED
-    # Jeśli jest dużo nieużytych EXTENDED, przenieś część ze SCHEDULED do this_batch
-    total_unused_extended = len(extended_this_batch) + len(extended_scheduled)
-    if total_unused_extended > 0 and remaining_batches > 0:
-        # Ile EXTENDED powinno być użyte w tym batchu?
-        extended_per_batch = math.ceil(total_unused_extended / remaining_batches)
+    # ================================================================
+    # KROK 3: FALLBACK - jeśli brak semantic_plan, użyj starej logiki
+    # ================================================================
+    basic_done = []
+    basic_target = []
+    extended_done = []
+    extended_scheduled = []
+    locked_exceeded = []
+    
+    if not semantic_batch_plan_early:
+        print(f"[PRE_BATCH] ⚠️ Brak semantic_plan, używam fallback logic")
         
-        # Jeśli mamy za mało w this_batch, przenieś ze SCHEDULED
-        while len(extended_this_batch) < extended_per_batch and extended_scheduled:
-            kw_to_move = extended_scheduled.pop(0)
-            # Znajdź pełne info o tej frazie
-            for rid, meta in keywords_state.items():
-                if meta.get("keyword") == kw_to_move:
-                    extended_this_batch.append({
-                        "keyword": kw_to_move,
-                        "type": "EXTENDED",
-                        "actual": 0,
-                        "target": "1-1",
-                        "suggested": 1,
-                        "priority": "HIGH",
-                        "instruction": f"📌 WPLEĆ 1x (przesuniete z kolejnych batchy)",
-                        "hard_max_this_batch": 1,
-                        "flexibility": "LOW"
-                    })
-                    break
-        
-        # Dodaj info o wymaganej liczbie EXTENDED
-        if extended_per_batch > 0:
-            print(f"[PRE_BATCH] Batch {current_batch_num}: wymaga {extended_per_batch} EXTENDED, ma {len(extended_this_batch)}")
+        for rid, meta in keywords_state.items():
+            keyword = meta.get("keyword", "")
+            if not keyword:
+                continue
+            
+            kw_type = meta.get("type", "BASIC").upper()
+            actual = meta.get("actual_uses", 0)
+            target_min = meta.get("target_min", 1)
+            target_max = meta.get("target_max", 999)
+            is_main = meta.get("is_main_keyword", False)
+            is_synonym = meta.get("is_synonym_of_main", False)
+            
+            suggested_info = calculate_suggested_v25(
+                keyword=keyword,
+                kw_type=kw_type,
+                actual=actual,
+                target_min=target_min,
+                target_max=target_max,
+                remaining_batches=remaining_batches,
+                total_batches=total_planned_batches,
+                current_batch=current_batch_num,
+                is_main=is_main
+            )
+            
+            suggested_use = suggested_info["suggested"]
+            hard_max = suggested_info["hard_max_this_batch"]
+            
+            kw_info = {
+                "keyword": keyword,
+                "type": kw_type,
+                "actual": actual,
+                "target_total": f"{target_min}-{target_max}",
+                "use_this_batch": f"{suggested_use}-{hard_max}" if suggested_use > 0 else "0",
+                "suggested": suggested_use,
+                "priority": suggested_info["priority"],
+                "instruction": suggested_info["instruction"],
+                "hard_max_this_batch": hard_max,
+                "flexibility": suggested_info["flexibility"],
+                "is_main": is_main,
+                "is_synonym": is_synonym,
+                "source": "fallback"
+            }
+            
+            if is_main:
+                main_keyword_info = kw_info
+            elif suggested_info["priority"] in ["EXCEEDED", "LOCKED"]:
+                locked_exceeded.append(kw_info)
+            elif kw_type == "EXTENDED":
+                if suggested_info["priority"] == "DONE":
+                    extended_done.append(keyword)
+                else:
+                    extended_this_batch.append(kw_info)
+            else:
+                if actual == 0 and hard_max > 0:
+                    basic_must_use.append(kw_info)
+                elif actual < target_min and hard_max > 0:
+                    basic_target.append(kw_info)
+                else:
+                    basic_done.append(kw_info)
+    
+    # ================================================================
+    # KROK 4: Zbierz info o RESERVED keywords (dla wyświetlenia w prompt)
+    # ================================================================
+    reserved_for_display = []
+    for rk in semantic_reserved[:15]:
+        if isinstance(rk, dict):
+            reserved_for_display.append({
+                "keyword": rk.get("keyword", ""),
+                "reserved_for_h2": rk.get("reserved_for_h2", ""),
+                "reserved_for_batch": rk.get("reserved_for_batch", 0)
+            })
+    
+    # Policz statystyki
+    total_unused_basic = len(basic_must_use)
+    total_unused_extended = len(extended_this_batch)
     
     # Used H2
     used_h2 = []
@@ -2713,13 +2831,9 @@ def get_pre_batch_info(project_id):
     
     # ================================================================
     # 🆕 v36.0: SEMANTIC CONTEXT DLA TEGO BATCHA
+    # 🆕 v36.5: Użyj już pobranego semantic_batch_plan_early
     # ================================================================
-    semantic_batch_plan = None
-    if semantic_plan and "batch_plans" in semantic_plan:
-        for bp in semantic_plan.get("batch_plans", []):
-            if bp.get("batch_number") == current_batch_num:
-                semantic_batch_plan = bp
-                break
+    semantic_batch_plan = semantic_batch_plan_early  # Już pobrane wcześniej
     
     if semantic_batch_plan:
         prompt_sections.append("=" * 60)
@@ -2899,9 +3013,22 @@ def get_pre_batch_info(project_id):
                     print(f"[PRE_BATCH] 📊 Profil '{lp}' (×{multiplier}): BASIC {original_basic}→{basic_this_batch_count}, EXTENDED {original_extended}→{extended_this_batch_count}")
                 break
     
-    # Wybierz konkretne frazy do tego batcha
-    basic_for_this_batch = basic_must_use[:basic_this_batch_count]
-    extended_for_this_batch = extended_this_batch[:extended_this_batch_count]
+    # ================================================================
+    # 🆕 v36.7: UNIFIED APPROACH
+    # Jeśli mamy semantic_plan → użyj WSZYSTKIE assigned (nie tnij!)
+    # keywords_budget kontroluje ILE RAZY, nie KTÓRE frazy
+    # ================================================================
+    if semantic_batch_plan_early:
+        # Mamy semantic_plan → basic_must_use zawiera TYLKO assigned+universal
+        # Użyj WSZYSTKIE (nie tnij przez basic_this_batch_count)
+        basic_for_this_batch = basic_must_use  # Wszystkie!
+        extended_for_this_batch = extended_this_batch  # Wszystkie!
+        print(f"[PRE_BATCH] ✅ Semantic mode: {len(basic_for_this_batch)} BASIC, {len(extended_for_this_batch)} EXTENDED (all assigned)")
+    else:
+        # Brak semantic_plan → użyj starej logiki z count
+        basic_for_this_batch = basic_must_use[:basic_this_batch_count]
+        extended_for_this_batch = extended_this_batch[:extended_this_batch_count]
+        print(f"[PRE_BATCH] ⚠️ Fallback mode: {len(basic_for_this_batch)} BASIC, {len(extended_for_this_batch)} EXTENDED (limited)")
     
     prompt_sections.append("="*60)
     prompt_sections.append("🔴🔴🔴 OBOWIĄZKOWE FRAZY DO UŻYCIA W TYM BATCHU 🔴🔴🔴")
