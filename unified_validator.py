@@ -15,7 +15,7 @@ EFEKT: -40% iteracji, -70% czasu na batch
 
 import re
 import math
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 from collections import defaultdict
@@ -713,3 +713,305 @@ def should_auto_approve(attempt: int, score: int, has_critical: bool) -> bool:
         return True
     
     return False
+
+
+# ================================================================
+# 🆕 v36.9: PRIORITIZE ISSUES - Ogranicza liczbę błędów do naprawy
+# ================================================================
+ISSUE_PRIORITY = {
+    # CRITICAL - blokujące (priorytet 1-10)
+    "CRITICAL_LOW_BURSTINESS": 1,
+    "CRITICAL_HIGH_BURSTINESS": 2,
+    "HARD_EXCEEDED": 3,
+    
+    # HIGH - ważne (priorytet 11-20)
+    "SOFT_EXCEEDED": 11,
+    "SEVERE_STUFFING": 12,
+    "LOW_BURSTINESS": 13,
+    "HIGH_BURSTINESS": 14,
+    
+    # MEDIUM - wpływa na score (priorytet 21-30)
+    "HIGH_DENSITY": 21,
+    "LOW_MAIN_KEYWORD_RATIO": 22,
+    "LOW_NGRAM_COVERAGE": 23,
+    
+    # LOW - informacyjne (priorytet 31+)
+    "SHORT_H3_SECTION": 31,
+    "TOO_MANY_LISTS": 32,
+    "SHORT_INTRO": 33,
+    "LONG_INTRO": 34,
+    "LOW_TRANSITION_RATIO": 35,
+    "HIGH_TRANSITION_RATIO": 36,
+    "BANNED_INTRO_OPENER": 37,
+    "MAIN_KEYWORD_NOT_IN_FIRST_SENTENCE": 38,
+    "OVEROPTIMIZED_H2_KEYWORDS": 39,
+}
+
+
+def prioritize_issues(issues: List[ValidationIssue], max_issues: int = 2) -> List[ValidationIssue]:
+    """
+    🆕 v36.9: Zwraca tylko najważniejsze problemy do naprawy.
+    
+    Rozwiązuje problem "over-optimization" - AI dostaje max 2 problemy
+    zamiast 10, więc wie co naprawić najpierw.
+    
+    Args:
+        issues: Lista wszystkich problemów
+        max_issues: Maksymalna liczba problemów do zwrócenia (default: 2)
+        
+    Returns:
+        Lista najważniejszych problemów (max `max_issues`)
+    """
+    if not issues:
+        return []
+    
+    def get_priority(issue: ValidationIssue) -> int:
+        # Priorytet z mapy, lub 50 dla nieznanych (nisko)
+        return ISSUE_PRIORITY.get(issue.type, 50)
+    
+    # Sortuj po priorytecie (niższy = ważniejszy)
+    sorted_issues = sorted(issues, key=get_priority)
+    
+    # Zwróć max `max_issues` problemów
+    return sorted_issues[:max_issues]
+
+
+def get_actionable_feedback(
+    issues: List[ValidationIssue], 
+    attempt: int = 1,
+    previous_issues: List[Dict] = None
+) -> Dict[str, Any]:
+    """
+    🆕 v36.9: Generuje konkretne instrukcje naprawy dla AI.
+    
+    Zamiast: "Burstiness za niski: 2.1"
+    Zwraca: "Dodaj 2-3 KRÓTKIE zdania (5-8 słów) na początku akapitów"
+    
+    Args:
+        issues: Aktualne problemy
+        attempt: Numer próby
+        previous_issues: Problemy z poprzedniej próby (opcjonalnie)
+        
+    Returns:
+        Dict z priorytetowymi instrukcjami
+    """
+    prioritized = prioritize_issues(issues, max_issues=2)
+    
+    instructions = []
+    for issue in prioritized:
+        instruction = _get_fix_instruction(issue, attempt)
+        
+        # Sprawdź czy problem był w poprzedniej próbie
+        if previous_issues:
+            prev = next((p for p in previous_issues if p.get("type") == issue.type), None)
+            if prev:
+                instruction["recurring"] = True
+                instruction["previous_value"] = prev.get("value")
+                instruction["hint"] = f"Problem powtarza się - spróbuj innego podejścia"
+        
+        instructions.append(instruction)
+    
+    return {
+        "attempt": attempt,
+        "total_issues": len(issues),
+        "prioritized_count": len(prioritized),
+        "instructions": instructions,
+        "focus_message": _get_focus_message(prioritized)
+    }
+
+
+def _get_fix_instruction(issue: ValidationIssue, attempt: int) -> Dict[str, Any]:
+    """Generuje konkretną instrukcję naprawy dla danego problemu."""
+    
+    base = {
+        "type": issue.type,
+        "severity": issue.severity.value,
+        "message": issue.message,
+        "recurring": False
+    }
+    
+    # Konkretne instrukcje dla każdego typu
+    if issue.type == "CRITICAL_LOW_BURSTINESS" or issue.type == "LOW_BURSTINESS":
+        value = issue.details.get("value", 0)
+        cv = issue.details.get("cv", value / 5)
+        base["fix"] = (
+            f"Tekst jest zbyt monotonny (CV={cv:.2f}). "
+            f"DODAJ 3-4 KRÓTKIE zdania (5-8 słów) rozrzucone po tekście. "
+            f"Przykłady: 'To ważne.', 'Warto pamiętać.', 'Oto szczegóły.'"
+        )
+        base["examples"] = [
+            "Zmień: 'Ubezwłasnowolnienie jest procesem prawnym który wymaga spełnienia określonych przesłanek.'",
+            "Na: 'Ubezwłasnowolnienie to proces prawny. Wymaga spełnienia przesłanek. Oto najważniejsze z nich.'"
+        ]
+        
+    elif issue.type == "CRITICAL_HIGH_BURSTINESS" or issue.type == "HIGH_BURSTINESS":
+        base["fix"] = (
+            "Tekst jest zbyt chaotyczny - za duża różnica między zdaniami. "
+            "WYRÓWNAJ długości: zamień bardzo krótkie zdania na średnie (12-18 słów)."
+        )
+        
+    elif issue.type == "HARD_EXCEEDED" or issue.type == "SOFT_EXCEEDED":
+        keyword = issue.details.get("keyword", "fraza")
+        actual = issue.details.get("actual", 0)
+        limit = issue.details.get("hard_max", issue.details.get("target_max", 5))
+        base["fix"] = (
+            f"Fraza '{keyword}' użyta {actual}× (limit: {limit}×). "
+            f"ZAMIEŃ nadmiarowe wystąpienia na synonimy lub zaimki: "
+            f"'ta procedura', 'ten proces', 'omawiana instytucja'."
+        )
+        
+    elif issue.type == "HIGH_DENSITY":
+        density = issue.details.get("value", 0)
+        base["fix"] = (
+            f"Gęstość fraz ({density:.1f}%) za wysoka. "
+            f"ROZŁÓŻ frazy kluczowe bardziej równomiernie lub użyj synonimów."
+        )
+        
+    elif issue.type == "LOW_NGRAM_COVERAGE":
+        coverage = issue.details.get("coverage", 0)
+        base["fix"] = (
+            f"Pokrycie n-gramów ({coverage:.0%}) za niskie. "
+            f"DODAJ więcej fraz tematycznych z listy wymaganych."
+        )
+        
+    else:
+        base["fix"] = f"Napraw: {issue.message}"
+    
+    return base
+
+
+def _get_focus_message(prioritized: List[ValidationIssue]) -> str:
+    """Generuje krótki komunikat co naprawić."""
+    if not prioritized:
+        return "✅ Brak krytycznych problemów"
+    
+    if len(prioritized) == 1:
+        return f"🎯 SKUP SIĘ NA: {prioritized[0].type}"
+    
+    types = [p.type for p in prioritized]
+    return f"🎯 NAPRAW NAJPIERW: {types[0]}, potem: {types[1]}"
+
+
+# ================================================================
+# 🆕 v36.9: AUTO-FIX BURSTINESS - Automatyczna naprawa monotonii
+# ================================================================
+
+def auto_fix_burstiness(text: str, target_cv: float = 0.44) -> Tuple[str, List[str], Dict]:
+    """
+    🆕 v36.9: Automatycznie naprawia zbyt niski burstiness.
+    
+    Strategia:
+    1. Dzieli najdłuższe zdania (>25 słów) w miejscach naturalnych przecięć
+    2. NIE łączy krótkich zdań (to psuje styl)
+    
+    Args:
+        text: Tekst do naprawy
+        target_cv: Docelowy CV (default: 0.44 = burstiness 2.2)
+        
+    Returns:
+        Tuple[fixed_text, applied_fixes, stats]
+        
+    UWAGA: Ta funkcja jest konserwatywna - lepiej nie naprawić niż zepsuć.
+    """
+    # Oblicz aktualny burstiness
+    current_burstiness = calculate_burstiness(text)
+    current_cv = current_burstiness / 5.0
+    
+    if current_cv >= target_cv:
+        return text, [], {"status": "OK", "cv_before": current_cv, "cv_after": current_cv}
+    
+    # Podziel na zdania
+    sentence_pattern = r'(?<=[.!?])\s+'
+    sentences = re.split(sentence_pattern, text)
+    
+    if len(sentences) < 3:
+        return text, [], {"status": "TOO_SHORT", "cv_before": current_cv, "cv_after": current_cv}
+    
+    # Znajdź zdania do podziału (>25 słów)
+    applied_fixes = []
+    modified_sentences = []
+    
+    # Naturalne punkty podziału
+    split_patterns = [
+        (r',\s*które?\s+', '. '),           # ", które " -> ". "
+        (r',\s*co\s+', '. To '),             # ", co " -> ". To "
+        (r',\s*ponieważ\s+', '. '),          # ", ponieważ " -> ". "
+        (r',\s*gdyż\s+', '. '),              # ", gdyż " -> ". "
+        (r',\s*jednak\s+', '. Jednak '),     # ", jednak " -> ". Jednak "
+        (r',\s*natomiast\s+', '. '),         # ", natomiast " -> ". "
+        (r',\s*a\s+także\s+', '. Ponadto '), # ", a także " -> ". Ponadto "
+        (r'\s+–\s+', '. '),                  # " – " -> ". "
+    ]
+    
+    for sentence in sentences:
+        words = sentence.split()
+        word_count = len(words)
+        
+        if word_count > 25:
+            # Próbuj podzielić
+            modified = sentence
+            was_split = False
+            
+            for pattern, replacement in split_patterns:
+                if re.search(pattern, modified, re.IGNORECASE):
+                    # Podziel tylko raz
+                    parts = re.split(pattern, modified, maxsplit=1, flags=re.IGNORECASE)
+                    if len(parts) == 2 and len(parts[0].split()) >= 8 and len(parts[1].split()) >= 5:
+                        # Obie części są sensownej długości
+                        new_sentence = parts[0].rstrip() + replacement + parts[1].lstrip()
+                        # Upewnij się że druga część zaczyna się wielką literą
+                        new_sentence = _capitalize_after_period(new_sentence)
+                        
+                        applied_fixes.append(f"Podzielono ({word_count} słów): '{sentence[:50]}...'")
+                        modified = new_sentence
+                        was_split = True
+                        break
+            
+            modified_sentences.append(modified)
+        else:
+            modified_sentences.append(sentence)
+    
+    if not applied_fixes:
+        return text, [], {"status": "NO_CHANGES", "cv_before": current_cv, "cv_after": current_cv}
+    
+    # Złóż tekst z powrotem
+    fixed_text = ' '.join(modified_sentences)
+    
+    # Sprawdź nowy burstiness
+    new_burstiness = calculate_burstiness(fixed_text)
+    new_cv = new_burstiness / 5.0
+    
+    # Sprawdź czy się poprawiło (a nie pogorszyło)
+    if new_cv < current_cv:
+        # Pogorszyło się - wróć do oryginału
+        return text, [], {
+            "status": "REVERTED", 
+            "cv_before": current_cv, 
+            "cv_after": current_cv,
+            "reason": "Zmiana pogorszyła burstiness"
+        }
+    
+    return fixed_text, applied_fixes, {
+        "status": "FIXED",
+        "cv_before": current_cv,
+        "cv_after": new_cv,
+        "improvement": new_cv - current_cv,
+        "fixes_count": len(applied_fixes)
+    }
+
+
+def _capitalize_after_period(text: str) -> str:
+    """Upewnia się że po kropce jest wielka litera."""
+    result = []
+    capitalize_next = False
+    
+    for i, char in enumerate(text):
+        if capitalize_next and char.isalpha():
+            result.append(char.upper())
+            capitalize_next = False
+        else:
+            result.append(char)
+            if char in '.!?':
+                capitalize_next = True
+    
+    return ''.join(result)
