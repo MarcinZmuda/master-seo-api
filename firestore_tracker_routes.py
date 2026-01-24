@@ -747,8 +747,15 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
     
     try:
         doc_ref.set(project_data)
+        print(f"[FIRESTORE] ✅ Batch saved successfully, total batches: {len(project_data.get('batches', []))}")
     except Exception as e:
-        print(f"[FIRESTORE] ⚠️ Błąd zapisu: {e}")
+        print(f"[FIRESTORE] ❌ CRITICAL: Błąd zapisu: {e}")
+        # 🆕 v36.3: Return error instead of silently continuing!
+        return {
+            "status": "ERROR",
+            "error": f"Firestore save failed: {str(e)}",
+            "message": "Batch was NOT saved. Please retry."
+        }
 
     # =========================================================================
     # v33.3: Przygotuj keywords_state_after do response
@@ -1017,6 +1024,15 @@ def approve_batch(project_id):
             print(f"[APPROVE_BATCH] ⚠️ Grammar check error: {e}, proceeding with save")
 
     result = process_batch_in_firestore(project_id, text, meta_trace, forced)
+    
+    # 🆕 v36.3: Check if Firestore save failed
+    if isinstance(result, dict) and result.get("status") == "ERROR":
+        return jsonify({
+            "status": "ERROR",
+            "error": result.get("error", "Unknown Firestore error"),
+            "message": result.get("message", "Batch was NOT saved"),
+            "retry": True
+        }), 500
 
     db = firestore.client()
     doc = db.collection("seo_projects").document(project_id).get()
