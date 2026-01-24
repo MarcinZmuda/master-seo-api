@@ -1,5 +1,10 @@
 """
-PROJECT ROUTES - v30.1 BRAJEN SEO Engine - OPTIMIZED
+PROJECT ROUTES - v36.3 BRAJEN SEO Engine - FIRESTORE FIX
+
+ZMIANY v36.3:
+- 🆕 FIRESTORE FIX: sanitize_for_firestore() dla kluczy ze znakami . / [ ]
+- 🆕 Sanityzacja przed każdym doc_ref.set() i doc_ref.update()
+- 🆕 Naprawiono ValueError: One or more components is not a string or is empty
 
 ZMIANY v30.1 OPTIMIZED:
 - 🆕 Best-of-N domyślnie WŁĄCZONE (use_best_of_n=True)
@@ -54,6 +59,70 @@ from firebase_admin import firestore
 from firestore_tracker_routes import process_batch_in_firestore
 import google.generativeai as genai
 from seo_optimizer import unified_prevalidation
+
+# ================================================================
+# 🆕 v36.3: FIRESTORE KEY SANITIZATION
+# Firestore nie akceptuje pustych kluczy ani znaków . / [ ] w kluczach
+# ================================================================
+def sanitize_for_firestore(data, depth=0, max_depth=50):
+    """
+    Recursively sanitize dictionary keys for Firestore compatibility.
+    
+    Firestore restrictions:
+    - Keys must be non-empty strings
+    - Keys cannot contain: . / [ ] \\ " '
+    - Keys cannot start/end with whitespace
+    
+    Args:
+        data: Any data structure (dict, list, or primitive)
+        depth: Current recursion depth
+        max_depth: Maximum recursion depth to prevent infinite loops
+        
+    Returns:
+        Sanitized data structure
+    """
+    if depth > max_depth:
+        return data
+    
+    if isinstance(data, dict):
+        sanitized = {}
+        for key, value in data.items():
+            # Skip None keys
+            if key is None:
+                continue
+            
+            # Convert to string
+            str_key = str(key).strip()
+            
+            # Skip empty keys
+            if not str_key:
+                continue
+            
+            # Replace problematic characters for Firestore
+            safe_key = (str_key
+                .replace('.', '_')
+                .replace('/', '_')
+                .replace('[', '(')
+                .replace(']', ')')
+                .replace('\\', '_')
+                .replace('"', '')
+                .replace("'", '')
+            )
+            
+            # Ensure key is not empty after sanitization
+            if not safe_key:
+                safe_key = f"_sanitized_key_{depth}"
+            
+            # Recursively sanitize value
+            sanitized[safe_key] = sanitize_for_firestore(value, depth + 1, max_depth)
+        
+        return sanitized
+    
+    elif isinstance(data, list):
+        return [sanitize_for_firestore(item, depth + 1, max_depth) for item in data]
+    
+    else:
+        return data
 
 # 🆕 v36.2: Anti-Frankenstein System
 try:
@@ -2017,6 +2086,13 @@ def create_project():
         except Exception as e:
             print(f"[PROJECT] ⚠️ Anti-Frankenstein error: {e}")
     
+    # 🆕 v36.3: Sanitize keys before Firestore save
+    try:
+        project_data = sanitize_for_firestore(project_data)
+        print(f"[PROJECT] ✅ Data sanitized for Firestore")
+    except Exception as e:
+        print(f"[PROJECT] ⚠️ Sanitization warning: {e}")
+    
     doc_ref.set(project_data)
     
     # v27.2: Policz ile BASIC vs EXTENDED
@@ -2179,7 +2255,7 @@ def convert_to_extended(project_id):
     
     # Zapisz do Firestore
     if converted:
-        doc_ref.update({"keywords_state": keywords_state})
+        doc_ref.update({"keywords_state": sanitize_for_firestore(keywords_state)})
     
     # Policz nowe statystyki
     basic_count = sum(1 for k in keywords_state.values() if k.get("type", "BASIC").upper() in ["BASIC"])
