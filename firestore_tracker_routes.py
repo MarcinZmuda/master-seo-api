@@ -1,5 +1,11 @@
 """
-SEO Content Tracker Routes - v27.0 BRAJEN SEO Engine
+SEO Content Tracker Routes - v36.3 BRAJEN SEO Engine
+
+ZMIANY v36.3:
+- 🆕 FIRESTORE FIX: sanitize_for_firestore() dla kluczy ze znakami . / [ ]
+- 🆕 Naprawiono ValueError: One or more components is not a string or is empty
+
+v27.0 Original:
 + v27.0: approve_batch fallback z last_preview
 + Minimal approve_batch response (~500B instead of 220KB)
 + Morfeusz2 lemmatization (with spaCy fallback)
@@ -20,6 +26,42 @@ from seo_optimizer import unified_prevalidation
 from google.api_core.exceptions import InvalidArgument
 import google.generativeai as genai
 import os
+
+# ================================================================
+# 🆕 v36.3: FIRESTORE KEY SANITIZATION
+# ================================================================
+def sanitize_for_firestore(data, depth=0, max_depth=50):
+    """
+    Recursively sanitize dictionary keys for Firestore compatibility.
+    """
+    if depth > max_depth:
+        return data
+    
+    if isinstance(data, dict):
+        sanitized = {}
+        for key, value in data.items():
+            if key is None:
+                continue
+            str_key = str(key).strip()
+            if not str_key:
+                continue
+            safe_key = (str_key
+                .replace('.', '_')
+                .replace('/', '_')
+                .replace('[', '(')
+                .replace(']', ')')
+                .replace('\\', '_')
+                .replace('"', '')
+                .replace("'", '')
+            )
+            if not safe_key:
+                safe_key = f"_sanitized_key_{depth}"
+            sanitized[safe_key] = sanitize_for_firestore(value, depth + 1, max_depth)
+        return sanitized
+    elif isinstance(data, list):
+        return [sanitize_for_firestore(item, depth + 1, max_depth) for item in data]
+    else:
+        return data
 
 # 🆕 v36.2: Anti-Frankenstein System
 try:
@@ -696,6 +738,12 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
             print(f"[TRACKER] 🧟 Anti-Frankenstein updated: batch {batch_number}, memory claims: {len(project_data.get('article_memory', {}).get('key_claims', []))}")
         except Exception as e:
             print(f"[TRACKER] ⚠️ Anti-Frankenstein update error: {e}")
+    
+    # 🆕 v36.3: Sanitize before Firestore save
+    try:
+        project_data = sanitize_for_firestore(project_data)
+    except Exception as e:
+        print(f"[TRACKER] ⚠️ Sanitization warning: {e}")
     
     try:
         doc_ref.set(project_data)
