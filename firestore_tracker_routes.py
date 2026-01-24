@@ -705,6 +705,18 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
     # ================================================================
     # 🆕 v36.2: ANTI-FRANKENSTEIN - Update Memory & Style
     # ================================================================
+    # 🆕 v36.4: Calculate real humanness_score for soft caps
+    real_humanness_score = 100.0
+    try:
+        from ai_detection_metrics import calculate_humanness_score
+        humanness_result = calculate_humanness_score(batch_text)
+        real_humanness_score = float(humanness_result.get("humanness_score", 100.0))
+        print(f"[TRACKER] 🎯 Humanness score calculated: {real_humanness_score}")
+    except ImportError:
+        print("[TRACKER] ⚠️ ai_detection_metrics not available, using default humanness=100")
+    except Exception as e:
+        print(f"[TRACKER] ⚠️ Humanness calculation error: {e}, using default=100")
+    
     if ANTI_FRANKENSTEIN_ENABLED:
         try:
             batch_number = len(project_data.get("batches", []))
@@ -733,7 +745,7 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
                 batch_number=batch_number,
                 h2_sections=h2_sections,
                 entities_used=entities_used,
-                humanness_score=100.0  # TODO: pobierz z ai_detection jeśli dostępne
+                humanness_score=real_humanness_score  # 🆕 v36.4: Real humanness!
             )
             print(f"[TRACKER] 🧟 Anti-Frankenstein updated: batch {batch_number}, memory claims: {len(project_data.get('article_memory', {}).get('key_claims', []))}")
         except Exception as e:
@@ -820,7 +832,7 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
             soft_cap_result = validate_batch_with_soft_caps(
                 batch_counts=keyword_counts,
                 keywords_state=keywords_state,
-                humanness_score=100.0,  # TODO: użyj rzeczywistego humanness jeśli dostępny
+                humanness_score=real_humanness_score,  # 🆕 v36.4: Real humanness!
                 total_batches=project_data.get("total_planned_batches", 7)
             )
             
