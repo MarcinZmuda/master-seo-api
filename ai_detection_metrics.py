@@ -162,15 +162,16 @@ class AIDetectionConfig:
     HUMANNESS_CRITICAL = 50
     HUMANNESS_WARNING = 70
     
-    # Wagi - 🔧 v35.1 OPTIMIZED: Zmniejszona waga burstiness - mniej blokujące
+    # Wagi - 🆕 v36.5: Dodano template_diversity dla wykrywania AI patterns
     WEIGHTS = {
-        "burstiness": 0.22,       # 🔧 było 0.30 - zmniejszone, mniej blokujące
-        "vocabulary": 0.20,       # 🔧 było 0.15 - zwiększone
-        "sophistication": 0.12,   # 🔧 było 0.10
-        "entropy": 0.18,          # 🔧 było 0.15
-        "repetition": 0.15,
-        "pos_diversity": 0.08,    # 🔧 było 0.10
-        "sentence_distribution": 0.05
+        "burstiness": 0.18,           # 🔧 zmniejszone z 0.22
+        "vocabulary": 0.18,           # 🔧 zmniejszone z 0.20
+        "sophistication": 0.10,       # 🔧 zmniejszone z 0.12
+        "entropy": 0.15,              # 🔧 zmniejszone z 0.18
+        "repetition": 0.12,           # 🔧 zmniejszone z 0.15
+        "pos_diversity": 0.07,        # 🔧 zmniejszone z 0.08
+        "sentence_distribution": 0.05,
+        "template_diversity": 0.15    # 🆕 v36.5: Nowa metryka dla wykrywania AI patterns
     }
 
 
@@ -930,6 +931,127 @@ def calculate_word_repetition(text: str) -> Dict[str, Any]:
 
 
 # ================================================================
+# 🆕 v36.5: TEMPLATE DIVERSITY SCORE
+# ================================================================
+
+AI_SENTENCE_PATTERNS = {
+    "conditional_structures": [
+        r"wtedy,?\s+gdy",
+        r"w przypadku,?\s+gdy",
+        r"w sytuacji,?\s+gdy",
+        r"jeśli.*to\s+",
+        r"kiedy.*wówczas"
+    ],
+    "emphasis_phrases": [
+        r"warto\s+(?:zauważyć|podkreślić|wspomnieć|wiedzieć)",
+        r"należy\s+(?:zauważyć|podkreślić|wspomnieć|pamiętać)",
+        r"trzeba\s+(?:zauważyć|podkreślić|wspomnieć|pamiętać)",
+        r"istotne\s+(?:jest|będzie)",
+        r"kluczowe\s+(?:jest|znaczenie|będzie)"
+    ],
+    "universal_negations": [
+        r"nie\s+każd[yaei]",
+        r"nie\s+zawsze",
+        r"nie\s+oznacza\s+(?:to\s+)?(?:że|automatycznie)",
+        r"sam\s+fakt.*nie\s+"
+    ],
+    "generic_openers": [
+        r"^w\s+dzisiejszych\s+czasach",
+        r"^współcześnie",
+        r"^w\s+niniejszym",
+        r"^jak\s+wiadomo",
+        r"^nie\s+jest\s+tajemnicą"
+    ],
+    "structure_markers": [
+        r"ma\s+to\s+miejsce",
+        r"dotyczy\s+to",
+        r"odnosi\s+się\s+to",
+        r"chodzi\s+o\s+to"
+    ]
+}
+
+
+def calculate_template_diversity_score(text: str) -> Dict[str, Any]:
+    """
+    🆕 v36.5: Mierzy różnorodność struktur zdaniowych.
+    
+    Wykrywa powtarzające się szablony charakterystyczne dla AI:
+    - Struktury warunkowe ("wtedy, gdy")
+    - Frazy emfatyczne ("warto zauważyć")
+    - Uniwersalne negacje ("nie każdy", "nie zawsze")
+    - Generyczne otwieracze ("w dzisiejszych czasach")
+    - Znaczniki strukturalne ("ma to miejsce")
+    
+    Returns:
+        Dict z wynikiem 0-1 (1 = różnorodny/ludzki, 0 = szablonowy/AI)
+    """
+    text_lower = text.lower()
+    sentences = split_into_sentences(text)
+    
+    if len(sentences) < 5:
+        return {
+            "value": 0.5,
+            "status": "OK",
+            "message": "Za mało zdań do analizy templateów",
+            "pattern_hits": 0,
+            "details": {}
+        }
+    
+    pattern_details = {}
+    total_hits = 0
+    
+    for category, patterns in AI_SENTENCE_PATTERNS.items():
+        category_hits = 0
+        matched = []
+        
+        for pattern in patterns:
+            try:
+                matches = re.findall(pattern, text_lower, re.IGNORECASE | re.MULTILINE)
+                category_hits += len(matches)
+                if matches:
+                    matched.extend(matches[:2])
+            except re.error:
+                continue
+        
+        pattern_details[category] = {
+            "count": category_hits,
+            "examples": matched[:3]
+        }
+        total_hits += category_hits
+    
+    # Oblicz score: więcej hitów = niższy score
+    # Normalizacja: 0 hitów = 1.0, 10+ hitów = 0.0
+    if total_hits == 0:
+        score = 1.0
+        status = "OK"
+        message = "Brak wykrytych wzorców AI - tekst różnorodny"
+    elif total_hits <= 3:
+        score = 0.85
+        status = "OK"
+        message = f"Niewiele wzorców AI ({total_hits}) - akceptowalne"
+    elif total_hits <= 6:
+        score = 0.6
+        status = "WARNING"
+        message = f"Umiarkowana liczba wzorców AI ({total_hits}) - rozważ zróżnicowanie"
+    elif total_hits <= 10:
+        score = 0.35
+        status = "WARNING"
+        message = f"Wysoka liczba wzorców AI ({total_hits}) - tekst brzmi szablonowo"
+    else:
+        score = max(0.1, 1.0 - (total_hits / 20))
+        status = "CRITICAL"
+        message = f"Bardzo wysoka templateowość ({total_hits} wzorców) - tekst wygląda na AI"
+    
+    return {
+        "value": score,
+        "status": status,
+        "message": message,
+        "pattern_hits": total_hits,
+        "details": pattern_details
+    }
+
+
+# ================================================================
 # 🎯 GŁÓWNA FUNKCJA - HUMANNESS SCORE
 # ================================================================
 def calculate_humanness_score(text: str) -> Dict[str, Any]:
@@ -943,6 +1065,9 @@ def calculate_humanness_score(text: str) -> Dict[str, Any]:
     
     # v33.3: POS diversity
     pos_diversity = calculate_pos_diversity(text)
+    
+    # 🆕 v36.5: Template diversity
+    template_diversity = calculate_template_diversity_score(text)
     
     def normalize_burstiness(val):
         if val < config.BURSTINESS_CRITICAL_LOW:
@@ -1005,7 +1130,8 @@ def calculate_humanness_score(text: str) -> Dict[str, Any]:
         "sophistication": normalize_zipf(sophistication.get("value", 0)),
         "entropy": normalize_entropy(entropy.get("value", 0)),
         "repetition": repetition.get("value", 1.0),
-        "pos_diversity": normalize_pos(pos_diversity.get("value", 0.5))  # v33.3
+        "pos_diversity": normalize_pos(pos_diversity.get("value", 0.5)),
+        "template_diversity": template_diversity.get("value", 0.5)  # 🆕 v36.5
     }
     
     # 🔧 FIX v34.3: Używamy wag z konfiguracji (jedno źródło prawdy)
@@ -1038,6 +1164,9 @@ def calculate_humanness_score(text: str) -> Dict[str, Any]:
     # v33.3: POS diversity warnings
     if pos_diversity.get("status") not in ["OK", "DISABLED"] and pos_diversity.get("enabled", True):
         all_warnings.append(pos_diversity.get("message"))
+    # 🆕 v36.5: Template diversity warnings
+    if template_diversity.get("status") not in ["OK"]:
+        all_warnings.append(template_diversity.get("message"))
     
     all_suggestions = []
     all_suggestions.extend(entropy.get("suggestions", []))
@@ -1053,7 +1182,8 @@ def calculate_humanness_score(text: str) -> Dict[str, Any]:
             "lexical_sophistication": sophistication,
             "starter_entropy": entropy,
             "word_repetition": repetition,
-            "pos_diversity": pos_diversity  # v33.3
+            "pos_diversity": pos_diversity,
+            "template_diversity": template_diversity  # 🆕 v36.5
         },
         "normalized_scores": scores,
         "warnings": all_warnings[:5],
