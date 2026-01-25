@@ -3512,6 +3512,10 @@ def get_pre_batch_info(project_id):
     # ================================================================
     anti_frankenstein_section = ""
     dynamic_sections_data = None
+    # 🆕 v36.9: Dodatkowe pola Anti-Frankenstein
+    article_memory_data = None
+    style_instructions_data = None
+    soft_cap_data = None
     if ANTI_FRANKENSTEIN_ENABLED:
         try:
             anti_frankenstein_section = generate_anti_frankenstein_gpt_section(
@@ -3530,6 +3534,10 @@ def get_pre_batch_info(project_id):
                 current_h2=remaining_h2[0] if remaining_h2 else ""
             )
             dynamic_sections_data = af_context.get("dynamic_sections")
+            # 🆕 v36.9: Article Memory i Style Instructions
+            article_memory_data = af_context.get("article_memory_context")
+            style_instructions_data = af_context.get("style_instructions")
+            soft_cap_data = af_context.get("soft_cap_keywords")
         except Exception as e:
             print(f"[PRE_BATCH] ⚠️ Anti-Frankenstein context error: {e}")
     
@@ -3658,6 +3666,15 @@ def get_pre_batch_info(project_id):
         # 🆕 v36.2: Anti-Frankenstein dynamic sections (Token Budgeting)
         "dynamic_sections": dynamic_sections_data,
         
+        # 🆕 v36.9: Article Memory - kontekst z poprzednich batchów
+        "article_memory": article_memory_data,
+        
+        # 🆕 v36.9: Style Instructions - utrzymanie spójnego tonu
+        "style_instructions": style_instructions_data,
+        
+        # 🆕 v36.9: Soft Cap Recommendations - elastyczne limity
+        "soft_cap_recommendations": soft_cap_data,
+        
         # 🆕 v36.5: Legal context - przepisy prawne i instrukcje cytowania
         "legal_context": {
             "active": data.get("detected_category") == "prawo",
@@ -3679,7 +3696,7 @@ def get_pre_batch_info(project_id):
         
         "gpt_prompt": gpt_prompt,
         
-        "version": "v36.5"
+        "version": "v36.9"
     }), 200
 
 
@@ -3849,35 +3866,97 @@ def approve_batch_with_review(project_id):
         "complexity_score": complexity_score
     }
     
+    # 🆕 v36.9: Domyślne wartości
+    auto_fixes = []
+    has_optimization_helpers = False
+    
     # ============================================
     # CLAUDE REVIEW
     # ============================================
     try:
         from claude_reviewer import review_batch, ReviewResult
+        # 🆕 v36.9: Import optimization_helpers dla actionable_feedback
+        try:
+            from optimization_helpers import get_actionable_feedback
+            has_optimization_helpers = True
+        except ImportError:
+            has_optimization_helpers = False
+            print("[APPROVE_BATCH] ⚠️ optimization_helpers not available")
         
         result = review_batch(batch_text, review_context, skip_claude=skip_review)
+        
+        # 🆕 v36.9: Pobierz auto_fixes_applied jeśli dostępne
+        auto_fixes = getattr(result, 'auto_fixes_applied', []) if result else []
         
         # QUICK_CHECK_FAILED - zwróć do poprawy
         if result.status == "QUICK_CHECK_FAILED":
             issues_list = [asdict(i) for i in result.issues]
+            
+            # 🆕 v36.9: Prioritized issues i actionable feedback
+            prioritized_issues = []
+            actionable_feedback = {}
+            if has_optimization_helpers:
+                try:
+                    feedback = get_actionable_feedback(issues_list, attempt)
+                    prioritized_issues = feedback.get("prioritized_issues", issues_list[:2])
+                    actionable_feedback = {
+                        "attempt": attempt,
+                        "total_issues": len(issues_list),
+                        "prioritized_count": len(prioritized_issues),
+                        "focus_message": f"🎯 SKUP SIĘ NA: {prioritized_issues[0].get('type', 'UNKNOWN') if prioritized_issues else 'brak'}",
+                        "instructions": feedback.get("instructions", [])
+                    }
+                except Exception as e:
+                    print(f"[APPROVE_BATCH] ⚠️ actionable_feedback error: {e}")
+                    prioritized_issues = issues_list[:2]
+            else:
+                prioritized_issues = issues_list[:2]
+            
             return jsonify({
-                "status": "QUICK_CHECK_FAILED",
+                "status": "NEEDS_CORRECTION",  # 🆕 v36.9: Zmiana z QUICK_CHECK_FAILED
                 "needs_correction": True,
-                "issues": issues_list,
+                "prioritized_issues": prioritized_issues,  # 🆕 v36.9
+                "actionable_feedback": actionable_feedback,  # 🆕 v36.9
+                "auto_fixes_applied": auto_fixes,  # 🆕 v36.9
+                "issues": issues_list,  # zachowane dla kompatybilności
                 "correction_prompt": build_correction_prompt(issues_list, batch_text),
                 "message": result.summary,
                 "word_count": result.word_count,
                 "attempt": attempt,
-                "next_attempt": attempt + 1,  # v28.3: GPT powinien przekazać to w następnym requeście
-                "auto_approve_at": 2  # v30.1: info że po 2 próbie będzie auto-approve
+                "next_attempt": attempt + 1,
+                "auto_approve_at": 2
             }), 200
         
         # REJECTED - wymaga przepisania
         if result.status == "REJECTED":
             issues_list = [asdict(i) for i in result.issues]
+            
+            # 🆕 v36.9: Prioritized issues i actionable feedback
+            prioritized_issues = []
+            actionable_feedback = {}
+            if has_optimization_helpers:
+                try:
+                    feedback = get_actionable_feedback(issues_list, attempt)
+                    prioritized_issues = feedback.get("prioritized_issues", issues_list[:2])
+                    actionable_feedback = {
+                        "attempt": attempt,
+                        "total_issues": len(issues_list),
+                        "prioritized_count": len(prioritized_issues),
+                        "focus_message": f"🎯 SKUP SIĘ NA: {prioritized_issues[0].get('type', 'UNKNOWN') if prioritized_issues else 'przepisanie'}",
+                        "instructions": feedback.get("instructions", [])
+                    }
+                except Exception as e:
+                    print(f"[APPROVE_BATCH] ⚠️ actionable_feedback error: {e}")
+                    prioritized_issues = issues_list[:2]
+            else:
+                prioritized_issues = issues_list[:2]
+            
             return jsonify({
-                "status": "REJECTED",
+                "status": "NEEDS_CORRECTION",  # 🆕 v36.9: Zmiana z REJECTED
                 "needs_correction": True,
+                "prioritized_issues": prioritized_issues,  # 🆕 v36.9
+                "actionable_feedback": actionable_feedback,  # 🆕 v36.9
+                "auto_fixes_applied": auto_fixes,  # 🆕 v36.9
                 "issues": issues_list,
                 "correction_prompt": f"Tekst wymaga przepisania. {result.summary}",
                 "message": result.summary,
@@ -3913,6 +3992,8 @@ def approve_batch_with_review(project_id):
         
     except ImportError:
         print(f"[APPROVE_BATCH] ⚠️ claude_reviewer not available, saving without review")
+    except ImportError:
+        print(f"[APPROVE_BATCH] ⚠️ claude_reviewer not available, saving without review")
     except Exception as e:
         print(f"[APPROVE_BATCH] ⚠️ Review error: {e}, saving anyway")
     
@@ -3929,6 +4010,7 @@ def approve_batch_with_review(project_id):
         "batch_number": save_result.get("batch_number"),
         "word_count": len(batch_text.split()),
         "message": "Batch zatwierdzony i zapisany",
+        "auto_fixes_applied": auto_fixes,  # 🆕 v36.9
         **save_result
     }), 200
 
