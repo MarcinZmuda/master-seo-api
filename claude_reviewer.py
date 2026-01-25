@@ -37,6 +37,16 @@ except ImportError:
     LANGUAGETOOL_AVAILABLE = False
     print("[CLAUDE_REVIEWER] ⚠️ LanguageTool not available, using Claude-only grammar check")
 
+# 🆕 v36.5: Import pełnej bazy synonimów z keyword_synonyms.py
+try:
+    from keyword_synonyms import get_synonyms as get_synonyms_full, LEGAL_SYNONYMS
+    KEYWORD_SYNONYMS_AVAILABLE = True
+    print("[CLAUDE_REVIEWER] ✅ keyword_synonyms integration enabled (plWordNet + LEGAL_SYNONYMS)")
+except ImportError:
+    KEYWORD_SYNONYMS_AVAILABLE = False
+    LEGAL_SYNONYMS = {}
+    print("[CLAUDE_REVIEWER] ⚠️ keyword_synonyms not available, using local SYNONYM_MAP only")
+
 
 # ================================================================
 # 🆕 v33.5: SŁOWNIK SYNONIMÓW DO AUTO-FIX
@@ -66,19 +76,54 @@ SYNONYM_MAP = {
 }
 
 
-def get_synonym(phrase: str) -> Optional[str]:
+def get_synonym(phrase: str, context: str = None) -> Optional[str]:
     """
-    🆕 v33.5: Zwraca synonim dla frazy.
+    🆕 v36.5: Zwraca synonim dla frazy z kontekstowym doborem.
+    
+    Kolejność źródeł:
+    1. keyword_synonyms.py (LEGAL_SYNONYMS + plWordNet + LLM fallback)
+    2. Lokalny SYNONYM_MAP
+    3. Kontekstowe dopasowanie (jeśli context podany)
+    
+    Args:
+        phrase: Fraza do zamiany
+        context: Opcjonalny kontekst zdania (do lepszego doboru synonimu)
+    
+    Returns:
+        Najlepszy synonim lub None
     """
     phrase_lower = phrase.lower().strip()
     
-    # Dokładne dopasowanie
+    # 1. Użyj pełnej bazy z keyword_synonyms.py (najlepsza jakość)
+    if KEYWORD_SYNONYMS_AVAILABLE:
+        try:
+            synonyms = get_synonyms_full(phrase_lower)
+            if synonyms:
+                # Jeśli mamy kontekst, wybierz najlepszy synonim
+                if context and len(synonyms) > 1:
+                    return _select_best_synonym_for_context(synonyms, context)
+                return synonyms[0]
+        except Exception as e:
+            print(f"[CLAUDE_REVIEWER] ⚠️ get_synonyms_full error: {e}")
+    
+    # 2. Sprawdź LEGAL_SYNONYMS (jeśli dostępne)
+    if LEGAL_SYNONYMS:
+        for key, synonyms in LEGAL_SYNONYMS.items():
+            if key in phrase_lower or phrase_lower in key:
+                if synonyms:
+                    if context and len(synonyms) > 1:
+                        return _select_best_synonym_for_context(synonyms, context)
+                    return synonyms[0]
+    
+    # 3. Fallback na lokalny SYNONYM_MAP
     if phrase_lower in SYNONYM_MAP:
         synonyms = SYNONYM_MAP[phrase_lower]
         if synonyms:
-            return synonyms[0]  # Zwróć pierwszy synonim
+            if context and len(synonyms) > 1:
+                return _select_best_synonym_for_context(synonyms, context)
+            return synonyms[0]
     
-    # Częściowe dopasowanie
+    # 4. Częściowe dopasowanie w lokalnym SYNONYM_MAP
     for key, synonyms in SYNONYM_MAP.items():
         if key in phrase_lower or phrase_lower in key:
             if synonyms:
@@ -87,9 +132,44 @@ def get_synonym(phrase: str) -> Optional[str]:
     return None
 
 
+def _select_best_synonym_for_context(synonyms: List[str], context: str) -> str:
+    """
+    🆕 v36.5: Wybiera najlepszy synonim na podstawie kontekstu zdania.
+    
+    Heurystyka:
+    - Kontekst prawny → preferuj synonimy z terminologią prawną
+    - Krótki kontekst → preferuj krótsze synonimy
+    - Default → pierwszy synonim
+    """
+    if not synonyms:
+        return None
+    
+    context_lower = context.lower()
+    
+    # Słowa wskazujące na kontekst prawny
+    legal_markers = ['sąd', 'prawo', 'ustawa', 'art.', 'kodeks', 'postępow', 'orzecz', 'cywil']
+    is_legal_context = any(marker in context_lower for marker in legal_markers)
+    
+    if is_legal_context:
+        # Preferuj synonimy z terminologią prawną
+        legal_terms = ['prawn', 'sądow', 'procedu', 'cywil', 'postępow', 'orzecz', 'zdoln']
+        legal_synonyms = [s for s in synonyms if any(term in s.lower() for term in legal_terms)]
+        if legal_synonyms:
+            return legal_synonyms[0]
+    
+    # Dla krótkich kontekstów preferuj krótsze synonimy
+    if len(context.split()) < 15:
+        synonyms_sorted = sorted(synonyms, key=len)
+        return synonyms_sorted[0]
+    
+    return synonyms[0]
+
+
 def auto_fix_stuffing(text: str, stuffed_keywords: List[Dict]) -> Tuple[str, List[str]]:
     """
-    🆕 v33.5: Automatycznie naprawia stuffing zamieniając nadmiarowe wystąpienia na synonimy.
+    🆕 v36.5: Automatycznie naprawia stuffing z kontekstowym doborem synonimów.
+    
+    Używa różnych synonimów dla różnych wystąpień w zależności od kontekstu zdania.
     
     Args:
         text: Tekst do naprawy
@@ -100,6 +180,7 @@ def auto_fix_stuffing(text: str, stuffed_keywords: List[Dict]) -> Tuple[str, Lis
     """
     fixed_text = text
     applied_fixes = []
+    used_synonyms = {}  # Tracking użytych synonimów dla różnorodności
     
     for stuffed in stuffed_keywords:
         keyword = stuffed.get("keyword", "")
@@ -109,38 +190,65 @@ def auto_fix_stuffing(text: str, stuffed_keywords: List[Dict]) -> Tuple[str, Lis
         if not keyword or count <= limit:
             continue
         
-        excess = count - limit
-        synonym = get_synonym(keyword)
-        
-        if not synonym:
-            # Brak synonimu - spróbuj generycznego
-            if len(keyword.split()) > 1:
-                # Dla fraz wielowyrazowych - użyj pierwszego słowa
-                synonym = keyword.split()[0]
-            else:
-                # Dla pojedynczych słów - pomiń
-                applied_fixes.append(f"Brak synonimu dla '{keyword}' - wymaga ręcznej poprawy")
-                continue
-        
-        # Znajdź i zamień nadmiarowe wystąpienia (od końca, żeby nie zmienić pozycji)
+        # Znajdź wszystkie wystąpienia
         pattern = re.compile(re.escape(keyword), re.IGNORECASE)
         matches = list(pattern.finditer(fixed_text))
         
-        # Zostaw 'limit' wystąpień, zamień resztę
-        if len(matches) > limit:
-            # Zamień wystąpienia od końca (żeby indeksy się nie przesunęły)
-            for match in reversed(matches[limit:excess + limit]):
-                start, end = match.start(), match.end()
-                original = fixed_text[start:end]
-                
-                # Zachowaj wielkość liter
-                if original[0].isupper():
-                    replacement = synonym[0].upper() + synonym[1:]
+        if len(matches) <= limit:
+            continue
+        
+        # Pobierz listę dostępnych synonimów
+        all_synonyms = []
+        if KEYWORD_SYNONYMS_AVAILABLE:
+            try:
+                all_synonyms = get_synonyms_full(keyword.lower()) or []
+            except:
+                pass
+        
+        if not all_synonyms and keyword.lower() in LEGAL_SYNONYMS:
+            all_synonyms = LEGAL_SYNONYMS[keyword.lower()]
+        
+        if not all_synonyms and keyword.lower() in SYNONYM_MAP:
+            all_synonyms = SYNONYM_MAP[keyword.lower()]
+        
+        # Zamień wystąpienia od końca (żeby indeksy się nie przesunęły)
+        synonym_index = 0
+        for i, match in enumerate(reversed(matches[limit:])):
+            start, end = match.start(), match.end()
+            original = fixed_text[start:end]
+            
+            # 🆕 v36.5: Pobierz kontekst zdania
+            sentence_start = max(0, fixed_text.rfind('.', 0, start) + 1)
+            sentence_end = fixed_text.find('.', end)
+            if sentence_end == -1:
+                sentence_end = len(fixed_text)
+            context = fixed_text[sentence_start:sentence_end].strip()
+            
+            # 🆕 v36.5: Użyj różnych synonimów dla różnorodności
+            if all_synonyms:
+                # Rotuj przez dostępne synonimy
+                synonym = all_synonyms[synonym_index % len(all_synonyms)]
+                synonym_index += 1
+            else:
+                # Fallback: dobierz z kontekstem
+                synonym = get_synonym(keyword, context)
+            
+            if not synonym:
+                # Ostatni fallback dla fraz wielowyrazowych
+                if len(keyword.split()) > 1:
+                    synonym = keyword.split()[0]
                 else:
-                    replacement = synonym
-                
-                fixed_text = fixed_text[:start] + replacement + fixed_text[end:]
-                applied_fixes.append(f"'{original}' → '{replacement}'")
+                    applied_fixes.append(f"⚠️ Brak synonimu dla '{keyword}' - wymaga ręcznej poprawy")
+                    continue
+            
+            # Zachowaj wielkość liter
+            if original[0].isupper():
+                replacement = synonym[0].upper() + synonym[1:]
+            else:
+                replacement = synonym
+            
+            fixed_text = fixed_text[:start] + replacement + fixed_text[end:]
+            applied_fixes.append(f"'{original}' → '{replacement}'")
     
     return fixed_text, applied_fixes
 
