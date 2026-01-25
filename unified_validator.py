@@ -423,6 +423,137 @@ def calculate_density(text: str, keywords_state: Dict) -> float:
 
 
 # ================================================================
+# 🆕 v36.5: TEMPLATE PATTERN DETECTION
+# ================================================================
+
+TEMPLATE_PATTERNS = {
+    "conditional": {
+        "patterns": [
+            r"wtedy,?\s+gdy",
+            r"w przypadku,?\s+gdy", 
+            r"w sytuacji,?\s+gdy",
+            r"jeśli.*to\s+",
+            r"kiedy.*wówczas"
+        ],
+        "max_allowed": 2,
+        "severity": "WARNING"
+    },
+    "emphasis": {
+        "patterns": [
+            r"warto\s+(?:zauważyć|podkreślić|wspomnieć|wiedzieć)",
+            r"należy\s+(?:zauważyć|podkreślić|wspomnieć|pamiętać)",
+            r"trzeba\s+(?:zauważyć|podkreślić|wspomnieć|pamiętać)",
+            r"istotne\s+(?:jest|będzie)",
+            r"kluczowe\s+(?:jest|znaczenie)"
+        ],
+        "max_allowed": 2,
+        "severity": "WARNING"
+    },
+    "negation_universal": {
+        "patterns": [
+            r"nie\s+każd[yaei]",
+            r"nie\s+zawsze",
+            r"nie\s+oznacza\s+(?:to\s+)?(?:że|automatycznie)",
+            r"nie\s+(?:jest|będzie)\s+(?:to\s+)?(?:jedyn|konieczn)"
+        ],
+        "max_allowed": 2,
+        "severity": "WARNING"
+    },
+    "structure_markers": {
+        "patterns": [
+            r"ma\s+to\s+miejsce",
+            r"dotyczy\s+to\s+(?:przede\s+wszystkim|głównie|szczególnie)",
+            r"odnosi\s+się\s+(?:to\s+)?do",
+            r"chodzi\s+(?:tutaj\s+)?o"
+        ],
+        "max_allowed": 2,
+        "severity": "INFO"
+    },
+    "ai_openers": {
+        "patterns": [
+            r"^w\s+dzisiejszych\s+czasach",
+            r"^w\s+obecnych\s+czasach", 
+            r"^współcześnie",
+            r"^w\s+niniejszym\s+artykule",
+            r"^artykuł\s+(?:ten\s+)?(?:omawia|przedstawia|opisuje)"
+        ],
+        "max_allowed": 0,
+        "severity": "ERROR"
+    }
+}
+
+
+def check_template_patterns(text: str) -> List[ValidationIssue]:
+    """
+    🆕 v36.5: Wykrywa nadużywane wzorce szablonowe charakterystyczne dla AI.
+    
+    Sprawdza:
+    - Powtarzające się struktury warunkowe ("wtedy, gdy")
+    - Schematyczne wprowadzenia ("warto zauważyć")
+    - Uniwersalne negacje ("nie każdy", "nie zawsze")
+    - Znaczniki strukturalne ("ma to miejsce")
+    - AI openers ("w dzisiejszych czasach")
+    
+    Returns:
+        Lista ValidationIssue z wykrytymi problemami
+    """
+    issues = []
+    text_lower = text.lower()
+    
+    template_stats = {}
+    
+    for category, config in TEMPLATE_PATTERNS.items():
+        category_count = 0
+        matched_patterns = []
+        
+        for pattern in config["patterns"]:
+            try:
+                matches = re.findall(pattern, text_lower, re.IGNORECASE | re.MULTILINE)
+                category_count += len(matches)
+                if matches:
+                    matched_patterns.extend(matches[:3])
+            except re.error:
+                continue
+        
+        template_stats[category] = {
+            "count": category_count,
+            "max_allowed": config["max_allowed"],
+            "examples": matched_patterns[:3]
+        }
+        
+        if category_count > config["max_allowed"]:
+            severity = Severity.ERROR if config["severity"] == "ERROR" else (
+                Severity.WARNING if config["severity"] == "WARNING" else Severity.INFO
+            )
+            
+            examples_str = ", ".join(f'"{m}"' for m in matched_patterns[:2]) if matched_patterns else ""
+            
+            issues.append(ValidationIssue(
+                f"TEMPLATE_OVERUSE_{category.upper()}",
+                f"Wzorzec '{category}' użyty {category_count}× (max {config['max_allowed']}). {examples_str}",
+                severity,
+                {
+                    "category": category,
+                    "count": category_count,
+                    "max_allowed": config["max_allowed"],
+                    "examples": matched_patterns[:3]
+                }
+            ))
+    
+    # Sprawdź ogólną templateowość
+    total_templates = sum(s["count"] for s in template_stats.values())
+    if total_templates > 8:
+        issues.append(ValidationIssue(
+            "HIGH_TEMPLATE_DENSITY",
+            f"Wysoka templateowość: {total_templates} wzorców - tekst brzmi sztucznie",
+            Severity.WARNING,
+            {"total_templates": total_templates, "breakdown": template_stats}
+        ))
+    
+    return issues, template_stats
+
+
+# ================================================================
 # 🎯 GŁÓWNA FUNKCJA WALIDACJI - v35.1 OPTIMIZED
 # ================================================================
 def validate_content(
@@ -541,6 +672,11 @@ def validate_content(
         structure_analysis["ngram_coverage"] = {"coverage": round(coverage, 2), "used": used_ngrams, "missing": missing_ngrams}
         if coverage < config.NGRAM_COVERAGE_MIN:
             issues.append(ValidationIssue("LOW_NGRAM_COVERAGE", f"Niskie pokrycie n-gramów: {coverage:.0%}", Severity.WARNING, {"coverage": coverage}))
+    
+    # 🆕 v36.5: Template patterns check
+    template_issues, template_stats = check_template_patterns(text)
+    issues.extend(template_issues)
+    structure_analysis["template_patterns"] = template_stats
     
     # 6. Score - 🔧 v35.1: ZMNIEJSZONE PENALIZACJE
     score = 100
