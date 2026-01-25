@@ -3658,9 +3658,28 @@ def get_pre_batch_info(project_id):
         # 🆕 v36.2: Anti-Frankenstein dynamic sections (Token Budgeting)
         "dynamic_sections": dynamic_sections_data,
         
+        # 🆕 v36.5: Legal context - przepisy prawne i instrukcje cytowania
+        "legal_context": {
+            "active": data.get("detected_category") == "prawo",
+            "detected_articles": data.get("detected_articles", []),
+            "legal_instruction": data.get("legal_instruction", ""),
+            "top_judgments": [
+                {
+                    "signature": j.get("signature", j.get("caseNumber", "")),
+                    "court": j.get("court", j.get("courtName", "")),
+                    "date": j.get("date", j.get("judgmentDate", "")),
+                    "relevance_score": j.get("relevance_score", 0)
+                }
+                for j in data.get("legal_judgments", [])[:3]
+            ],
+            "must_cite": len(data.get("detected_articles", [])) > 0,
+            "citation_hint": f"Odwołaj się do: {', '.join(data.get('detected_articles', []))}" 
+                if data.get("detected_articles") else None
+        } if data.get("detected_category") == "prawo" else None,
+        
         "gpt_prompt": gpt_prompt,
         
-        "version": "v36.2"
+        "version": "v36.5"
     }), 200
 
 
