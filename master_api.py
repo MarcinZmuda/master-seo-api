@@ -37,7 +37,7 @@ app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024  # 32 MB
 CORS(app)
 
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-VERSION = "v35.7"  # 🔧 BURSTINESS FIX: Złagodzone progi blokowania (1.5→1.2)
+VERSION = "v36.9"  # 🆕 Anti-Loop System: prioritized_issues, actionable_feedback, auto_fixes
 
 # ================================================================
 # 🆕 v32.4: Firestore persistence for projects
