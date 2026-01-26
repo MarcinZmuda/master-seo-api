@@ -1,19 +1,37 @@
 """
-SEO Content Tracker Routes - v36.3 BRAJEN SEO Engine
+SEO Content Tracker Routes - v37.2 BRAJEN SEO Engine
+
+ZMIANY v37.2:
+- 🆕 CLAUDE SMART-FIX: inteligentne poprawki z pre_batch_info
+- 🆕 POST /claude_smart_fix - Claude poprawia batch z kontekstem
+- 🆕 POST /review_and_fix - auto-fix + opcjonalnie Claude
+- 🆕 Claude wie: które frazy UNDER (dodaj), EXCEEDED (zamień), H2, spójność
+
+ZMIANY v37.1:
+- 🆕 MOE BATCH VALIDATOR: 4 ekspertów walidujących każdy batch
+  - STRUCTURE: różna liczba akapitów, anty-monotonność
+  - SEO: BASIC/EXTENDED keywords, encje, n-gramy
+  - LANGUAGE: gramatyka polska (LanguageTool)
+  - AI DETECTION: burstiness, TTR, rozkład zdań
+- 🆕 moe_validation w response i batch_entry
+- 🆕 moe_fix_instructions z konkretnymi poprawkami
+
+ZMIANY v37.0:
+- 🆕 EXCEEDED KEYWORDS: podział na WARNING (1-49%) i CRITICAL (50%+)
+- 🆕 BLOKADA BATCHA przy exceeded 50%+ (chyba że forced=True)
+- 🆕 SYNONIMY: automatyczne pobieranie synonimów dla exceeded keywords
+- 🆕 FIX INSTRUCTIONS: konkretne synonimy do przepisania batcha
+- 🆕 Tylko BASIC/MAIN są pilnowane - EXTENDED mogą być przekroczone
 
 ZMIANY v36.3:
 - 🆕 FIRESTORE FIX: sanitize_for_firestore() dla kluczy ze znakami . / [ ]
-- 🆕 Naprawiono ValueError: One or more components is not a string or is empty
 
 v27.0 Original:
-+ v27.0: approve_batch fallback z last_preview
-+ Minimal approve_batch response (~500B instead of 220KB)
 + Morfeusz2 lemmatization (with spaCy fallback)
 + Burstiness validation (3.2-3.8)
 + Transition words validation (25-50%)
 + v24.0: Per-batch keyword validation
 + v24.0: Fixed density limit (3.0% from seo_rules.json)
-+ v24.0: Rozróżnienie EXCEEDED TOTAL vs per-batch warnings
 """
 
 from flask import Blueprint, request, jsonify
@@ -115,6 +133,45 @@ try:
 except ImportError as e:
     SEMANTIC_ENABLED = False
     print(f"[TRACKER] Semantic Analyzer not available: {e}")
+
+# 🆕 v37.0: Keyword Synonyms dla exceeded keywords
+try:
+    from keyword_synonyms import get_synonyms, generate_synonyms_prompt_section
+    SYNONYMS_ENABLED = True
+    print("[TRACKER] ✅ Keyword Synonyms loaded")
+except ImportError as e:
+    SYNONYMS_ENABLED = False
+    print(f"[TRACKER] ⚠️ Keyword Synonyms not available: {e}")
+    def get_synonyms(keyword, max_synonyms=4):
+        return []
+
+# 🆕 v37.1: Batch Review System z auto-poprawkami
+try:
+    from batch_review_system import (
+        review_batch_comprehensive,
+        get_review_summary,
+        generate_claude_fix_prompt,
+        claude_smart_fix,
+        should_use_claude_smart_fix,
+        build_smart_fix_prompt,
+        get_pre_batch_info_for_claude,
+        SmartFixResult,
+        ReviewResult
+    )
+    BATCH_REVIEW_ENABLED = True
+    print("[TRACKER] ✅ Batch Review System loaded")
+except ImportError as e:
+    BATCH_REVIEW_ENABLED = False
+    print(f"[TRACKER] ⚠️ Batch Review System not available: {e}")
+
+# 🆕 v37.1: MoE Batch Validator
+try:
+    from moe_batch_validator import validate_batch_moe, format_validation_for_gpt, ValidationMode
+    MOE_VALIDATOR_ENABLED = True
+    print("[TRACKER] ✅ MoE Batch Validator loaded")
+except ImportError as e:
+    MOE_VALIDATOR_ENABLED = False
+    print(f"[TRACKER] ⚠️ MoE Validator not available: {e}")
 
 tracker_routes = Blueprint("tracker_routes", __name__)
 
@@ -338,6 +395,62 @@ def validate_metrics(burstiness: float, transition_data: dict, density: float) -
 
 
 # ============================================================================
+# 🆕 v36.9: AUTO-MERGE FULL ARTICLE
+# ============================================================================
+def auto_merge_full_article(project_id: str, project_data: dict) -> dict:
+    """
+    🆕 v36.9: Automatycznie scala wszystkie batche w full_article.
+    Wywoływane po zapisaniu ostatniego batcha.
+    """
+    try:
+        batches = project_data.get("batches", [])
+        if not batches:
+            return {"merged": False, "reason": "No batches to merge"}
+        
+        # Scala wszystkie batche
+        full_content_parts = []
+        total_words = 0
+        h2_count = 0
+        
+        for batch in batches:
+            text = batch.get("text", "")
+            if text:
+                full_content_parts.append(text.strip())
+                total_words += len(text.split())
+                h2_count += len(re.findall(r'(?:^h2:|<h2)', text, re.MULTILINE | re.IGNORECASE))
+        
+        full_content = "\n\n".join(full_content_parts)
+        
+        # Zapisz do projektu
+        project_data["full_article"] = {
+            "content": full_content,
+            "word_count": total_words,
+            "h2_count": h2_count,
+            "saved_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "auto_merged": True,
+            "batch_count": len(batches)
+        }
+        
+        # Zapisz do Firestore
+        db = firestore.client()
+        doc_ref = db.collection("seo_projects").document(project_id)
+        doc_ref.set(project_data, merge=True)
+        
+        print(f"[AUTO-MERGE] ✅ Full article merged: {total_words} words, {h2_count} H2, {len(batches)} batches")
+        
+        return {
+            "merged": True,
+            "word_count": total_words,
+            "h2_count": h2_count,
+            "batch_count": len(batches)
+        }
+        
+    except Exception as e:
+        print(f"[AUTO-MERGE] ❌ Error: {e}")
+        return {"merged": False, "error": str(e)}
+
+
+# ============================================================================
 # 3. FIRESTORE PROCESSOR
 # ============================================================================
 def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=False):
@@ -461,24 +574,55 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
                 f"Zostało {max(0, remaining_to_max - batch_count)}/{target_max} dla artykułu."
             )
     
-    # Check EXCEEDED TOTAL (całkowity limit artykułu - to jest KRYTYCZNE)
-    exceeded_keywords = []
+    # ================================================================
+    # 🆕 v37.0: EXCEEDED KEYWORDS z podziałem na WARNING i CRITICAL
+    # WARNING: exceeded 1-49% → batch zapisuje się + ostrzeżenie + synonimy
+    # CRITICAL: exceeded 50%+ → batch ZABLOKOWANY + synonimy do przepisania
+    # ================================================================
+    exceeded_warning = []   # 1-49% over max
+    exceeded_critical = []  # 50%+ over max
+    
     for rid, batch_count in batch_counts.items():
         meta = keywords_state[rid]
+        
+        # Tylko BASIC i MAIN - EXTENDED pomijamy (mogą być przekroczone)
         if meta.get("type", "BASIC").upper() not in ["BASIC", "MAIN"]:
             continue
+        
+        keyword = meta.get("keyword", "")
         current = meta.get("actual_uses", 0)
         target_max = meta.get("target_max", 999)
         new_total = current + batch_count
+        
         if new_total > target_max:
-            exceeded_keywords.append({
-                "keyword": meta.get("keyword"),
+            exceeded_by = new_total - target_max
+            exceed_percent = (exceeded_by / target_max * 100) if target_max > 0 else 100
+            
+            # Pobierz synonimy
+            synonyms = get_synonyms(keyword) if SYNONYMS_ENABLED else []
+            
+            exceeded_info = {
+                "keyword": keyword,
                 "current": current,
                 "batch_uses": batch_count,
                 "would_be": new_total,
                 "target_max": target_max,
-                "exceeded_by": new_total - target_max
-            })
+                "exceeded_by": exceeded_by,
+                "exceed_percent": round(exceed_percent),
+                "synonyms": synonyms[:3]
+            }
+            
+            if exceed_percent >= 50:
+                # 50%+ przekroczenia → CRITICAL (blokada)
+                exceeded_critical.append(exceeded_info)
+                print(f"[TRACKER] ❌ CRITICAL: '{keyword}' exceeded by {exceed_percent:.0f}% (50%+ = BLOCK)")
+            else:
+                # 1-49% przekroczenia → WARNING (ostrzeżenie)
+                exceeded_warning.append(exceeded_info)
+                print(f"[TRACKER] ⚠️ WARNING: '{keyword}' exceeded by {exceed_percent:.0f}% (<50% = warn only)")
+    
+    # Backward compatibility: exceeded_keywords = wszystkie exceeded
+    exceeded_keywords = exceeded_warning + exceeded_critical
     
     # ================================================================
     # 🆕 v36.0: RESERVED KEYWORDS VALIDATION
@@ -680,6 +824,88 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
     if not has_critical and not has_density_issue and not exceeded_keywords:
         status = "APPROVED"
 
+    # ================================================================
+    # 🆕 v37.0: BLOKADA przy exceeded_critical (50%+) - NIE zapisuj batcha!
+    # ================================================================
+    if exceeded_critical and not forced:
+        # Generuj mapę synonimów do przepisania
+        synonyms_map = {}
+        details = []
+        for ek in exceeded_critical:
+            kw = ek["keyword"]
+            syns = ek.get("synonyms", [])
+            synonyms_map[kw] = syns
+            syn_text = f" → użyj: {', '.join(syns[:2])}" if syns else " → pomiń tę frazę"
+            details.append(
+                f"'{kw}': {ek['would_be']}/{ek['target_max']} "
+                f"(+{ek['exceed_percent']}%){syn_text}"
+            )
+        
+        print(f"[TRACKER] ❌ BATCH REJECTED: {len(exceeded_critical)} fraz BASIC exceeded 50%+")
+        
+        return {
+            "status": "REJECTED",
+            "saved": False,
+            "reason": "BASIC_EXCEEDED_50_PERCENT",
+            "message": f"❌ Batch odrzucony: {len(exceeded_critical)} fraz BASIC przekroczyło max o 50%+",
+            "exceeded_critical": exceeded_critical,
+            "exceeded_warning": exceeded_warning,
+            "fix_instruction": "Przepisz batch UŻYWAJĄC SYNONIMÓW zamiast przekroczonych fraz:",
+            "synonyms_map": synonyms_map,
+            "details": details,
+            "tip": "Możesz też wysłać z forced=True aby zaakceptować mimo przekroczenia"
+        }
+    
+    # 🆕 v37.0: Dodaj warnings dla exceeded_warning (1-49%)
+    for ew in exceeded_warning:
+        syn_hint = f" → rozważ synonimy: {', '.join(ew['synonyms'][:2])}" if ew.get('synonyms') else ""
+        warnings.append(
+            f"⚠️ EXCEEDED: '{ew['keyword']}' = {ew['would_be']}/{ew['target_max']} "
+            f"(+{ew['exceed_percent']}%){syn_hint}"
+        )
+
+    # ================================================================
+    # 🆕 v37.1: MoE BATCH VALIDATOR - Kompleksowa walidacja
+    # ================================================================
+    moe_validation_result = None
+    moe_fix_instructions = []
+    
+    if MOE_VALIDATOR_ENABLED:
+        try:
+            batches_done = len(project_data.get("batches", []))
+            moe_validation_result = validate_batch_moe(
+                batch_text=batch_text,
+                project_data=project_data,
+                batch_number=batches_done + 1,
+                mode=ValidationMode.SOFT  # SOFT = warnings nie blokują
+            )
+            
+            # Zbierz fix instructions
+            moe_fix_instructions = moe_validation_result.fix_instructions
+            
+            # Dodaj MoE warnings do ogólnych warnings
+            for issue in moe_validation_result.issues:
+                if issue.severity == "critical":
+                    warnings.append(f"🔍 MOE/{issue.expert}: {issue.message}")
+                elif issue.severity == "warning":
+                    warnings.append(f"ℹ️ MOE/{issue.expert}: {issue.message}")
+            
+            # Log
+            critical_count = len([i for i in moe_validation_result.issues if i.severity == "critical"])
+            warning_count = len([i for i in moe_validation_result.issues if i.severity == "warning"])
+            print(f"[TRACKER] 🔍 MoE Validation: {moe_validation_result.status} "
+                  f"({critical_count} critical, {warning_count} warnings)")
+            
+            # Sprawdź strukturę (różna liczba akapitów)
+            structure_summary = moe_validation_result.experts_summary.get("structure", {})
+            if structure_summary:
+                para_count = structure_summary.get("paragraph_count", 0)
+                prev_counts = structure_summary.get("previous_counts", [])
+                print(f"[TRACKER] 📊 Structure: {para_count} paragraphs (previous: {prev_counts[-3:] if prev_counts else 'none'})")
+                
+        except Exception as e:
+            print(f"[TRACKER] ⚠️ MoE Validation error: {e}")
+
     # Save batch
     batch_entry = {
         "text": batch_text,
@@ -696,7 +922,10 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
             "burstiness": burstiness
         },
         "warnings": warnings,
-        "status": status
+        "status": status,
+        # 🆕 v37.1: MoE Validation results
+        "moe_validation": moe_validation_result.to_dict() if moe_validation_result else None,
+        "moe_fix_instructions": moe_fix_instructions
     }
 
     project_data.setdefault("batches", []).append(batch_entry)
@@ -848,28 +1077,106 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         except Exception as e:
             print(f"[TRACKER] ⚠️ Soft cap validation error: {e}")
 
+    # ================================================================
+    # 🆕 v37.1: BATCH REVIEW + AUTO-FIX
+    # ================================================================
+    batch_review_result = None
+    auto_fixed_text = None
+    
+    if BATCH_REVIEW_ENABLED:
+        try:
+            # Pobierz poprzedni batch dla sprawdzenia spójności
+            previous_batches = project_data.get("batches", [])
+            previous_batch_text = previous_batches[-2]["text"] if len(previous_batches) > 1 else None
+            
+            # Uruchom comprehensive review
+            batch_review_result = review_batch_comprehensive(
+                batch_text=batch_text,
+                keywords_state=keywords_state,
+                batch_counts=batch_counts,
+                previous_batch_text=previous_batch_text,
+                auto_fix=True,  # Włącz auto-poprawki
+                use_claude_for_complex=False  # Na razie bez Claude
+            )
+            
+            # Jeśli były auto-poprawki, zaktualizuj batch w Firestore
+            if batch_review_result.fixed_text and batch_review_result.fixed_text != batch_text:
+                auto_fixed_text = batch_review_result.fixed_text
+                
+                # Zaktualizuj ostatni batch w project_data
+                if project_data.get("batches"):
+                    project_data["batches"][-1]["text"] = auto_fixed_text
+                    project_data["batches"][-1]["auto_fixed"] = True
+                    project_data["batches"][-1]["auto_fixes"] = batch_review_result.auto_fixes_applied
+                    
+                    # Zapisz do Firestore
+                    doc_ref.update({
+                        "batches": sanitize_for_firestore(project_data["batches"])
+                    })
+                
+                print(f"[TRACKER] ✅ Auto-fixed {len(batch_review_result.auto_fixes_applied)} issues")
+                for fix in batch_review_result.auto_fixes_applied[:3]:
+                    print(f"[TRACKER]    • {fix}")
+            
+            # Loguj review summary
+            print(f"[TRACKER] 📋 Review: {batch_review_result.status}, issues: {len(batch_review_result.issues)}")
+            
+        except Exception as e:
+            print(f"[TRACKER] ⚠️ Batch review error: {e}")
+
+    # ================================================================
+    # 🆕 v36.9: AUTO-MERGE po ostatnim batchu
+    # ================================================================
+    batches_done = len(project_data.get("batches", []))
+    total_planned = project_data.get("total_planned_batches", 4)
+    remaining_batches = max(0, total_planned - batches_done)
+    is_last_batch = (remaining_batches == 0)
+    
+    auto_merge_result = None
+    if is_last_batch:
+        print(f"[TRACKER] 🏁 Last batch detected! Auto-merging full article...")
+        auto_merge_result = auto_merge_full_article(project_id, project_data)
+
     return {
         "status": status,
         "semantic_score": semantic_score,
         "density": density,
         "burstiness": burstiness,
         "warnings": warnings,
-        "per_batch_warnings": per_batch_warnings,  # v24.0: osobno
-        "semantic_gaps": semantic_gaps,  # v24.1: frazy bez pokrycia
+        "per_batch_warnings": per_batch_warnings,
+        "semantic_gaps": semantic_gaps,
         "exceeded_keywords": exceeded_keywords,
+        # 🆕 v37.0: Rozdzielone exceeded na warning i critical
+        "exceeded_warning": exceeded_warning,
+        "exceeded_critical": exceeded_critical,
         "batch_counts": batch_counts,
-        "unified_counting": UNIFIED_COUNTING if 'UNIFIED_COUNTING' in dir() else False,  # v24.2
-        "in_headers": in_headers if 'in_headers' in dir() else {},  # v24.2: frazy w H2/H3
-        "in_intro": in_intro if 'in_intro' in dir() else {},  # v24.2: frazy w intro
-        "keywords_state_after": keywords_state_after,  # v33.3: Aktualny stan keywords po zapisie batcha
-        "delta_s2": delta_s2,  # v33.3: Przyrost pokrycia encji
-        # 🆕 v36.1: Semantic proximity validation
+        "unified_counting": UNIFIED_COUNTING if 'UNIFIED_COUNTING' in dir() else False,
+        "in_headers": in_headers if 'in_headers' in dir() else {},
+        "in_intro": in_intro if 'in_intro' in dir() else {},
+        "keywords_state_after": keywords_state_after,
+        "delta_s2": delta_s2,
         "semantic_proximity": {
             "score": proximity_score,
             "isolated_keywords": isolated_keywords[:5]
         },
-        # 🆕 v36.2: Soft cap validation
         "soft_cap_validation": soft_cap_result,
+        # 🆕 v37.1: MoE Validation
+        "moe_validation": moe_validation_result.to_dict() if moe_validation_result else None,
+        "moe_fix_instructions": moe_fix_instructions,
+        # 🆕 v37.1: Batch Review + Auto-Fix
+        "batch_review": batch_review_result.to_dict() if batch_review_result else None,
+        "auto_fixed": auto_fixed_text is not None,
+        "auto_fixed_text": auto_fixed_text,
+        "claude_fixes_needed": batch_review_result.claude_fixes_needed if batch_review_result else [],
+        # 🆕 v36.9: Info o postępie i auto-merge
+        "batch_number": batches_done,
+        "total_planned_batches": total_planned,
+        "remaining_batches": remaining_batches,
+        "is_last_batch": is_last_batch,
+        "auto_merge": auto_merge_result,
+        "article_complete": is_last_batch and auto_merge_result and auto_merge_result.get("merged", False),
+        "export_ready": is_last_batch,
+        "next_step": "GET /api/project/{id}/export/docx" if is_last_batch else f"Continue with batch {batches_done + 1}",
         "status_code": 200
     }
 
@@ -952,6 +1259,281 @@ def _minimal_batch_response(result: dict, project_data: dict = None) -> dict:
         response["info"] = info  # Per-batch to tylko info
     
     return response
+
+
+# ============================================================================
+# 🆕 v37.1: CLAUDE SMART-FIX ENDPOINT
+# ============================================================================
+@tracker_routes.post("/api/project/<project_id>/claude_smart_fix")
+def claude_smart_fix_endpoint(project_id):
+    """
+    🤖 Claude poprawia batch INTELIGENTNIE z pełnym kontekstem pre_batch_info.
+    
+    Nie przepisuje całości - tylko:
+    1. DODAJE brakujące frazy (UNDER) w naturalnych miejscach
+    2. ZAMIENIA exceeded na synonimy
+    3. POPRAWIA spójność z poprzednim batchem
+    4. NAPRAWIA wzorce AI
+    
+    Request body:
+    {
+        "text": "tekst batcha do poprawy",
+        "batch_number": 3,  // opcjonalne, domyślnie ostatni batch
+        "auto_save": true   // czy zapisać poprawiony tekst
+    }
+    
+    Response:
+    {
+        "success": true,
+        "fixed_text": "poprawiony tekst",
+        "changes_made": ["Dodano frazę: 'xyz'", ...],
+        "keywords_added": ["xyz", ...],
+        "keywords_replaced": [{"original": "sąd", "replacement": "organ sądowy"}],
+        "auto_saved": true/false
+    }
+    """
+    data = request.get_json(force=True) if request.is_json else {}
+    
+    # Pobierz tekst
+    text = data.get("text", "").strip()
+    auto_save = data.get("auto_save", False)
+    batch_number = data.get("batch_number")
+    
+    # Pobierz projekt
+    db = firestore.client()
+    doc_ref = db.collection("seo_projects").document(project_id)
+    doc = doc_ref.get()
+    
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+    
+    project_data = doc.to_dict()
+    batches = project_data.get("batches", [])
+    keywords_state = project_data.get("keywords_state", {})
+    
+    # Jeśli nie podano tekstu, użyj ostatniego batcha
+    if not text and batches:
+        text = batches[-1].get("text", "")
+        batch_number = len(batches)
+        print(f"[CLAUDE_FIX] Używam tekstu z ostatniego batcha #{batch_number}")
+    
+    if not text:
+        return jsonify({
+            "error": "No text to fix",
+            "hint": "Podaj tekst w polu 'text' lub najpierw dodaj batch"
+        }), 400
+    
+    # Określ numer batcha
+    if not batch_number:
+        batch_number = len(batches) if batches else 1
+    
+    # Sprawdź czy mamy batch_review_system
+    if not BATCH_REVIEW_ENABLED:
+        return jsonify({
+            "error": "Batch Review System not available",
+            "hint": "Moduł batch_review_system.py nie jest dostępny"
+        }), 500
+    
+    try:
+        # Przygotuj pre_batch_info
+        pre_batch_info = get_pre_batch_info_for_claude(project_data, batch_number)
+        
+        # Policz batch_counts dla review
+        from keyword_counter import count_keywords_for_state
+        batch_counts = count_keywords_for_state(text, keywords_state, use_exclusive_for_nested=False)
+        
+        # Najpierw zrób review żeby wykryć problemy
+        previous_batch_text = batches[batch_number - 2]["text"] if batch_number > 1 and len(batches) >= batch_number - 1 else None
+        
+        review_result = review_batch_comprehensive(
+            batch_text=text,
+            keywords_state=keywords_state,
+            batch_counts=batch_counts,
+            previous_batch_text=previous_batch_text,
+            auto_fix=False,  # Nie auto-fix, Claude to zrobi
+            use_claude_for_complex=False
+        )
+        
+        # Wywołaj Claude Smart-Fix
+        result = claude_smart_fix(
+            batch_text=text,
+            pre_batch_info=pre_batch_info,
+            review_result=review_result,
+            keywords_state=keywords_state
+        )
+        
+        if not result.success:
+            return jsonify({
+                "success": False,
+                "error": result.error or "Unknown error",
+                "review_issues": [i.message for i in review_result.issues] if review_result else [],
+                "prompt_preview": result.prompt_used[:1000] + "..." if result.prompt_used else None
+            }), 500
+        
+        fixed_text = result.fixed_text
+        
+        # Auto-save jeśli requested
+        saved = False
+        if auto_save and fixed_text and batches and batch_number <= len(batches):
+            # Zaktualizuj odpowiedni batch
+            batch_idx = batch_number - 1
+            batches[batch_idx]["text"] = fixed_text
+            batches[batch_idx]["claude_fixed"] = True
+            batches[batch_idx]["claude_changes"] = result.changes_made
+            
+            doc_ref.update({
+                "batches": sanitize_for_firestore(batches)
+            })
+            saved = True
+            print(f"[CLAUDE_FIX] ✅ Auto-saved fixed batch #{batch_number}")
+        
+        return jsonify({
+            "success": True,
+            "fixed_text": fixed_text,
+            "changes_made": result.changes_made,
+            "keywords_added": result.keywords_added,
+            "keywords_replaced": result.keywords_replaced,
+            "auto_saved": saved,
+            "batch_number": batch_number,
+            "review_before": {
+                "issues_count": len(review_result.issues) if review_result else 0,
+                "status": review_result.status if review_result else "UNKNOWN",
+                "issues": [
+                    {"type": i.type.value, "message": i.message}
+                    for i in (review_result.issues if review_result else [])[:10]
+                ]
+            }
+        })
+        
+    except ImportError as e:
+        return jsonify({
+            "success": False,
+            "error": f"Missing dependency: {e}",
+            "hint": "Zainstaluj keyword_counter"
+        }), 500
+    except Exception as e:
+        import traceback
+        print(f"[CLAUDE_FIX] ❌ Error: {e}")
+        traceback.print_exc()
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@tracker_routes.post("/api/project/<project_id>/review_and_fix")
+def review_and_fix_batch(project_id):
+    """
+    🔍 Review batcha + automatyczne poprawki + opcjonalnie Claude Smart-Fix.
+    
+    Workflow:
+    1. Auto-fix (synonimy, burstiness) - bez Claude
+    2. Jeśli są problemy wymagające Claude → wywołaj Claude Smart-Fix
+    3. Zapisz poprawiony batch
+    
+    Request body:
+    {
+        "text": "tekst batcha",
+        "use_claude": true,  // czy użyć Claude dla złożonych problemów
+        "auto_save": true    // czy zapisać poprawiony batch
+    }
+    """
+    data = request.get_json(force=True) if request.is_json else {}
+    
+    text = data.get("text", "").strip()
+    use_claude = data.get("use_claude", True)
+    auto_save = data.get("auto_save", True)
+    
+    if not text:
+        return jsonify({"error": "No text provided"}), 400
+    
+    # Pobierz projekt
+    db = firestore.client()
+    doc_ref = db.collection("seo_projects").document(project_id)
+    doc = doc_ref.get()
+    
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+    
+    project_data = doc.to_dict()
+    batches = project_data.get("batches", [])
+    keywords_state = project_data.get("keywords_state", {})
+    batch_number = len(batches) + 1
+    
+    if not BATCH_REVIEW_ENABLED:
+        return jsonify({
+            "error": "Batch Review System not available"
+        }), 500
+    
+    try:
+        from batch_review_system import (
+            review_batch_comprehensive,
+            claude_smart_fix,
+            get_pre_batch_info_for_claude,
+            get_review_summary
+        )
+        
+        # KROK 1: Review + Auto-Fix
+        previous_text = batches[-1]["text"] if batches else None
+        
+        review_result = review_batch_comprehensive(
+            batch_text=text,
+            keywords_state=keywords_state,
+            batch_counts={},
+            previous_batch_text=previous_text,
+            auto_fix=True,
+            use_claude_for_complex=False
+        )
+        
+        current_text = review_result.fixed_text or text
+        
+        # KROK 2: Claude Smart-Fix jeśli potrzebny
+        claude_result = None
+        if use_claude and review_result.claude_fixes_needed:
+            pre_batch_info = get_pre_batch_info_for_claude(project_data, batch_number)
+            
+            claude_result = claude_smart_fix(
+                batch_text=current_text,
+                pre_batch_info=pre_batch_info,
+                review_result=review_result,
+                keywords_state=keywords_state
+            )
+            
+            if claude_result.get("success"):
+                current_text = claude_result.get("fixed_text", current_text)
+        
+        # KROK 3: Zapisz jeśli requested
+        saved = False
+        if auto_save:
+            # Użyj process_batch do zapisania z pełną walidacją
+            save_result = process_batch_in_firestore(
+                project_id=project_id,
+                batch_text=current_text,
+                meta_trace={"source": "review_and_fix", "claude_used": use_claude}
+            )
+            saved = save_result.get("status") != "REJECTED"
+        
+        return jsonify({
+            "success": True,
+            "original_text": text,
+            "fixed_text": current_text,
+            "review_summary": get_review_summary(review_result),
+            "auto_fixes_applied": review_result.auto_fixes_applied,
+            "claude_used": claude_result is not None and claude_result.get("success", False),
+            "claude_changes": claude_result.get("changes_made", []) if claude_result else [],
+            "saved": saved,
+            "batch_number": batch_number,
+            "final_status": review_result.status
+        })
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
 
 @tracker_routes.post("/api/project/<project_id>/approve_batch")
 def approve_batch(project_id):
