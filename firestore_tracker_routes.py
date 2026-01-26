@@ -1,11 +1,20 @@
 """
-SEO Content Tracker Routes - v37.2 BRAJEN SEO Engine
+SEO Content Tracker Routes - v37.4 BRAJEN SEO Engine
+
+ZMIANY v37.4:
+- 🆕 GLOBAL QUALITY SCORE: jeden score 0-100 z grade A-F
+- 🆕 DECISION TRACE: audit trail dla każdej decyzji
+- 🆕 CONFIDENCE: HIGH/MEDIUM/LOW dla GPT
+- 🆕 CONFIG-DRIVEN: konfigurowalne progi (QualityConfig)
+- 🆕 SIMPLIFIED RESPONSE: mniej pól, jasna akcja
+- 🆕 FAST MODE: szybka walidacja ~100ms (validate_fast_mode)
+- 🔧 Grammar YMYL: ≥2 błędy → CRITICAL + cap grade C
+- 🔧 Semantic: wielopoziomowe capy (0.25→B, 0.35→B+)
 
 ZMIANY v37.2:
 - 🆕 CLAUDE SMART-FIX: inteligentne poprawki z pre_batch_info
 - 🆕 POST /claude_smart_fix - Claude poprawia batch z kontekstem
 - 🆕 POST /review_and_fix - auto-fix + opcjonalnie Claude
-- 🆕 Claude wie: które frazy UNDER (dodaj), EXCEEDED (zamień), H2, spójność
 
 ZMIANY v37.1:
 - 🆕 MOE BATCH VALIDATOR: 4 ekspertów walidujących każdy batch
@@ -172,6 +181,22 @@ try:
 except ImportError as e:
     MOE_VALIDATOR_ENABLED = False
     print(f"[TRACKER] ⚠️ MoE Validator not available: {e}")
+
+# 🆕 v37.4: Quality Score Module
+try:
+    from quality_score_module import (
+        calculate_global_quality_score,
+        create_simplified_response,
+        validate_fast_mode,
+        get_gpt_action_response,
+        QualityConfig,
+        CONFIG as QUALITY_CONFIG
+    )
+    QUALITY_SCORE_ENABLED = True
+    print("[TRACKER] ✅ Quality Score Module loaded")
+except ImportError as e:
+    QUALITY_SCORE_ENABLED = False
+    print(f"[TRACKER] ⚠️ Quality Score Module not available: {e}")
 
 tracker_routes = Blueprint("tracker_routes", __name__)
 
@@ -1137,6 +1162,56 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         print(f"[TRACKER] 🏁 Last batch detected! Auto-merging full article...")
         auto_merge_result = auto_merge_full_article(project_id, project_data)
 
+    # ================================================================
+    # 🆕 v37.4: GLOBAL QUALITY SCORE
+    # ================================================================
+    quality_result = None
+    gpt_action = None
+    
+    if QUALITY_SCORE_ENABLED:
+        try:
+            # Przygotuj dane do quality score
+            validation_data = {
+                "exceeded_critical": exceeded_critical,
+                "exceeded_warning": exceeded_warning,
+                "burstiness_cv": burstiness / 5.0 if burstiness and burstiness > 0 else 0.4,
+                "burstiness": burstiness,
+                "humanness_score": real_humanness_score if 'real_humanness_score' in dir() else 50,
+                "semantic_score": semantic_score,
+                "structure_valid": valid_struct if 'valid_struct' in dir() else True,
+                "has_h2": True,  # Już sprawdzone wcześniej
+                "batch_text": batch_text,
+                "batch_role": "INTRO" if batches_done == 1 else ("FINAL" if is_last_batch else "CONTENT"),
+                "moe_validation": moe_validation_result.to_dict() if moe_validation_result else {},
+                "batch_review": batch_review_result.to_dict() if batch_review_result else {}
+            }
+            
+            # Oblicz quality score
+            quality_result = calculate_global_quality_score(
+                validation_data, 
+                project_data
+            )
+            
+            # Pobierz GPT action
+            gpt_action = get_gpt_action_response(
+                validation_data,
+                quality_result,
+                project_data,
+                batches_done
+            )
+            
+            print(f"[TRACKER] 🎯 Quality: {quality_result['score']}/100 ({quality_result['grade']}) "
+                  f"→ {gpt_action['action']} [{gpt_action['confidence']}]")
+            
+            if quality_result.get("decision_trace"):
+                for trace in quality_result["decision_trace"][:3]:
+                    print(f"[TRACKER]    • {trace}")
+                    
+        except Exception as e:
+            print(f"[TRACKER] ⚠️ Quality score error: {e}")
+            import traceback
+            traceback.print_exc()
+
     return {
         "status": status,
         "semantic_score": semantic_score,
@@ -1177,6 +1252,25 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         "article_complete": is_last_batch and auto_merge_result and auto_merge_result.get("merged", False),
         "export_ready": is_last_batch,
         "next_step": "GET /api/project/{id}/export/docx" if is_last_batch else f"Continue with batch {batches_done + 1}",
+        # 🆕 v37.4: Global Quality Score
+        "quality": {
+            "score": quality_result["score"] if quality_result else None,
+            "grade": quality_result["grade"] if quality_result else None,
+            "status": quality_result["status"] if quality_result else None,
+            "components": quality_result.get("components") if quality_result else None,
+            "max_grade_cap": quality_result.get("max_grade_cap") if quality_result else None
+        } if quality_result else None,
+        # 🆕 v37.4: GPT Action (uproszczona decyzja)
+        "gpt_action": {
+            "accepted": gpt_action["accepted"] if gpt_action else None,
+            "action": gpt_action["action"] if gpt_action else None,
+            "confidence": gpt_action["confidence"] if gpt_action else None,
+            "message": gpt_action["message"] if gpt_action else None,
+            "fixes_needed": gpt_action.get("fixes_needed", []) if gpt_action else [],
+            "next_task": gpt_action.get("next_task") if gpt_action else None
+        } if gpt_action else None,
+        # 🆕 v37.4: Decision trace (audit)
+        "decision_trace": quality_result.get("decision_trace", []) if quality_result else [],
         "status_code": 200
     }
 
@@ -1704,3 +1798,208 @@ def reset_project(project_id):
     })
     
     return jsonify({"status": "RESET", "project_id": project_id}), 200
+
+
+# ============================================================================
+# 🆕 v37.4: FAST VALIDATE - szybka walidacja (~100ms)
+# ============================================================================
+@tracker_routes.post("/api/project/<project_id>/fast_validate")
+def fast_validate_batch(project_id):
+    """
+    Szybka walidacja batcha (~100ms zamiast ~1200ms).
+    
+    Sprawdza TYLKO krytyczne rzeczy:
+    1. Exceeded keywords (CRITICAL)
+    2. Struktura (H2)
+    3. Burstiness (AI detection)
+    
+    Używaj do szybkiego feedbacku przed pełnym POST /batch.
+    
+    Request:
+        {"text": "h2: Tytuł\n\nTreść batcha..."}
+    
+    Response:
+        {
+            "status": "OK" | "WARNING" | "REJECTED",
+            "action": "CONTINUE" | "REWRITE",
+            "message": "...",
+            "exceeded_critical": [...],
+            "exceeded_warning": [...],
+            "decision_trace": [...]
+        }
+    """
+    if not QUALITY_SCORE_ENABLED:
+        return jsonify({
+            "error": "Quality Score module not available",
+            "hint": "Install quality_score_module.py"
+        }), 503
+    
+    data = request.get_json() or {}
+    text = data.get("text", "").strip()
+    
+    if not text:
+        return jsonify({"error": "No text provided"}), 400
+    
+    # Pobierz projekt
+    db = firestore.client()
+    doc = db.collection("seo_projects").document(project_id).get()
+    
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+    
+    project_data = doc.to_dict()
+    keywords_state = project_data.get("keywords_state", {})
+    
+    # Policz keywords w tekście (uproszczone)
+    batch_counts = {}
+    text_lower = text.lower()
+    for rid, meta in keywords_state.items():
+        keyword = meta.get("keyword", "").lower()
+        if keyword and keyword in text_lower:
+            # Proste liczenie (fast mode)
+            count = text_lower.count(keyword)
+            if count > 0:
+                batch_counts[rid] = count
+    
+    # Fast validate
+    result = validate_fast_mode(text, keywords_state, batch_counts)
+    
+    return jsonify(result), 200
+
+
+# ============================================================================
+# 🆕 v37.4: GET QUALITY - pobierz jakość ostatniego batcha
+# ============================================================================
+@tracker_routes.get("/api/project/<project_id>/quality")
+def get_project_quality(project_id):
+    """
+    Pobiera quality score dla projektu (ostatni batch + ogólnie).
+    
+    Response:
+        {
+            "last_batch_quality": {...},
+            "overall_progress": {...},
+            "recommendations": [...]
+        }
+    """
+    db = firestore.client()
+    doc = db.collection("seo_projects").document(project_id).get()
+    
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+    
+    project_data = doc.to_dict()
+    batches = project_data.get("batches", [])
+    
+    if not batches:
+        return jsonify({
+            "error": "No batches yet",
+            "hint": "Submit first batch with POST /batch"
+        }), 200
+    
+    # Ostatni batch
+    last_batch = batches[-1]
+    last_quality = last_batch.get("quality", {})
+    
+    # Statystyki ogólne
+    total_batches = len(batches)
+    planned_batches = project_data.get("total_planned_batches", 7)
+    
+    # Zbierz quality scores ze wszystkich batchów
+    quality_scores = []
+    for b in batches:
+        q = b.get("quality", {})
+        if q and q.get("score"):
+            quality_scores.append(q["score"])
+    
+    avg_quality = sum(quality_scores) / len(quality_scores) if quality_scores else None
+    
+    # Rekomendacje
+    recommendations = []
+    keywords_state = project_data.get("keywords_state", {})
+    
+    # Frazy UNDER
+    under_keywords = [
+        meta.get("keyword") for rid, meta in keywords_state.items()
+        if meta.get("status") == "UNDER" and meta.get("type", "").upper() in ["BASIC", "MAIN"]
+    ]
+    if under_keywords:
+        recommendations.append({
+            "type": "UNDER_KEYWORDS",
+            "message": f"{len(under_keywords)} keywords still need more uses",
+            "keywords": under_keywords[:5]
+        })
+    
+    # Frazy OVER
+    over_keywords = [
+        meta.get("keyword") for rid, meta in keywords_state.items()
+        if meta.get("status") in ["OVER", "LOCKED"]
+    ]
+    if over_keywords:
+        recommendations.append({
+            "type": "OVER_KEYWORDS",
+            "message": f"{len(over_keywords)} keywords exceeded - use synonyms",
+            "keywords": over_keywords[:5]
+        })
+    
+    return jsonify({
+        "project_id": project_id,
+        "last_batch_quality": last_quality,
+        "overall_progress": {
+            "batches_done": total_batches,
+            "batches_planned": planned_batches,
+            "progress_percent": round(total_batches / planned_batches * 100) if planned_batches else 0,
+            "avg_quality_score": round(avg_quality) if avg_quality else None
+        },
+        "recommendations": recommendations
+    }), 200
+
+
+# ============================================================================
+# 🆕 v37.4: SIMPLIFIED RESPONSE ENDPOINT
+# ============================================================================
+@tracker_routes.post("/api/project/<project_id>/batch_simple")
+def submit_batch_simple(project_id):
+    """
+    Alternatywny endpoint z uproszczonym response dla GPT.
+    
+    Zamiast 50+ pól, zwraca tylko to co potrzebne:
+    - accepted: true/false
+    - action: CONTINUE/FIX_AND_RETRY/REWRITE
+    - quality: {score, grade, status}
+    - issues: [top 4 issues]
+    - fixes_needed: [top 3 fixes]
+    - next_task: {batch_number, h2, action}
+    
+    Request:
+        {"text": "h2: Tytuł\n\nTreść batcha..."}
+    """
+    if not QUALITY_SCORE_ENABLED:
+        return jsonify({
+            "error": "Quality Score module not available"
+        }), 503
+    
+    data = request.get_json() or {}
+    text = data.get("text", "").strip()
+    forced = data.get("forced", False)
+    
+    if not text:
+        return jsonify({"error": "No text provided"}), 400
+    
+    # Standardowe przetwarzanie
+    result = process_batch_in_firestore(project_id, text, {}, forced)
+    
+    if isinstance(result, dict) and result.get("status_code") == 404:
+        return jsonify({"error": "Project not found"}), 404
+    
+    # Pobierz project_data dla simplified response
+    db = firestore.client()
+    doc = db.collection("seo_projects").document(project_id).get()
+    project_data = doc.to_dict() if doc.exists else {}
+    
+    batch_number = len(project_data.get("batches", []))
+    
+    # Utwórz simplified response
+    simplified = create_simplified_response(result, project_data, batch_number)
+    
+    return jsonify(simplified), 200
