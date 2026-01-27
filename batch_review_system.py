@@ -1,8 +1,14 @@
 """
 ===============================================================================
-🔍 BATCH REVIEW SYSTEM v37.0
+🔍 BATCH REVIEW SYSTEM v37.5
 ===============================================================================
 Kompleksowy system review i auto-poprawek po każdym batchu.
+
+ZMIANY v37.5:
+- 🔧 FIX: exceeded_by - zamienia DOKŁADNIE tyle ile przekroczono
+- 🔧 FIX: max_replacements dynamiczne (nie hardcoded 1-2)
+- 🆕 Pole exceeded_by w ReviewIssue
+- 🆕 Lepsza informacja w fix_suggestion ("Zamień 3× na...")
 
 FLOW:
 1. Batch przychodzi → walidacja
@@ -115,6 +121,7 @@ class ReviewIssue:
     claude_fixable: bool = False
     fix_suggestion: Optional[str] = None
     synonyms: List[str] = field(default_factory=list)
+    exceeded_by: int = 0  # 🆕 v37.5: Ile trzeba zamienić na synonimy
 
 
 @dataclass
@@ -146,7 +153,8 @@ class ReviewResult:
                     "auto_fixable": i.auto_fixable,
                     "claude_fixable": i.claude_fixable,
                     "fix_suggestion": i.fix_suggestion,
-                    "synonyms": i.synonyms
+                    "synonyms": i.synonyms,
+                    "exceeded_by": i.exceeded_by  # 🆕 v37.5
                 }
                 for i in self.issues
             ]
@@ -196,14 +204,17 @@ def review_batch_comprehensive(
     issues.extend(exceeded_issues)
     
     # Auto-fix exceeded przez zamianę na synonimy
+    # 🆕 v37.5: Zamienia DOKŁADNIE tyle ile przekroczono (nie hardcoded 1-2)
     if auto_fix:
         for issue in exceeded_issues:
-            if issue.auto_fixable and issue.synonyms:
+            if issue.auto_fixable and issue.synonyms and issue.exceeded_by > 0:
+                # Zamień dokładnie tyle wystąpień ile trzeba żeby wrócić do limitu
+                replacements_needed = issue.exceeded_by
                 current_text, fix_applied = _replace_with_synonym(
                     current_text, 
                     issue.location,  # keyword
                     issue.synonyms,
-                    max_replacements=issue.severity == IssueSeverity.CRITICAL and 2 or 1
+                    max_replacements=replacements_needed  # 🆕 v37.5: Dynamiczne!
                 )
                 if fix_applied:
                     auto_fixes_applied.append(fix_applied)
@@ -364,8 +375,9 @@ def _check_exceeded_keywords(
                 message=f"'{keyword}' exceeded: {new_total}/{target_max} (+{exceed_pct:.0f}%)",
                 location=keyword,
                 auto_fixable=auto_fixable,
-                fix_suggestion=f"Zamień na: {', '.join(synonyms[:2])}" if synonyms else None,
-                synonyms=synonyms[:4]
+                fix_suggestion=f"Zamień {exceeded_by}× na: {', '.join(synonyms[:2])}" if synonyms else None,
+                synonyms=synonyms[:4],
+                exceeded_by=exceeded_by  # 🆕 v37.5: Ile dokładnie trzeba zamienić
             ))
     
     return issues
@@ -1045,7 +1057,7 @@ def _get_exceeded_keywords_with_synonyms(
                 "actual": actual,
                 "target_max": target_max,
                 "exceeded_by": exceeded_by,
-                "to_replace": min(exceeded_by, 3),  # Max 3 zamiany
+                "to_replace": exceeded_by,  # 🆕 v37.5: Bez sztucznego limitu
                 "synonyms": synonyms[:4]
             })
     
