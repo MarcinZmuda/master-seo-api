@@ -1,13 +1,19 @@
 """
 ===============================================================================
-🎯 ENTITY COVERAGE VALIDATOR v38.0
+🎯 ENTITY COVERAGE VALIDATOR v38.3
 ===============================================================================
 Waliduje pokrycie encji z S1 w batchach.
 
+ZMIANY v38.3:
+- 🆕 SEMANTIC FALLBACK: gdy regex nie znajdzie, próbuje keyword proximity
+- 🔧 DRIFT: procedural ↔ institutional dozwolone (nie jest driftem)
+- 🔧 DRIFT: tylko positive ↔ negative blokuje (CRITICAL)
+
 FUNKCJE:
 - Sprawdza czy encje HIGH importance zostały wprowadzone/zdefiniowane
-- Wykrywa brak definicji kluczowych encji
+- Wykrywa brak definicji kluczowych encji (regex + semantic fallback)
 - Waliduje relacje między encjami
+- Wykrywa entity drift (zmiana definicji między batchami)
 - Aktualizuje entity_state po każdym batchu
 
 INTEGRACJA:
@@ -305,6 +311,11 @@ class EntityCoverageExpert:
         # 2. Sprawdź czy wymagana akcja została wykonana
         if action == "DEFINE":
             matched = self._check_patterns(batch_text, entity, self.DEFINITION_PATTERNS)
+            
+            # v38.3: Semantic fallback jeśli regex nie znalazł
+            if not matched:
+                matched = self._semantic_fallback_definition(batch_text, entity)
+            
             if not matched:
                 issues.append(f"Encja '{entity}' występuje, ale nie została zdefiniowana")
                 suggestions.append(f"Dodaj definicję, np.: '{entity} to...' lub '{entity} jest...'")
@@ -321,6 +332,11 @@ class EntityCoverageExpert:
         
         elif action == "EXPLAIN":
             matched = self._check_patterns(batch_text, entity, self.EXPLANATION_PATTERNS)
+            
+            # v38.3: Semantic fallback jeśli regex nie znalazł
+            if not matched:
+                matched = self._semantic_fallback_explanation(batch_text, entity)
+            
             if not matched:
                 issues.append(f"Encja '{entity}' nie została wyjaśniona (brak opisu celu/skutków)")
                 suggestions.append(f"Dodaj wyjaśnienie, np.: 'celem {entity} jest...' lub '{entity} służy...'")
@@ -387,6 +403,83 @@ class EntityCoverageExpert:
                     matched.append(pattern)
             except re.error:
                 continue
+        
+        return matched
+    
+    # ================================================================
+    # v38.3: SEMANTIC FALLBACK - gdy regex nie znalazł
+    # ================================================================
+    
+    # Słowa kluczowe wskazujące na definicję
+    DEFINITION_KEYWORDS = [
+        "to", "jest", "stanowi", "oznacza", "definiuje", "określa",
+        "polega", "nazywa", "rozumie", "traktuje", "uznaje"
+    ]
+    
+    # Słowa kluczowe wskazujące na wyjaśnienie
+    EXPLANATION_KEYWORDS = [
+        "służy", "celem", "pozwala", "umożliwia", "prowadzi", "skutkuje",
+        "zapewnia", "chroni", "zabezpiecza", "gwarantuje", "daje",
+        "ma na celu", "w celu", "po to", "dzięki", "przez co"
+    ]
+    
+    def _semantic_fallback_definition(self, text: str, entity: str) -> List[str]:
+        """
+        v38.3: Semantic fallback dla definicji.
+        Sprawdza czy zdanie z encją zawiera słowa kluczowe definicji.
+        """
+        text_lower = text.lower()
+        entity_lower = entity.lower()
+        matched = []
+        
+        # Podziel na zdania
+        sentences = re.split(r'[.!?]+', text_lower)
+        
+        for sentence in sentences:
+            if entity_lower not in sentence:
+                continue
+            
+            # Sprawdź czy encja jest blisko słowa kluczowego definicji
+            for keyword in self.DEFINITION_KEYWORDS:
+                # Encja + keyword w tym samym zdaniu (max 50 znaków odległości)
+                entity_pos = sentence.find(entity_lower)
+                keyword_pos = sentence.find(keyword)
+                
+                if entity_pos >= 0 and keyword_pos >= 0:
+                    distance = abs(entity_pos - keyword_pos)
+                    if distance < 50:  # Blisko siebie
+                        matched.append(f"[SEMANTIC_FALLBACK] {entity} + {keyword}")
+                        return matched  # Wystarczy jeden match
+        
+        return matched
+    
+    def _semantic_fallback_explanation(self, text: str, entity: str) -> List[str]:
+        """
+        v38.3: Semantic fallback dla wyjaśnienia.
+        Sprawdza czy zdanie z encją zawiera słowa kluczowe wyjaśnienia.
+        """
+        text_lower = text.lower()
+        entity_lower = entity.lower()
+        matched = []
+        
+        # Podziel na zdania
+        sentences = re.split(r'[.!?]+', text_lower)
+        
+        for sentence in sentences:
+            if entity_lower not in sentence:
+                continue
+            
+            # Sprawdź czy encja jest blisko słowa kluczowego wyjaśnienia
+            for keyword in self.EXPLANATION_KEYWORDS:
+                if keyword in sentence:
+                    entity_pos = sentence.find(entity_lower)
+                    keyword_pos = sentence.find(keyword)
+                    
+                    if entity_pos >= 0 and keyword_pos >= 0:
+                        distance = abs(entity_pos - keyword_pos)
+                        if distance < 60:  # Trochę większy zakres dla wyjaśnień
+                            matched.append(f"[SEMANTIC_FALLBACK] {entity} + {keyword}")
+                            return matched
         
         return matched
     
@@ -796,7 +889,22 @@ class EntityDriftDetector:
         old_category = stored_definition.get("category", "neutral")
         new_category = new_definition.get("category", "neutral")
         
-        # Krytyczny drift: positive ↔ negative
+        # v38.3: Dozwolone przejścia (nie są driftem)
+        allowed_transitions = {
+            ("procedural", "institutional"),
+            ("institutional", "procedural"),
+            # Neutral może przejść w cokolwiek
+            ("neutral", "positive"),
+            ("neutral", "negative"),
+            ("neutral", "procedural"),
+            ("neutral", "institutional"),
+        }
+        
+        # Jeśli przejście jest dozwolone → brak driftu
+        if (old_category, new_category) in allowed_transitions:
+            return None
+        
+        # Krytyczny drift: positive ↔ negative (sprzeczność semantyczna!)
         critical_drift = (
             (old_category == "positive" and new_category == "negative") or
             (old_category == "negative" and new_category == "positive")
@@ -813,7 +921,7 @@ class EntityDriftDetector:
                 "message": f"Entity drift: '{entity}' zmienia charakter z {old_category} na {new_category}"
             }
         
-        # Warning drift: zmiana kategorii ale nie krytyczna
+        # Warning drift: inna zmiana kategorii (nie critical, nie dozwolona)
         if old_category != new_category and old_category != "neutral" and new_category != "neutral":
             return {
                 "entity": entity,
