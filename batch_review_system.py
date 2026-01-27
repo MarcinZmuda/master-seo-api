@@ -1,8 +1,14 @@
 """
 ===============================================================================
-🔍 BATCH REVIEW SYSTEM v37.5
+🔍 BATCH REVIEW SYSTEM v38.0
 ===============================================================================
 Kompleksowy system review i auto-poprawek po każdym batchu.
+
+ZMIANY v38.0:
+- 🆕 HelpfulReflexDetector - wykrywa "dopowiadanie" GPT
+- 🆕 Integracja z EntityCoverageExpert
+- 🆕 Integracja z LegalHardLockValidator
+- 🔧 Ulepszone wzorce AI detection
 
 ZMIANY v37.5:
 - 🔧 FIX: exceeded_by - zamienia DOKŁADNIE tyle ile przekroczono
@@ -105,9 +111,24 @@ class IssueType(Enum):
     AI_PATTERN = "AI_PATTERN"
     TEMPLATE_DETECTED = "TEMPLATE_DETECTED"
     
+    # 🆕 v38: Helpful reflex
+    HELPFUL_REFLEX = "HELPFUL_REFLEX"
+    UNNECESSARY_EXPLANATION = "UNNECESSARY_EXPLANATION"
+    SOFT_ADVICE = "SOFT_ADVICE"
+    EXCESSIVE_HEDGING = "EXCESSIVE_HEDGING"
+    FILLER_PHRASE = "FILLER_PHRASE"
+    
+    # 🆕 v38: Entity coverage
+    MISSING_ENTITY = "MISSING_ENTITY"
+    UNDEFINED_ENTITY = "UNDEFINED_ENTITY"
+    UNEXPLAINED_ENTITY = "UNEXPLAINED_ENTITY"
+    
+    # 🆕 v38: Legal
+    ILLEGAL_ARTICLE = "ILLEGAL_ARTICLE"
+    ILLEGAL_JUDGMENT = "ILLEGAL_JUDGMENT"
+    
     # Manual only
     FACTUAL_ERROR = "FACTUAL_ERROR"
-    MISSING_ENTITY = "MISSING_ENTITY"
 
 
 @dataclass
@@ -159,6 +180,197 @@ class ReviewResult:
                 for i in self.issues
             ]
         }
+
+
+# ================================================================
+# 🆕 v38: HELPFUL REFLEX DETECTOR
+# ================================================================
+class HelpfulReflexDetector:
+    """
+    Wykrywa wzorce "helpful reflex" - gdy GPT dodaje nieproszony content.
+    
+    Typy wykrywane:
+    - UNNECESSARY_EXPLANATION: "warto wiedzieć", "należy zauważyć"
+    - SOFT_ADVICE: "zaleca się", "warto skonsultować" (niedozwolone w YMYL)
+    - EXCESSIVE_HEDGING: "każdy przypadek jest inny"
+    - FILLER_PHRASE: "jak wspomniano", "co więcej"
+    - OVERSIMPLIFICATION: "innymi słowy", "mówiąc prościej"
+    """
+    
+    # Wzorce z kategorią i severity
+    PATTERNS = [
+        # Niepotrzebne wyjaśnienia
+        (r"warto\s+(?:również\s+)?(?:wiedzieć|zauważyć|wspomnieć|podkreślić)", 
+         "unnecessary_explanation", "WARNING"),
+        (r"(?:dodatkowo|ponadto)\s+(?:warto|należy)\s+(?:wspo|zazna)", 
+         "unnecessary_explanation", "WARNING"),
+        (r"(?:na\s+)?(?:marginesie|koniec)\s+(?:warto|należy)", 
+         "unnecessary_explanation", "WARNING"),
+        (r"nie\s+bez\s+znaczenia\s+(?:jest|pozostaje)", 
+         "unnecessary_explanation", "WARNING"),
+        
+        # Upraszczanie (może być OK, ale często zbędne)
+        (r"innymi\s+słowy", "oversimplification", "INFO"),
+        (r"(?:mówiąc\s+)?(?:prościej|prostym\s+językiem|w\s+skrócie)", 
+         "oversimplification", "INFO"),
+        (r"(?:krótko\s+)?mówiąc", "oversimplification", "INFO"),
+        
+        # Soft porady (CRITICAL w YMYL!)
+        (r"zaleca\s+się", "soft_advice", "WARNING"),
+        (r"(?:warto|dobrze)\s+(?:jest\s+)?(?:skonsultować|poradzić|zasięgnąć)", 
+         "soft_advice", "WARNING"),
+        (r"(?:rekomenduje|sugeruje)\s+się", "soft_advice", "WARNING"),
+        (r"(?:najlepiej|najlepszym\s+rozwiązaniem)\s+(?:jest|będzie)", 
+         "soft_advice", "WARNING"),
+        
+        # Nadmierne ostrożności (hedging)
+        (r"(?:oczywiście\s+)?każdy\s+(?:przypadek|sytuacja)\s+jest\s+(?:inna|inny|indywidualn)", 
+         "excessive_hedging", "INFO"),
+        (r"(?:należy|trzeba|warto)\s+pamiętać,?\s+że", 
+         "excessive_hedging", "INFO"),
+        (r"(?:jednak|niemniej)\s+(?:należy|trzeba|warto)", 
+         "excessive_hedging", "INFO"),
+        (r"to\s+(?:oczywiście\s+)?zależy\s+od", 
+         "excessive_hedging", "INFO"),
+        
+        # Filler phrases
+        (r"jak\s+(?:już\s+)?(?:wspomniano|wspomniałem|wspomniano\s+wcześniej)", 
+         "filler", "INFO"),
+        (r"co\s+(?:więcej|istotne|ważne|ciekawe)", "filler", "INFO"),
+        (r"(?:warto|należy)\s+(?:przy\s+tym\s+)?(?:dodać|nadmienić)", 
+         "filler", "INFO"),
+        (r"(?:na\s+)?(?:samym\s+)?(?:wstępie|początku)\s+(?:warto|należy)", 
+         "filler", "INFO"),
+        (r"(?:podsumowując|reasumując|konkludując)", "filler", "INFO"),
+        
+        # AI-style intro/outro
+        (r"^(?:w\s+)?(?:niniejszym|tym)\s+(?:artykule|tekście)", 
+         "ai_intro", "WARNING"),
+        (r"(?:mam\s+nadzieję|mamy\s+nadzieję),?\s+że", 
+         "ai_outro", "WARNING"),
+        (r"(?:jeśli|jeżeli)\s+masz\s+(?:jakieś\s+)?pytania", 
+         "ai_outro", "WARNING"),
+    ]
+    
+    def detect(
+        self, 
+        text: str, 
+        is_ymyl: bool = False
+    ) -> List[ReviewIssue]:
+        """
+        Wykrywa wzorce helpful reflex w tekście.
+        
+        Args:
+            text: Tekst do sprawdzenia
+            is_ymyl: Czy treść YMYL (wpływa na severity)
+            
+        Returns:
+            Lista ReviewIssue z wykrytymi problemami
+        """
+        issues = []
+        text_lower = text.lower()
+        
+        for pattern, pattern_type, base_severity in self.PATTERNS:
+            for match in re.finditer(pattern, text_lower):
+                # Określ severity
+                if is_ymyl and pattern_type == "soft_advice":
+                    severity = IssueSeverity.ERROR  # W YMYL soft advice to ERROR
+                elif base_severity == "WARNING":
+                    severity = IssueSeverity.WARNING
+                else:
+                    severity = IssueSeverity.INFO
+                
+                # Określ IssueType
+                issue_type = self._pattern_type_to_issue_type(pattern_type)
+                
+                # Pobierz kontekst
+                start = max(0, match.start() - 20)
+                end = min(len(text), match.end() + 20)
+                context = text[start:end]
+                
+                issues.append(ReviewIssue(
+                    type=issue_type,
+                    severity=severity,
+                    message=f"Helpful reflex: '{match.group(0)}' ({pattern_type})",
+                    location=context,
+                    auto_fixable=pattern_type in ["filler", "ai_intro", "ai_outro"],
+                    claude_fixable=True,
+                    fix_suggestion=self._get_suggestion(pattern_type, is_ymyl)
+                ))
+        
+        return issues
+    
+    def _pattern_type_to_issue_type(self, pattern_type: str) -> IssueType:
+        """Mapuje typ wzorca na IssueType."""
+        mapping = {
+            "unnecessary_explanation": IssueType.UNNECESSARY_EXPLANATION,
+            "oversimplification": IssueType.HELPFUL_REFLEX,
+            "soft_advice": IssueType.SOFT_ADVICE,
+            "excessive_hedging": IssueType.EXCESSIVE_HEDGING,
+            "filler": IssueType.FILLER_PHRASE,
+            "ai_intro": IssueType.AI_PATTERN,
+            "ai_outro": IssueType.AI_PATTERN,
+        }
+        return mapping.get(pattern_type, IssueType.HELPFUL_REFLEX)
+    
+    def _get_suggestion(self, pattern_type: str, is_ymyl: bool) -> str:
+        """Zwraca sugestię naprawy."""
+        suggestions = {
+            "unnecessary_explanation": "Usuń lub uprość - treść powinna być konkretna",
+            "oversimplification": "Rozważ usunięcie - może być zbędne",
+            "soft_advice": "USUŃ - niedozwolone w treściach informacyjnych" if is_ymyl 
+                          else "Rozważ usunięcie - unikaj porad",
+            "excessive_hedging": "Ogranicz hedging - bądź konkretny",
+            "filler": "Usuń filler phrase - nie wnosi treści",
+            "ai_intro": "Usuń AI-style intro - zacznij od sedna",
+            "ai_outro": "Usuń AI-style outro - niepotrzebne",
+        }
+        return suggestions.get(pattern_type, "Rozważ usunięcie")
+    
+    def auto_remove_fillers(self, text: str) -> Tuple[str, List[str]]:
+        """
+        Automatycznie usuwa proste filler phrases.
+        
+        Returns:
+            (cleaned_text, list of removed phrases)
+        """
+        removed = []
+        cleaned = text
+        
+        # Wzorce do auto-usunięcia
+        auto_remove_patterns = [
+            (r"(?:jak\s+(?:już\s+)?wspomniano,?\s*)", "jak wspomniano"),
+            (r"(?:co\s+więcej,?\s*)", "co więcej"),
+            (r"(?:warto\s+dodać,?\s+że\s*)", "warto dodać"),
+            (r"(?:należy\s+zauważyć,?\s+że\s*)", "należy zauważyć"),
+            (r"(?:podsumowując,?\s*)", "podsumowując"),
+        ]
+        
+        for pattern, name in auto_remove_patterns:
+            matches = re.findall(pattern, cleaned, re.IGNORECASE)
+            if matches:
+                cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
+                removed.append(f"Usunięto: '{name}'")
+        
+        # Wyczyść podwójne spacje
+        cleaned = re.sub(r"\s{2,}", " ", cleaned)
+        cleaned = re.sub(r"\s+([.,;:])", r"\1", cleaned)
+        
+        return cleaned, removed
+
+
+# Globalna instancja
+_helpful_reflex_detector = HelpfulReflexDetector()
+
+
+def detect_helpful_reflex(text: str, is_ymyl: bool = False) -> List[ReviewIssue]:
+    """Convenience function do wykrywania helpful reflex."""
+    return _helpful_reflex_detector.detect(text, is_ymyl)
+
+
+def auto_remove_fillers(text: str) -> Tuple[str, List[str]]:
+    """Convenience function do auto-usuwania fillers."""
+    return _helpful_reflex_detector.auto_remove_fillers(text)
 
 
 # ================================================================
@@ -269,6 +481,22 @@ def review_batch_comprehensive(
     
     for issue in ai_pattern_issues:
         if issue.claude_fixable:
+            claude_fixes_needed.append(issue.message)
+    
+    # ================================================================
+    # 6b. 🆕 v38: SPRAWDZENIE HELPFUL REFLEX
+    # ================================================================
+    helpful_reflex_issues = detect_helpful_reflex(current_text, is_ymyl=False)
+    issues.extend(helpful_reflex_issues)
+    
+    # Auto-remove fillers jeśli włączone
+    if auto_fix:
+        current_text, filler_removals = auto_remove_fillers(current_text)
+        for removal in filler_removals:
+            auto_fixes_applied.append(f"[FILLER] {removal}")
+    
+    for issue in helpful_reflex_issues:
+        if issue.severity in [IssueSeverity.WARNING, IssueSeverity.ERROR]:
             claude_fixes_needed.append(issue.message)
     
     # ================================================================
