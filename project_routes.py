@@ -137,6 +137,25 @@ except ImportError:
     ANTI_FRANKENSTEIN_ENABLED = False
     print("[PROJECT_ROUTES] ⚠️ Anti-Frankenstein modules not available")
 
+# 🆕 v39.0: Enhanced Pre-Batch Instructions
+try:
+    from enhanced_pre_batch import (
+        generate_enhanced_pre_batch_info,
+        get_entities_to_define,
+        get_relations_to_establish,
+        get_semantic_context,
+        get_style_instructions,
+        get_continuation_context,
+        get_keyword_tracking_info,
+        calculate_optimal_batch_count,
+        AI_PATTERNS_TO_AVOID
+    )
+    ENHANCED_PRE_BATCH_ENABLED = True
+    print("[PROJECT] ✅ Enhanced Pre-Batch v39.0 loaded")
+except ImportError as e:
+    ENHANCED_PRE_BATCH_ENABLED = False
+    print(f"[PROJECT] ⚠️ Enhanced Pre-Batch not available: {e}")
+
 # v26.1: Keyword synonyms for exceeded keywords
 try:
     from keyword_synonyms import (
@@ -3543,6 +3562,32 @@ def get_pre_batch_info(project_id):
     
     gpt_prompt = "\n".join(prompt_sections)
     
+    # ================================================================
+    # 🆕 v39.0: ENHANCED PRE-BATCH INSTRUCTIONS
+    # Konkretne instrukcje zamiast surowych danych
+    # ================================================================
+    enhanced_info = None
+    if ENHANCED_PRE_BATCH_ENABLED:
+        try:
+            enhanced_info = generate_enhanced_pre_batch_info(
+                s1_data=s1_data,
+                keywords_state=keywords_state,
+                batches=batches,
+                h2_structure=h2_structure,
+                current_batch_num=current_batch_num,
+                total_batches=total_planned_batches,
+                main_keyword=main_keyword,
+                entity_state=data.get("entity_state", {}),
+                style_fingerprint=data.get("style_fingerprint", {}),
+                is_ymyl=data.get("is_ymyl", False),
+                is_legal=data.get("is_legal", False) or data.get("detected_category") == "prawo"
+            )
+            print(f"[PRE_BATCH] 🎯 Enhanced instructions: {len(enhanced_info.get('entities_to_define', []))} entities, {len(enhanced_info.get('relations_to_establish', []))} relations")
+        except Exception as e:
+            print(f"[PRE_BATCH] ⚠️ Enhanced pre-batch error: {e}")
+            import traceback
+            traceback.print_exc()
+    
     return jsonify({
         "project_id": project_id,
         "topic": data.get("topic"),
@@ -3696,7 +3741,19 @@ def get_pre_batch_info(project_id):
         
         "gpt_prompt": gpt_prompt,
         
-        "version": "v36.9"
+        # 🆕 v39.0: Enhanced Pre-Batch Instructions
+        "enhanced": enhanced_info,
+        
+        # 🆕 v39.0: Konkretne instrukcje (wyodrębnione dla łatwości użycia)
+        "entities_to_define": enhanced_info.get("entities_to_define", []) if enhanced_info else [],
+        "relations_to_establish": enhanced_info.get("relations_to_establish", []) if enhanced_info else [],
+        "semantic_context": enhanced_info.get("semantic_context", {}) if enhanced_info else {},
+        "style_instructions_v39": enhanced_info.get("style_instructions", {}) if enhanced_info else {},
+        "continuation_v39": enhanced_info.get("continuation", {}) if enhanced_info else {},
+        "keyword_tracking": enhanced_info.get("keyword_tracking", {}) if enhanced_info else {},
+        "gpt_instructions_v39": enhanced_info.get("gpt_instructions", "") if enhanced_info else "",
+        
+        "version": "v39.0"
     }), 200
 
 
