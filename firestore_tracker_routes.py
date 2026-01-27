@@ -1,5 +1,18 @@
 """
-SEO Content Tracker Routes - v38.2 BRAJEN SEO Engine
+SEO Content Tracker Routes - v38.4 BRAJEN SEO Engine
+
+ZMIANY v38.4:
+- 🆕 STRUCTURAL KEYWORDS: frazy w MAIN/H2 NIE blokują batcha
+- 🆕 structural_exceeded w response (global check only)
+- 🆕 FINAL REVIEW: weryfikacja globalna z tolerancją 30%
+- 🆕 final_review w response (status, warnings, exceeded)
+- 🔧 is_structural_keyword() helper function
+- ✅ Koniec nieskończonych pętli REWRITE dla fraz w H2!
+
+ZMIANY v38.3:
+- 🔧 DRIFT: procedural ↔ institutional dozwolone (nie blokuje)
+- 🔧 SEMANTIC FALLBACK: entity validator próbuje keyword proximity po regexach
+- ✅ Proximity clusters: zostawione jako soft warning (nie ruszać!)
 
 ZMIANY v38.2:
 - 🔴 RELATION COMPLETION: brakujące relacje MUST → FIX_AND_RETRY
@@ -698,9 +711,30 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
     # 🆕 v37.0: EXCEEDED KEYWORDS z podziałem na WARNING i CRITICAL
     # WARNING: exceeded 1-49% → batch zapisuje się + ostrzeżenie + synonimy
     # CRITICAL: exceeded 50%+ → batch ZABLOKOWANY + synonimy do przepisania
+    # 🆕 v38.3: STRUCTURAL keywords (w MAIN/H2) - POMIJANE, tylko global check
     # ================================================================
     exceeded_warning = []   # 1-49% over max
     exceeded_critical = []  # 50%+ over max
+    
+    # 🆕 v38.3: Wykryj STRUCTURAL keywords (w MAIN lub H2)
+    main_keyword = project_data.get("main_keyword", project_data.get("topic", ""))
+    h2_structure = project_data.get("h2_structure", [])
+    main_lower = main_keyword.lower().strip()
+    h2_lower = [h.lower().strip() for h in h2_structure]
+    
+    def is_structural_keyword(kw: str) -> bool:
+        """Sprawdza czy fraza jest STRUCTURAL (w MAIN lub H2)."""
+        kw_lower = kw.lower().strip()
+        # W MAIN
+        if kw_lower in main_lower or kw_lower == main_lower:
+            return True
+        # W H2
+        for h2 in h2_lower:
+            if kw_lower in h2 or kw_lower == h2 or h2 in kw_lower:
+                return True
+        return False
+    
+    structural_exceeded = []  # 🆕 v38.3: exceeded ale STRUCTURAL - tylko info
     
     for rid, batch_count in batch_counts.items():
         meta = keywords_state[rid]
@@ -732,6 +766,13 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
                 "synonyms": synonyms[:3]
             }
             
+            # 🆕 v38.3: STRUCTURAL keywords - NIE blokują batcha!
+            if is_structural_keyword(keyword):
+                exceeded_info["is_structural"] = True
+                structural_exceeded.append(exceeded_info)
+                print(f"[TRACKER] 🔵 STRUCTURAL: '{keyword}' exceeded but STRUCTURAL (global check only)")
+                continue  # Pomijamy - nie dodajemy do critical/warning
+            
             if exceed_percent >= 50:
                 # 50%+ przekroczenia → CRITICAL (blokada)
                 exceeded_critical.append(exceeded_info)
@@ -743,6 +784,10 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
     
     # Backward compatibility: exceeded_keywords = wszystkie exceeded
     exceeded_keywords = exceeded_warning + exceeded_critical
+    
+    # 🆕 v38.3: Info o structural exceeded (nie blokują, ale warto wiedzieć)
+    if structural_exceeded:
+        print(f"[TRACKER] 🔵 {len(structural_exceeded)} STRUCTURAL keywords exceeded (global check in final_review)")
     
     # ================================================================
     # 🆕 v36.0: RESERVED KEYWORDS VALIDATION
@@ -1418,9 +1463,99 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
     is_last_batch = (remaining_batches == 0)
     
     auto_merge_result = None
+    final_review_result = None
+    
     if is_last_batch:
-        print(f"[TRACKER] 🏁 Last batch detected! Auto-merging full article...")
-        auto_merge_result = auto_merge_full_article(project_id, project_data)
+        print(f"[TRACKER] 🏁 Last batch detected! Running final review...")
+        
+        # ================================================================
+        # 🆕 v38.4: FINAL REVIEW - weryfikacja globalna z tolerancją 30%
+        # ================================================================
+        final_review_warnings = []
+        final_review_exceeded = []
+        
+        TOLERANCE_PERCENT = 30  # 30% tolerancji powyżej max
+        
+        for rid, meta in keywords_state.items():
+            keyword = meta.get("keyword", "")
+            if not keyword:
+                continue
+            
+            kw_type = meta.get("type", "BASIC").upper()
+            actual = meta.get("actual_uses", 0)
+            target_max = meta.get("target_max", 999)
+            target_min = meta.get("target_min", 1)
+            
+            # Oblicz tolerancję (30% powyżej max)
+            tolerance_max = int(target_max * (1 + TOLERANCE_PERCENT / 100))
+            
+            # Sprawdź przekroczenie
+            if actual > tolerance_max:
+                # Przekroczono nawet z tolerancją 30% → ERROR
+                exceeded_by = actual - target_max
+                over_tolerance_by = actual - tolerance_max
+                final_review_exceeded.append({
+                    "keyword": keyword,
+                    "type": kw_type,
+                    "actual": actual,
+                    "target_max": target_max,
+                    "tolerance_max": tolerance_max,
+                    "exceeded_by": exceeded_by,
+                    "over_tolerance_by": over_tolerance_by,
+                    "severity": "ERROR",
+                    "message": f"'{keyword}' przekroczyła limit nawet z tolerancją 30%: {actual}/{target_max} (max z tolerancją: {tolerance_max})"
+                })
+                print(f"[FINAL REVIEW] ❌ '{keyword}': {actual}/{target_max} (tolerance {tolerance_max}) - EXCEEDED!")
+            
+            elif actual > target_max:
+                # Przekroczono max ale w granicach tolerancji → WARNING (OK)
+                final_review_warnings.append({
+                    "keyword": keyword,
+                    "type": kw_type,
+                    "actual": actual,
+                    "target_max": target_max,
+                    "tolerance_max": tolerance_max,
+                    "exceeded_by": actual - target_max,
+                    "severity": "WARNING",
+                    "message": f"'{keyword}' lekko przekroczona ale w tolerancji 30%: {actual}/{target_max} (OK)"
+                })
+                print(f"[FINAL REVIEW] ⚠️ '{keyword}': {actual}/{target_max} (within tolerance) - OK")
+            
+            elif actual < target_min:
+                # Poniżej minimum → WARNING
+                final_review_warnings.append({
+                    "keyword": keyword,
+                    "type": kw_type,
+                    "actual": actual,
+                    "target_min": target_min,
+                    "target_max": target_max,
+                    "severity": "WARNING",
+                    "message": f"'{keyword}' poniżej minimum: {actual}/{target_min}"
+                })
+                print(f"[FINAL REVIEW] ⚠️ '{keyword}': {actual} < {target_min} (under min)")
+        
+        final_review_result = {
+            "status": "PASS" if not final_review_exceeded else "NEEDS_CORRECTION",
+            "tolerance_percent": TOLERANCE_PERCENT,
+            "warnings": final_review_warnings,
+            "exceeded": final_review_exceeded,
+            "warnings_count": len(final_review_warnings),
+            "exceeded_count": len(final_review_exceeded),
+            "message": (
+                f"✅ Final review PASS: {len(final_review_warnings)} warnings (within tolerance)"
+                if not final_review_exceeded
+                else f"❌ Final review NEEDS_CORRECTION: {len(final_review_exceeded)} keywords exceeded tolerance"
+            )
+        }
+        
+        print(f"[TRACKER] 📊 Final review: {final_review_result['status']} ({len(final_review_exceeded)} exceeded, {len(final_review_warnings)} warnings)")
+        
+        # Auto-merge tylko jeśli final review OK
+        if not final_review_exceeded:
+            print(f"[TRACKER] 🏁 Final review OK! Auto-merging full article...")
+            auto_merge_result = auto_merge_full_article(project_id, project_data)
+        else:
+            print(f"[TRACKER] ⚠️ Final review has errors - skipping auto-merge")
 
     # ================================================================
     # 🆕 v37.4: GLOBAL QUALITY SCORE
@@ -1636,6 +1771,8 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         # 🆕 v37.0: Rozdzielone exceeded na warning i critical
         "exceeded_warning": exceeded_warning,
         "exceeded_critical": exceeded_critical,
+        # 🆕 v38.3: STRUCTURAL exceeded (nie blokują, global check)
+        "structural_exceeded": structural_exceeded if 'structural_exceeded' in dir() else [],
         "batch_counts": batch_counts,
         "unified_counting": UNIFIED_COUNTING if 'UNIFIED_COUNTING' in dir() else False,
         "in_headers": in_headers if 'in_headers' in dir() else {},
@@ -1661,9 +1798,16 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         "remaining_batches": remaining_batches,
         "is_last_batch": is_last_batch,
         "auto_merge": auto_merge_result,
+        # 🆕 v38.4: Final review z tolerancją 30%
+        "final_review": final_review_result if 'final_review_result' in dir() else None,
         "article_complete": is_last_batch and auto_merge_result and auto_merge_result.get("merged", False),
-        "export_ready": is_last_batch,
-        "next_step": "GET /api/project/{id}/export/docx" if is_last_batch else f"Continue with batch {batches_done + 1}",
+        "export_ready": is_last_batch and (not final_review_result or final_review_result.get("status") == "PASS"),
+        "next_step": (
+            "GET /api/project/{id}/export/docx" 
+            if is_last_batch and (not final_review_result or final_review_result.get("status") == "PASS")
+            else f"Continue with batch {batches_done + 1}" if not is_last_batch
+            else "FIX exceeded keywords (see final_review.exceeded)"
+        ),
         # 🆕 v37.4: Global Quality Score
         "quality": {
             "score": quality_result["score"] if quality_result else None,
