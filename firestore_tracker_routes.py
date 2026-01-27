@@ -1,5 +1,11 @@
 """
-SEO Content Tracker Routes - v37.4 BRAJEN SEO Engine
+SEO Content Tracker Routes - v37.5 BRAJEN SEO Engine
+
+ZMIANY v37.5:
+- 🔄 CRITICAL FIX: Recount keywords after auto-fix
+- ✅ keywords_state saved to Firestore after auto-fix
+- 📊 Accurate keyword tracking for subsequent batches
+- 🔧 Fixed: keywords were counted BEFORE auto-fix, not AFTER
 
 ZMIANY v37.4:
 - 🆕 GLOBAL QUALITY SCORE: jeden score 0-100 z grade A-F
@@ -1142,6 +1148,66 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
                 print(f"[TRACKER] ✅ Auto-fixed {len(batch_review_result.auto_fixes_applied)} issues")
                 for fix in batch_review_result.auto_fixes_applied[:3]:
                     print(f"[TRACKER]    • {fix}")
+                
+                # ================================================================
+                # 🆕 v37.5: RECOUNT KEYWORDS AFTER AUTO-FIX
+                # ================================================================
+                print(f"[TRACKER] 🔄 Recounting keywords after auto-fix...")
+                
+                # 1. Przelicz frazy w POPRAWIONYM tekście
+                new_batch_counts = count_keywords_for_state(
+                    auto_fixed_text, 
+                    keywords_state, 
+                    use_exclusive_for_nested=False
+                )
+                
+                # 2. Oblicz różnicę i zaktualizuj keywords_state
+                recount_changes = []
+                for rid, meta in keywords_state.items():
+                    old_count = batch_counts.get(rid, 0)
+                    new_count = new_batch_counts.get(rid, 0)
+                    
+                    if old_count != new_count:
+                        keyword = meta.get("keyword", rid)
+                        diff = new_count - old_count
+                        recount_changes.append({
+                            "keyword": keyword,
+                            "before": old_count,
+                            "after": new_count,
+                            "diff": diff
+                        })
+                        print(f"[TRACKER]    • '{keyword}': {old_count} → {new_count} ({diff:+d})")
+                        
+                        # Cofnij stare liczenie, dodaj nowe
+                        current_actual = meta.get("actual_uses", 0)
+                        corrected_actual = current_actual - old_count + new_count
+                        meta["actual_uses"] = max(0, corrected_actual)
+                        
+                        # Przelicz status
+                        target_min = meta.get("target_min", 0)
+                        target_max = meta.get("target_max", 999)
+                        actual = meta["actual_uses"]
+                        
+                        if actual < target_min:
+                            meta["status"] = "UNDER"
+                        elif actual == target_max:
+                            meta["status"] = "OPTIMAL"
+                        elif target_min <= actual < target_max:
+                            meta["status"] = "OK"
+                        elif actual > target_max:
+                            meta["status"] = "OVER"
+                        
+                        meta["remaining_max"] = max(0, target_max - actual)
+                
+                # 3. Użyj nowych batch_counts
+                batch_counts = new_batch_counts
+                
+                # 4. Zapisz poprawiony keywords_state do Firestore
+                doc_ref.update({
+                    "keywords_state": sanitize_for_firestore(keywords_state)
+                })
+                
+                print(f"[TRACKER] ✅ Keywords recounted: {len(recount_changes)} changes, state saved to Firestore")
             
             # Loguj review summary
             print(f"[TRACKER] 📋 Review: {batch_review_result.status}, issues: {len(batch_review_result.issues)}")
