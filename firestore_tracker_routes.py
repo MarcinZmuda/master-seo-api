@@ -1,5 +1,21 @@
 """
-SEO Content Tracker Routes - v37.5 BRAJEN SEO Engine
+SEO Content Tracker Routes - v38.1 BRAJEN SEO Engine
+
+ZMIANY v38.1:
+- 🔴 DECISION ENGINE: entity/legal/helpful → WPŁYWAJĄ NA ACTION!
+- 🔴 Entity MUST missing → action = REWRITE
+- 🔴 Legal CRITICAL violations → action = FIX_AND_RETRY  
+- 🔴 YMYL soft_advice → action = FIX_AND_RETRY
+- 🔴 v38_overrides w response i decision_trace
+- ✅ Fixes_needed z konkretnym co naprawić
+
+ZMIANY v38.0:
+- 🆕 ENTITY_STATE: tracking encji z S1 (introduced/defined/explained)
+- 🆕 ENTITY_REQUIREMENTS: wymagania encji w pre_batch_info
+- 🆕 ENTITY_COVERAGE_EXPERT: walidacja pokrycia encji
+- 🆕 LEGAL_HARD_LOCK: whitelist przepisów dla YMYL
+- 🆕 HELPFUL_REFLEX_DETECTOR: wykrywanie "dopowiadania" GPT
+- 🔧 Rozszerzona inicjalizacja projektu
 
 ZMIANY v37.5:
 - 🔄 CRITICAL FIX: Recount keywords after auto-fix
@@ -203,6 +219,42 @@ try:
 except ImportError as e:
     QUALITY_SCORE_ENABLED = False
     print(f"[TRACKER] ⚠️ Quality Score Module not available: {e}")
+
+# 🆕 v38: Entity Coverage Validator
+try:
+    from entity_validator import (
+        EntityCoverageExpert,
+        initialize_entity_state,
+        generate_entity_requirements,
+        EntityValidationResult,
+        EntityCoverageResult
+    )
+    ENTITY_VALIDATOR_ENABLED = True
+    print("[TRACKER] ✅ Entity Coverage Validator loaded")
+except ImportError as e:
+    ENTITY_VALIDATOR_ENABLED = False
+    print(f"[TRACKER] ⚠️ Entity Coverage Validator not available: {e}")
+
+# 🆕 v38: Legal Hard-Lock Validator
+try:
+    from legal_validator import (
+        LegalHardLockValidator,
+        create_legal_whitelist,
+        add_common_legal_articles,
+        LegalValidationResult
+    )
+    LEGAL_VALIDATOR_ENABLED = True
+    print("[TRACKER] ✅ Legal Hard-Lock Validator loaded")
+except ImportError as e:
+    LEGAL_VALIDATOR_ENABLED = False
+    print(f"[TRACKER] ⚠️ Legal Hard-Lock Validator not available: {e}")
+
+# 🆕 v38: Helpful Reflex Detector (z batch_review_system)
+try:
+    from batch_review_system import detect_helpful_reflex, auto_remove_fillers
+    HELPFUL_REFLEX_ENABLED = True
+except ImportError:
+    HELPFUL_REFLEX_ENABLED = False
 
 tracker_routes = Blueprint("tracker_routes", __name__)
 
@@ -493,6 +545,36 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
 
     project_data = doc.to_dict()
     keywords_state = project_data.get("keywords_state", {})
+    
+    # ================================================================
+    # 🆕 v38: INICJALIZACJA ENTITY_STATE (jeśli brak)
+    # ================================================================
+    if ENTITY_VALIDATOR_ENABLED and "entity_state" not in project_data:
+        s1_data = project_data.get("s1_data", {})
+        batch_plan = {
+            "total_batches": project_data.get("total_planned_batches", 6)
+        }
+        if s1_data.get("entities"):
+            project_data["entity_state"] = initialize_entity_state(s1_data, batch_plan)
+            print(f"[TRACKER] 🎯 Entity state initialized: {len(project_data['entity_state'])} entities")
+    
+    # ================================================================
+    # 🆕 v38: INICJALIZACJA LEGAL_WHITELIST (jeśli YMYL i brak)
+    # ================================================================
+    if LEGAL_VALIDATOR_ENABLED and project_data.get("is_legal") and "legal_whitelist" not in project_data:
+        detected_articles = project_data.get("detected_articles", [])
+        legal_judgments = project_data.get("legal_judgments", [])
+        legal_category = project_data.get("legal_category", "")
+        
+        whitelist = create_legal_whitelist(detected_articles, legal_judgments)
+        
+        # Dodaj popularne artykuły dla kategorii
+        if legal_category:
+            whitelist = add_common_legal_articles(whitelist, legal_category)
+        
+        project_data["legal_whitelist"] = whitelist
+        project_data["legal_hardlock_enabled"] = True
+        print(f"[TRACKER] ⚖️ Legal whitelist created: {len(whitelist.get('articles', []))} articles, {len(whitelist.get('judgments', []))} judgments")
     
     # v24.2: UNIFIED COUNTING - jedna funkcja dla całego systemu
     # Zastępuje: count_all_forms + deduplicate_keyword_counts + stuffing detection
@@ -937,6 +1019,105 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         except Exception as e:
             print(f"[TRACKER] ⚠️ MoE Validation error: {e}")
 
+    # ================================================================
+    # 🆕 v38: ENTITY COVERAGE VALIDATION
+    # ================================================================
+    entity_validation_result = None
+    entity_fix_instructions = []
+    
+    if ENTITY_VALIDATOR_ENABLED and project_data.get("entity_state"):
+        try:
+            entity_expert = EntityCoverageExpert()
+            batches_done = len(project_data.get("batches", []))
+            batch_number = batches_done + 1
+            
+            # Generuj wymagania encji dla tego batcha
+            entity_requirements = generate_entity_requirements(
+                entity_state=project_data.get("entity_state", {}),
+                batch_number=batch_number,
+                semantic_plan=project_data.get("semantic_keyword_plan", {}),
+                total_batches=project_data.get("total_planned_batches", 6)
+            )
+            
+            # Waliduj pokrycie encji
+            entity_validation_result = entity_expert.validate_batch(
+                batch_text=batch_text,
+                entity_requirements=entity_requirements.get("required_entities", []),
+                entity_state=project_data.get("entity_state", {}),
+                relationships_to_check=entity_requirements.get("relationships_to_establish", [])
+            )
+            
+            # Dodaj warnings
+            if entity_validation_result.must_missing:
+                for entity in entity_validation_result.must_missing:
+                    warnings.append(f"🎯 ENTITY MISSING: '{entity}' - wymagana encja nie występuje!")
+                    entity_fix_instructions.append(f"Dodaj encję '{entity}' do treści")
+            
+            if entity_validation_result.should_missing:
+                for entity in entity_validation_result.should_missing:
+                    warnings.append(f"ℹ️ ENTITY: '{entity}' - zalecana encja nie występuje")
+            
+            # Aktualizuj entity_state
+            if entity_validation_result.status != "FAIL":
+                project_data["entity_state"] = entity_expert.update_entity_state(
+                    entity_state=project_data.get("entity_state", {}),
+                    batch_text=batch_text,
+                    batch_number=batch_number,
+                    validation_results=entity_validation_result.results
+                )
+                
+                # Aktualizuj relacje
+                if entity_validation_result.relationships_established:
+                    project_data["entity_state"] = entity_expert.update_relationships(
+                        entity_state=project_data["entity_state"],
+                        relationships_established=entity_validation_result.relationships_established
+                    )
+            
+            print(f"[TRACKER] 🎯 Entity Coverage: {entity_validation_result.status} "
+                  f"(score: {entity_validation_result.score}, missing: {len(entity_validation_result.must_missing)})")
+                
+        except Exception as e:
+            print(f"[TRACKER] ⚠️ Entity Coverage Validation error: {e}")
+
+    # ================================================================
+    # 🆕 v38: LEGAL HARD-LOCK VALIDATION (YMYL)
+    # ================================================================
+    legal_validation_result = None
+    legal_removals = []
+    processed_batch_text = batch_text
+    
+    if LEGAL_VALIDATOR_ENABLED and project_data.get("legal_hardlock_enabled"):
+        try:
+            legal_validator = LegalHardLockValidator()
+            
+            legal_validation_result = legal_validator.validate_batch(
+                batch_text=batch_text,
+                legal_whitelist=project_data.get("legal_whitelist", {}),
+                auto_remove=True,  # Automatycznie usuwaj nielegalne przepisy
+                strict_mode=True
+            )
+            
+            # Użyj przetworzonego tekstu (bez nielegalnych przepisów)
+            if legal_validation_result.removals:
+                processed_batch_text = legal_validation_result.processed_text
+                batch_text = processed_batch_text
+                
+                for removal in legal_validation_result.removals:
+                    warnings.append(f"⚖️ LEGAL: Usunięto '{removal.original}' - {removal.reason}")
+                    legal_removals.append(removal.to_dict())
+            
+            if legal_validation_result.violations:
+                for violation in legal_validation_result.violations:
+                    if violation.severity.value == "CRITICAL":
+                        warnings.append(f"⚖️ LEGAL CRITICAL: {violation.found_text} - potencjalna halucynacja!")
+            
+            print(f"[TRACKER] ⚖️ Legal Validation: valid={legal_validation_result.is_valid}, "
+                  f"violations={len(legal_validation_result.violations)}, "
+                  f"auto_removed={len(legal_validation_result.removals)}")
+                
+        except Exception as e:
+            print(f"[TRACKER] ⚠️ Legal Validation error: {e}")
+
     # Save batch
     batch_entry = {
         "text": batch_text,
@@ -956,7 +1137,13 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         "status": status,
         # 🆕 v37.1: MoE Validation results
         "moe_validation": moe_validation_result.to_dict() if moe_validation_result else None,
-        "moe_fix_instructions": moe_fix_instructions
+        "moe_fix_instructions": moe_fix_instructions,
+        # 🆕 v38: Entity Coverage results
+        "entity_validation": entity_validation_result.to_dict() if entity_validation_result else None,
+        "entity_fix_instructions": entity_fix_instructions,
+        # 🆕 v38: Legal Validation results
+        "legal_validation": legal_validation_result.to_dict() if legal_validation_result else None,
+        "legal_removals": legal_removals
     }
 
     project_data.setdefault("batches", []).append(batch_entry)
@@ -1278,6 +1465,94 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
             import traceback
             traceback.print_exc()
 
+    # ================================================================
+    # 🆕 v38.1: DECISION ENGINE - ENTITY/LEGAL/HELPFUL → ACTION
+    # ================================================================
+    # To jest JEDYNE miejsce gdzie entity/legal/helpful WPŁYWAJĄ na action
+    # Wcześniejsze walidacje tylko zbierały dane - tu podejmujemy decyzje
+    # ================================================================
+    
+    v38_overrides = []
+    v38_fixes_needed = []
+    v38_action_override = None
+    
+    # 1. ENTITY COVERAGE - MUST missing → REWRITE
+    if entity_validation_result and entity_validation_result.status == "FAIL":
+        v38_action_override = "REWRITE"
+        for entity in entity_validation_result.must_missing:
+            v38_fixes_needed.append(f"[ENTITY MUST] Dodaj encję '{entity}' do treści")
+        v38_overrides.append(f"entity_coverage: FAIL → REWRITE (missing: {entity_validation_result.must_missing})")
+        print(f"[TRACKER] 🔴 v38.1 OVERRIDE: Entity FAIL → action=REWRITE")
+    
+    # 2. LEGAL VIOLATIONS - critical pozostałe po auto-remove → FIX_AND_RETRY
+    if legal_validation_result and legal_validation_result.violations:
+        # Sprawdź czy są CRITICAL violations które nie zostały auto-usunięte
+        critical_violations = [v for v in legal_validation_result.violations 
+                              if v.severity.value == "CRITICAL"]
+        
+        if critical_violations and v38_action_override != "REWRITE":
+            v38_action_override = "FIX_AND_RETRY"
+            for v in critical_violations[:3]:
+                v38_fixes_needed.append(f"[LEGAL] Usuń nielegalny przepis: '{v.found_text}'")
+            v38_overrides.append(f"legal_hardlock: {len(critical_violations)} CRITICAL → FIX_AND_RETRY")
+            print(f"[TRACKER] 🔴 v38.1 OVERRIDE: Legal CRITICAL → action=FIX_AND_RETRY")
+    
+    # 3. HELPFUL REFLEX (tylko dla YMYL) - soft_advice → FIX_AND_RETRY
+    is_ymyl = project_data.get("is_ymyl", False) or project_data.get("is_legal", False)
+    
+    if is_ymyl and HELPFUL_REFLEX_ENABLED:
+        try:
+            helpful_issues = detect_helpful_reflex(batch_text, is_ymyl=True)
+            soft_advice_issues = [i for i in helpful_issues 
+                                 if i.type.value in ["SOFT_ADVICE", "UNNECESSARY_EXPLANATION"] 
+                                 and i.severity.value in ["ERROR", "WARNING"]]
+            
+            if soft_advice_issues and v38_action_override not in ["REWRITE", "FIX_AND_RETRY"]:
+                v38_action_override = "FIX_AND_RETRY"
+                for issue in soft_advice_issues[:2]:
+                    v38_fixes_needed.append(f"[YMYL] Usuń: '{issue.location[:50]}...'")
+                v38_overrides.append(f"helpful_reflex: {len(soft_advice_issues)} soft_advice in YMYL → FIX_AND_RETRY")
+                print(f"[TRACKER] 🔴 v38.1 OVERRIDE: YMYL soft_advice → action=FIX_AND_RETRY")
+        except Exception as e:
+            print(f"[TRACKER] ⚠️ Helpful reflex check error: {e}")
+    
+    # 4. ZASTOSUJ OVERRIDE do gpt_action
+    if v38_action_override and gpt_action:
+        original_action = gpt_action.get("action", "CONTINUE")
+        
+        # Override tylko jeśli nowy action jest "gorszy"
+        action_priority = {"CONTINUE": 0, "FIX_AND_RETRY": 1, "REWRITE": 2}
+        
+        if action_priority.get(v38_action_override, 0) > action_priority.get(original_action, 0):
+            gpt_action["action"] = v38_action_override
+            gpt_action["accepted"] = False
+            gpt_action["confidence"] = "HIGH"
+            gpt_action["message"] = f"❌ v38.1 Override: {v38_action_override} (was: {original_action})"
+            
+            # Dodaj fixes do istniejących
+            existing_fixes = gpt_action.get("fixes_needed", [])
+            gpt_action["fixes_needed"] = v38_fixes_needed + existing_fixes
+            
+            print(f"[TRACKER] ✅ v38.1 Applied override: {original_action} → {v38_action_override}")
+    
+    # Jeśli nie ma gpt_action ale mamy override - stwórz
+    elif v38_action_override and not gpt_action:
+        gpt_action = {
+            "accepted": False,
+            "action": v38_action_override,
+            "confidence": "HIGH",
+            "message": f"❌ v38.1: {v38_action_override}",
+            "fixes_needed": v38_fixes_needed,
+            "next_task": None
+        }
+        print(f"[TRACKER] ✅ v38.1 Created action: {v38_action_override}")
+    
+    # Dodaj v38 overrides do decision_trace
+    if quality_result and v38_overrides:
+        if "decision_trace" not in quality_result:
+            quality_result["decision_trace"] = []
+        quality_result["decision_trace"].extend(v38_overrides)
+
     return {
         "status": status,
         "semantic_score": semantic_score,
@@ -1337,6 +1612,23 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         } if gpt_action else None,
         # 🆕 v37.4: Decision trace (audit)
         "decision_trace": quality_result.get("decision_trace", []) if quality_result else [],
+        # 🆕 v38.1: Entity Coverage Validation
+        "entity_validation": {
+            "status": entity_validation_result.status if entity_validation_result else None,
+            "score": entity_validation_result.score if entity_validation_result else None,
+            "must_missing": entity_validation_result.must_missing if entity_validation_result else [],
+            "should_missing": entity_validation_result.should_missing if entity_validation_result else [],
+            "relationships_established": entity_validation_result.relationships_established if entity_validation_result else []
+        } if entity_validation_result else None,
+        # 🆕 v38.1: Legal Hard-Lock Validation
+        "legal_validation": {
+            "is_valid": legal_validation_result.is_valid if legal_validation_result else True,
+            "violations_count": len(legal_validation_result.violations) if legal_validation_result else 0,
+            "auto_removed_count": len(legal_validation_result.removals) if legal_validation_result else 0,
+            "removals": [r.to_dict() for r in legal_validation_result.removals] if legal_validation_result else []
+        } if legal_validation_result else None,
+        # 🆕 v38.1: Override info
+        "v38_overrides": v38_overrides if 'v38_overrides' in dir() and v38_overrides else None,
         "status_code": 200
     }
 
