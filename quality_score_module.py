@@ -593,6 +593,241 @@ def create_simplified_response(
 
 
 # ================================================================
+# 🆕 v39.0: TOLERANCJA 30% + STRUCTURAL KEYWORDS
+# ================================================================
+
+def check_keyword_with_tolerance(
+    keyword: str,
+    actual: int,
+    target_min: int,
+    target_max: int,
+    kw_type: str = "BASIC",
+    tolerance_percent: float = 0.30
+) -> Dict:
+    """
+    Sprawdza keyword z tolerancją 30%.
+    
+    Returns:
+        Dict z status, within_tolerance, message
+    """
+    # Oblicz tolerancję
+    tolerance_max = int(target_max * (1 + tolerance_percent))
+    
+    result = {
+        "keyword": keyword,
+        "actual": actual,
+        "target_min": target_min,
+        "target_max": target_max,
+        "tolerance_max": tolerance_max,
+        "within_tolerance": False,
+        "status": "UNKNOWN",
+        "message": ""
+    }
+    
+    # Sprawdź status
+    if actual < target_min:
+        result["status"] = "UNDER"
+        result["message"] = f"Za mało: {actual}/{target_min}"
+    elif actual <= target_max:
+        result["status"] = "PASS"
+        result["within_tolerance"] = True
+        result["message"] = f"OK: {actual} w zakresie {target_min}-{target_max}"
+    elif actual <= tolerance_max:
+        result["status"] = "WARNING"
+        result["within_tolerance"] = True
+        result["message"] = f"W tolerancji: {actual} (max={target_max}, tolerancja={tolerance_max})"
+    else:
+        result["status"] = "FAIL"
+        result["within_tolerance"] = False
+        exceeded_by = actual - target_max
+        exceeded_pct = round((exceeded_by / target_max) * 100) if target_max > 0 else 100
+        result["message"] = f"Przekroczone: {actual} > {tolerance_max} (+{exceeded_pct}%)"
+    
+    return result
+
+
+def validate_final_keywords_with_tolerance(
+    keywords_state: Dict,
+    tolerance_percent: float = 0.30
+) -> Dict:
+    """
+    Finalna walidacja wszystkich keywords z tolerancją 30%.
+    Używane w final_review endpoint.
+    """
+    results = {
+        "pass": [],
+        "warning": [],  # W tolerancji
+        "fail": [],
+        "under": [],
+        "total_pass": 0,
+        "total_warning": 0,
+        "total_fail": 0,
+        "overall_status": "PASS"
+    }
+    
+    for rid, meta in keywords_state.items():
+        keyword = meta.get("keyword", "")
+        if not keyword:
+            continue
+        
+        actual = meta.get("actual_uses", 0)
+        target_min = meta.get("target_min", 1)
+        target_max = meta.get("target_max", 999)
+        kw_type = meta.get("type", "BASIC").upper()
+        
+        check = check_keyword_with_tolerance(
+            keyword=keyword,
+            actual=actual,
+            target_min=target_min,
+            target_max=target_max,
+            kw_type=kw_type,
+            tolerance_percent=tolerance_percent
+        )
+        
+        if check["status"] == "PASS":
+            results["pass"].append(check)
+            results["total_pass"] += 1
+        elif check["status"] == "WARNING":
+            results["warning"].append(check)
+            results["total_warning"] += 1
+        elif check["status"] == "FAIL":
+            results["fail"].append(check)
+            results["total_fail"] += 1
+        elif check["status"] == "UNDER":
+            results["under"].append(check)
+    
+    # Overall status
+    if results["total_fail"] > 0:
+        results["overall_status"] = "FAIL"
+    elif results["total_warning"] > 3:
+        results["overall_status"] = "WARNING"
+    elif len(results["under"]) > 2:
+        results["overall_status"] = "WARNING"
+    else:
+        results["overall_status"] = "PASS"
+    
+    results["summary"] = (
+        f"PASS: {results['total_pass']}, "
+        f"W tolerancji: {results['total_warning']}, "
+        f"FAIL: {results['total_fail']}, "
+        f"Underused: {len(results['under'])}"
+    )
+    
+    return results
+
+
+def is_structural_keyword(keyword: str, main_keyword: str, h2_structure: List[str]) -> bool:
+    """
+    Sprawdza czy keyword jest STRUCTURAL (w MAIN lub H2).
+    STRUCTURAL keywords NIE blokują per-batch!
+    """
+    keyword_lower = keyword.lower()
+    main_lower = main_keyword.lower()
+    
+    # Keyword = main keyword
+    if keyword_lower == main_lower:
+        return True
+    
+    # Keyword zawiera się w main lub odwrotnie
+    if keyword_lower in main_lower or main_lower in keyword_lower:
+        return True
+    
+    # Keyword jest częścią H2
+    for h2 in h2_structure:
+        h2_lower = h2.lower()
+        if keyword_lower in h2_lower:
+            return True
+    
+    return False
+
+
+def validate_batch_with_structural_awareness(
+    batch_counts: Dict,
+    keywords_state: Dict,
+    main_keyword: str,
+    h2_structure: List[str],
+    config: QualityConfig = CONFIG
+) -> Dict:
+    """
+    Waliduje batch z uwzględnieniem STRUCTURAL keywords.
+    STRUCTURAL: tylko INFO, nigdy STOP per-batch.
+    """
+    results = {
+        "action": "CONTINUE",
+        "exceeded_critical": [],
+        "exceeded_warning": [],
+        "structural_info": [],
+        "decision_trace": []
+    }
+    
+    for rid, count in batch_counts.items():
+        if rid not in keywords_state:
+            continue
+        
+        meta = keywords_state[rid]
+        keyword = meta.get("keyword", "")
+        kw_type = meta.get("type", "BASIC").upper()
+        
+        if kw_type not in ["BASIC", "MAIN"]:
+            continue
+        
+        target_max = meta.get("target_max", 999)
+        if target_max <= 0:
+            continue
+        
+        actual = meta.get("actual_uses", 0)
+        new_total = actual + count
+        
+        if new_total <= target_max:
+            continue  # OK
+        
+        # Przekroczenie
+        exceeded_by = new_total - target_max
+        exceeded_pct = round((exceeded_by / target_max) * 100) if target_max > 0 else 100
+        
+        # Czy STRUCTURAL?
+        is_structural = is_structural_keyword(keyword, main_keyword, h2_structure)
+        
+        exc_info = {
+            "keyword": keyword,
+            "actual": new_total,
+            "target_max": target_max,
+            "exceeded_percent": exceeded_pct,
+            "is_structural": is_structural,
+            "synonyms": meta.get("synonyms", [])
+        }
+        
+        if is_structural:
+            # STRUCTURAL - tylko INFO, nie blokuje
+            exc_info["status"] = "INFO"
+            exc_info["message"] = f"🔵 STRUCTURAL - limit globalny, nie per-batch"
+            results["structural_info"].append(exc_info)
+            results["decision_trace"].append(f"structural_info: '{keyword}' {new_total}/{target_max}")
+        else:
+            # NON-STRUCTURAL - normalne limity
+            if exceeded_pct >= config.exceeded_critical_threshold:
+                exc_info["status"] = "CRITICAL"
+                results["exceeded_critical"].append(exc_info)
+                results["decision_trace"].append(f"exceeded_critical: '{keyword}' +{exceeded_pct}%")
+            else:
+                exc_info["status"] = "WARNING"
+                results["exceeded_warning"].append(exc_info)
+                results["decision_trace"].append(f"exceeded_warning: '{keyword}' +{exceeded_pct}%")
+    
+    # Decyzja - tylko non-STRUCTURAL wpływa
+    if results["exceeded_critical"]:
+        results["action"] = "REWRITE"
+        results["decision_trace"].append("action: REWRITE (exceeded_critical non-structural)")
+    elif len(results["exceeded_warning"]) >= 3:
+        results["action"] = "FIX_AND_RETRY"
+        results["decision_trace"].append("action: FIX_AND_RETRY (3+ exceeded_warning)")
+    else:
+        results["decision_trace"].append("action: CONTINUE")
+    
+    return results
+
+
+# ================================================================
 # FAST MODE VALIDATION
 # ================================================================
 
