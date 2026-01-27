@@ -701,3 +701,181 @@ def generate_entity_requirements(
         "relationships_to_establish": relationships,
         "entity_warnings": warnings
     }
+
+
+# ================================================================
+# 🆕 v38.2: ENTITY DRIFT DETECTION
+# ================================================================
+
+class EntityDriftDetector:
+    """
+    Wykrywa zmiany w definicji/roli encji między batchami.
+    
+    Drift = encja jest definiowana inaczej niż wcześniej
+    Przykład: 
+    - Batch 1: "ubezwłasnowolnienie to instytucja ochronna"
+    - Batch 3: "ubezwłasnowolnienie to forma kary"
+    → DRIFT DETECTED!
+    """
+    
+    # Wzorce wyciągające definicję
+    DEFINITION_EXTRACT_PATTERNS = [
+        # "X to Y"
+        r"{entity}\s+to\s+([^.]+)",
+        # "X jest Y"
+        r"{entity}\s+jest\s+([^.]+)",
+        # "X stanowi Y"
+        r"{entity}\s+stanowi\s+([^.]+)",
+        # "X oznacza Y"  
+        r"{entity}\s+oznacza\s+([^.]+)",
+        # "przez X rozumie się Y"
+        r"przez\s+{entity}\s+rozumie\s+się\s+([^.]+)",
+    ]
+    
+    # Słowa kluczowe charakteryzujące definicję
+    DEFINITION_KEYWORDS = {
+        "positive": ["ochrona", "ochronny", "ochronna", "pomoc", "wsparcie", "zabezpieczenie"],
+        "negative": ["kara", "karny", "sankcja", "ograniczenie", "pozbawienie"],
+        "procedural": ["procedura", "postępowanie", "proces", "tryb"],
+        "institutional": ["instytucja", "organ", "urząd", "sąd"],
+    }
+    
+    def __init__(self):
+        self.initial_definitions = {}  # {entity: {text, category, batch}}
+    
+    def extract_definition(self, text: str, entity: str) -> Optional[dict]:
+        """Wyciąga definicję encji z tekstu."""
+        text_lower = text.lower()
+        entity_lower = entity.lower()
+        entity_escaped = re.escape(entity_lower)
+        
+        for pattern in self.DEFINITION_EXTRACT_PATTERNS:
+            regex = pattern.format(entity=entity_escaped)
+            match = re.search(regex, text_lower)
+            if match:
+                definition_text = match.group(1).strip()
+                category = self._categorize_definition(definition_text)
+                return {
+                    "text": definition_text[:200],  # Max 200 chars
+                    "category": category,
+                    "full_match": match.group(0)
+                }
+        
+        return None
+    
+    def _categorize_definition(self, definition_text: str) -> str:
+        """Kategoryzuje definicję na podstawie słów kluczowych."""
+        text_lower = definition_text.lower()
+        
+        scores = {}
+        for category, keywords in self.DEFINITION_KEYWORDS.items():
+            score = sum(1 for kw in keywords if kw in text_lower)
+            if score > 0:
+                scores[category] = score
+        
+        if not scores:
+            return "neutral"
+        
+        return max(scores, key=scores.get)
+    
+    def check_drift(
+        self,
+        entity: str,
+        new_definition: dict,
+        stored_definition: dict
+    ) -> Optional[dict]:
+        """
+        Sprawdza czy nowa definicja różni się od zapisanej.
+        
+        Returns:
+            dict z informacją o drift lub None jeśli brak
+        """
+        if not stored_definition or not new_definition:
+            return None
+        
+        old_category = stored_definition.get("category", "neutral")
+        new_category = new_definition.get("category", "neutral")
+        
+        # Krytyczny drift: positive ↔ negative
+        critical_drift = (
+            (old_category == "positive" and new_category == "negative") or
+            (old_category == "negative" and new_category == "positive")
+        )
+        
+        if critical_drift:
+            return {
+                "entity": entity,
+                "severity": "CRITICAL",
+                "old_definition": stored_definition.get("text", ""),
+                "old_category": old_category,
+                "new_definition": new_definition.get("text", ""),
+                "new_category": new_category,
+                "message": f"Entity drift: '{entity}' zmienia charakter z {old_category} na {new_category}"
+            }
+        
+        # Warning drift: zmiana kategorii ale nie krytyczna
+        if old_category != new_category and old_category != "neutral" and new_category != "neutral":
+            return {
+                "entity": entity,
+                "severity": "WARNING",
+                "old_definition": stored_definition.get("text", ""),
+                "old_category": old_category,
+                "new_definition": new_definition.get("text", ""),
+                "new_category": new_category,
+                "message": f"Entity drift: '{entity}' zmienia kategorię z {old_category} na {new_category}"
+            }
+        
+        return None
+    
+    def detect_drift_in_batch(
+        self,
+        batch_text: str,
+        entity_state: dict,
+        batch_number: int
+    ) -> List[dict]:
+        """
+        Sprawdza wszystkie encje w batchu pod kątem drift.
+        
+        Returns:
+            Lista wykrytych driftów
+        """
+        drifts = []
+        
+        for entity_name, entity_data in entity_state.items():
+            # Wyciągnij definicję z nowego batcha
+            new_def = self.extract_definition(batch_text, entity_name)
+            
+            if not new_def:
+                continue
+            
+            # Pobierz zapisaną definicję
+            stored_def = entity_data.get("initial_definition")
+            
+            if stored_def:
+                # Sprawdź drift
+                drift = self.check_drift(entity_name, new_def, stored_def)
+                if drift:
+                    drift["batch_number"] = batch_number
+                    drifts.append(drift)
+            else:
+                # Zapisz jako initial definition
+                entity_data["initial_definition"] = {
+                    "text": new_def.get("text", ""),
+                    "category": new_def.get("category", "neutral"),
+                    "batch": batch_number
+                }
+        
+        return drifts
+
+
+# Global instance
+_drift_detector = EntityDriftDetector()
+
+
+def detect_entity_drift(
+    batch_text: str,
+    entity_state: dict,
+    batch_number: int
+) -> List[dict]:
+    """Convenience function do wykrywania entity drift."""
+    return _drift_detector.detect_drift_in_batch(batch_text, entity_state, batch_number)
