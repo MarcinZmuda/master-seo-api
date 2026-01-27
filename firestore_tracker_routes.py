@@ -1,5 +1,11 @@
 """
-SEO Content Tracker Routes - v38.1 BRAJEN SEO Engine
+SEO Content Tracker Routes - v38.2 BRAJEN SEO Engine
+
+ZMIANY v38.2:
+- 🔴 RELATION COMPLETION: brakujące relacje MUST → FIX_AND_RETRY
+- 🔴 ENTITY DRIFT DETECTION: wykrywa zmiany definicji encji
+- 🔴 PROXIMITY CLUSTERS: aktywowane jako soft validator
+- ✅ Kompletna egzekucja entity/relation/drift
 
 ZMIANY v38.1:
 - 🔴 DECISION ENGINE: entity/legal/helpful → WPŁYWAJĄ NA ACTION!
@@ -227,7 +233,8 @@ try:
         initialize_entity_state,
         generate_entity_requirements,
         EntityValidationResult,
-        EntityCoverageResult
+        EntityCoverageResult,
+        detect_entity_drift  # 🆕 v38.2
     )
     ENTITY_VALIDATOR_ENABLED = True
     print("[TRACKER] ✅ Entity Coverage Validator loaded")
@@ -1516,7 +1523,71 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         except Exception as e:
             print(f"[TRACKER] ⚠️ Helpful reflex check error: {e}")
     
-    # 4. ZASTOSUJ OVERRIDE do gpt_action
+    # 4. 🆕 v38.2: RELATION COMPLETION - brakujące relacje MUST → FIX_AND_RETRY
+    if entity_validation_result and entity_validation_result.relationships_missing:
+        # Sprawdź ile relacji MUST brakuje
+        must_relations_missing = [r for r in entity_validation_result.relationships_missing 
+                                  if r.get("priority") == "MUST"]
+        
+        if must_relations_missing and v38_action_override not in ["REWRITE"]:
+            # Relacje to mniejszy problem niż brak encji - tylko FIX_AND_RETRY
+            if v38_action_override != "FIX_AND_RETRY":
+                v38_action_override = "FIX_AND_RETRY"
+            
+            for rel in must_relations_missing[:3]:
+                v38_fixes_needed.append(
+                    f"[RELATION] Ustanów relację: '{rel.get('subject')}' → {rel.get('relation')} → '{rel.get('object')}'"
+                )
+            v38_overrides.append(f"relations: {len(must_relations_missing)} MUST missing → FIX_AND_RETRY")
+            print(f"[TRACKER] 🔴 v38.2 OVERRIDE: Relations MUST missing → action=FIX_AND_RETRY")
+    
+    # 5. 🆕 v38.2: PROXIMITY CLUSTERS - soft validation (tylko warning, nie blokuje)
+    proximity_score = result.get("semantic_proximity", {}).get("score", 100) if 'result' in dir() else 100
+    isolated_keywords = result.get("semantic_proximity", {}).get("isolated_keywords", []) if 'result' in dir() else []
+    
+    if proximity_score < 60 and isolated_keywords:
+        # Nie blokujemy, ale dodajemy do fixes_needed jako sugestię
+        v38_fixes_needed.append(
+            f"[PROXIMITY] Słabe powiązanie fraz: {', '.join(isolated_keywords[:3])} - rozważ lepszą integrację"
+        )
+        v38_overrides.append(f"proximity_clusters: score={proximity_score}, isolated={len(isolated_keywords)} (warning only)")
+        warnings.append(f"⚠️ Proximity clusters: {len(isolated_keywords)} izolowanych fraz")
+        print(f"[TRACKER] ⚠️ v38.2: Proximity clusters weak (score={proximity_score})")
+    
+    # 6. 🆕 v38.2: ENTITY DRIFT DETECTION - wykrywa zmiany definicji encji
+    entity_drifts = []
+    if ENTITY_VALIDATOR_ENABLED and project_data.get("entity_state"):
+        try:
+            batches_done = len(project_data.get("batches", []))
+            entity_drifts = detect_entity_drift(
+                batch_text=batch_text,
+                entity_state=project_data.get("entity_state", {}),
+                batch_number=batches_done + 1
+            )
+            
+            if entity_drifts:
+                critical_drifts = [d for d in entity_drifts if d.get("severity") == "CRITICAL"]
+                warning_drifts = [d for d in entity_drifts if d.get("severity") == "WARNING"]
+                
+                # CRITICAL drift → FIX_AND_RETRY
+                if critical_drifts and v38_action_override not in ["REWRITE"]:
+                    v38_action_override = "FIX_AND_RETRY"
+                    for drift in critical_drifts[:2]:
+                        v38_fixes_needed.append(
+                            f"[DRIFT CRITICAL] '{drift['entity']}' zmienia definicję z '{drift['old_category']}' na '{drift['new_category']}' - NAPRAW!"
+                        )
+                    v38_overrides.append(f"entity_drift: {len(critical_drifts)} CRITICAL → FIX_AND_RETRY")
+                    print(f"[TRACKER] 🔴 v38.2 OVERRIDE: Entity drift CRITICAL → action=FIX_AND_RETRY")
+                
+                # Warning drifts → tylko info
+                for drift in warning_drifts[:2]:
+                    warnings.append(f"⚠️ Entity drift: '{drift['entity']}' - {drift['message']}")
+                
+                print(f"[TRACKER] 🔍 Entity drift detection: {len(critical_drifts)} critical, {len(warning_drifts)} warnings")
+        except Exception as e:
+            print(f"[TRACKER] ⚠️ Entity drift detection error: {e}")
+    
+    # 7. ZASTOSUJ OVERRIDE do gpt_action
     if v38_action_override and gpt_action:
         original_action = gpt_action.get("action", "CONTINUE")
         
@@ -1629,6 +1700,8 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         } if legal_validation_result else None,
         # 🆕 v38.1: Override info
         "v38_overrides": v38_overrides if 'v38_overrides' in dir() and v38_overrides else None,
+        # 🆕 v38.2: Entity drift detection
+        "entity_drifts": entity_drifts if 'entity_drifts' in dir() and entity_drifts else None,
         "status_code": 200
     }
 
