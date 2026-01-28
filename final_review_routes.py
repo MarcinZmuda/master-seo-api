@@ -1,10 +1,15 @@
 # ================================================================
-# 🔍 FINAL REVIEW ROUTES v29.2 - TYLKO STUFFING BLOKUJE
+# 🔍 FINAL REVIEW ROUTES v40.0 - ORIGINAL_MAX FIX
 # ================================================================
-# ZMIANY v29.2:
+# ZMIANY v40.0:
+# - FIX: Używa original_max zamiast target_max dla zredukowanych fraz
 # - TYLKO stuffing (>max) blokuje
 # - Brak frazy (0×) = warning, Claude uzupełni
 # - underused (<target) = OK
+#
+# ZMIANY v29.2:
+# - TYLKO stuffing (>max) blokuje
+# - Brak frazy (0×) = warning, Claude uzupełni
 # ================================================================
 
 import os
@@ -35,17 +40,26 @@ else:
 
 GEMINI_MODEL = "gemini-2.5-flash"
 
+# 🆕 v40.0: Tolerancja dla przekroczenia limitu
+TOLERANCE_PERCENT = 30
+
 
 # ================================================================
-# 1. MISSING KEYWORDS DETECTOR - v29.2
+# 1. MISSING KEYWORDS DETECTOR - v40.0 (ORIGINAL_MAX FIX)
 # ================================================================
 def detect_missing_keywords(text, keywords_state):
     """
-    v29.2: Wykrywa brakujące frazy - TYLKO STUFFING BLOKUJE!
+    v40.0: Wykrywa brakujące frazy - używa ORIGINAL_MAX dla zredukowanych fraz!
     
+    WAŻNE:
+    - Frazy mogą mieć zredukowany target_max (np. 24→2) przez AUTO-REDUKCJA
+    - original_max zawiera ORYGINALNY limit podany przez użytkownika
+    - Final review MUSI używać original_max, nie zredukowanego target_max
+    
+    Logika:
     - missing (0×) → WARNING (Claude uzupełni)
     - underused (< target) → OK
-    - stuffing (> max) → CRITICAL (JEDYNY BLOKER!)
+    - stuffing (> original_max) → CRITICAL (JEDYNY BLOKER!)
     
     needs_correction = True TYLKO gdy stuffing > 0
     """
@@ -57,6 +71,7 @@ def detect_missing_keywords(text, keywords_state):
         underused_basic = []    # < target - OK
         underused_extended = [] # < target - OK
         stuffing = []           # > max - CRITICAL (JEDYNY BLOKER!)
+        within_tolerance = []   # > max ale w tolerancji 30% - WARNING
         
         # v24.2: Unified counting
         if UNIFIED_COUNTER:
@@ -69,7 +84,25 @@ def detect_missing_keywords(text, keywords_state):
             
             kw_type = meta.get("type", "BASIC").upper()
             target_min = meta.get("target_min", 1)
-            target_max = meta.get("target_max", target_min * 3)  # max = 3× target
+            
+            # ================================================================
+            # 🆕 v40.0: CRITICAL FIX - użyj ORIGINAL_MAX!
+            # ================================================================
+            # target_max może być zredukowany przez AUTO-REDUKCJA (np. 24→2)
+            # original_max to limit który użytkownik FAKTYCZNIE podał
+            original_max = meta.get("original_max")  # Zapisany przed redukcją
+            target_max_current = meta.get("target_max", target_min * 3)
+            
+            # Jeśli jest original_max → użyj go (fraza była zredukowana)
+            # Jeśli nie ma → użyj target_max (fraza nie była zredukowana)
+            target_max = original_max if original_max else target_max_current
+            
+            # Oblicz tolerancję (30% powyżej ORYGINALNEGO max)
+            tolerance_max = int(target_max * (1 + TOLERANCE_PERCENT / 100))
+            
+            # Debug log dla zredukowanych fraz
+            if original_max and original_max != target_max_current:
+                print(f"[FINAL_REVIEW] ℹ️ '{keyword}': using original_max={original_max} (was reduced to {target_max_current})")
             
             # v24.2: Unified vs legacy counting
             if UNIFIED_COUNTER:
@@ -86,14 +119,27 @@ def detect_missing_keywords(text, keywords_state):
                 "actual": actual,
                 "target_min": target_min,
                 "target_max": target_max,
-                "missing": max(0, target_min - actual)
+                "target_max_current": target_max_current,  # Zredukowany (dla info)
+                "original_max": original_max,  # Oryginalny (jeśli był)
+                "tolerance_max": tolerance_max,
+                "missing": max(0, target_min - actual),
+                "was_reduced": original_max is not None and original_max != target_max_current
             }
             
-            # v29.2: NOWA LOGIKA - tylko stuffing blokuje!
-            if actual > target_max:
-                # CRITICAL: stuffing - JEDYNY BLOKER!
-                info["severity"] = "stuffing"
+            # v40.0: NOWA LOGIKA - używa original_max!
+            if actual > tolerance_max:
+                # CRITICAL: stuffing POZA tolerancją - JEDYNY BLOKER!
+                info["severity"] = "stuffing_critical"
+                info["exceeded_by"] = actual - target_max
+                info["exceeded_tolerance_by"] = actual - tolerance_max
                 stuffing.append(info)
+                print(f"[FINAL_REVIEW] ❌ '{keyword}': {actual}/{target_max} (tolerance {tolerance_max}) - EXCEEDED!")
+            elif actual > target_max:
+                # WARNING: przekroczone ale W tolerancji 30%
+                info["severity"] = "stuffing_warning"
+                info["exceeded_by"] = actual - target_max
+                within_tolerance.append(info)
+                print(f"[FINAL_REVIEW] ⚠️ '{keyword}': {actual}/{target_max} (tolerance {tolerance_max}) - within tolerance")
             elif actual == 0:
                 # WARNING: fraza brakuje - Claude uzupełni
                 if kw_type in ["BASIC", "MAIN"]:
@@ -109,33 +155,40 @@ def detect_missing_keywords(text, keywords_state):
         
         missing_basic.sort(key=lambda x: x["missing"], reverse=True)
         
-        # v29.2: needs_correction TYLKO dla stuffing!
-        # missing = warning, Claude uzupełni
-        has_stuffing = len(stuffing) > 0
+        # v40.0: needs_correction TYLKO dla stuffing POZA tolerancją!
+        has_critical_stuffing = len(stuffing) > 0
         
         return {
             "missing": {"basic": missing_basic, "extended": missing_extended},
             "underused": {"basic": underused_basic, "extended": underused_extended},
-            "stuffing": stuffing,
+            "stuffing": stuffing,  # POZA tolerancją - CRITICAL
+            "within_tolerance": within_tolerance,  # W tolerancji - WARNING
             "priority_to_add": {
-                "critical": stuffing,                          # TYLKO stuffing jest critical
+                "critical": stuffing,                          # TYLKO stuffing poza tolerancją jest critical
+                "warning": within_tolerance,                   # W tolerancji 30%
                 "to_add_by_claude": missing_basic + missing_extended,  # Claude uzupełni
                 "ok": underused_basic + underused_extended     # OK, nie trzeba nic robić
             },
-            "needs_correction": has_stuffing,  # v29.2: TYLKO stuffing blokuje!
-            "needs_claude_help": len(missing_basic) + len(missing_extended) > 0,  # Claude uzupełni
+            "needs_correction": has_critical_stuffing,  # v40.0: TYLKO stuffing POZA tolerancją blokuje!
+            "needs_claude_help": len(missing_basic) + len(missing_extended) > 0,
             "summary": {
                 "missing_count": len(missing_basic) + len(missing_extended),
                 "underused_count": len(underused_basic) + len(underused_extended),
-                "stuffing_count": len(stuffing)
-            }
+                "stuffing_critical_count": len(stuffing),
+                "stuffing_warning_count": len(within_tolerance),
+                "tolerance_percent": TOLERANCE_PERCENT
+            },
+            "version": "v40.0"
         }
     except Exception as e:
         print(f"[FINAL_REVIEW] ❌ detect_missing_keywords error: {e}")
+        traceback.print_exc()
         return {
             "missing": {"basic": [], "extended": []},
             "underused": {"basic": [], "extended": []},
-            "priority_to_add": {"critical": [], "high": [], "medium": []},
+            "stuffing": [],
+            "within_tolerance": [],
+            "priority_to_add": {"critical": [], "warning": [], "to_add_by_claude": [], "ok": []},
             "needs_correction": False,
             "error": str(e)
         }
@@ -176,7 +229,6 @@ def check_main_vs_synonyms(text, main_keyword, keywords_state):
             if meta.get("is_synonym_of_main"):
                 kw = meta.get("keyword", "").lower()
                 if kw:
-                    # v24.2: Unified counting
                     if UNIFIED_COUNTER:
                         count = count_single_keyword(text, kw)
                     else:
@@ -232,9 +284,9 @@ def validate_h2_keywords(text, main_keyword):
         if not main_keyword:
             return {"valid": True, "h2_count": 0, "coverage": 1.0, "issues": []}
         
-        h2_pattern = r'(?:^h2:\s*(.+)$|<h2[^>]*>([^<]+)</h2>)'
+        h2_pattern = r'(?:^h2:\s*(.+)$|<h2[^>]*>([^<]+)</h2>|^##\s+(.+)$)'
         h2_matches = re.findall(h2_pattern, text, re.MULTILINE | re.IGNORECASE)
-        h2_list = [(m[0] or m[1]).strip() for m in h2_matches if m[0] or m[1]]
+        h2_list = [(m[0] or m[1] or m[2]).strip() for m in h2_matches if m[0] or m[1] or m[2]]
         
         if not h2_list:
             return {"valid": True, "h2_count": 0, "coverage": 1.0, "issues": []}
@@ -243,8 +295,6 @@ def validate_h2_keywords(text, main_keyword):
         h2_with_main = sum(1 for h2 in h2_list if main_lower in h2.lower())
         
         # v26.1: Max 1 H2 z frazą główną (unikamy przeoptymalizowania)
-        # Stara reguła: coverage >= 0.2 (20% H2 z keyword)
-        # Nowa reguła: max 1 H2 z keyword, reszta synonimy
         overoptimized = h2_with_main > 1
         
         issues = []
@@ -255,7 +305,7 @@ def validate_h2_keywords(text, main_keyword):
             })
         
         return {
-            "valid": not overoptimized,  # v26.1: valid gdy max 1 H2 z keyword
+            "valid": not overoptimized,
             "h2_count": len(h2_list),
             "h2_with_main": h2_with_main,
             "max_recommended": 1,
@@ -273,7 +323,7 @@ def validate_h2_keywords(text, main_keyword):
 def validate_h3_length(text, min_words=80):
     """Sprawdza czy sekcje H3 mają minimalną długość."""
     try:
-        h3_pattern = r'(?:^h3:\s*(.+)$|<h3[^>]*>([^<]+)</h3>)'
+        h3_pattern = r'(?:^h3:\s*(.+)$|<h3[^>]*>([^<]+)</h3>|^###\s+(.+)$)'
         h3_matches = list(re.finditer(h3_pattern, text, re.MULTILINE | re.IGNORECASE))
         
         if not h3_matches:
@@ -282,11 +332,11 @@ def validate_h3_length(text, min_words=80):
         issues = []
         
         for i, match in enumerate(h3_matches):
-            h3_title = (match.group(1) or match.group(2) or "").strip()
+            h3_title = (match.group(1) or match.group(2) or match.group(3) or "").strip()
             start = match.end()
             end = len(text)
             
-            next_h = re.search(r'^h[23]:|<h[23]', text[start:], re.MULTILINE | re.IGNORECASE)
+            next_h = re.search(r'^h[23]:|<h[23]|^##', text[start:], re.MULTILINE | re.IGNORECASE)
             if next_h:
                 end = start + next_h.start()
             
@@ -373,6 +423,74 @@ def check_ngrams(text, s1_data):
 
 
 # ================================================================
+# 7. 🆕 v40.0: KEYWORDS SUMMARY WITH TOLERANCE
+# ================================================================
+def get_keywords_validation_summary(missing_kw):
+    """
+    v40.0: Generuje podsumowanie walidacji keywords z tolerancją 30%.
+    
+    Returns:
+        {
+            "pass": [...],      # actual <= target_max
+            "warning": [...],   # target_max < actual <= tolerance_max
+            "fail": [...],      # actual > tolerance_max
+            "overall_status": "PASS" | "WARNING" | "FAIL"
+        }
+    """
+    pass_list = []
+    warning_list = []
+    fail_list = []
+    
+    # Stuffing poza tolerancją = FAIL
+    for kw in missing_kw.get("stuffing", []):
+        fail_list.append({
+            "keyword": kw["keyword"],
+            "actual": kw["actual"],
+            "target_max": kw["target_max"],
+            "tolerance_max": kw["tolerance_max"],
+            "status": "FAIL",
+            "message": f"Przekroczono tolerancję 30%: {kw['actual']}/{kw['target_max']} (max {kw['tolerance_max']})"
+        })
+    
+    # Stuffing w tolerancji = WARNING
+    for kw in missing_kw.get("within_tolerance", []):
+        warning_list.append({
+            "keyword": kw["keyword"],
+            "actual": kw["actual"],
+            "target_max": kw["target_max"],
+            "tolerance_max": kw["tolerance_max"],
+            "status": "WARNING",
+            "message": f"W tolerancji 30%: {kw['actual']}/{kw['target_max']} (max {kw['tolerance_max']})"
+        })
+    
+    # Missing = WARNING (Claude uzupełni)
+    for kw in missing_kw.get("missing", {}).get("basic", []):
+        warning_list.append({
+            "keyword": kw["keyword"],
+            "actual": kw["actual"],
+            "target_min": kw["target_min"],
+            "status": "WARNING",
+            "message": f"Brak frazy - Claude uzupełni"
+        })
+    
+    # Określ overall status
+    if fail_list:
+        overall_status = "FAIL"
+    elif warning_list:
+        overall_status = "WARNING"
+    else:
+        overall_status = "PASS"
+    
+    return {
+        "pass": pass_list,
+        "warning": warning_list,
+        "fail": fail_list,
+        "overall_status": overall_status,
+        "tolerance_percent": TOLERANCE_PERCENT
+    }
+
+
+# ================================================================
 # MAIN ENDPOINT: performFinalReview
 # ================================================================
 @final_review_routes.get("/api/project/<project_id>/final_review")
@@ -389,7 +507,6 @@ def get_final_review(project_id):
         
         data = doc.to_dict()
         
-        # Sprawdź czy jest już zapisany final_review
         existing_review = data.get("final_review")
         if existing_review:
             print(f"[FINAL_REVIEW] ✅ Returning existing review")
@@ -399,7 +516,6 @@ def get_final_review(project_id):
                 "hint": "Use POST to run new review"
             }), 200
         
-        # Jeśli nie ma - wykonaj review (przekieruj do POST logiki)
         print(f"[FINAL_REVIEW] ℹ️ No existing review, running new one...")
         return perform_final_review(project_id)
         
@@ -410,8 +526,15 @@ def get_final_review(project_id):
 
 @final_review_routes.post("/api/project/<project_id>/final_review")
 def perform_final_review(project_id):
-    """Kompleksowy audyt końcowy artykułu."""
-    print(f"[FINAL_REVIEW] 🔍 Starting review for project: {project_id}")
+    """
+    v40.0: Kompleksowy audyt końcowy artykułu.
+    
+    ZMIANY v40.0:
+    - Używa original_max zamiast target_max dla zredukowanych fraz
+    - Tolerancja 30% dla przekroczenia
+    - Szczegółowe podsumowanie keywords_validation
+    """
+    print(f"[FINAL_REVIEW] 🔍 Starting review v40.0 for project: {project_id}")
     
     try:
         db = firestore.client()
@@ -443,11 +566,13 @@ def perform_final_review(project_id):
         word_count = len(full_text.split())
         print(f"[FINAL_REVIEW] 📝 Text length: {word_count} words")
         
-        # Wykonaj analizy (każda z własną obsługą błędów)
+        # ================================================================
+        # Wykonaj analizy
+        # ================================================================
         print("[FINAL_REVIEW] 🔍 Running validations...")
         
         missing_kw = detect_missing_keywords(full_text, keywords_state)
-        print(f"[FINAL_REVIEW] ✅ Missing keywords check done")
+        print(f"[FINAL_REVIEW] ✅ Missing keywords check done (v40.0 with original_max)")
         
         main_syn = check_main_vs_synonyms(full_text, main_keyword, keywords_state)
         print(f"[FINAL_REVIEW] ✅ Main vs synonyms check done")
@@ -464,29 +589,61 @@ def perform_final_review(project_id):
         ngram_val = check_ngrams(full_text, s1_data)
         print(f"[FINAL_REVIEW] ✅ N-gram check done")
         
+        # 🆕 v40.0: Keywords validation summary
+        keywords_validation = get_keywords_validation_summary(missing_kw)
+        
+        # ================================================================
         # Zbierz issues
+        # ================================================================
         all_issues = []
+        
+        # 🆕 v40.0: Stuffing poza tolerancją = ERROR
+        if missing_kw.get("stuffing"):
+            for kw in missing_kw["stuffing"]:
+                all_issues.append({
+                    "type": "STUFFING_CRITICAL",
+                    "severity": "ERROR",
+                    "keyword": kw["keyword"],
+                    "actual": kw["actual"],
+                    "target_max": kw["target_max"],
+                    "tolerance_max": kw["tolerance_max"],
+                    "message": f"'{kw['keyword']}': {kw['actual']}/{kw['target_max']} przekracza tolerancję {TOLERANCE_PERCENT}%"
+                })
+        
+        # 🆕 v40.0: Stuffing w tolerancji = WARNING
+        if missing_kw.get("within_tolerance"):
+            for kw in missing_kw["within_tolerance"]:
+                all_issues.append({
+                    "type": "STUFFING_WARNING",
+                    "severity": "WARNING",
+                    "keyword": kw["keyword"],
+                    "actual": kw["actual"],
+                    "target_max": kw["target_max"],
+                    "tolerance_max": kw["tolerance_max"],
+                    "message": f"'{kw['keyword']}': {kw['actual']}/{kw['target_max']} w tolerancji {TOLERANCE_PERCENT}%"
+                })
         
         if missing_kw.get("missing", {}).get("basic"):
             all_issues.append({
                 "type": "MISSING_BASIC",
-                "severity": "ERROR",
-                "keywords": [k["keyword"] for k in missing_kw["missing"]["basic"][:5]]
+                "severity": "WARNING",  # v40.0: Downgrade z ERROR do WARNING
+                "keywords": [k["keyword"] for k in missing_kw["missing"]["basic"][:5]],
+                "message": "Brakujące frazy - Claude uzupełni"
             })
         
         if not main_syn.get("valid", True):
             all_issues.append({
                 "type": "SYNONYM_OVERUSE",
-                "severity": "ERROR",
+                "severity": "WARNING",
                 "ratio": main_syn.get("main_ratio", 1.0),
                 "warning": main_syn.get("warning")
             })
         
         if not h2_val.get("valid", True):
             all_issues.append({
-                "type": "H2_NO_KEYWORDS",
+                "type": "H2_OVEROPTIMIZED",
                 "severity": "WARNING",
-                "coverage": h2_val.get("coverage", 1.0)
+                "h2_with_main": h2_val.get("h2_with_main", 0)
             })
         
         if not h3_val.get("valid", True):
@@ -510,20 +667,35 @@ def perform_final_review(project_id):
                 "coverage": ngram_val.get("coverage", 1.0)
             })
         
+        # ================================================================
         # Status
+        # ================================================================
         errors = sum(1 for i in all_issues if i.get("severity") == "ERROR")
         warnings = sum(1 for i in all_issues if i.get("severity") == "WARNING")
         
+        # v40.0: TYLKO stuffing poza tolerancją blokuje
         status = "WYMAGA_POPRAWEK" if errors > 0 else ("WARN" if warnings > 2 else "OK")
         
+        # ================================================================
         # Recommendations
+        # ================================================================
         recommendations = []
+        
+        # Stuffing poza tolerancją - MUSI być naprawione
+        for kw in missing_kw.get("stuffing", [])[:3]:
+            excess = kw["actual"] - kw["target_max"]
+            recommendations.append(f"🔴 USUŃ {excess}x '{kw['keyword']}' (aktualnie {kw['actual']}, max {kw['target_max']})")
+        
+        # Stuffing w tolerancji - zalecane
+        for kw in missing_kw.get("within_tolerance", [])[:2]:
+            excess = kw["actual"] - kw["target_max"]
+            recommendations.append(f"🟡 Rozważ usunięcie {excess}x '{kw['keyword']}' (w tolerancji, ale przekroczone)")
         
         for ov in main_syn.get("overused_synonyms", [])[:2]:
             recommendations.append(ov.get("action", ""))
         
-        for kw in missing_kw.get("priority_to_add", {}).get("critical", [])[:3]:
-            recommendations.append(f"DODAJ '{kw.get('keyword', '')}' min. {kw.get('target_min', 1)}x")
+        for kw in missing_kw.get("priority_to_add", {}).get("to_add_by_claude", [])[:3]:
+            recommendations.append(f"Wpleć '{kw.get('keyword', '')}' min. {kw.get('target_min', 1)}x")
         
         for issue in h3_val.get("issues", [])[:2]:
             recommendations.append(f"Rozbuduj H3 '{issue.get('h3', '')}' o {issue.get('deficit', 0)} słów")
@@ -534,14 +706,21 @@ def perform_final_review(project_id):
         if ngram_val.get("missing"):
             recommendations.append(f"Wpleć: {', '.join(ngram_val.get('missing', [])[:3])}")
         
+        # ================================================================
         # Score
+        # ================================================================
         score = 100
-        score -= len(missing_kw.get("missing", {}).get("basic", [])) * 5
-        score -= len(missing_kw.get("underused", {}).get("basic", [])) * 2
+        # Stuffing poza tolerancją = -15 za każde
+        score -= len(missing_kw.get("stuffing", [])) * 15
+        # Stuffing w tolerancji = -5 za każde
+        score -= len(missing_kw.get("within_tolerance", [])) * 5
+        # Missing = -3 za każde (mniejsza kara, Claude uzupełni)
+        score -= len(missing_kw.get("missing", {}).get("basic", [])) * 3
+        score -= len(missing_kw.get("underused", {}).get("basic", [])) * 1
         if main_syn.get("main_ratio", 1.0) < 0.3:
             score -= 15
-        if h2_val.get("coverage", 1.0) < 0.2:
-            score -= 10
+        if h2_val.get("overoptimized"):
+            score -= 5
         score -= len(h3_val.get("issues", [])) * 3
         if list_val.get("count", 0) > 1:
             score -= (list_val["count"] - 1) * 5
@@ -549,11 +728,19 @@ def perform_final_review(project_id):
             score -= 10
         score = max(0, min(100, score))
         
+        # ================================================================
+        # Result
+        # ================================================================
         result = {
             "status": status,
             "project_id": project_id,
             "word_count": word_count,
             "score": score,
+            "version": "v40.0",
+            
+            # 🆕 v40.0: Keywords validation z tolerancją
+            "keywords_validation": keywords_validation,
+            
             "validations": {
                 "missing_keywords": missing_kw,
                 "main_vs_synonyms": main_syn,
@@ -565,12 +752,20 @@ def perform_final_review(project_id):
             "all_issues": all_issues,
             "issues_summary": {
                 "errors": errors,
-                "warnings": warnings
+                "warnings": warnings,
+                "stuffing_critical": len(missing_kw.get("stuffing", [])),
+                "stuffing_warning": len(missing_kw.get("within_tolerance", []))
             },
-            "recommendations": [r for r in recommendations if r]  # Filter empty
+            "recommendations": [r for r in recommendations if r],
+            "tolerance_info": {
+                "percent": TOLERANCE_PERCENT,
+                "explanation": f"Przekroczenie target_max o max {TOLERANCE_PERCENT}% = WARNING, powyżej = ERROR"
+            }
         }
         
+        # ================================================================
         # Save to Firestore
+        # ================================================================
         try:
             doc_ref = db.collection("seo_projects").document(project_id)
             doc_ref.update({
@@ -629,21 +824,31 @@ def apply_final_corrections(project_id):
         if not recommendations:
             return jsonify({"status": "NO_CORRECTIONS_NEEDED"}), 200
         
-        # Build corrections
         corrections = [r for r in recommendations[:10] if r]
         
         keywords_to_add = []
         missing_kw = final_review.get("validations", {}).get("missing_keywords", {})
-        for kw in missing_kw.get("priority_to_add", {}).get("critical", [])[:5]:
+        for kw in missing_kw.get("priority_to_add", {}).get("to_add_by_claude", [])[:5]:
             if kw.get("keyword"):
                 keywords_to_add.append({"keyword": kw["keyword"], "times": kw.get("target_min", 1)})
+        
+        # 🆕 v40.0: Keywords to remove (stuffing)
+        keywords_to_remove = []
+        for kw in missing_kw.get("stuffing", [])[:3]:
+            if kw.get("keyword"):
+                excess = kw["actual"] - kw["target_max"]
+                keywords_to_remove.append({"keyword": kw["keyword"], "remove_count": excess})
         
         model = genai.GenerativeModel(GEMINI_MODEL)
         
         kw_section = ""
         if keywords_to_add:
             kw_list = "\n".join([f"  - '{k['keyword']}': {k['times']}x" for k in keywords_to_add])
-            kw_section = f"FRAZY DO WPLECENIA:\n{kw_list}\n\n"
+            kw_section += f"FRAZY DO WPLECENIA:\n{kw_list}\n\n"
+        
+        if keywords_to_remove:
+            remove_list = "\n".join([f"  - '{k['keyword']}': usuń {k['remove_count']}x" for k in keywords_to_remove])
+            kw_section += f"FRAZY DO USUNIĘCIA (stuffing):\n{remove_list}\n\n"
         
         prompt = f"""Popraw artykuł:
 
@@ -651,9 +856,10 @@ def apply_final_corrections(project_id):
 {chr(10).join(f"- {c}" for c in corrections)}
 
 ZASADY:
-1. Zachowaj h2:/h3:
+1. Zachowaj h2:/h3: lub ## / ###
 2. Frazy wplataj naturalnie
 3. "{main_keyword}" częściej niż synonimy
+4. Usuń nadmiarowe wystąpienia zaznaczonych fraz
 
 ARTYKUŁ:
 {full_text[:14000]}
@@ -665,7 +871,7 @@ Zwróć TYLKO poprawiony artykuł."""
         corrected = re.sub(r'^```(?:html|markdown)?\n?', '', corrected)
         corrected = re.sub(r'\n?```$', '', corrected)
         
-        # Verify - v24.2: Unified counting
+        # Verify
         verification = {}
         for k in keywords_to_add[:5]:
             kw = k["keyword"]
@@ -682,6 +888,22 @@ Zwróć TYLKO poprawiony artykuł."""
                     after = corrected.lower().count(kw_lower)
             verification[kw] = {"before": before, "after": after, "added": after - before}
         
+        # Verify removed
+        for k in keywords_to_remove[:3]:
+            kw = k["keyword"]
+            if UNIFIED_COUNTER:
+                before = count_single_keyword(full_text, kw)
+                after = count_single_keyword(corrected, kw)
+            else:
+                kw_lower = kw.lower()
+                try:
+                    before = len(re.findall(rf"\b{re.escape(kw_lower)}\b", full_text.lower()))
+                    after = len(re.findall(rf"\b{re.escape(kw_lower)}\b", corrected.lower()))
+                except:
+                    before = full_text.lower().count(kw_lower)
+                    after = corrected.lower().count(kw_lower)
+            verification[kw] = {"before": before, "after": after, "removed": before - after}
+        
         doc_ref = db.collection("seo_projects").document(project_id)
         doc_ref.update({
             "corrected_article": corrected,
@@ -689,32 +911,26 @@ Zwróć TYLKO poprawiony artykuł."""
             "correction_timestamp": firestore.SERVER_TIMESTAMP
         })
         
-        # ================================================================
-        # 🆕 v36.1: VERSION MANAGER - zapisz wersję przed i po korekcie
-        # ================================================================
+        # Version tracking
         try:
             from version_manager import VersionManager, VersionSource, create_version_manager_for_project
             
-            # Pobierz lub utwórz version_manager dla projektu
             vm_data = data.get("version_manager")
             if vm_data:
                 vm = VersionManager.from_dict(vm_data)
             else:
                 vm = create_version_manager_for_project(project_id, batches)
             
-            # Zapisz wersję PRZED korektą (jeśli jeszcze nie zapisana)
             if not vm_data:
-                # Pierwszy raz - zapisz oryginalny tekst
                 vm.create_version(
-                    batch_number=0,  # 0 = cały artykuł
+                    batch_number=0,
                     text=full_text,
                     source=VersionSource.MANUAL,
                     metadata={"type": "original_before_corrections"}
                 )
             
-            # Zapisz wersję PO korekcie
             new_version = vm.create_version(
-                batch_number=0,  # 0 = cały artykuł
+                batch_number=0,
                 text=corrected,
                 source=VersionSource.FINAL_CORRECTIONS,
                 metadata={
@@ -724,12 +940,11 @@ Zwróć TYLKO poprawiony artykuł."""
                 }
             )
             
-            # Zapisz version_manager do projektu
             doc_ref.update({
                 "version_manager": vm.to_dict()
             })
             
-            print(f"[FINAL_REVIEW] 📚 Version saved: v{new_version.version_number} (source: FINAL_CORRECTIONS)")
+            print(f"[FINAL_REVIEW] 📚 Version saved: v{new_version.version_number}")
         except ImportError:
             print("[FINAL_REVIEW] ⚠️ version_manager not available")
         except Exception as e:
@@ -764,8 +979,9 @@ def health_check():
     """Health check endpoint."""
     return jsonify({
         "status": "OK",
-        "version": "22.5",
-        "gemini_configured": bool(GEMINI_API_KEY)
+        "version": "40.0",
+        "gemini_configured": bool(GEMINI_API_KEY),
+        "tolerance_percent": TOLERANCE_PERCENT
     }), 200
 
 
@@ -779,7 +995,7 @@ def apply_final_corrections_alias(project_id):
 
 
 # ================================================================
-# 🆕 v36.1: VERSION MANAGEMENT ENDPOINTS
+# VERSION MANAGEMENT ENDPOINTS
 # ================================================================
 
 @final_review_routes.get("/api/project/<project_id>/versions")
@@ -806,7 +1022,6 @@ def get_version_history(project_id):
             from version_manager import VersionManager
             vm = VersionManager.from_dict(vm_data)
             
-            # Pobierz historię dla całego artykułu (batch_number=0)
             history = vm.get_batch_history(0)
             
             if history:
@@ -863,7 +1078,6 @@ def rollback_to_version(project_id, version_id):
             from version_manager import VersionManager, VersionSource
             vm = VersionManager.from_dict(vm_data)
             
-            # Wykonaj rollback
             result = vm.rollback_to_version(batch_number=0, version_id=version_id)
             
             if result.get("status") != "OK":
@@ -871,7 +1085,6 @@ def rollback_to_version(project_id, version_id):
             
             restored_text = result.get("restored_text", "")
             
-            # Zapisz przywrócony tekst
             doc_ref = db.collection("seo_projects").document(project_id)
             doc_ref.update({
                 "corrected_article": restored_text,
@@ -893,36 +1106,17 @@ def rollback_to_version(project_id, version_id):
             return jsonify({"error": "version_manager not available"}), 500
             
     except Exception as e:
-        import traceback
         print(f"[FINAL_REVIEW] ❌ Rollback error: {e}")
-        print(traceback.format_exc())
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
 # ================================================================
-# 🆕 v36.6: MERGE BATCHES - Scala wszystkie batche w finalny artykuł
+# MERGE BATCHES
 # ================================================================
 @final_review_routes.post("/api/project/<project_id>/merge_batches")
 def merge_batches(project_id):
-    """
-    🆕 v36.6: Scala wszystkie batche w jeden spójny artykuł.
-    
-    Co robi:
-    1. Pobiera wszystkie batche z projektu
-    2. Łączy teksty w odpowiedniej kolejności
-    3. Normalizuje formatowanie H2/H3
-    4. Dodaje disclaimer (dla tematów prawnych)
-    5. Zapisuje jako corrected_article
-    
-    Returns:
-        {
-            "status": "MERGED",
-            "article": "pełny tekst artykułu",
-            "word_count": 3500,
-            "h2_count": 6,
-            "batches_merged": 7
-        }
-    """
+    """Scala wszystkie batche w jeden spójny artykuł."""
     try:
         db = firestore.client()
         doc = db.collection("seo_projects").document(project_id).get()
@@ -939,9 +1133,6 @@ def merge_batches(project_id):
         main_keyword = data.get("main_keyword", data.get("topic", ""))
         detected_category = data.get("detected_category", "general")
         
-        # ================================================================
-        # KROK 1: Zbierz teksty ze wszystkich batchy
-        # ================================================================
         merged_parts = []
         
         for i, batch in enumerate(batches):
@@ -949,22 +1140,14 @@ def merge_batches(project_id):
             if not batch_text:
                 continue
             
-            # Oczyść tekst
             clean_text = batch_text.strip()
-            
-            # Normalizuj formatowanie H2
-            # h2: Tytuł → ## Tytuł (markdown) lub zachowaj oryginalne
             clean_text = re.sub(r'^h2:\s*(.+)$', r'## \1', clean_text, flags=re.MULTILINE)
             clean_text = re.sub(r'^h3:\s*(.+)$', r'### \1', clean_text, flags=re.MULTILINE)
             
             merged_parts.append(clean_text)
         
-        # Połącz części z podwójnym newline
         merged_article = "\n\n".join(merged_parts)
         
-        # ================================================================
-        # KROK 2: Dodaj disclaimer dla tematów prawnych
-        # ================================================================
         if detected_category == "prawo":
             legal_disclaimer = data.get("legal_disclaimer", "")
             if not legal_disclaimer:
@@ -975,20 +1158,13 @@ def merge_batches(project_id):
                     "z wykwalifikowanym prawnikiem."
                 )
             
-            # Dodaj disclaimer na końcu jeśli jeszcze nie ma
             if "Zastrzeżenie prawne" not in merged_article and "zastrzeżenie" not in merged_article.lower():
                 merged_article += legal_disclaimer
         
-        # ================================================================
-        # KROK 3: Policz metryki
-        # ================================================================
         word_count = len(merged_article.split())
         h2_matches = re.findall(r'^##\s+.+$|^h2:\s*.+$|<h2[^>]*>.+</h2>', merged_article, re.MULTILINE | re.IGNORECASE)
         h2_count = len(h2_matches)
         
-        # ================================================================
-        # KROK 4: Zapisz jako corrected_article
-        # ================================================================
         doc_ref = db.collection("seo_projects").document(project_id)
         doc_ref.update({
             "corrected_article": merged_article,
@@ -1015,17 +1191,14 @@ def merge_batches(project_id):
         }), 200
         
     except Exception as e:
-        import traceback
         print(f"[FINAL_REVIEW] ❌ Merge error: {e}")
-        print(traceback.format_exc())
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
 @final_review_routes.get("/api/project/<project_id>/merged_article")
 def get_merged_article(project_id):
-    """
-    🆕 v36.6: Pobiera scalony artykuł (jeśli istnieje).
-    """
+    """Pobiera scalony artykuł."""
     try:
         db = firestore.client()
         doc = db.collection("seo_projects").document(project_id).get()
