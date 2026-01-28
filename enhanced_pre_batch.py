@@ -1197,9 +1197,9 @@ def generate_enhanced_pre_batch_info(
                     example_sentences=style_fingerprint.get("example_sentences", []),
                     preferred_transitions=style_fingerprint.get("preferred_transitions", [])
                 )
-                enhanced["style_fingerprint_instructions"] = fp.to_prompt_section()
+                enhanced["style_fingerprint_instructions"] = fp.generate_style_instructions()
             elif isinstance(style_fingerprint, StyleFingerprint):
-                enhanced["style_fingerprint_instructions"] = style_fingerprint.to_prompt_section()
+                enhanced["style_fingerprint_instructions"] = style_fingerprint.generate_style_instructions()
         except Exception as e:
             print(f"[ENHANCED_PRE_BATCH] ⚠️ Style fingerprint error: {e}")
     
@@ -1225,7 +1225,7 @@ def generate_enhanced_pre_batch_info(
                 warnings = style_inst.get("warnings", [])
                 warnings.append(para_cv_alert["instruction"])
                 enhanced["style_instructions"]["warnings"] = warnings
-                print(f"[ENHANCED_PRE_BATCH] ⚠️ Paragraph CV {para_cv_alert['status']}: CV={para_cv_alert.get('cv', 'N/A')}")
+                print(f"[ENHANCED_PRE_BATCH] ⚠️ Paragraph CV {para_cv_alert['severity']}: CV={para_cv_alert.get('cv', 'N/A')}")
         except Exception as e:
             print(f"[ENHANCED_PRE_BATCH] ⚠️ Paragraph CV error: {e}")
     
