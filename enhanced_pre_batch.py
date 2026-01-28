@@ -30,6 +30,47 @@ from dataclasses import dataclass, field
 
 
 # ============================================================================
+# 🆕 v40.2: IMPORT CONCEPT MAP EXTRACTOR (Semantic Entity SEO)
+# ============================================================================
+
+try:
+    from concept_map_extractor import (
+        extract_concept_map,
+        get_fallback_concept_map,
+        validate_concept_map
+    )
+    CONCEPT_MAP_AVAILABLE = True
+    print("[ENHANCED_PRE_BATCH] ✅ concept_map_extractor loaded")
+except ImportError as e:
+    CONCEPT_MAP_AVAILABLE = False
+    print(f"[ENHANCED_PRE_BATCH] ⚠️ concept_map_extractor not available: {e}")
+    
+    def extract_concept_map(main_kw, competitor_texts, **kwargs):
+        return {"status": "UNAVAILABLE", "concept_map": {}}
+    
+    def get_fallback_concept_map(main_kw):
+        return {"main_entity": {"name": main_kw, "type": "Thing"}}
+
+
+# ============================================================================
+# 🆕 v40.2: IMPORT STYLE ANALYZER (Persona Fingerprint)
+# ============================================================================
+
+try:
+    from style_analyzer import (
+        StyleAnalyzer,
+        StyleFingerprint,
+        FormalityLevel,
+        PersonalPronouns
+    )
+    STYLE_ANALYZER_AVAILABLE = True
+    print("[ENHANCED_PRE_BATCH] ✅ style_analyzer loaded")
+except ImportError as e:
+    STYLE_ANALYZER_AVAILABLE = False
+    print(f"[ENHANCED_PRE_BATCH] ⚠️ style_analyzer not available: {e}")
+
+
+# ============================================================================
 # 🆕 v40.1: IMPORT DYNAMIC HUMANIZATION (zastępuje słabe biblioteki)
 # ============================================================================
 
@@ -1097,6 +1138,63 @@ def generate_enhanced_pre_batch_info(
     
     # GPT PROMPT SECTION
     enhanced["gpt_instructions"] = _generate_gpt_prompt_section(enhanced, is_legal)
+    
+    # 🆕 v40.2: CONCEPT MAP (Semantic Entity SEO)
+    if CONCEPT_MAP_AVAILABLE and current_batch_num == 1:
+        try:
+            # Pobierz teksty konkurencji z S1
+            competitor_texts = []
+            competitor_h2 = s1_data.get("competitor_h2", [])
+            for comp in competitor_h2[:5]:
+                if isinstance(comp, dict):
+                    # Zbierz teksty z H2 konkurencji
+                    h2_texts = comp.get("h2_content", [])
+                    if h2_texts:
+                        competitor_texts.append(" ".join(h2_texts[:3]))
+            
+            # Fallback: użyj PAA jako źródła semantycznego
+            if not competitor_texts:
+                paa_data = s1_data.get("paa", [])
+                for paa in paa_data[:5]:
+                    q = paa.get("question", "") if isinstance(paa, dict) else str(paa)
+                    competitor_texts.append(q)
+            
+            if competitor_texts:
+                result = extract_concept_map(
+                    main_keyword=main_keyword,
+                    competitor_texts=competitor_texts
+                )
+                
+                if result.get("status") == "OK":
+                    enhanced["concept_map"] = result.get("concept_map", {})
+                    print(f"[ENHANCED_PRE_BATCH] ✅ Concept map extracted for '{main_keyword}'")
+                else:
+                    enhanced["concept_map"] = result.get("concept_map", {})
+                    print(f"[ENHANCED_PRE_BATCH] ⚠️ Concept map fallback used")
+            else:
+                enhanced["concept_map"] = get_fallback_concept_map(main_keyword)
+                
+        except Exception as e:
+            print(f"[ENHANCED_PRE_BATCH] ⚠️ Concept map error: {e}")
+            enhanced["concept_map"] = {"error": str(e)}
+    
+    # 🆕 v40.2: STYLE FINGERPRINT INSTRUCTIONS
+    if STYLE_ANALYZER_AVAILABLE and style_fingerprint:
+        try:
+            # Konwertuj dict na StyleFingerprint jeśli to dict
+            if isinstance(style_fingerprint, dict) and style_fingerprint:
+                fp = StyleFingerprint(
+                    formality_score=style_fingerprint.get("formality_score", 0.5),
+                    sentence_length_avg=style_fingerprint.get("sentence_length_avg", 18.0),
+                    passive_voice_ratio=style_fingerprint.get("passive_voice_ratio", 0.15),
+                    example_sentences=style_fingerprint.get("example_sentences", []),
+                    preferred_transitions=style_fingerprint.get("preferred_transitions", [])
+                )
+                enhanced["style_fingerprint_instructions"] = fp.to_prompt_section()
+            elif isinstance(style_fingerprint, StyleFingerprint):
+                enhanced["style_fingerprint_instructions"] = style_fingerprint.to_prompt_section()
+        except Exception as e:
+            print(f"[ENHANCED_PRE_BATCH] ⚠️ Style fingerprint error: {e}")
     
     return enhanced
 

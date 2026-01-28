@@ -42,6 +42,19 @@ except ImportError as e:
     ADVANCED_SEMANTIC_ENABLED = False
     print(f"[FINAL_REVIEW] ⚠️ Advanced semantic features not available: {e}")
 
+# 🆕 v40.2: Entity Scoring for Semantic SEO
+try:
+    from entity_scoring import (
+        calculate_entity_score,
+        calculate_entity_coverage,
+        calculate_entity_density
+    )
+    ENTITY_SCORING_ENABLED = True
+    print("[FINAL_REVIEW] ✅ Entity scoring loaded")
+except ImportError as e:
+    ENTITY_SCORING_ENABLED = False
+    print(f"[FINAL_REVIEW] ⚠️ Entity scoring not available: {e}")
+
 final_review_routes = Blueprint("final_review_routes", __name__)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -793,6 +806,50 @@ def perform_final_review(project_id):
                 print(f"[FINAL_REVIEW] ⚠️ Advanced semantic error: {adv_error}")
                 advanced_semantic = {"error": str(adv_error)}
         
+        # 🆕 v40.2: ENTITY SCORING (Semantic SEO 2025)
+        # ================================================================
+        entity_scoring_result = None
+        if ENTITY_SCORING_ENABLED:
+            try:
+                # Pobierz encje i relacje z S1
+                s1_entities = s1_data.get("entity_seo", {}).get("entities", [])
+                s1_relationships = s1_data.get("relationships", [])
+                
+                # Kompleksowy scoring encji
+                entity_score = calculate_entity_score(
+                    text=full_text,
+                    s1_entities=s1_entities,
+                    main_keyword=main_keyword,
+                    s1_relationships=s1_relationships
+                )
+                
+                entity_scoring_result = {
+                    "score": entity_score.get("score", 0),
+                    "grade": entity_score.get("grade", "N/A"),
+                    "status": entity_score.get("status", "UNKNOWN"),
+                    "components": {
+                        "coverage": entity_score.get("components", {}).get("coverage", {}).get("score", 0),
+                        "density": entity_score.get("components", {}).get("density", {}).get("score", 0),
+                        "relationships": entity_score.get("components", {}).get("relationships", {}).get("score", 0),
+                        "salience": entity_score.get("components", {}).get("salience", {}).get("score", 0)
+                    },
+                    "summary": entity_score.get("summary", {}),
+                    "recommendations": entity_score.get("recommendations", [])[:3]
+                }
+                
+                # Impact na score
+                if entity_score.get("score", 50) < 40:
+                    score -= 5
+                    for rec in entity_score.get("recommendations", [])[:1]:
+                        recommendations.append(f"🟣 {rec}")
+                
+                score = max(0, min(100, score))
+                print(f"[FINAL_REVIEW] ✅ Entity scoring done: {entity_score.get('score', 0)}/100 (grade: {entity_score.get('grade', 'N/A')})")
+                
+            except Exception as ent_error:
+                print(f"[FINAL_REVIEW] ⚠️ Entity scoring error: {ent_error}")
+                entity_scoring_result = {"error": str(ent_error)}
+        
         # ================================================================
         # Result
         # ================================================================
@@ -801,13 +858,16 @@ def perform_final_review(project_id):
             "project_id": project_id,
             "word_count": word_count,
             "score": score,
-            "version": "v40.1",
+            "version": "v40.2",
             
             # 🆕 v40.1: Keywords validation z tolerancją
             "keywords_validation": keywords_validation,
             
             # 🆕 v40.1: Advanced semantic analysis
             "advanced_semantic": advanced_semantic,
+            
+            # 🆕 v40.2: Entity scoring (Semantic SEO)
+            "entity_scoring": entity_scoring_result,
             
             "validations": {
                 "missing_keywords": missing_kw,

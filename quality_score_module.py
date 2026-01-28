@@ -125,13 +125,16 @@ def get_grade(score: int, max_grade: Optional[str] = None, config: QualityConfig
 # WAGI KOMPONENTÓW
 # ================================================================
 
+# v40.2: Rebalanced weights for Semantic SEO 2025
+# Research: Entity-based SEO gives 1400% visibility increase
+# Changes: keywords -10, grammar -5, structure +5, semantic +10
 QUALITY_WEIGHTS = {
-    "keywords": 30,
-    "humanness": 25,
-    "grammar": 15,
-    "structure": 10,
-    "semantic": 10,
-    "coherence": 10
+    "keywords": 20,      # v40.1: 30 → v40.2: 20 (keyword stuffing less important)
+    "humanness": 25,     # unchanged (AI detection still crucial)
+    "grammar": 10,       # v40.1: 15 → v40.2: 10 (PL grammar tools limited)
+    "structure": 15,     # v40.1: 10 → v40.2: 15 (H2/H3 structure matters)
+    "semantic": 20,      # v40.1: 10 → v40.2: 20 (ENTITY SEO critical!)
+    "coherence": 10      # unchanged
 }
 
 WORD_COUNT_RANGES = {

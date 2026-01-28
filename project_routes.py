@@ -2325,7 +2325,7 @@ def create_project():
         "legal_module_active": project_data.get("legal_context", {}).get("legal_module_active", False),
         "legal_instruction": project_data.get("legal_instruction"),
         "legal_judgments": project_data.get("legal_judgments", []),
-        "version": "v40.1"
+        "version": "v40.2"
     }), 201
 
 
