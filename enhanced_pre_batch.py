@@ -10,7 +10,7 @@ ROZWIĄZUJE PROBLEMY:
 3. Humanizacja - konkretne instrukcje stylu
 4. Kontynuacja - pełny kontekst poprzedniego batcha
 
-ZMIANY v40.0:
+ZMIANY v40.1:
 - USUNIĘTO słabe SHORT_INSERTS_LIBRARY (9 generycznych fraz)
 - USUNIĘTO słabe SYNONYM_MAP (4 słowa)
 - DODANO integrację z dynamic_humanization.py (tematyczne biblioteki)
@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 
 
 # ============================================================================
-# 🆕 v40.0: IMPORT DYNAMIC HUMANIZATION (zastępuje słabe biblioteki)
+# 🆕 v40.1: IMPORT DYNAMIC HUMANIZATION (zastępuje słabe biblioteki)
 # ============================================================================
 
 try:
@@ -100,6 +100,23 @@ except ImportError:
         "sekwencja": ["najpierw", "następnie", "potem", "na koniec"]
     }
     print("[ENHANCED_PRE_BATCH] ⚠️ polish_language_quality not available, using fallback")
+
+
+# ============================================================================
+# 🆕 v40.1: ADVANCED SEMANTIC FEATURES (entity density, topic completeness)
+# ============================================================================
+
+try:
+    from advanced_semantic_features import (
+        perform_advanced_semantic_analysis,
+        generate_advanced_prompt_instructions,
+        detect_entity_gap
+    )
+    ADVANCED_SEMANTIC_ENABLED = True
+    print("[ENHANCED_PRE_BATCH] ✅ advanced_semantic_features loaded")
+except ImportError as e:
+    ADVANCED_SEMANTIC_ENABLED = False
+    print(f"[ENHANCED_PRE_BATCH] ⚠️ advanced_semantic_features not available: {e}")
 
 
 # ============================================================================
@@ -402,7 +419,7 @@ def get_semantic_context(
 
 
 # ============================================================================
-# 4. STYLE INSTRUCTIONS - humanizacja tekstu (v40.0 - DYNAMIC)
+# 4. STYLE INSTRUCTIONS - humanizacja tekstu (v40.1 - DYNAMIC)
 # ============================================================================
 
 # Frazy typowe dla AI do unikania
@@ -453,13 +470,13 @@ def get_style_instructions(
     """
     Generuje konkretne instrukcje stylistyczne dla GPT.
     
-    v40.0: DYNAMICZNA HUMANIZACJA
+    v40.1: DYNAMICZNA HUMANIZACJA
     - Krótkie zdania dopasowane do TEMATU (prawo/medycyna/finanse/etc.)
     - Synonimy kontekstowe
     - Analiza burstiness poprzedniego batcha
     """
     
-    # 🆕 v40.0: DYNAMICZNE KRÓTKIE ZDANIA (zastępuje SHORT_INSERTS_LIBRARY)
+    # 🆕 v40.1: DYNAMICZNE KRÓTKIE ZDANIA (zastępuje SHORT_INSERTS_LIBRARY)
     short_sentences_data = get_dynamic_short_sentences(
         main_keyword=main_keyword or style_fingerprint.get("main_keyword", ""),
         h2_titles=h2_titles or style_fingerprint.get("h2_titles", []),
@@ -474,12 +491,12 @@ def get_style_instructions(
         context=domain_context  # 🆕 v40.1: Przekaż domenę dla lepszych synonimów
     )
     
-    # 🆕 v40.0: BURSTINESS Z ANALIZĄ POPRZEDNIEGO BATCHA
+    # 🆕 v40.1: BURSTINESS Z ANALIZĄ POPRZEDNIEGO BATCHA
     burstiness_data = get_burstiness_instructions(previous_batch_text)
     
     instructions = {
         # ================================================================
-        # 🆕 v40.0: BURSTINESS - kluczowa metryka humanizacji
+        # 🆕 v40.1: BURSTINESS - kluczowa metryka humanizacji
         # ================================================================
         "burstiness_critical": {
             "instruction": "⚠️ ZRÓŻNICUJ długości zdań! CV musi być > 0.40",
@@ -495,7 +512,7 @@ def get_style_instructions(
         },
         
         # ================================================================
-        # 🆕 v40.0: DYNAMICZNE KRÓTKIE ZDANIA (tematyczne)
+        # 🆕 v40.1: DYNAMICZNE KRÓTKIE ZDANIA (tematyczne)
         # ================================================================
         "short_sentences_dynamic": {
             "instruction": short_sentences_data.get("instruction", "Wstaw 2-4 krótkie zdania"),
@@ -506,7 +523,7 @@ def get_style_instructions(
         },
         
         # ================================================================
-        # 🆕 v40.0: SYNONIMY DYNAMICZNE (kontekstowe)
+        # 🆕 v40.1: SYNONIMY DYNAMICZNE (kontekstowe)
         # ================================================================
         "synonyms_dynamic": {
             "instruction": synonyms_data.get("instruction", "NIE POWTARZAJ tych samych słów!"),
@@ -888,25 +905,65 @@ def generate_enhanced_pre_batch_info(
     entity_state: Dict = None,
     style_fingerprint: Dict = None,
     is_ymyl: bool = False,
-    is_legal: bool = False
+    is_legal: bool = False,
+    batch_plan: Dict = None  # 🆕 v40.1: Plan batcha z h2_sections
 ) -> Dict[str, Any]:
     """Generuje KOMPLETNE enhanced pre_batch_info z konkretnymi instrukcjami."""
     if entity_state is None:
         entity_state = {}
     if style_fingerprint is None:
         style_fingerprint = {}
+    if batch_plan is None:
+        batch_plan = {}
     
     remaining_batches = max(1, total_batches - len(batches))
     
-    # Określ H2 dla tego batcha
+    # ================================================================
+    # 🆕 v40.1: NAPRAWIONA LOGIKA H2 PER BATCH
+    # Batch może mieć WIELE H2 (zgodnie z batch_planner.py)
+    # ================================================================
+    
+    # Najpierw sprawdź czy mamy h2_sections z batch_plan
+    batch_h2_from_plan = None
+    if batch_plan:
+        # batch_plan może być dict z "batches" lub bezpośrednio info o batchu
+        batches_list = batch_plan.get("batches", [])
+        if batches_list and current_batch_num <= len(batches_list):
+            current_batch_plan = batches_list[current_batch_num - 1]
+            batch_h2_from_plan = current_batch_plan.get("h2_sections", [])
+    
+    # Fallback: oblicz remaining_h2 jak wcześniej
     used_h2 = []
     for batch in batches:
-        h2_match = re.search(r'^h2:\s*(.+)$', batch.get("text", ""), re.MULTILINE | re.IGNORECASE)
-        if h2_match:
-            used_h2.append(h2_match.group(1).strip())
+        # Szukaj wszystkich H2 w tekście batcha
+        h2_matches = re.findall(r'^h2:\s*(.+)$', batch.get("text", ""), re.MULTILINE | re.IGNORECASE)
+        used_h2.extend([h.strip() for h in h2_matches])
+        # Szukaj też w formatcie HTML
+        h2_html = re.findall(r'<h2[^>]*>([^<]+)</h2>', batch.get("text", ""), re.IGNORECASE)
+        used_h2.extend([h.strip() for h in h2_html])
     
     remaining_h2 = [h2 for h2 in h2_structure if h2 not in used_h2]
-    current_h2 = remaining_h2[0] if remaining_h2 else main_keyword
+    
+    # Określ H2 dla tego batcha
+    if batch_h2_from_plan:
+        # Użyj h2_sections z batch_plan (może być lista!)
+        current_h2_list = batch_h2_from_plan
+        current_h2 = current_h2_list[0] if current_h2_list else main_keyword
+    else:
+        # Fallback: oblicz ile H2 przypada na batch
+        h2_per_batch = max(1, len(h2_structure) // total_batches) if total_batches > 0 else 1
+        if current_batch_num == 1:
+            # INTRO - bez H2
+            current_h2_list = []
+            current_h2 = main_keyword
+        elif current_batch_num >= total_batches:
+            # FINAL - wszystkie pozostałe H2
+            current_h2_list = remaining_h2
+            current_h2 = remaining_h2[0] if remaining_h2 else main_keyword
+        else:
+            # CONTENT - weź odpowiednią liczbę H2
+            current_h2_list = remaining_h2[:h2_per_batch]
+            current_h2 = current_h2_list[0] if current_h2_list else main_keyword
     
     # Batch type
     if current_batch_num == 1:
@@ -916,13 +973,16 @@ def generate_enhanced_pre_batch_info(
     else:
         batch_type = "CONTENT"
     
-    # 🆕 v40.0: Pobierz tekst poprzedniego batcha do analizy burstiness
+    # 🆕 v40.1: Pobierz tekst poprzedniego batcha do analizy burstiness
     previous_batch_text = None
     if batches:
         previous_batch_text = batches[-1].get("text", "")
     
-    # 🆕 v40.0: Wykryj nadużywane słowa
+    # 🆕 v40.1: Wykryj nadużywane słowa
     overused_words = style_fingerprint.get("overused_words", [])
+    
+    # 🆕 v40.1: Oblicz remaining_h2 po użyciu current_h2_list
+    remaining_h2_after_current = [h2 for h2 in remaining_h2 if h2 not in current_h2_list]
     
     # ================================================================
     # GENERUJ WSZYSTKIE SEKCJE
@@ -932,8 +992,10 @@ def generate_enhanced_pre_batch_info(
         "batch_number": current_batch_num,
         "total_batches": total_batches,
         "batch_type": batch_type,
-        "current_h2": current_h2,
-        "remaining_h2": remaining_h2[1:4],
+        "current_h2": current_h2,  # Pierwszy H2 (dla kompatybilności)
+        "current_h2_list": current_h2_list,  # 🆕 v40.1: WSZYSTKIE H2 dla tego batcha
+        "h2_count_in_batch": len(current_h2_list),  # 🆕 v40.1: Ile H2 w tym batchu
+        "remaining_h2": remaining_h2_after_current[:4],  # Następne H2 (po tym batchu)
         
         # 1. ENCJE DO ZDEFINIOWANIA
         "entities_to_define": get_entities_to_define(
@@ -960,7 +1022,7 @@ def generate_enhanced_pre_batch_info(
             keywords_state=keywords_state
         ),
         
-        # 4. INSTRUKCJE STYLU (v40.0 - DYNAMIC)
+        # 4. INSTRUKCJE STYLU (v40.1 - DYNAMIC)
         "style_instructions": get_style_instructions(
             style_fingerprint=style_fingerprint,
             current_batch_num=current_batch_num,
@@ -997,6 +1059,42 @@ def generate_enhanced_pre_batch_info(
         )
     }
     
+    # 🆕 v40.1: ADVANCED SEMANTIC - entity density, topic completeness, entity gap
+    if ADVANCED_SEMANTIC_ENABLED:
+        try:
+            # Zbierz tekst wszystkich poprzednich batchów
+            all_previous_text = "\n".join([b.get("text", "") for b in batches]) if batches else ""
+            
+            # Pobierz oczekiwane encje z S1
+            expected_entities = []
+            entity_seo = s1_data.get("entity_seo", {})
+            for ent in entity_seo.get("entities", [])[:20]:
+                expected_entities.append(ent.get("name", "") if isinstance(ent, dict) else str(ent))
+            
+            # Wykryj brakujące encje
+            entity_gap = detect_entity_gap(
+                text=all_previous_text,
+                expected_entities=expected_entities,
+                topic=main_keyword
+            )
+            
+            enhanced["advanced_semantic"] = {
+                "entity_gap": {
+                    "missing_entities": entity_gap.get("missing_hard_entities", [])[:5],
+                    "missing_count": entity_gap.get("hard_missing_count", 0),
+                    "status": entity_gap.get("status", "OK")
+                },
+                "instructions": generate_advanced_prompt_instructions(entity_gap) if entity_gap.get("status") != "OK" else None
+            }
+            
+            # Dodaj do fixes_needed jeśli brakuje wielu encji
+            if entity_gap.get("hard_missing_count", 0) > 3:
+                enhanced["advanced_semantic"]["priority_entities"] = entity_gap.get("missing_hard_entities", [])[:3]
+                
+        except Exception as e:
+            print(f"[ENHANCED_PRE_BATCH] ⚠️ Advanced semantic error: {e}")
+            enhanced["advanced_semantic"] = {"error": str(e)}
+    
     # GPT PROMPT SECTION
     enhanced["gpt_instructions"] = _generate_gpt_prompt_section(enhanced, is_legal)
     
@@ -1011,7 +1109,20 @@ def _generate_gpt_prompt_section(enhanced: Dict, is_legal: bool = False) -> str:
     lines.append("=" * 60)
     lines.append("")
     
-    lines.append(f"📌 H2: \"{enhanced['current_h2']}\"")
+    # 🆕 v40.1: Pokaż WSZYSTKIE H2 dla tego batcha
+    h2_list = enhanced.get("current_h2_list", [])
+    h2_count = enhanced.get("h2_count_in_batch", 0)
+    
+    if h2_count > 1:
+        lines.append(f"📌 H2 W TYM BATCHU ({h2_count} sekcje):")
+        for i, h2 in enumerate(h2_list, 1):
+            lines.append(f"   {i}. \"{h2}\"")
+        lines.append("")
+        lines.append("⚠️ WYMAGANE: Napisz WSZYSTKIE powyższe sekcje H2 w tym batchu!")
+    elif h2_count == 1:
+        lines.append(f"📌 H2: \"{enhanced['current_h2']}\"")
+    else:
+        lines.append(f"📌 SEKCJA: {enhanced.get('batch_type', 'CONTENT')}")
     lines.append("")
     
     # Encje do zdefiniowania
@@ -1042,7 +1153,7 @@ def _generate_gpt_prompt_section(enhanced: Dict, is_legal: bool = False) -> str:
         lines.append(f"   {', '.join(context_terms[:5])}")
         lines.append("")
     
-    # 🆕 v40.0: Krótkie zdania (dynamiczne)
+    # 🆕 v40.1: Krótkie zdania (dynamiczne)
     style = enhanced.get("style_instructions", {})
     short_sentences = style.get("short_sentences_dynamic", {})
     if short_sentences.get("examples"):
