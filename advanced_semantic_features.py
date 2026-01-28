@@ -404,23 +404,42 @@ class TopicCluster:
 
 
 def analyze_topic_completeness(
-    content: str,
-    competitor_topics: List[Dict],
-    competitor_entities: List[Dict],
-    main_keyword: str
+    content: str = None,
+    competitor_topics: List[Dict] = None,
+    competitor_entities: List[Dict] = None,
+    main_keyword: str = "",
+    *,
+    text: str = None  # ✅ ALIAS dla kompatybilności
 ) -> Dict[str, Any]:
     """
     Analizuje kompletność tematyczną vs konkurencja.
     
     Args:
-        content: Treść artykułu do oceny
+        content: Treść artykułu do oceny (lub użyj 'text' jako alias)
         competitor_topics: Lista tematów z analyze_topical_coverage()
         competitor_entities: Lista encji z extract_entities()
         main_keyword: Główna fraza kluczowa
+        text: Alias dla 'content' (dla kompatybilności wstecznej)
         
     Returns:
         Dict z oceną kompletności i brakami
     """
+    # ✅ OBSŁUGA ALIASU
+    if content is None and text is not None:
+        content = text
+    
+    if content is None:
+        return {
+            "status": "NO_DATA",
+            "message": "Brak tekstu do analizy"
+        }
+    
+    if competitor_topics is None:
+        competitor_topics = []
+    
+    if competitor_entities is None:
+        competitor_entities = []
+    
     content_lower = content.lower()
     config = AdvancedSemanticConfig()
     
