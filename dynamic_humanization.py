@@ -1,6 +1,6 @@
 """
 ===============================================================================
-🎯 DYNAMIC HUMANIZATION MODULE v40.0
+🎯 DYNAMIC HUMANIZATION MODULE v40.1
 ===============================================================================
 Zastępuje słabe SHORT_INSERTS_LIBRARY dynamicznym systemem.
 
@@ -14,13 +14,46 @@ NOWE PODEJŚCIE:
 2. Wzorce gramatyczne zamiast gotowych fraz
 3. Tematyczne biblioteki (prawo, medycyna, tech, etc.)
 
-Autor: BRAJEN SEO Master API v40.0
+ZMIANY v40.1:
+- Integracja z synonym_service.py (plWordNet + Firestore cache + LLM fallback)
+- CONTEXTUAL_SYNONYMS jako pierwsza warstwa, synonym_service jako fallback
+- Wsparcie dla get_synonyms_batch() dla wielu słów
+
+Autor: BRAJEN SEO Master API v40.1
 ===============================================================================
 """
 
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 import re
+
+# ============================================================================
+# 🆕 v40.1: INTEGRACJA Z SYNONYM_SERVICE
+# ============================================================================
+
+SYNONYM_SERVICE_AVAILABLE = False
+
+try:
+    from synonym_service import (
+        get_synonyms as _get_synonyms_external,
+        get_synonyms_batch as _get_synonyms_batch_external,
+        suggest_synonym_for_repetition
+    )
+    SYNONYM_SERVICE_AVAILABLE = True
+    print("[DYNAMIC_HUMANIZATION] ✅ synonym_service loaded (plWordNet + cache)")
+except ImportError as e:
+    print(f"[DYNAMIC_HUMANIZATION] ⚠️ synonym_service not available: {e}")
+    print("[DYNAMIC_HUMANIZATION] ℹ️ Using local CONTEXTUAL_SYNONYMS only")
+    
+    # Fallback funkcje
+    def _get_synonyms_external(word: str, context: str = "", use_cache: bool = True) -> Dict:
+        return {"word": word, "synonyms": [], "source": "none", "count": 0}
+    
+    def _get_synonyms_batch_external(words: List[str], context: str = "") -> Dict[str, List[str]]:
+        return {}
+    
+    def suggest_synonym_for_repetition(word: str, count: int, context: str = "") -> Dict:
+        return {"word": word, "suggestions": [], "source": "none"}
 
 
 # ============================================================================
@@ -290,38 +323,118 @@ CONTEXTUAL_SYNONYMS = {
 }
 
 
-def get_synonyms_for_word(word: str) -> List[str]:
+def get_synonyms_for_word(word: str, context: str = "") -> List[str]:
     """
-    Zwraca synonimy dla słowa z CONTEXTUAL_SYNONYMS.
+    Zwraca synonimy dla słowa.
+    
+    v40.1: Hierarchia źródeł:
+    1. CONTEXTUAL_SYNONYMS (lokalna mapa - najszybsze)
+    2. synonym_service (plWordNet API + Firestore cache + LLM fallback)
+    
+    Args:
+        word: Słowo do znalezienia synonimów
+        context: Opcjonalny kontekst (np. "artykuł prawniczy")
+        
+    Returns:
+        Lista synonimów (max 5)
     """
     word_lower = word.lower().strip()
-    return CONTEXTUAL_SYNONYMS.get(word_lower, [])
+    
+    # 1. NAJPIERW: lokalna mapa CONTEXTUAL_SYNONYMS (najszybsze)
+    local_synonyms = CONTEXTUAL_SYNONYMS.get(word_lower, [])
+    if local_synonyms:
+        return local_synonyms[:5]
+    
+    # 2. FALLBACK: synonym_service (plWordNet + cache + LLM)
+    if SYNONYM_SERVICE_AVAILABLE:
+        try:
+            result = _get_synonyms_external(word_lower, context=context, use_cache=True)
+            external_synonyms = result.get("synonyms", [])
+            if external_synonyms:
+                source = result.get("source", "unknown")
+                print(f"[DYNAMIC_HUMANIZATION] 📚 Synonyms for '{word}' from {source}: {external_synonyms[:3]}")
+                return external_synonyms[:5]
+        except Exception as e:
+            print(f"[DYNAMIC_HUMANIZATION] ⚠️ synonym_service error for '{word}': {e}")
+    
+    return []
 
 
-def get_synonym_instructions(overused_words: List[str] = None) -> Dict[str, any]:
+def get_synonyms_batch(words: List[str], context: str = "") -> Dict[str, List[str]]:
+    """
+    🆕 v40.1: Pobiera synonimy dla wielu słów naraz.
+    
+    Optymalizacja - jedno zapytanie zamiast wielu.
+    
+    Args:
+        words: Lista słów
+        context: Kontekst artykułu
+        
+    Returns:
+        Dict {słowo: [synonimy]}
+    """
+    result = {}
+    words_to_fetch_external = []
+    
+    # 1. Sprawdź lokalną mapę
+    for word in words:
+        word_lower = word.lower().strip()
+        local = CONTEXTUAL_SYNONYMS.get(word_lower, [])
+        if local:
+            result[word] = local[:5]
+        else:
+            words_to_fetch_external.append(word)
+    
+    # 2. Pobierz brakujące z synonym_service
+    if words_to_fetch_external and SYNONYM_SERVICE_AVAILABLE:
+        try:
+            external_results = _get_synonyms_batch_external(words_to_fetch_external, context)
+            for word, synonyms in external_results.items():
+                if synonyms:
+                    result[word] = synonyms[:5]
+        except Exception as e:
+            print(f"[DYNAMIC_HUMANIZATION] ⚠️ Batch synonym fetch error: {e}")
+    
+    return result
+
+
+def get_synonym_instructions(overused_words: List[str] = None, context: str = "") -> Dict[str, any]:
     """
     Generuje instrukcje synonimów dla GPT.
     
+    v40.1: Używa batch fetch dla wydajności + kontekst dla lepszych wyników.
+    
     Args:
         overused_words: Lista słów które są nadużywane w artykule
+        context: Kontekst artykułu (np. "prawo", "medycyna")
         
     Returns:
         Dict z instrukcjami i mapą synonimów
     """
     # Jeśli podano nadużywane słowa, priorytetyzuj je
     if overused_words:
+        # v40.1: Użyj batch fetch dla wydajności
+        all_synonyms = get_synonyms_batch(overused_words, context=context)
+        
         priority_synonyms = {}
         for word in overused_words:
-            syns = get_synonyms_for_word(word)
+            syns = all_synonyms.get(word, [])
+            if not syns:
+                # Fallback do pojedynczego zapytania
+                syns = get_synonyms_for_word(word, context=context)
             if syns:
                 priority_synonyms[word] = syns[:3]
         
         if priority_synonyms:
+            # Informacja o źródle
+            source_info = "plWordNet + cache" if SYNONYM_SERVICE_AVAILABLE else "local"
+            
             return {
                 "priority": "HIGH",
                 "instruction": "⚠️ TE SŁOWA SĄ NADUŻYWANE - użyj synonimów:",
                 "synonyms": priority_synonyms,
-                "warning": "Nie powtarzaj tego samego słowa >3x w batchu!"
+                "warning": "Nie powtarzaj tego samego słowa >3x w batchu!",
+                "source": source_info
             }
     
     # Domyślne - ogólne wskazówki
@@ -333,7 +446,8 @@ def get_synonym_instructions(overused_words: List[str] = None) -> Dict[str, any]
             "ważny/istotny": ["kluczowy", "znaczący", "zasadniczy"],
             "w przypadku": ["gdy", "jeśli", "kiedy"],
         },
-        "tip": "Sprawdź czy nie powtarzasz słów >3x"
+        "tip": "Sprawdź czy nie powtarzasz słów >3x",
+        "source": "defaults"
     }
 
 
@@ -513,6 +627,36 @@ def get_humanization_instructions(
 
 
 # ============================================================================
+# EXPORTS
+# ============================================================================
+
+__all__ = [
+    # Główne funkcje
+    'get_dynamic_short_sentences',
+    'get_synonym_instructions',
+    'get_burstiness_instructions',
+    'get_humanization_instructions',
+    
+    # Funkcje pomocnicze
+    'detect_topic_domain',
+    'analyze_burstiness',
+    'get_synonyms_for_word',
+    'get_synonyms_batch',  # 🆕 v40.1
+    
+    # Klasy
+    'BurstinessMetrics',
+    
+    # Stałe
+    'CONTEXTUAL_SYNONYMS',
+    'TOPIC_SHORT_SENTENCES',
+    'SHORT_SENTENCE_PATTERNS',
+    
+    # Status integracji
+    'SYNONYM_SERVICE_AVAILABLE',  # 🆕 v40.1
+]
+
+
+# ============================================================================
 # TEST / DEMO
 # ============================================================================
 
@@ -567,3 +711,24 @@ if __name__ == "__main__":
     print(f"Zdrowe: {metrics.is_healthy}")
     if metrics.issues:
         print(f"Problemy: {metrics.issues}")
+    
+    # 🆕 v40.1: Test integracji z synonym_service
+    print("\n" + "=" * 60)
+    print("TEST: Synonimy (v40.1 - z integracją synonym_service)")
+    print("=" * 60)
+    print(f"SYNONYM_SERVICE_AVAILABLE: {SYNONYM_SERVICE_AVAILABLE}")
+    
+    test_words = ["można", "ważny", "procedura", "ubezwłasnowolnienie"]
+    for word in test_words:
+        syns = get_synonyms_for_word(word, context="prawo")
+        source = "local" if word in CONTEXTUAL_SYNONYMS else ("external" if syns else "none")
+        print(f"'{word}' → {syns[:3] if syns else '(brak)'} [source: {source}]")
+    
+    print("\n" + "=" * 60)
+    print("TEST: Batch synonym fetch")
+    print("=" * 60)
+    
+    batch_result = get_synonyms_batch(["można", "należy", "sąd"], context="prawo")
+    for word, syns in batch_result.items():
+        print(f"'{word}' → {syns[:3]}")
+
