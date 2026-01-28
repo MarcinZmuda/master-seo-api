@@ -396,8 +396,10 @@ class LanguageExpert:
         if LANGUAGETOOL_AVAILABLE:
             try:
                 lt_result = validate_batch_grammar(batch_text)
-                grammar_errors = lt_result.get("errors", [])
-                critical_errors = lt_result.get("critical", [])
+                # GrammarValidation is a dataclass, not a dict!
+                grammar_errors = lt_result.errors if hasattr(lt_result, 'errors') else []
+                # Filter critical errors from the errors list
+                critical_errors = [e for e in grammar_errors if e.get("rule", {}).get("category", {}).get("id") in ["GRAMMAR", "TYPOS"]] if grammar_errors else []
                 
                 # Critical grammar errors
                 for err in critical_errors[:self.config.max_critical_grammar + 1]:
