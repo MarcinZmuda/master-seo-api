@@ -1,6 +1,6 @@
 """
 ===============================================================================
-🎯 ENHANCED PRE-BATCH INSTRUCTIONS v39.0
+🎯 ENHANCED PRE-BATCH INSTRUCTIONS v40.0
 ===============================================================================
 Moduł generujący KONKRETNE instrukcje dla GPT zamiast surowych danych.
 
@@ -10,7 +10,12 @@ ROZWIĄZUJE PROBLEMY:
 3. Humanizacja - konkretne instrukcje stylu
 4. Kontynuacja - pełny kontekst poprzedniego batcha
 
-Autor: BRAJEN SEO Master API v39.0
+ZMIANY v40.0:
+- USUNIĘTO słabe SHORT_INSERTS_LIBRARY (9 generycznych fraz)
+- USUNIĘTO słabe SYNONYM_MAP (4 słowa)
+- DODANO integrację z dynamic_humanization.py (tematyczne biblioteki)
+
+Autor: BRAJEN SEO Master API v40.0
 ===============================================================================
 """
 
@@ -18,6 +23,76 @@ import re
 import math
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, field
+
+
+# ============================================================================
+# 🆕 v40.0: IMPORT DYNAMIC HUMANIZATION (zastępuje słabe biblioteki)
+# ============================================================================
+
+try:
+    from dynamic_humanization import (
+        get_dynamic_short_sentences,
+        get_synonym_instructions,
+        get_burstiness_instructions,
+        get_humanization_instructions,
+        analyze_burstiness,
+        detect_topic_domain,
+        CONTEXTUAL_SYNONYMS
+    )
+    DYNAMIC_HUMANIZATION_AVAILABLE = True
+    print("[ENHANCED_PRE_BATCH] ✅ dynamic_humanization v40.0 loaded")
+except ImportError as e:
+    DYNAMIC_HUMANIZATION_AVAILABLE = False
+    print(f"[ENHANCED_PRE_BATCH] ⚠️ dynamic_humanization not available: {e}")
+    
+    # Fallback - minimalne funkcje
+    CONTEXTUAL_SYNONYMS = {
+        "można": ["da się", "istnieje możliwość"],
+        "należy": ["trzeba", "wymaga się"],
+        "ważny": ["istotny", "kluczowy", "zasadniczy"],
+    }
+    
+    def get_dynamic_short_sentences(main_kw, h2s=None, count=8, include_q=True):
+        return {
+            "domain": "universal",
+            "sentences": ["To ważne.", "Co dalej?", "Warto wiedzieć.", "Ale uwaga."],
+            "instruction": "Wstaw 2-4 krótkie zdania (3-8 słów)"
+        }
+    
+    def get_synonym_instructions(overused=None):
+        return {
+            "instruction": "Unikaj powtórzeń - używaj synonimów",
+            "synonyms": CONTEXTUAL_SYNONYMS
+        }
+    
+    def get_burstiness_instructions(prev_text=None):
+        return {
+            "critical": True,
+            "target_cv": ">0.40",
+            "example_sequence": "5, 18, 8, 25, 12 słów"
+        }
+    
+    def detect_topic_domain(main_kw, h2s=None):
+        return "universal"
+
+
+# ============================================================================
+# IMPORT POLISH LANGUAGE QUALITY (słowa łączące)
+# ============================================================================
+
+try:
+    from polish_language_quality import TRANSITION_WORDS_CATEGORIZED
+    POLISH_QUALITY_AVAILABLE = True
+    print("[ENHANCED_PRE_BATCH] ✅ polish_language_quality loaded")
+except ImportError:
+    POLISH_QUALITY_AVAILABLE = False
+    TRANSITION_WORDS_CATEGORIZED = {
+        "kontrast": ["jednak", "natomiast", "ale", "mimo to", "z drugiej strony"],
+        "przyczyna": ["ponieważ", "bowiem", "dlatego że", "ze względu na"],
+        "skutek": ["dlatego", "zatem", "więc", "w efekcie", "w rezultacie"],
+        "sekwencja": ["najpierw", "następnie", "potem", "na koniec"]
+    }
+    print("[ENHANCED_PRE_BATCH] ⚠️ polish_language_quality not available, using fallback")
 
 
 # ============================================================================
@@ -109,23 +184,13 @@ def classify_entity_type(entity: str) -> str:
 def generate_definition_instruction(entity: str, context: str = "", h2: str = "") -> Dict[str, Any]:
     """
     Generuje konkretną instrukcję jak zdefiniować encję.
-    
-    Args:
-        entity: Nazwa encji
-        context: Kontekst z S1 (jeśli dostępny)
-        h2: Nagłówek H2 tej sekcji
-        
-    Returns:
-        Dict z instrukcją definicji
     """
     entity_type = classify_entity_type(entity)
     templates = DEFINITION_TEMPLATES.get(entity_type, DEFINITION_TEMPLATES["default"])
     
-    # Wybierz template
     template = templates[0]
     how = template.format(entity=entity)
     
-    # Dodaj kontekst jeśli dostępny
     if context:
         how += f" W kontekście: {context}"
     
@@ -148,22 +213,11 @@ def get_entities_to_define(
 ) -> List[Dict]:
     """
     Zwraca listę encji do zdefiniowania w tym batchu z konkretnymi instrukcjami.
-    
-    Args:
-        s1_data: Dane z analizy S1
-        current_batch_num: Numer aktualnego batcha
-        entity_state: Stan encji (które już zdefiniowane)
-        current_h2: Nagłówek H2 tego batcha
-        total_batches: Łączna liczba batchów
-        
-    Returns:
-        Lista encji z instrukcjami definicji
     """
     entity_seo = s1_data.get("entity_seo", {})
     entities = entity_seo.get("entities", [])
     topical_coverage = entity_seo.get("topical_coverage", [])
     
-    # Filtruj encje które jeszcze nie zostały zdefiniowane
     already_defined = set(entity_state.get("defined", []))
     
     result = []
@@ -186,7 +240,6 @@ def get_entities_to_define(
         if ent.get("importance", 0) >= 0.7:
             entity = ent.get("text", ent.get("entity", ""))
             if entity and entity.lower() not in {e.lower() for e in already_defined}:
-                # Sprawdź czy nie ma już w wynikach
                 if entity.lower() not in {r["entity"].lower() for r in result}:
                     instruction = generate_definition_instruction(
                         entity=entity,
@@ -201,9 +254,7 @@ def get_entities_to_define(
     start_idx = (current_batch_num - 1) * entities_per_batch
     end_idx = min(start_idx + entities_per_batch + 1, len(result))
     
-    # Batch 1 = INTRO, weź więcej encji fundamentalnych
     if current_batch_num == 1:
-        # Sortuj by MUST były pierwsze
         result.sort(key=lambda x: 0 if x.get("priority") == "MUST" else 1)
         return result[:CONFIG.MAX_ENTITIES_TO_DEFINE]
     
@@ -250,10 +301,7 @@ def generate_relation_instruction(
     relation: str,
     to_entity: str
 ) -> Dict[str, Any]:
-    """
-    Generuje instrukcję ustanowienia relacji między encjami.
-    """
-    # Znajdź odpowiedni template
+    """Generuje instrukcję ustanowienia relacji między encjami."""
     relation_lower = relation.lower().replace(" ", "_")
     templates = RELATION_TEMPLATES.get(relation_lower, RELATION_TEMPLATES["default"])
     
@@ -278,13 +326,10 @@ def get_relations_to_establish(
     entity_state: Dict,
     total_batches: int
 ) -> List[Dict]:
-    """
-    Zwraca relacje do ustanowienia w tym batchu.
-    """
+    """Zwraca relacje do ustanowienia w tym batchu."""
     entity_seo = s1_data.get("entity_seo", {})
     relationships = entity_seo.get("entity_relationships", [])
     
-    # Filtruj już ustanowione
     established = set(entity_state.get("relations_established", []))
     
     result = []
@@ -296,14 +341,12 @@ def get_relations_to_establish(
         if not from_ent or not to_ent or not relation:
             continue
         
-        # Utwórz klucz relacji
         rel_key = f"{from_ent}|{relation}|{to_ent}".lower()
         if rel_key not in established:
             instruction = generate_relation_instruction(from_ent, relation, to_ent)
             instruction["priority"] = rel.get("priority", "SHOULD")
             result.append(instruction)
     
-    # Rozłóż na batche
     rels_per_batch = max(1, len(result) // total_batches)
     start_idx = (current_batch_num - 1) * rels_per_batch
     end_idx = min(start_idx + rels_per_batch + 1, len(result))
@@ -321,27 +364,16 @@ def get_semantic_context(
     current_h2: str,
     keywords_state: Dict
 ) -> Dict[str, Any]:
-    """
-    Generuje semantic context z terminami do użycia.
-    
-    Zawiera:
-    - context_terms: terminy które MUSZĄ pojawić się w tekście
-    - supporting_phrases: frazy wzbogacające
-    - semantic_field: pole semantyczne tematu
-    """
-    # N-gramy
+    """Generuje semantic context z terminami do użycia."""
     ngrams = s1_data.get("ngrams", [])
     top_ngrams = [n.get("ngram", "") for n in ngrams if n.get("weight", 0) > 0.4]
     
-    # LSI keywords
     semantic_keyphrases = s1_data.get("semantic_keyphrases", [])
     lsi_keywords = [kp.get("phrase", "") for kp in semantic_keyphrases if kp.get("score", 0) > 0.6]
     
-    # Related searches
     serp = s1_data.get("serp_analysis", {})
     related = serp.get("related_searches", [])[:5]
     
-    # Wybierz terminy dla tego batcha
     all_terms = top_ngrams + lsi_keywords
     terms_per_batch = max(CONFIG.MIN_CONTEXT_TERMS, len(all_terms) // 8)
     
@@ -350,7 +382,6 @@ def get_semantic_context(
     
     batch_terms = all_terms[start_idx:end_idx][:CONFIG.MAX_CONTEXT_TERMS]
     
-    # Filtruj - usuń terminy które są w keywords_state (będą osobno trackowane)
     keyword_set = {meta.get("keyword", "").lower() for meta in keywords_state.values()}
     batch_terms = [t for t in batch_terms if t.lower() not in keyword_set]
     
@@ -364,7 +395,7 @@ def get_semantic_context(
 
 
 # ============================================================================
-# 4. STYLE INSTRUCTIONS - humanizacja tekstu
+# 4. STYLE INSTRUCTIONS - humanizacja tekstu (v40.0 - DYNAMIC)
 # ============================================================================
 
 # Frazy typowe dla AI do unikania
@@ -383,10 +414,12 @@ AI_PATTERNS_TO_AVOID = [
     "biorąc pod uwagę",
     "co więcej",
     "ponadto",
-    "dodatkowo",  # Tylko na początku zdania
+    "dodatkowo",
     "warto zaznaczyć",
     "należy podkreślić",
-    "trzeba wspomnieć"
+    "trzeba wspomnieć",
+    "nie bez znaczenia",
+    "warto zauważyć"
 ]
 
 # Naturalne alternatywy
@@ -396,54 +429,123 @@ NATURAL_ALTERNATIVES = {
     "w kontekście": ["przy", "jeśli chodzi o", "w sprawie"],
     "co więcej": ["Poza tym", "Również", "A co ważne"],
     "ponadto": ["Oprócz tego", "Też", "Również"],
+    "warto zauważyć": ["", "Ważne:", "Zwróć uwagę:"],
+    "nie bez znaczenia": ["Ważne:", "Istotne:"],
 }
 
 
 def get_style_instructions(
     style_fingerprint: Dict,
     current_batch_num: int,
-    is_ymyl: bool = False
+    is_ymyl: bool = False,
+    main_keyword: str = "",
+    h2_titles: List[str] = None,
+    previous_batch_text: str = None,
+    overused_words: List[str] = None
 ) -> Dict[str, Any]:
     """
     Generuje konkretne instrukcje stylistyczne dla GPT.
+    
+    v40.0: DYNAMICZNA HUMANIZACJA
+    - Krótkie zdania dopasowane do TEMATU (prawo/medycyna/finanse/etc.)
+    - Synonimy kontekstowe
+    - Analiza burstiness poprzedniego batcha
     """
-    # Bazowe instrukcje
+    
+    # 🆕 v40.0: DYNAMICZNE KRÓTKIE ZDANIA (zastępuje SHORT_INSERTS_LIBRARY)
+    short_sentences_data = get_dynamic_short_sentences(
+        main_keyword=main_keyword or style_fingerprint.get("main_keyword", ""),
+        h2_titles=h2_titles or style_fingerprint.get("h2_titles", []),
+        count=8,
+        include_questions=True
+    )
+    
+    # 🆕 v40.0: DYNAMICZNE SYNONIMY (zastępuje słabe SYNONYM_MAP)
+    synonyms_data = get_synonym_instructions(
+        overused_words=overused_words or style_fingerprint.get("overused_words", [])
+    )
+    
+    # 🆕 v40.0: BURSTINESS Z ANALIZĄ POPRZEDNIEGO BATCHA
+    burstiness_data = get_burstiness_instructions(previous_batch_text)
+    
     instructions = {
-        "vary_sentence_length": {
-            "instruction": "Mieszaj długości zdań: 5-40 słów",
+        # ================================================================
+        # 🆕 v40.0: BURSTINESS - kluczowa metryka humanizacji
+        # ================================================================
+        "burstiness_critical": {
+            "instruction": "⚠️ ZRÓŻNICUJ długości zdań! CV musi być > 0.40",
+            "why": "Monotonne zdania 15-20 słów = wykrycie AI!",
+            "example_lengths": burstiness_data.get("example_sequence", "5, 18, 8, 25, 12, 6, 30, 14 słów"),
             "target_distribution": {
-                "short_2_10_words": "20-25%",
-                "medium_12_18_words": "50-60%",
-                "long_20_35_words": "15-25%"
+                "short_3_8_words": "20-25% (np. 'To ważne.', 'Sąd orzeka.')",
+                "medium_10_18_words": "50-60%",
+                "long_22_35_words": "15-25%"
             },
-            "avoid": "Nie pisz wszystkich zdań 15-22 słów (wzorzec AI)"
+            "avoid": "❌ NIE PISZ wszystkich zdań 15-22 słów!",
+            "previous_batch_analysis": burstiness_data.get("previous_batch_analysis")
         },
         
+        # ================================================================
+        # 🆕 v40.0: DYNAMICZNE KRÓTKIE ZDANIA (tematyczne)
+        # ================================================================
+        "short_sentences_dynamic": {
+            "instruction": short_sentences_data.get("instruction", "Wstaw 2-4 krótkie zdania"),
+            "domain": short_sentences_data.get("domain", "universal"),
+            "examples": short_sentences_data.get("sentences", [])[:8],
+            "usage": "Wstaw 2-4 takie zdania w każdym batchu. NIE POWTARZAJ!",
+            "tip": "Możesz tworzyć WŁASNE krótkie zdania (3-8 słów) pasujące do tematu"
+        },
+        
+        # ================================================================
+        # 🆕 v40.0: SYNONIMY DYNAMICZNE (kontekstowe)
+        # ================================================================
+        "synonyms_dynamic": {
+            "instruction": synonyms_data.get("instruction", "NIE POWTARZAJ tych samych słów!"),
+            "priority": synonyms_data.get("priority", "NORMAL"),
+            "map": synonyms_data.get("synonyms", {}),
+            "warning": "Nie powtarzaj tego samego słowa >3× w batchu!"
+        },
+        
+        # ================================================================
+        # SŁOWA ŁĄCZĄCE z polish_language_quality
+        # ================================================================
+        "transition_words_pl": {
+            "instruction": "Używaj polskich słów łączących:",
+            "kontrast": TRANSITION_WORDS_CATEGORIZED.get("kontrast", ["jednak", "natomiast"])[:5],
+            "przyczyna": TRANSITION_WORDS_CATEGORIZED.get("przyczyna", ["ponieważ", "bowiem"])[:5],
+            "skutek": TRANSITION_WORDS_CATEGORIZED.get("skutek", ["dlatego", "zatem"])[:5],
+            "sekwencja": TRANSITION_WORDS_CATEGORIZED.get("czas_sekwencja", ["najpierw", "następnie"])[:5]
+        },
+        
+        # ================================================================
+        # AI PATTERNS DO UNIKANIA
+        # ================================================================
         "avoid_ai_patterns": {
             "instruction": "UNIKAJ tych fraz (typowe dla AI):",
             "patterns": AI_PATTERNS_TO_AVOID[:10],
-            "alternatives": NATURAL_ALTERNATIVES
-        },
-        
-        "use_active_voice": {
-            "instruction": "Preferuj stronę czynną",
-            "examples": {
-                "bad": "Wniosek jest składany do sądu",
-                "good": "Wniosek składa się do sądu"
+            "patterns_with_fixes": {
+                "warto podkreślić": "usuń lub 'Zwróć uwagę:'",
+                "należy pamiętać": "'Pamiętaj:' lub usuń",
+                "w kontekście": "'przy', 'podczas'",
+                "istotne jest": "'Ważne:'",
+                "kluczowym aspektem": "usuń",
+                "kompleksowe omówienie": "'omówienie'",
+                "warto zauważyć": "usuń",
+                "nie bez znaczenia": "'Ważne:'"
             }
         },
         
         "pronouns_consistency": {
-            "instruction": "Wybierz JEDEN styl i trzymaj się go",
+            "instruction": "Wybierz JEDEN styl i TRZYMAJ SIĘ go!",
             "options": ["bezosobowo (można, należy)", "per 'ty' (możesz, powinieneś)"],
-            "warning": "NIE mieszaj stylów w jednym tekście!"
+            "warning": "❌ NIE mieszaj stylów w jednym artykule!"
         },
         
         "natural_flow": {
-            "instruction": "Pisz jak ekspert tłumaczący znajomemu, nie jak encyklopedia",
+            "instruction": "Pisz jak ekspert tłumaczący znajomemu",
             "tips": [
-                "Używaj pytań retorycznych",
-                "Dodaj przykłady z życia",
+                "Używaj pytań retorycznych (Co dalej? Dlaczego to ważne?)",
+                "Dodaj krótkie zdania dla naturalności",
                 "Nie każde zdanie musi być 'mądrą' definicją"
             ]
         }
@@ -483,9 +585,7 @@ def get_continuation_context(
     style_fingerprint: Dict,
     entity_state: Dict
 ) -> Dict[str, Any]:
-    """
-    Generuje pełny kontekst kontynuacji dla GPT.
-    """
+    """Generuje pełny kontekst kontynuacji dla GPT."""
     if not batches:
         return {
             "is_first_batch": True,
@@ -495,19 +595,16 @@ def get_continuation_context(
     last_batch = batches[-1]
     last_text = last_batch.get("text", "")
     
-    # Wyciągnij ostatni pełny akapit (nie tylko 2 zdania)
     paragraphs = re.split(r'\n\n+', last_text)
     paragraphs = [p.strip() for p in paragraphs if p.strip() and not p.startswith("h2:")]
     
     last_paragraph = ""
     if paragraphs:
         last_paragraph = paragraphs[-1]
-        # Ogranicz długość
         words = last_paragraph.split()
         if len(words) > CONFIG.LAST_PARAGRAPH_WORDS:
             last_paragraph = " ".join(words[-CONFIG.LAST_PARAGRAPH_WORDS:])
     
-    # Zbierz zdefiniowane encje
     defined_entities = {}
     for ent, batch_num in entity_state.get("introduced_entities", {}).items():
         definition = entity_state.get("defined_terms", {}).get(ent, "wprowadzone")
@@ -516,7 +613,6 @@ def get_continuation_context(
             "in_batch": batch_num
         }
     
-    # Ostatnie H2
     last_h2 = ""
     h2_match = re.search(r'^h2:\s*(.+)$', last_text, re.MULTILINE | re.IGNORECASE)
     if h2_match:
@@ -550,7 +646,80 @@ def get_continuation_context(
 
 
 # ============================================================================
-# 6. KEYWORD TRACKING MODE - tracking zamiast blokowania
+# 6. STRUCTURE INSTRUCTIONS - H3, listy, długość sekcji
+# ============================================================================
+
+def get_structure_instructions(
+    current_batch_num: int,
+    total_batches: int,
+    h2_structure: List[str],
+    current_h2: str,
+    batch_type: str
+) -> Dict[str, Any]:
+    """Generuje instrukcje strukturalne dla batcha."""
+    h2_index = 0
+    for i, h2 in enumerate(h2_structure):
+        if h2.lower() == current_h2.lower() or current_h2.lower() in h2.lower():
+            h2_index = i
+            break
+    
+    num_h2 = len(h2_structure)
+    longest_section_index = num_h2 // 2
+    
+    if batch_type == "INTRO":
+        paragraphs_target = 2
+        length_profile = "SHORT"
+    elif batch_type == "FINAL":
+        paragraphs_target = 3
+        length_profile = "MEDIUM"
+    elif h2_index == longest_section_index:
+        paragraphs_target = 5
+        length_profile = "LONG"
+    elif h2_index < longest_section_index:
+        paragraphs_target = 2 + h2_index
+        length_profile = "MEDIUM" if paragraphs_target >= 3 else "SHORT"
+    else:
+        paragraphs_target = 4 - (h2_index - longest_section_index)
+        paragraphs_target = max(2, paragraphs_target)
+        length_profile = "MEDIUM" if paragraphs_target >= 3 else "SHORT"
+    
+    has_h3 = (h2_index == longest_section_index and length_profile == "LONG")
+    
+    has_list = (
+        h2_index > longest_section_index and 
+        batch_type != "FINAL" and 
+        not has_h3
+    )
+    
+    if not has_list and h2_index == num_h2 - 2:
+        has_list = True
+    
+    return {
+        "paragraphs_target": paragraphs_target,
+        "length_profile": length_profile,
+        "has_h3": has_h3,
+        "h3_instruction": "Ta sekcja MUSI mieć H3 (np. podział na kroki/etapy)" if has_h3 else None,
+        "has_list": has_list,
+        "list_instruction": "Ta sekcja MUSI zawierać listę wypunktowaną" if has_list else None,
+        "is_longest_section": h2_index == longest_section_index,
+        "section_index": h2_index,
+        "total_sections": num_h2,
+        "summary": _get_structure_summary(paragraphs_target, has_h3, has_list, length_profile)
+    }
+
+
+def _get_structure_summary(paragraphs: int, has_h3: bool, has_list: bool, profile: str) -> str:
+    """Generuje podsumowanie struktury dla GPT."""
+    parts = [f"{paragraphs} paragrafów ({profile})"]
+    if has_h3:
+        parts.append("+ H3 (NAJDŁUŻSZA sekcja)")
+    if has_list:
+        parts.append("+ lista wypunktowana")
+    return ", ".join(parts)
+
+
+# ============================================================================
+# 7. KEYWORD TRACKING MODE - tracking zamiast blokowania
 # ============================================================================
 
 def get_keyword_tracking_info(
@@ -559,20 +728,15 @@ def get_keyword_tracking_info(
     total_batches: int,
     remaining_batches: int
 ) -> Dict[str, Any]:
-    """
-    Generuje informacje o keywords w trybie TRACKING (nie blokującym).
-    
-    Per-batch: tylko INFO/WARNING, nigdy STOP
-    Final review: weryfikacja globalna
-    """
+    """Generuje informacje o keywords w trybie TRACKING (nie blokującym)."""
     tracking = {
         "mode": "TRACKING",
         "explanation": "Frazy są ŚLEDZONE w tle. Per-batch nie blokuje. Weryfikacja globalna w final_review.",
         
-        "use_naturally": [],      # Użyj naturalnie
-        "available": [],          # Dostępne, ale nie wymagane
-        "near_limit": [],         # Blisko limitu - uważaj
-        "structural": [],         # STRUCTURAL - bez limitu per-batch
+        "use_naturally": [],
+        "available": [],
+        "near_limit": [],
+        "structural": [],
     }
     
     for rid, meta in keywords_state.items():
@@ -587,11 +751,9 @@ def get_keyword_tracking_info(
         is_main = meta.get("is_main_keyword", False)
         is_structural = meta.get("is_structural", False) or is_main
         
-        # Oblicz ile jeszcze potrzeba
         remaining_needed = max(0, target_min - actual)
         remaining_allowed = max(0, target_max - actual)
         
-        # Suggested per batch
         if remaining_batches > 0:
             suggested = math.ceil(remaining_needed / remaining_batches) if remaining_needed > 0 else 0
             max_here = math.ceil(remaining_allowed / remaining_batches)
@@ -610,7 +772,6 @@ def get_keyword_tracking_info(
             "max_this_batch": min(max_here, 5)
         }
         
-        # Kategoryzuj
         if is_structural:
             kw_info["note"] = "🔵 STRUCTURAL - użyj naturalnie, limit globalny"
             tracking["structural"].append(kw_info)
@@ -624,7 +785,6 @@ def get_keyword_tracking_info(
             kw_info["note"] = "✓ W normie, opcjonalnie 1×"
             tracking["available"].append(kw_info)
     
-    # Podsumowanie dla GPT
     tracking["summary"] = {
         "total_keywords": len(keywords_state),
         "need_usage": len(tracking["use_naturally"]),
@@ -637,7 +797,7 @@ def get_keyword_tracking_info(
 
 
 # ============================================================================
-# 7. DYNAMIC BATCH COUNT - na podstawie S1
+# 8. DYNAMIC BATCH COUNT - na podstawie S1
 # ============================================================================
 
 def calculate_optimal_batch_count(
@@ -647,52 +807,34 @@ def calculate_optimal_batch_count(
     target_length: int,
     is_ymyl: bool = False
 ) -> Dict[str, Any]:
-    """
-    Oblicza optymalną liczbę batchów na podstawie analizy S1.
-    
-    Faktory:
-    - Liczba encji do zdefiniowania
-    - Liczba relacji do ustanowienia
-    - Liczba keywords
-    - Długość docelowa
-    - YMYL wymaga więcej szczegółów
-    """
+    """Oblicza optymalną liczbę batchów na podstawie analizy S1."""
     entity_seo = s1_data.get("entity_seo", {})
     entities = entity_seo.get("entities", [])
     relationships = entity_seo.get("entity_relationships", [])
     topical_coverage = entity_seo.get("topical_coverage", [])
     
-    # Policz encje HIGH importance
     high_entities = len([e for e in entities if e.get("importance", 0) >= 0.7])
     must_topics = len([t for t in topical_coverage if t.get("priority") == "MUST"])
     
-    # Bazowa liczba batchów
-    base_batches = h2_count + 1  # H2 + intro
-    
-    # Dodatkowe batche na podstawie złożoności
+    base_batches = h2_count + 1
     complexity_batches = 0
     
-    # Dużo encji = więcej batchów
     if high_entities > 8:
         complexity_batches += 2
     elif high_entities > 5:
         complexity_batches += 1
     
-    # Dużo relacji = więcej batchów
     if len(relationships) > 6:
         complexity_batches += 1
     
-    # Dużo keywords = więcej batchów
     if keywords_count > 25:
         complexity_batches += 2
     elif keywords_count > 15:
         complexity_batches += 1
     
-    # YMYL = więcej szczegółów
     if is_ymyl:
         complexity_batches += 1
     
-    # Długi artykuł = więcej batchów
     if target_length > 3500:
         complexity_batches += 2
     elif target_length > 2500:
@@ -700,7 +842,6 @@ def calculate_optimal_batch_count(
     
     optimal = base_batches + complexity_batches
     
-    # Limity
     min_batches = max(4, h2_count)
     max_batches = 15
     
@@ -724,7 +865,7 @@ def calculate_optimal_batch_count(
 
 
 # ============================================================================
-# 8. MAIN FUNCTION - generuje kompletne enhanced pre_batch_info
+# 9. MAIN FUNCTION - generuje kompletne enhanced pre_batch_info
 # ============================================================================
 
 def generate_enhanced_pre_batch_info(
@@ -740,12 +881,7 @@ def generate_enhanced_pre_batch_info(
     is_ymyl: bool = False,
     is_legal: bool = False
 ) -> Dict[str, Any]:
-    """
-    Generuje KOMPLETNE enhanced pre_batch_info z konkretnymi instrukcjami.
-    
-    Returns:
-        Dict gotowy do wysłania do GPT
-    """
+    """Generuje KOMPLETNE enhanced pre_batch_info z konkretnymi instrukcjami."""
     if entity_state is None:
         entity_state = {}
     if style_fingerprint is None:
@@ -771,6 +907,14 @@ def generate_enhanced_pre_batch_info(
     else:
         batch_type = "CONTENT"
     
+    # 🆕 v40.0: Pobierz tekst poprzedniego batcha do analizy burstiness
+    previous_batch_text = None
+    if batches:
+        previous_batch_text = batches[-1].get("text", "")
+    
+    # 🆕 v40.0: Wykryj nadużywane słowa
+    overused_words = style_fingerprint.get("overused_words", [])
+    
     # ================================================================
     # GENERUJ WSZYSTKIE SEKCJE
     # ================================================================
@@ -780,7 +924,7 @@ def generate_enhanced_pre_batch_info(
         "total_batches": total_batches,
         "batch_type": batch_type,
         "current_h2": current_h2,
-        "remaining_h2": remaining_h2[1:4],  # Następne 3 H2
+        "remaining_h2": remaining_h2[1:4],
         
         # 1. ENCJE DO ZDEFINIOWANIA
         "entities_to_define": get_entities_to_define(
@@ -807,11 +951,15 @@ def generate_enhanced_pre_batch_info(
             keywords_state=keywords_state
         ),
         
-        # 4. INSTRUKCJE STYLU
+        # 4. INSTRUKCJE STYLU (v40.0 - DYNAMIC)
         "style_instructions": get_style_instructions(
             style_fingerprint=style_fingerprint,
             current_batch_num=current_batch_num,
-            is_ymyl=is_ymyl
+            is_ymyl=is_ymyl,
+            main_keyword=main_keyword,
+            h2_titles=h2_structure,
+            previous_batch_text=previous_batch_text,
+            overused_words=overused_words
         ),
         
         # 5. KONTEKST KONTYNUACJI
@@ -828,29 +976,32 @@ def generate_enhanced_pre_batch_info(
             current_batch_num=current_batch_num,
             total_batches=total_batches,
             remaining_batches=remaining_batches
+        ),
+        
+        # 7. STRUCTURE INSTRUCTIONS - H3, listy, długość
+        "structure_instructions": get_structure_instructions(
+            current_batch_num=current_batch_num,
+            total_batches=total_batches,
+            h2_structure=h2_structure,
+            current_h2=current_h2,
+            batch_type=batch_type
         )
     }
     
-    # ================================================================
-    # GPT PROMPT SECTION - gotowy do wklejenia
-    # ================================================================
-    
+    # GPT PROMPT SECTION
     enhanced["gpt_instructions"] = _generate_gpt_prompt_section(enhanced, is_legal)
     
     return enhanced
 
 
 def _generate_gpt_prompt_section(enhanced: Dict, is_legal: bool = False) -> str:
-    """
-    Generuje gotową sekcję promptu dla GPT.
-    """
+    """Generuje gotową sekcję promptu dla GPT."""
     lines = []
     lines.append("=" * 60)
     lines.append(f"📋 BATCH #{enhanced['batch_number']} - {enhanced['batch_type']}")
     lines.append("=" * 60)
     lines.append("")
     
-    # H2
     lines.append(f"📌 H2: \"{enhanced['current_h2']}\"")
     lines.append("")
     
@@ -882,8 +1033,16 @@ def _generate_gpt_prompt_section(enhanced: Dict, is_legal: bool = False) -> str:
         lines.append(f"   {', '.join(context_terms[:5])}")
         lines.append("")
     
-    # Styl
+    # 🆕 v40.0: Krótkie zdania (dynamiczne)
     style = enhanced.get("style_instructions", {})
+    short_sentences = style.get("short_sentences_dynamic", {})
+    if short_sentences.get("examples"):
+        domain = short_sentences.get("domain", "universal")
+        lines.append(f"✂️ KRÓTKIE ZDANIA ({domain.upper()}):")
+        lines.append(f"   {' | '.join(short_sentences['examples'][:5])}")
+        lines.append("")
+    
+    # AI patterns do unikania
     if style.get("avoid_ai_patterns"):
         patterns = style["avoid_ai_patterns"].get("patterns", [])[:5]
         lines.append("🚫 UNIKAJ (typowe dla AI):")
@@ -930,8 +1089,10 @@ __all__ = [
     'get_style_instructions',
     'get_continuation_context',
     'get_keyword_tracking_info',
+    'get_structure_instructions',
     'calculate_optimal_batch_count',
     'CONFIG',
     'AI_PATTERNS_TO_AVOID',
-    'NATURAL_ALTERNATIVES'
+    'NATURAL_ALTERNATIVES',
+    'DYNAMIC_HUMANIZATION_AVAILABLE'
 ]
