@@ -1,6 +1,6 @@
 """
 ===============================================================================
-🎯 ENHANCED PRE-BATCH INSTRUCTIONS v40.0
+🎯 ENHANCED PRE-BATCH INSTRUCTIONS v40.1
 ===============================================================================
 Moduł generujący KONKRETNE instrukcje dla GPT zamiast surowych danych.
 
@@ -15,7 +15,11 @@ ZMIANY v40.0:
 - USUNIĘTO słabe SYNONYM_MAP (4 słowa)
 - DODANO integrację z dynamic_humanization.py (tematyczne biblioteki)
 
-Autor: BRAJEN SEO Master API v40.0
+ZMIANY v40.1:
+- Synonimy z kontekstem domeny (przekazuje domenę do synonym_service)
+- Integracja z plWordNet API + Firestore cache
+
+Autor: BRAJEN SEO Master API v40.1
 ===============================================================================
 """
 
@@ -37,12 +41,15 @@ try:
         get_humanization_instructions,
         analyze_burstiness,
         detect_topic_domain,
-        CONTEXTUAL_SYNONYMS
+        CONTEXTUAL_SYNONYMS,
+        SYNONYM_SERVICE_AVAILABLE  # 🆕 v40.1
     )
     DYNAMIC_HUMANIZATION_AVAILABLE = True
-    print("[ENHANCED_PRE_BATCH] ✅ dynamic_humanization v40.0 loaded")
+    synonym_source = "plWordNet + cache" if SYNONYM_SERVICE_AVAILABLE else "local only"
+    print(f"[ENHANCED_PRE_BATCH] ✅ dynamic_humanization v40.1 loaded (synonyms: {synonym_source})")
 except ImportError as e:
     DYNAMIC_HUMANIZATION_AVAILABLE = False
+    SYNONYM_SERVICE_AVAILABLE = False
     print(f"[ENHANCED_PRE_BATCH] ⚠️ dynamic_humanization not available: {e}")
     
     # Fallback - minimalne funkcje
@@ -460,9 +467,11 @@ def get_style_instructions(
         include_questions=True
     )
     
-    # 🆕 v40.0: DYNAMICZNE SYNONIMY (zastępuje słabe SYNONYM_MAP)
+    # 🆕 v40.1: DYNAMICZNE SYNONIMY z kontekstem domeny (plWordNet + cache)
+    domain_context = short_sentences_data.get("domain", "universal")
     synonyms_data = get_synonym_instructions(
-        overused_words=overused_words or style_fingerprint.get("overused_words", [])
+        overused_words=overused_words or style_fingerprint.get("overused_words", []),
+        context=domain_context  # 🆕 v40.1: Przekaż domenę dla lepszych synonimów
     )
     
     # 🆕 v40.0: BURSTINESS Z ANALIZĄ POPRZEDNIEGO BATCHA
