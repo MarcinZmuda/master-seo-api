@@ -1,7 +1,7 @@
 """
-SEO Content Tracker Routes - v38.4 BRAJEN SEO Engine
+SEO Content Tracker Routes - v40.1 BRAJEN SEO Engine
 
-ZMIANY v38.4:
+ZMIANY v40.1:
 - 🆕 STRUCTURAL KEYWORDS: frazy w MAIN/H2 NIE blokują batcha
 - 🆕 structural_exceeded w response (global check only)
 - 🆕 FINAL REVIEW: weryfikacja globalna z tolerancją 30%
@@ -73,7 +73,7 @@ ZMIANY v37.0:
 - 🆕 FIX INSTRUCTIONS: konkretne synonimy do przepisania batcha
 - 🆕 Tylko BASIC/MAIN są pilnowane - EXTENDED mogą być przekroczone
 
-ZMIANY v36.3:
+ZMIANY v40.1:
 - 🆕 FIRESTORE FIX: sanitize_for_firestore() dla kluczy ze znakami . / [ ]
 
 v27.0 Original:
@@ -96,7 +96,7 @@ import google.generativeai as genai
 import os
 
 # ================================================================
-# 🆕 v36.3: FIRESTORE KEY SANITIZATION
+# 🆕 v40.1: FIRESTORE KEY SANITIZATION
 # ================================================================
 def sanitize_for_firestore(data, depth=0, max_depth=50):
     """
@@ -268,6 +268,15 @@ try:
 except ImportError as e:
     LEGAL_VALIDATOR_ENABLED = False
     print(f"[TRACKER] ⚠️ Legal Hard-Lock Validator not available: {e}")
+
+# 🆕 v40.1: Legal Post-Validator (walidacja poprawności prawnej po generacji)
+try:
+    from legal_post_validator import validate_legal_content, validate_batch_legal_content
+    LEGAL_POST_VALIDATOR_ENABLED = True
+    print("[TRACKER] ✅ Legal Post-Validator loaded")
+except ImportError as e:
+    LEGAL_POST_VALIDATOR_ENABLED = False
+    print(f"[TRACKER] ⚠️ Legal Post-Validator not available: {e}")
 
 # 🆕 v38: Helpful Reflex Detector (z batch_review_system)
 try:
@@ -1250,7 +1259,7 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         except Exception as e:
             print(f"[TRACKER] ⚠️ Anti-Frankenstein update error: {e}")
     
-    # 🆕 v36.3: Sanitize before Firestore save
+    # 🆕 v40.1: Sanitize before Firestore save
     try:
         project_data = sanitize_for_firestore(project_data)
     except Exception as e:
@@ -1261,7 +1270,7 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         print(f"[FIRESTORE] ✅ Batch saved successfully, total batches: {len(project_data.get('batches', []))}")
     except Exception as e:
         print(f"[FIRESTORE] ❌ CRITICAL: Błąd zapisu: {e}")
-        # 🆕 v36.3: Return error instead of silently continuing!
+        # 🆕 v40.1: Return error instead of silently continuing!
         return {
             "status": "ERROR",
             "error": f"Firestore save failed: {str(e)}",
@@ -1469,7 +1478,7 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         print(f"[TRACKER] 🏁 Last batch detected! Running final review...")
         
         # ================================================================
-        # 🆕 v38.4: FINAL REVIEW - weryfikacja globalna z tolerancją 30%
+        # 🆕 v40.1: FINAL REVIEW - weryfikacja globalna z tolerancją 30%
         # ================================================================
         final_review_warnings = []
         final_review_exceeded = []
@@ -1485,7 +1494,7 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
             actual = meta.get("actual_uses", 0)
             target_min = meta.get("target_min", 1)
             
-            # 🆕 v40.0: Użyj ORYGINALNEGO limitu (przed redukcją nested keywords)
+            # 🆕 v40.1: Użyj ORYGINALNEGO limitu (przed redukcją nested keywords)
             # original_max to limit który użytkownik FAKTYCZNIE podał
             original_max = meta.get("original_max")  # Zapisany przed redukcją
             target_max_current = meta.get("target_max", target_min * 3)
@@ -1511,12 +1520,12 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
                     "type": kw_type,
                     "actual": actual,
                     "target_max": target_max,
-                    "original_max": original_max,  # 🆕 v40.0
+                    "original_max": original_max,  # 🆕 v40.1
                     "tolerance_max": tolerance_max,
                     "exceeded_by": exceeded_by,
                     "over_tolerance_by": over_tolerance_by,
                     "severity": "ERROR",
-                    "was_reduced": original_max is not None and original_max != target_max_current,  # 🆕 v40.0
+                    "was_reduced": original_max is not None and original_max != target_max_current,  # 🆕 v40.1
                     "message": f"'{keyword}' przekroczyła limit nawet z tolerancją 30%: {actual}/{target_max} (max z tolerancją: {tolerance_max})"
                 })
                 print(f"[FINAL REVIEW] ❌ '{keyword}': {actual}/{target_max} (tolerance {tolerance_max}) - EXCEEDED!")
@@ -1528,11 +1537,11 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
                     "type": kw_type,
                     "actual": actual,
                     "target_max": target_max,
-                    "original_max": original_max,  # 🆕 v40.0
+                    "original_max": original_max,  # 🆕 v40.1
                     "tolerance_max": tolerance_max,
                     "exceeded_by": actual - target_max,
                     "severity": "WARNING",
-                    "was_reduced": original_max is not None and original_max != target_max_current,  # 🆕 v40.0
+                    "was_reduced": original_max is not None and original_max != target_max_current,  # 🆕 v40.1
                     "message": f"'{keyword}' lekko przekroczona ale w tolerancji 30%: {actual}/{target_max} (OK)"
                 })
                 print(f"[FINAL REVIEW] ⚠️ '{keyword}': {actual}/{target_max} (within tolerance) - OK")
@@ -1674,6 +1683,35 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         except Exception as e:
             print(f"[TRACKER] ⚠️ Helpful reflex check error: {e}")
     
+    # 🆕 v40.1: LEGAL POST-VALIDATOR - sprawdza poprawność prawną (sądy, artykuły)
+    legal_post_validation = None
+    if is_ymyl and LEGAL_POST_VALIDATOR_ENABLED:
+        try:
+            legal_post_validation = validate_batch_legal_content(
+                batch_text=batch_text,
+                topic=project_data.get("topic", ""),
+                is_legal=project_data.get("is_legal", False)
+            )
+            
+            legal_errors = legal_post_validation.get("errors", [])
+            legal_warnings = legal_post_validation.get("warnings", [])
+            
+            # Błędy krytyczne (np. zły sąd dla ubezwłasnowolnienia) → FIX_AND_RETRY
+            if legal_errors and v38_action_override not in ["REWRITE", "FIX_AND_RETRY"]:
+                v38_action_override = "FIX_AND_RETRY"
+                for error in legal_errors[:3]:
+                    v38_fixes_needed.append(f"[LEGAL] {error.get('message', 'Błąd prawny')}")
+                v38_overrides.append(f"legal_post_validator: {len(legal_errors)} errors → FIX_AND_RETRY")
+                print(f"[TRACKER] 🔴 v40.1 OVERRIDE: Legal post-validation errors → action=FIX_AND_RETRY")
+            
+            # Ostrzeżenia dodaj do fixes_needed bez blokowania
+            for warning in legal_warnings[:2]:
+                if warning.get('message') not in [f.get('message') for f in v38_fixes_needed]:
+                    v38_fixes_needed.append(f"[LEGAL WARNING] {warning.get('message', 'Sprawdź poprawność')}")
+                    
+        except Exception as e:
+            print(f"[TRACKER] ⚠️ Legal post-validator error: {e}")
+    
     # 4. 🆕 v38.2: RELATION COMPLETION - brakujące relacje MUST → FIX_AND_RETRY
     if entity_validation_result and entity_validation_result.relationships_missing:
         # Sprawdź ile relacji MUST brakuje
@@ -1814,7 +1852,7 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         "remaining_batches": remaining_batches,
         "is_last_batch": is_last_batch,
         "auto_merge": auto_merge_result,
-        # 🆕 v38.4: Final review z tolerancją 30%
+        # 🆕 v40.1: Final review z tolerancją 30%
         "final_review": final_review_result if 'final_review_result' in dir() else None,
         "article_complete": is_last_batch and auto_merge_result and auto_merge_result.get("merged", False),
         "export_ready": is_last_batch and (not final_review_result or final_review_result.get("status") == "PASS"),
@@ -2304,7 +2342,7 @@ def approve_batch(project_id):
 
     result = process_batch_in_firestore(project_id, text, meta_trace, forced)
     
-    # 🆕 v36.3: Check if Firestore save failed
+    # 🆕 v40.1: Check if Firestore save failed
     if isinstance(result, dict) and result.get("status") == "ERROR":
         return jsonify({
             "status": "ERROR",
