@@ -23,7 +23,7 @@ SUMA WAG: 1.00 (bez zmian)
 ===============================================================================
 """
 
-from typing import Dict
+from typing import Dict, Any  # ✅ POPRAWIONE - dodano Any
 from dataclasses import dataclass
 
 
