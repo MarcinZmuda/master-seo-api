@@ -1,6 +1,6 @@
 """
 ===============================================================================
-🔺 TRIPLET PRIORITY SYSTEM v41.0 - Hierarchia ważności relacji S-V-O
+🔺 TRIPLET PRIORITY SYSTEM v41.1 - Hierarchia ważności relacji S-V-O
 ===============================================================================
 
 System priorytetyzacji tripletów oparty na MIERZALNYCH danych z S1:
@@ -20,6 +20,7 @@ HIERARCHIA:
 ZASADA KLUCZOWA:
 Nie wymyślamy tripletów! Priorytetyzujemy tylko te, które przyszły z S1.
 
+v41.1: Naprawiono obsługę różnych formatów danych (list vs dict)
 ===============================================================================
 """
 
@@ -107,20 +108,114 @@ class PrioritizedTriplet:
 
 
 # ============================================================================
+# HELPER: Bezpieczne pobieranie wartości z różnych formatów
+# ============================================================================
+
+def _safe_get_value(item: Any, key: str, default: Any = None) -> Any:
+    """
+    Bezpiecznie pobiera wartość z różnych formatów danych.
+    
+    Obsługuje:
+    - dict: {"key": value}
+    - list/tuple: [value1, value2, ...]
+    - inne: zwraca default
+    """
+    if isinstance(item, dict):
+        return item.get(key, default)
+    elif isinstance(item, (list, tuple)):
+        # Mapowanie kluczy na indeksy dla typowych formatów
+        key_to_index = {
+            "name": 0, "text": 0, "subject": 0,
+            "type": 1, "verb": 1,
+            "importance": 2, "object": 2,
+            "sources_count": 3, "sources": 3
+        }
+        idx = key_to_index.get(key)
+        if idx is not None and len(item) > idx:
+            return item[idx]
+        return default
+    return default
+
+
+def _extract_relationship(rel: Any) -> Tuple[str, str, str]:
+    """
+    Wyciąga (subject, verb, object) z różnych formatów relacji.
+    
+    Obsługuje:
+    - dict: {"subject": ..., "verb": ..., "object": ...}
+    - list/tuple: [subject, verb, object]
+    - string: "subject verb object"
+    """
+    if isinstance(rel, dict):
+        subject = str(rel.get("subject", "")).strip()
+        verb = str(rel.get("verb", "")).strip()
+        obj = str(rel.get("object", "")).strip()
+        return subject, verb, obj
+    
+    elif isinstance(rel, (list, tuple)):
+        if len(rel) >= 3:
+            return str(rel[0]).strip(), str(rel[1]).strip(), str(rel[2]).strip()
+        elif len(rel) == 2:
+            return str(rel[0]).strip(), "relates to", str(rel[1]).strip()
+        elif len(rel) == 1:
+            return str(rel[0]).strip(), "", ""
+        return "", "", ""
+    
+    elif isinstance(rel, str):
+        parts = rel.split()
+        if len(parts) >= 3:
+            return parts[0], parts[1], " ".join(parts[2:])
+        return rel, "", ""
+    
+    return "", "", ""
+
+
+def _extract_entity_info(entity: Any) -> Tuple[str, float, int]:
+    """
+    Wyciąga (name, importance, sources_count) z różnych formatów encji.
+    
+    Obsługuje:
+    - dict: {"name": ..., "importance": ..., "sources_count": ...}
+    - list/tuple: [name, type, importance, sources]
+    - string: "entity_name"
+    """
+    if isinstance(entity, dict):
+        name = entity.get("name") or entity.get("text") or ""
+        if isinstance(name, dict):
+            name = name.get("name", "")
+        name = str(name).strip()
+        
+        importance = float(entity.get("importance", 0) or 0)
+        sources = int(entity.get("sources_count", 0) or entity.get("sources", 0) or 0)
+        return name, importance, sources
+    
+    elif isinstance(entity, (list, tuple)):
+        name = str(entity[0]).strip() if len(entity) > 0 else ""
+        importance = float(entity[2]) if len(entity) > 2 else 0.0
+        sources = int(entity[3]) if len(entity) > 3 else 0
+        return name, importance, sources
+    
+    elif isinstance(entity, str):
+        return entity.strip(), 0.5, 1
+    
+    return "", 0.0, 0
+
+
+# ============================================================================
 # GŁÓWNE FUNKCJE
 # ============================================================================
 
 def prioritize_triplets(
-    s1_relationships: List[Dict],
-    s1_entities: List[Dict],
+    s1_relationships: List[Any],
+    s1_entities: List[Any],
     config: TripletPriorityConfig = None
 ) -> Dict[str, List[PrioritizedTriplet]]:
     """
     Przypisuje priorytety tripletom na podstawie danych z S1.
     
     Args:
-        s1_relationships: Lista relacji z S1 [{"subject": str, "verb": str, "object": str}]
-        s1_entities: Lista encji z S1 [{"name": str, "importance": float, "sources_count": int}]
+        s1_relationships: Lista relacji z S1 (różne formaty obsługiwane)
+        s1_entities: Lista encji z S1 (różne formaty obsługiwane)
         config: Konfiguracja
         
     Returns:
@@ -139,10 +234,12 @@ def prioritize_triplets(
         "NICE": []
     }
     
+    if not s1_relationships:
+        return categorized
+    
     for rel in s1_relationships[:config.MAX_TRIPLETS_TO_CHECK]:
-        subject = rel.get("subject", "").strip()
-        verb = rel.get("verb", "").strip()
-        obj = rel.get("object", "").strip()
+        # ✅ Bezpieczna ekstrakcja z różnych formatów
+        subject, verb, obj = _extract_relationship(rel)
         
         if not subject or not obj:
             continue
@@ -173,24 +270,24 @@ def prioritize_triplets(
     return categorized
 
 
-def _build_entity_map(s1_entities: List[Dict]) -> Dict[str, Tuple[float, int]]:
+def _build_entity_map(s1_entities: List[Any]) -> Dict[str, Tuple[float, int]]:
     """
     Buduje mapę entity_name_lowercase -> (importance, sources_count).
+    
+    Obsługuje różne formaty encji (dict, list, string).
     """
     entity_map = {}
     
+    if not s1_entities:
+        return entity_map
+    
     for entity in s1_entities:
-        # Obsłuż różne formaty z S1
-        name = entity.get("name") or entity.get("text") or str(entity)
-        if isinstance(name, dict):
-            name = name.get("name", "")
+        # ✅ Bezpieczna ekstrakcja z różnych formatów
+        name, importance, sources = _extract_entity_info(entity)
         
         name_lower = name.lower().strip()
         if not name_lower:
             continue
-        
-        importance = float(entity.get("importance", 0) or 0)
-        sources = int(entity.get("sources_count", 0) or entity.get("sources", 0) or 0)
         
         # Zachowaj wyższe wartości jeśli duplikat
         if name_lower in entity_map:
@@ -325,14 +422,20 @@ def _check_triplet_presence(
     object_lower = obj.lower()
     
     # Znajdź wszystkie wystąpienia subject
-    subject_positions = [m.start() for m in re.finditer(
-        rf'\b{re.escape(subject_lower)}\b', text_lower
-    )]
+    try:
+        subject_positions = [m.start() for m in re.finditer(
+            rf'\b{re.escape(subject_lower)}\b', text_lower
+        )]
+    except re.error:
+        subject_positions = []
     
     # Znajdź wszystkie wystąpienia object
-    object_positions = [m.start() for m in re.finditer(
-        rf'\b{re.escape(object_lower)}\b', text_lower
-    )]
+    try:
+        object_positions = [m.start() for m in re.finditer(
+            rf'\b{re.escape(object_lower)}\b', text_lower
+        )]
+    except re.error:
+        object_positions = []
     
     if not subject_positions or not object_positions:
         return False, None
@@ -423,7 +526,7 @@ def _calculate_triplet_score(
 
 def get_triplet_instructions_for_prebatch(
     validation_result: Dict[str, Any],
-    batch_number: int
+    batch_number: int = 1
 ) -> Optional[str]:
     """
     Generuje instrukcję dla GPT jeśli brakuje ważnych tripletów.
@@ -435,28 +538,55 @@ def get_triplet_instructions_for_prebatch(
     Returns:
         Instrukcja dla GPT lub None jeśli OK
     """
-    if validation_result["status"] == "OK":
+    if not validation_result:
+        return None
+    
+    if validation_result.get("status") == "OK":
         return None
     
     instructions = []
     
+    # ✅ Bezpieczne pobieranie wyników
+    results = validation_result.get("results", {})
+    
     # MUST missing
-    must_missing = validation_result["results"]["MUST"]["missing"]
+    must_data = results.get("MUST", {})
+    must_missing = must_data.get("missing", [])
+    
     if must_missing:
         instructions.append("🚨 WYMAGANE RELACJE (MUSISZ użyć w tym batchu):")
-        for triplet_dict in must_missing[:3]:
-            instructions.append(
-                f"   • {triplet_dict['subject']} → {triplet_dict['verb']} → {triplet_dict['object']}"
-            )
+        for triplet_item in must_missing[:3]:
+            # ✅ Obsłuż zarówno dict jak i obiekt PrioritizedTriplet
+            if isinstance(triplet_item, dict):
+                subj = triplet_item.get("subject", "?")
+                verb = triplet_item.get("verb", "→")
+                obj = triplet_item.get("object", "?")
+            elif hasattr(triplet_item, "subject"):
+                subj = triplet_item.subject
+                verb = triplet_item.verb
+                obj = triplet_item.object
+            else:
+                continue
+            instructions.append(f"   • {subj} → {verb} → {obj}")
     
     # SHOULD missing (tylko jeśli > 2)
-    should_missing = validation_result["results"]["SHOULD"]["missing"]
+    should_data = results.get("SHOULD", {})
+    should_missing = should_data.get("missing", [])
+    
     if len(should_missing) > 2:
         instructions.append("\n⚠️ ZALECANE RELACJE (użyj min. 1):")
-        for triplet_dict in should_missing[:2]:
-            instructions.append(
-                f"   • {triplet_dict['subject']} → {triplet_dict['verb']} → {triplet_dict['object']}"
-            )
+        for triplet_item in should_missing[:2]:
+            if isinstance(triplet_item, dict):
+                subj = triplet_item.get("subject", "?")
+                verb = triplet_item.get("verb", "→")
+                obj = triplet_item.get("object", "?")
+            elif hasattr(triplet_item, "subject"):
+                subj = triplet_item.subject
+                verb = triplet_item.verb
+                obj = triplet_item.object
+            else:
+                continue
+            instructions.append(f"   • {subj} → {verb} → {obj}")
     
     if not instructions:
         return None
@@ -470,8 +600,8 @@ def get_triplet_instructions_for_prebatch(
 
 def analyze_triplets_with_priority(
     text: str,
-    s1_relationships: List[Dict],
-    s1_entities: List[Dict],
+    s1_relationships: List[Any],
+    s1_entities: List[Any],
     config: TripletPriorityConfig = None
 ) -> Dict[str, Any]:
     """
@@ -482,8 +612,8 @@ def analyze_triplets_with_priority(
     
     Args:
         text: Tekst do walidacji
-        s1_relationships: Relacje z S1
-        s1_entities: Encje z S1
+        s1_relationships: Relacje z S1 (różne formaty)
+        s1_entities: Encje z S1 (różne formaty)
         config: Konfiguracja
         
     Returns:
@@ -588,11 +718,11 @@ INTEGRACJA Z BRAJEN:
 # ============================================================================
 
 if __name__ == "__main__":
-    # Przykładowe dane z S1
+    # Przykładowe dane z S1 - różne formaty
     s1_entities = [
         {"name": "ubezwłasnowolnienie", "importance": 0.9, "sources_count": 8},
         {"name": "sąd okręgowy", "importance": 0.75, "sources_count": 6},
-        {"name": "kurator", "importance": 0.65, "sources_count": 4},
+        ["kurator", "PERSON", 0.65, 4],  # Format listowy
         {"name": "biegły sądowy", "importance": 0.55, "sources_count": 3},
         {"name": "zdolność do czynności prawnych", "importance": 0.7, "sources_count": 5},
         {"name": "opinia psychiatryczna", "importance": 0.45, "sources_count": 2},
@@ -601,7 +731,7 @@ if __name__ == "__main__":
     s1_relationships = [
         {"subject": "sąd okręgowy", "verb": "orzeka", "object": "ubezwłasnowolnienie"},
         {"subject": "ubezwłasnowolnienie", "verb": "pozbawia", "object": "zdolność do czynności prawnych"},
-        {"subject": "kurator", "verb": "sprawuje opiekę nad", "object": "ubezwłasnowolnienie"},
+        ["kurator", "sprawuje opiekę nad", "ubezwłasnowolnienie"],  # Format listowy
         {"subject": "biegły sądowy", "verb": "wydaje", "object": "opinia psychiatryczna"},
     ]
     
@@ -614,7 +744,7 @@ if __name__ == "__main__":
     """
     
     print("=" * 60)
-    print("TEST: TRIPLET PRIORITY SYSTEM v41")
+    print("TEST: TRIPLET PRIORITY SYSTEM v41.1")
     print("=" * 60)
     
     # 1. Priorytetyzacja
