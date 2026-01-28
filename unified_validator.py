@@ -20,6 +20,17 @@ from dataclasses import dataclass, field
 from enum import Enum
 from collections import defaultdict
 
+# v40.2: Import from core_metrics (Single Source of Truth)
+try:
+    from core_metrics import (
+        calculate_burstiness_simple as _calculate_burstiness_core,
+        split_into_sentences as _split_sentences_core
+    )
+    CORE_METRICS_AVAILABLE = True
+except ImportError:
+    CORE_METRICS_AVAILABLE = False
+    print("[VALIDATOR] ⚠️ core_metrics not available, using local functions")
+
 # ================================================================
 # 🧠 Współdzielony model spaCy
 # ================================================================
@@ -307,18 +318,26 @@ def count_keyword_occurrences(text_lemmas: List[str], keyword: str) -> int:
 # ================================================================
 # 📊 WALIDATORY METRYK
 # ================================================================
-def calculate_burstiness(text: str) -> float:
-    sentences = re.split(r'[.!?]+', text)
-    sentences = [s.strip() for s in sentences if s.strip()]
-    if len(sentences) < 3:
-        return 3.5
-    lengths = [len(s.split()) for s in sentences]
-    mean = sum(lengths) / len(lengths)
-    if not mean:
-        return 3.5
-    variance = sum((x - mean) ** 2 for x in lengths) / len(lengths)
-    raw_score = math.sqrt(variance) / mean
-    return round(raw_score * 5, 2)
+
+# v40.2: Use core_metrics if available
+if CORE_METRICS_AVAILABLE:
+    def calculate_burstiness(text: str) -> float:
+        """Deleguje do core_metrics.calculate_burstiness_simple"""
+        return _calculate_burstiness_core(text)
+else:
+    def calculate_burstiness(text: str) -> float:
+        """FALLBACK - use core_metrics instead"""
+        sentences = re.split(r'[.!?]+', text)
+        sentences = [s.strip() for s in sentences if s.strip()]
+        if len(sentences) < 3:
+            return 3.5
+        lengths = [len(s.split()) for s in sentences]
+        mean = sum(lengths) / len(lengths)
+        if not mean:
+            return 3.5
+        variance = sum((x - mean) ** 2 for x in lengths) / len(lengths)
+        raw_score = math.sqrt(variance) / mean
+        return round(raw_score * 5, 2)
 
 
 def validate_burstiness(burstiness: float, issues: List[ValidationIssue], attempt: int = 1) -> Dict[str, Any]:
