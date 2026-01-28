@@ -27,6 +27,14 @@ from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 import re
 
+# 🆕 v41.0: Import rozszerzonej mapy synonimów (105 słów zamiast 25)
+from contextual_synonyms_v41 import (
+    CONTEXTUAL_SYNONYMS_V41,
+    get_synonyms_v41,
+    get_synonyms_batch_v41,
+    get_stats_v41 as get_synonyms_stats_v41
+)
+
 # ============================================================================
 # 🆕 v40.1: INTEGRACJA Z SYNONYM_SERVICE
 # ============================================================================
@@ -292,43 +300,17 @@ ZASADY:
 # SYNONIMY DYNAMICZNE - zamiast słabego SYNONYM_MAP
 # ============================================================================
 
-# Synonimy kontekstowe - używane gdy fraza jest nadużywana
-CONTEXTUAL_SYNONYMS = {
-    # Czasowniki - najczęściej powtarzane
-    "można": ["da się", "istnieje możliwość", "jest opcja"],
-    "należy": ["trzeba", "wymaga się", "konieczne jest"],
-    "wymaga": ["potrzebuje", "niezbędne jest", "konieczne"],
-    "pozwala": ["umożliwia", "daje możliwość", "otwiera drogę do"],
-    "dotyczy": ["odnosi się do", "obejmuje", "tyczy się"],
-    "stanowi": ["jest", "reprezentuje", "tworzy"],
-    
-    # Przymiotniki - łatwe do nadużycia
-    "ważny": ["istotny", "znaczący", "kluczowy", "zasadniczy"],
-    "dobry": ["skuteczny", "wartościowy", "odpowiedni", "właściwy"],
-    "główny": ["podstawowy", "kluczowy", "centralny", "nadrzędny"],
-    "odpowiedni": ["właściwy", "stosowny", "adekwatny"],
-    
-    # Rzeczowniki - kontekstowe
-    "osoba": ["człowiek", "jednostka", "indywiduum"],
-    "sprawa": ["kwestia", "zagadnienie", "przypadek"],
-    "sposób": ["metoda", "forma", "droga"],
-    "proces": ["procedura", "przebieg", "tok"],
-    "warunek": ["wymóg", "kryterium", "przesłanka"],
-    
-    # Frazy do zamiany
-    "w przypadku": ["gdy", "jeśli", "kiedy"],
-    "w celu": ["aby", "żeby", "dla"],
-    "ze względu na": ["z powodu", "przez", "wskutek"],
-    "w kontekście": ["przy", "podczas", "w ramach"],
-}
+# 🆕 v41.0: Synonimy kontekstowe - importowane z contextual_synonyms_v41.py
+# 105 słów w 7 kategoriach (było 25 słów)
+CONTEXTUAL_SYNONYMS = CONTEXTUAL_SYNONYMS_V41
 
 
 def get_synonyms_for_word(word: str, context: str = "") -> List[str]:
     """
-    Zwraca synonimy dla słowa.
+    🆕 v41.0: Zwraca synonimy dla słowa - najpierw rozszerzona mapa v41.
     
-    v40.1: Hierarchia źródeł:
-    1. CONTEXTUAL_SYNONYMS (lokalna mapa - najszybsze)
+    Hierarchia źródeł:
+    1. contextual_synonyms_v41 (105 słów - najszybsze)
     2. synonym_service (plWordNet API + Firestore cache + LLM fallback)
     
     Args:
@@ -340,10 +322,10 @@ def get_synonyms_for_word(word: str, context: str = "") -> List[str]:
     """
     word_lower = word.lower().strip()
     
-    # 1. NAJPIERW: lokalna mapa CONTEXTUAL_SYNONYMS (najszybsze)
-    local_synonyms = CONTEXTUAL_SYNONYMS.get(word_lower, [])
-    if local_synonyms:
-        return local_synonyms[:5]
+    # 1. NAJPIERW: rozszerzona mapa v41 (105 słów)
+    v41_synonyms = get_synonyms_v41(word_lower, max_count=5)
+    if v41_synonyms:
+        return v41_synonyms
     
     # 2. FALLBACK: synonym_service (plWordNet + cache + LLM)
     if SYNONYM_SERVICE_AVAILABLE:

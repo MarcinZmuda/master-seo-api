@@ -54,6 +54,19 @@ from typing import Dict, List, Any, Tuple
 from enum import Enum
 
 # ================================================================
+# 🆕 v41.0: IMPORTS Z MODUŁÓW OPTYMALIZACYJNYCH
+# ================================================================
+from forbidden_phrases_v41 import (
+    FORBIDDEN_PATTERNS_V41,
+    FORBIDDEN_WORDS_V41,
+    FORBIDDEN_REPLACEMENTS_V41,
+    check_forbidden_phrases_v41
+)
+from paragraph_cv_analyzer_v41 import calculate_paragraph_cv
+from mattr_calculator_v41 import calculate_mattr
+from humanness_weights_v41 import WEIGHTS_V41
+
+# ================================================================
 # 📦 Opcjonalny import wordfreq
 # ================================================================
 try:
@@ -163,16 +176,8 @@ class AIDetectionConfig:
     HUMANNESS_WARNING = 70
     
     # Wagi - 🆕 v36.5: Dodano template_diversity dla wykrywania AI patterns
-    WEIGHTS = {
-        "burstiness": 0.18,           # 🔧 zmniejszone z 0.22
-        "vocabulary": 0.18,           # 🔧 zmniejszone z 0.20
-        "sophistication": 0.10,       # 🔧 zmniejszone z 0.12
-        "entropy": 0.15,              # 🔧 zmniejszone z 0.18
-        "repetition": 0.12,           # 🔧 zmniejszone z 0.15
-        "pos_diversity": 0.07,        # 🔧 zmniejszone z 0.08
-        "sentence_distribution": 0.05,
-        "template_diversity": 0.15    # 🆕 v36.5: Nowa metryka dla wykrywania AI patterns
-    }
+    # 🆕 v41.0: Nowe wagi z paragraph_cv (importowane z humanness_weights_v41)
+    WEIGHTS = WEIGHTS_V41
 
 
 class Severity(Enum):
@@ -706,40 +711,36 @@ def check_word_repetition_detailed(text: str, max_per_500: int = 5) -> Dict[str,
 
 
 def calculate_vocabulary_richness(text: str) -> Dict[str, Any]:
-    words = tokenize_no_stopwords(text)
-    
-    if len(words) < 50:
-        return {
-            "value": 0,
-            "status": Severity.WARNING.value,
-            "message": "Za mało słów do analizy (min 50)",
-            "word_count": len(words)
-        }
-    
-    unique_words = set(words)
-    ttr = len(unique_words) / len(words)
-    ttr = round(ttr, 3)
+    """
+    🆕 v41.0: Używa MATTR dla tekstów >= 500 słów, TTR dla krótszych.
+    """
+    # 🆕 v41: Użyj MATTR
+    mattr_result = calculate_mattr(text)
     
     config = AIDetectionConfig()
-    if ttr < config.TTR_CRITICAL:
+    value = mattr_result["value"]
+    
+    # Określ status
+    if value < config.TTR_CRITICAL:
         status = Severity.CRITICAL
-        message = f"Bardzo ubogi zasób słów (TTR {ttr} < {config.TTR_CRITICAL})"
-    elif ttr < config.TTR_WARNING:
+        message = f"Bardzo ubogi zasób słów ({mattr_result['method']}={value:.3f} < {config.TTR_CRITICAL})"
+    elif value < config.TTR_WARNING:
         status = Severity.WARNING
         message = f"Mało urozmaicone słownictwo. Użyj synonimów."
-    elif ttr >= config.TTR_OK:
+    elif value >= config.TTR_OK:
         status = Severity.OK
-        message = "Bogate słownictwo"
+        message = f"Bogate słownictwo ({mattr_result['method']}={value:.3f})"
     else:
         status = Severity.WARNING
         message = "Słownictwo poniżej optimum"
     
     return {
-        "value": ttr,
+        "value": value,
         "status": status.value,
         "message": message,
-        "unique_words": len(unique_words),
-        "total_words": len(words)
+        "method": mattr_result["method"],  # "mattr" lub "standard_ttr"
+        "ttr": value,  # alias dla kompatybilności
+        "total_words": mattr_result.get("total_words", 0)
     }
 
 
@@ -1069,6 +1070,9 @@ def calculate_humanness_score(text: str) -> Dict[str, Any]:
     # 🆕 v36.5: Template diversity
     template_diversity = calculate_template_diversity_score(text)
     
+    # 🆕 v41: Paragraph CV
+    paragraph_cv = calculate_paragraph_cv(text)
+    
     def normalize_burstiness(val):
         if val < config.BURSTINESS_CRITICAL_LOW:
             return 0.0
@@ -1131,7 +1135,9 @@ def calculate_humanness_score(text: str) -> Dict[str, Any]:
         "entropy": normalize_entropy(entropy.get("value", 0)),
         "repetition": repetition.get("value", 1.0),
         "pos_diversity": normalize_pos(pos_diversity.get("value", 0.5)),
-        "template_diversity": template_diversity.get("value", 0.5)  # 🆕 v36.5
+        "template_diversity": template_diversity.get("value", 0.5),  # 🆕 v36.5
+        "paragraph_cv": paragraph_cv.get("score", 50) / 100,  # 🆕 v41 (normalized 0-1)
+        "sentence_distribution": 0.5  # 🆕 v41: placeholder, obliczane gdzie indziej
     }
     
     # 🔧 FIX v34.3: Używamy wag z konfiguracji (jedno źródło prawdy)
@@ -1183,7 +1189,8 @@ def calculate_humanness_score(text: str) -> Dict[str, Any]:
             "starter_entropy": entropy,
             "word_repetition": repetition,
             "pos_diversity": pos_diversity,
-            "template_diversity": template_diversity  # 🆕 v36.5
+            "template_diversity": template_diversity,  # 🆕 v36.5
+            "paragraph_cv": paragraph_cv  # 🆕 v41
         },
         "normalized_scores": scores,
         "warnings": all_warnings[:5],
@@ -1208,98 +1215,19 @@ def quick_ai_check(text: str) -> Dict[str, Any]:
 
 # ================================================================
 # 🆕 v33.0: CRITICAL: FORBIDDEN PHRASES CHECK (rozszerzono!)
+# 🆕 v41.0: ZASTĄPIONO MODUŁEM forbidden_phrases_v41.py
 # ================================================================
-FORBIDDEN_PATTERNS = [
-    # Frazy typowe dla AI
-    (r'\bwarto wiedzieć\b', "warto wiedzieć"),
-    (r'\bnależy pamiętać\b', "należy pamiętać"),
-    (r'\bnależy podkreślić\b', "należy podkreślić"),
-    (r'\bkluczowy aspekt\b', "kluczowy aspekt"),
-    (r'\bkompleksowe rozwiązanie\b', "kompleksowe rozwiązanie"),
-    (r'\bholistyczne podejście\b', "holistyczne podejście"),
-    (r'\bw dzisiejszych czasach\b', "w dzisiejszych czasach"),
-    (r'\bnie ulega wątpliwości\b', "nie ulega wątpliwości"),
-    (r'\bcoraz więcej osób\b', "coraz więcej osób"),
-    (r'\bw tym artykule\b', "w tym artykule"),
-    (r'\bpodsumowując\b', "podsumowując"),
-    (r'\bjak już wspomniano\b', "jak już wspomniano"),
-    (r'\bkażdy z nas\b', "każdy z nas"),
-    (r'\bnie jest tajemnicą\b', "nie jest tajemnicą"),
-    (r'\bpowszechnie wiadomo\b', "powszechnie wiadomo"),
-    (r'\btrudno przecenić\b', "trudno przecenić"),
-    (r'\bw erze\s+\w+\b', "w erze..."),
-    (r'\bw dobie\s+\w+\b', "w dobie..."),
-    (r'\bw obliczu\b', "w obliczu"),
-    (r'\bna przestrzeni lat\b', "na przestrzeni lat"),
-]
 
-# 🆕 v33.0: Słowa zakazane (pojedyncze)
-FORBIDDEN_WORDS = [
-    "kluczowy", "kompleksowy", "innowacyjny", "holistyczny", 
-    "transformacyjny", "fundamentalny", "niewątpliwie", "wieloaspektowy",
-    "przełomowy", "bezsprzecznie", "rewolucyjny", "optymalizować"
-]
+# 🆕 v41: Aliasy dla kompatybilności (importowane z forbidden_phrases_v41)
+FORBIDDEN_PATTERNS = FORBIDDEN_PATTERNS_V41
+FORBIDDEN_WORDS = FORBIDDEN_WORDS_V41
+FORBIDDEN_REPLACEMENTS = FORBIDDEN_REPLACEMENTS_V41
+check_forbidden_phrases = check_forbidden_phrases_v41
 
-# 🆕 v33.0: Replacements dla zakazanych fraz
-FORBIDDEN_REPLACEMENTS = {
-    "coraz więcej osób": "wiele osób",
-    "w dzisiejszych czasach": "[USUŃ]",
-    "warto wiedzieć": "[USUŃ]",
-    "należy podkreślić": "[USUŃ]",
-    "podsumowując": "[zamień na konkretne zakończenie]",
-    "w tym artykule": "[NIGDY nie używaj]",
-    "kluczowy": "istotny/ważny",
-    "kompleksowy": "pełny/całościowy",
-    "innowacyjny": "nowoczesny/nowatorski",
-    "holistyczny": "całościowy",
-}
-
-def check_forbidden_phrases(text: str) -> Dict[str, Any]:
-    """
-    🆕 v33.0: Sprawdza zakazane frazy i słowa.
-    Zwraca should_block=True jeśli znaleziono ≥1 frazę!
-    """
-    text_lower = text.lower()
-    found_phrases = []
-    found_words = []
-    replacements = []
-    
-    # Sprawdź frazy
-    for pattern, name in FORBIDDEN_PATTERNS:
-        if re.search(pattern, text_lower, re.IGNORECASE):
-            found_phrases.append(name)
-            if name in FORBIDDEN_REPLACEMENTS:
-                replacements.append(f"'{name}' → {FORBIDDEN_REPLACEMENTS[name]}")
-    
-    # Sprawdź pojedyncze słowa
-    for word in FORBIDDEN_WORDS:
-        if re.search(rf'\b{word}\b', text_lower, re.IGNORECASE):
-            found_words.append(word)
-            if word in FORBIDDEN_REPLACEMENTS:
-                replacements.append(f"'{word}' → {FORBIDDEN_REPLACEMENTS[word]}")
-    
-    all_found = found_phrases + found_words
-    
-    if all_found:
-        # 🔴 v33.0: BLOKUJ jeśli znaleziono zakazane frazy!
-        status = Severity.CRITICAL
-        message = f"🚫 ZAKAZANE FRAZY ({len(all_found)}×): {', '.join(all_found[:5])}"
-        should_block = True
-    else:
-        status = Severity.OK
-        message = "Brak zakazanych fraz ✓"
-        should_block = False
-    
-    return {
-        "status": status.value,
-        "forbidden_found": all_found,
-        "phrases": found_phrases,
-        "words": found_words,
-        "count": len(all_found),
-        "message": message,
-        "replacements": replacements,
-        "should_block": should_block
-    }
+# Stare definicje USUNIĘTE - teraz w forbidden_phrases_v41.py:
+# - 60 wzorców (było 20)
+# - 24 słowa (było 12)
+# - Łącznie 84 markery (+163%)
 
 
 # ================================================================

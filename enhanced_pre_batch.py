@@ -28,6 +28,13 @@ import math
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, field
 
+# 🆕 v41.0: IMPORTS Z MODUŁÓW OPTYMALIZACYJNYCH
+from paragraph_cv_analyzer_v41 import (
+    get_paragraph_cv_for_prebatch,
+    calculate_paragraph_cv
+)
+from triplet_priority_v41 import get_triplet_instructions_for_prebatch
+
 
 # ============================================================================
 # 🆕 v40.2: IMPORT CONCEPT MAP EXTRACTOR (Semantic Entity SEO)
@@ -1195,6 +1202,49 @@ def generate_enhanced_pre_batch_info(
                 enhanced["style_fingerprint_instructions"] = style_fingerprint.to_prompt_section()
         except Exception as e:
             print(f"[ENHANCED_PRE_BATCH] ⚠️ Style fingerprint error: {e}")
+    
+    # ================================================================
+    # 🆕 v41.0: PARAGRAPH CV INSTRUCTIONS
+    # ================================================================
+    if current_batch_num >= 2 and batches:
+        try:
+            # Zbierz tekst wszystkich poprzednich batchów
+            accumulated_text = "\n".join([b.get("text", "") for b in batches])
+            
+            para_cv_alert = get_paragraph_cv_for_prebatch(
+                accumulated_text=accumulated_text,
+                batch_number=current_batch_num
+            )
+            
+            if para_cv_alert:
+                enhanced["paragraph_cv_alert"] = para_cv_alert
+                # Dodaj do gpt_instructions
+                if "style_instructions" not in enhanced:
+                    enhanced["style_instructions"] = {}
+                style_inst = enhanced.get("style_instructions", {})
+                warnings = style_inst.get("warnings", [])
+                warnings.append(para_cv_alert["instruction"])
+                enhanced["style_instructions"]["warnings"] = warnings
+                print(f"[ENHANCED_PRE_BATCH] ⚠️ Paragraph CV {para_cv_alert['status']}: CV={para_cv_alert.get('cv', 'N/A')}")
+        except Exception as e:
+            print(f"[ENHANCED_PRE_BATCH] ⚠️ Paragraph CV error: {e}")
+    
+    # ================================================================
+    # 🆕 v41.0: TRIPLET PRIORITY INSTRUCTIONS
+    # ================================================================
+    if "relations_to_establish" in enhanced:
+        try:
+            relations = enhanced.get("relations_to_establish", {})
+            if relations.get("prebatch_instruction"):
+                # Dodaj instrukcję tripletów do encji
+                if "entities_to_define" not in enhanced:
+                    enhanced["entities_to_define"] = {}
+                ent_def = enhanced.get("entities_to_define", {})
+                instructions = ent_def.get("instructions", [])
+                instructions.append(relations["prebatch_instruction"])
+                enhanced["entities_to_define"]["instructions"] = instructions
+        except Exception as e:
+            print(f"[ENHANCED_PRE_BATCH] ⚠️ Triplet priority error: {e}")
     
     return enhanced
 

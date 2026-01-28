@@ -33,6 +33,13 @@ from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass
 from collections import Counter
 
+# 🆕 v41.0: Import TRIPLET PRIORITY SYSTEM
+from triplet_priority_v41 import (
+    analyze_triplets_with_priority,
+    prioritize_triplets,
+    get_triplet_instructions_for_prebatch
+)
+
 
 # ============================================================
 # KONFIGURACJA
@@ -383,15 +390,15 @@ def analyze_entity_relationships(
     s1_entities: List[Dict] = None
 ) -> Dict[str, Any]:
     """
-    Analizuje relacje między encjami (Subject-Verb-Object).
+    🆕 v41.0: Analizuje relacje między encjami z priorytetyzacją MUST/SHOULD/NICE.
     
     Args:
         text: Tekst do analizy
         s1_relationships: Relacje z S1 [{"subject": str, "verb": str, "object": str}, ...]
-        s1_entities: Encje z S1 (do analizy współwystępowania)
+        s1_entities: Encje z S1 [{"name", "importance", "sources_count"}, ...]
         
     Returns:
-        Dict z: score, found_relationships, missing_relationships, co_occurrence
+        Dict z: score, found_relationships, missing_relationships, prioritized, prebatch_instruction
     """
     if not text:
         return {
@@ -399,90 +406,24 @@ def analyze_entity_relationships(
             "status": "NO_DATA"
         }
     
-    text_lower = text.lower()
-    results = {
+    # 🆕 v41: Użyj nowego systemu priorytetyzacji tripletów
+    if s1_relationships:
+        result = analyze_triplets_with_priority(
+            text=text,
+            s1_relationships=s1_relationships,
+            s1_entities=s1_entities or []
+        )
+        return result
+    
+    # Fallback jeśli brak relacji z S1
+    return {
+        "score": 50,
+        "status": "NO_DATA",
         "found_relationships": [],
         "missing_relationships": [],
-        "co_occurrence_score": 0,
-        "score": 50  # Default
+        "prioritized": None,
+        "prebatch_instruction": None
     }
-    
-    # Analiza relacji z S1
-    if s1_relationships:
-        for rel in s1_relationships:
-            subject = rel.get("subject", "").lower()
-            verb = rel.get("verb", "").lower()
-            obj = rel.get("object", "").lower()
-            
-            # Sprawdź czy relacja występuje (subject i object w tym samym zdaniu)
-            # Uproszczone: sprawdź czy wszystkie elementy są blisko siebie
-            if subject and obj:
-                # Szukaj współwystępowania w oknie 50 słów
-                subj_matches = list(re.finditer(rf'\b{re.escape(subject)}\b', text_lower))
-                obj_matches = list(re.finditer(rf'\b{re.escape(obj)}\b', text_lower))
-                
-                found = False
-                for sm in subj_matches:
-                    for om in obj_matches:
-                        # Sprawdź odległość (max 200 znaków)
-                        if abs(sm.start() - om.start()) < 200:
-                            found = True
-                            break
-                    if found:
-                        break
-                
-                rel_info = {
-                    "subject": subject,
-                    "verb": verb,
-                    "object": obj
-                }
-                
-                if found:
-                    results["found_relationships"].append(rel_info)
-                else:
-                    results["missing_relationships"].append(rel_info)
-    
-    # Analiza współwystępowania encji
-    if s1_entities:
-        entity_names = [
-            (e.get("name", e) if isinstance(e, dict) else str(e)).lower() 
-            for e in s1_entities[:20]
-        ]
-        
-        # Zlicz współwystępowania (encje w tym samym akapicie)
-        paragraphs = text_lower.split('\n\n')
-        co_occurrences = 0
-        
-        for para in paragraphs:
-            entities_in_para = [e for e in entity_names if e in para]
-            if len(entities_in_para) >= 2:
-                co_occurrences += len(entities_in_para) - 1
-        
-        results["co_occurrence_count"] = co_occurrences
-        results["co_occurrence_score"] = min(100, co_occurrences * 10)
-    
-    # Oblicz score
-    if s1_relationships:
-        total_rel = len(s1_relationships)
-        found_rel = len(results["found_relationships"])
-        rel_ratio = found_rel / total_rel if total_rel > 0 else 0
-        rel_score = rel_ratio * 70
-    else:
-        rel_score = 35  # Neutral jeśli brak relacji z S1
-    
-    co_occ_score = results.get("co_occurrence_score", 50) * 0.3
-    
-    results["score"] = min(100, int(rel_score + co_occ_score))
-    
-    # Status
-    if results["score"] >= 70:
-        results["status"] = "GOOD"
-    elif results["score"] >= 40:
-        results["status"] = "ACCEPTABLE"
-    else:
-        results["status"] = "WEAK"
-    
-    return results
 
 
 # ============================================================
