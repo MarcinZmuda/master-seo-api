@@ -40,46 +40,46 @@ class LengthProfile:
 PROFILES = {
     "short": LengthProfile(
         name="short",
-        paragraphs_min=2,
-        paragraphs_max=3,
-        words_min=150,
-        words_max=280,
+        paragraphs_min=3,  # 🆕 v41.1: było 2
+        paragraphs_max=4,  # 🆕 v41.1: było 3
+        words_min=200,     # 🆕 v41.1: było 150 (za mało!)
+        words_max=350,     # 🆕 v41.1: było 280 (za mało!)
         snippet_required=False,
         description="Zwięzła sekcja - proste pytanie lub krótka informacja"
     ),
     "medium": LengthProfile(
         name="medium",
         paragraphs_min=3,
-        paragraphs_max=4,
-        words_min=250,
-        words_max=400,
+        paragraphs_max=5,  # 🆕 v41.1: było 4
+        words_min=300,     # 🆕 v41.1: było 250
+        words_max=500,     # 🆕 v41.1: było 400
         snippet_required=True,
         description="Standardowa sekcja - wymaga rozwinięcia"
     ),
     "long": LengthProfile(
         name="long",
         paragraphs_min=4,
-        paragraphs_max=5,
-        words_min=350,
-        words_max=520,
+        paragraphs_max=6,  # 🆕 v41.1: było 5
+        words_min=400,     # 🆕 v41.1: było 350
+        words_max=600,     # 🆕 v41.1: było 520
         snippet_required=True,
         description="Rozbudowana sekcja - wiele aspektów do omówienia"
     ),
     "extended": LengthProfile(
         name="extended",
-        paragraphs_min=4,
-        paragraphs_max=6,
-        words_min=450,
-        words_max=650,
+        paragraphs_min=5,  # 🆕 v41.1: było 4
+        paragraphs_max=7,  # 🆕 v41.1: było 6
+        words_min=500,     # 🆕 v41.1: było 450
+        words_max=750,     # 🆕 v41.1: było 650
         snippet_required=True,
         description="Bardzo rozbudowana sekcja - kompleksowe omówienie"
     ),
     "intro": LengthProfile(
         name="intro",
         paragraphs_min=2,
-        paragraphs_max=3,
-        words_min=100,
-        words_max=160,
+        paragraphs_max=4,  # 🆕 v41.1: było 3
+        words_min=150,     # 🆕 v41.1: było 100 (za mało!)
+        words_max=250,     # 🆕 v41.1: było 160 (za mało!)
         snippet_required=True,
         description="Intro - hook + direct answer"
     )
@@ -553,16 +553,37 @@ def calculate_complexity_for_batch_plan(
         is_final=is_final
     )
     
+    # 🆕 v41.1: SKALOWANIE Z LICZBĄ H2!
+    # Każda sekcja H2 wymaga minimum 150-200 słów
+    MIN_WORDS_PER_H2 = 150
+    h2_count = len(h2_sections) if h2_sections else 1
+    
+    words_min = result.profile.words_min
+    words_max = result.profile.words_max
+    para_min = result.profile.paragraphs_min
+    para_max = result.profile.paragraphs_max
+    
+    if h2_count > 1:
+        # Skaluj słowa: każda dodatkowa H2 dodaje ~80% bazowej długości
+        h2_multiplier = 1 + (h2_count - 1) * 0.8
+        words_min = int(words_min * h2_multiplier)
+        words_max = int(words_max * h2_multiplier)
+        para_min = max(para_min, h2_count * 2)  # Min 2 akapity per H2
+        para_max = max(para_max, h2_count * 3)  # Max 3 akapity per H2
+    
+    # Enforce absolute minimum: 150 słów per H2
+    words_min = max(words_min, h2_count * MIN_WORDS_PER_H2)
+    
     return {
         "complexity_score": result.score,
         "profile_name": result.profile.name,
-        "target_words_min": result.profile.words_min,
-        "target_words_max": result.profile.words_max,
-        "target_paragraphs_min": result.profile.paragraphs_min,
-        "target_paragraphs_max": result.profile.paragraphs_max,
+        "target_words_min": words_min,
+        "target_words_max": words_max,
+        "target_paragraphs_min": para_min,
+        "target_paragraphs_max": para_max,
         "snippet_required": result.profile.snippet_required,
-        "factors": result.factors,
-        "reasoning": result.reasoning
+        "factors": {**result.factors, "h2_count": h2_count, "h2_multiplier": h2_multiplier if h2_count > 1 else 1.0},
+        "reasoning": result.reasoning + [f"🆕 H2 scaling: {h2_count} sekcji × {MIN_WORDS_PER_H2} min = {words_min}-{words_max} słów"]
     }
 
 
