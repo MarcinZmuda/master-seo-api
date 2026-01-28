@@ -1,6 +1,6 @@
 """
 ===============================================================================
-🧠 ADVANCED SEMANTIC FEATURES v1.0 - Rozszerzenie dla BRAJEN SEO Writer
+🧠 ADVANCED SEMANTIC FEATURES v1.1 - Rozszerzenie dla BRAJEN SEO Writer
 ===============================================================================
 Nowe mechanizmy zgodne z Google 2024+ dla lepszego rankingu:
 
@@ -22,6 +22,7 @@ Nowe mechanizmy zgodne z Google 2024+ dla lepszego rankingu:
 
 Autor: BRAJEN Team
 Data: 2025-01
+v1.1: Naprawiono sygnaturę detect_entity_gap (dodano alias 'text')
 ===============================================================================
 """
 
@@ -549,9 +550,11 @@ HARD_ENTITY_TYPE_NAMES = {"PERSON", "PER", "ORGANIZATION", "ORG", "LEGAL_ACT", "
 
 
 def detect_entity_gap(
-    content: str,
-    competitor_entities: List[Dict],
-    detected_content_entities: List[Dict] = None
+    content: str = None,
+    competitor_entities: List[Dict] = None,
+    detected_content_entities: List[Dict] = None,
+    *,
+    text: str = None  # ✅ ALIAS dla kompatybilności
 ) -> Dict[str, Any]:
     """
     Wykrywa brakujące encje vs konkurencja - AUTOMATYCZNIE z S1.
@@ -560,13 +563,25 @@ def detect_entity_gap(
     Wszystkie encje pochodzą z S1 (analiza konkurencji).
     
     Args:
-        content: Treść artykułu
+        content: Treść artykułu (lub użyj 'text' jako alias)
         competitor_entities: Encje z S1 entity_seo.entities (z konkurencji)
         detected_content_entities: Encje wykryte w naszej treści (opcjonalne)
+        text: Alias dla 'content' (dla kompatybilności wstecznej)
         
     Returns:
         Dict z analizą braków i rekomendacjami
     """
+    # ✅ OBSŁUGA ALIASU - przyjmij 'text' jeśli 'content' nie podano
+    if content is None and text is not None:
+        content = text
+    
+    if content is None:
+        return {
+            "status": "NO_DATA",
+            "message": "Brak tekstu do analizy",
+            "coverage_score": 0.5
+        }
+    
     content_lower = content.lower()
     config = AdvancedSemanticConfig()
     
@@ -583,15 +598,21 @@ def detect_entity_gap(
     # Z NER detection (jeśli dostępne)
     if detected_content_entities:
         for e in detected_content_entities:
-            text = e.get("text", "").lower().strip()
-            if text and len(text) > 2:
-                our_entities.add(text)
+            if isinstance(e, dict):
+                text_val = e.get("text", "").lower().strip()
+            else:
+                text_val = str(e).lower().strip()
+            if text_val and len(text_val) > 2:
+                our_entities.add(text_val)
     
     # Dodatkowo: sprawdź które encje z S1 występują w treści
     for entity in competitor_entities:
-        text = entity.get("text", "").lower().strip()
-        if text and text in content_lower:
-            our_entities.add(text)
+        if isinstance(entity, dict):
+            text_val = entity.get("text", "").lower().strip()
+        else:
+            text_val = str(entity).lower().strip()
+        if text_val and text_val in content_lower:
+            our_entities.add(text_val)
     
     # 2. Analizuj encje z S1 - które mamy, których brakuje
     entity_gap = []
@@ -601,19 +622,34 @@ def detect_entity_gap(
     missing_by_type = defaultdict(list)
     
     for entity in competitor_entities:
-        text = entity.get("text", "")
-        text_lower = text.lower().strip()
-        ent_type = entity.get("type", "UNKNOWN")
-        importance = entity.get("importance", 0.5)
-        sources_count = entity.get("sources_count", 1)
-        context = entity.get("sample_context", entity.get("context", ""))
+        # ✅ Defensywna obsługa różnych formatów
+        if isinstance(entity, dict):
+            text_val = entity.get("text", "")
+            ent_type = entity.get("type", "UNKNOWN")
+            importance = entity.get("importance", 0.5)
+            sources_count = entity.get("sources_count", 1)
+            context = entity.get("sample_context", entity.get("context", ""))
+        elif isinstance(entity, (list, tuple)) and len(entity) >= 2:
+            text_val = str(entity[0])
+            ent_type = str(entity[1]) if len(entity) > 1 else "UNKNOWN"
+            importance = float(entity[2]) if len(entity) > 2 else 0.5
+            sources_count = int(entity[3]) if len(entity) > 3 else 1
+            context = ""
+        else:
+            text_val = str(entity)
+            ent_type = "UNKNOWN"
+            importance = 0.5
+            sources_count = 1
+            context = ""
+        
+        text_lower_val = text_val.lower().strip()
         
         # Czy encja jest w naszej treści?
-        is_found = text_lower in our_entities or text_lower in content_lower
+        is_found = text_lower_val in our_entities or text_lower_val in content_lower
         
         if is_found:
             found_entities.append({
-                "entity": text,
+                "entity": text_val,
                 "type": ent_type,
                 "importance": importance
             })
@@ -633,14 +669,14 @@ def detect_entity_gap(
             weight = ENTITY_TYPE_WEIGHTS.get(ent_type, 0.8)
             
             gap_entry = {
-                "entity": text,
+                "entity": text_val,
                 "type": ent_type,
                 "priority": priority,
                 "importance": importance,
                 "sources_in_competitors": sources_count,
                 "weight": weight,
                 "context_hint": context[:150] if context else "",
-                "recommendation": f"Dodaj wzmiankę o: {text}"
+                "recommendation": f"Dodaj wzmiankę o: {text_val}"
             }
             
             entity_gap.append(gap_entry)
@@ -654,7 +690,15 @@ def detect_entity_gap(
     
     # 4. Oblicz coverage score
     # Liczymy tylko encje z importance >= 0.3 (istotne)
-    important_competitor_entities = [e for e in competitor_entities if e.get("importance", 0) >= 0.3]
+    important_competitor_entities = []
+    for e in competitor_entities:
+        if isinstance(e, dict):
+            imp = e.get("importance", 0)
+        else:
+            imp = 0.5
+        if imp >= 0.3:
+            important_competitor_entities.append(e)
+    
     total_important = len(important_competitor_entities)
     total_found = len(found_entities)
     
@@ -1025,7 +1069,7 @@ def perform_advanced_semantic_analysis(
     
     # 3. Entity Gap Analysis
     if competitor_entities:
-        gap_result = detect_entity_gap(content, competitor_entities, detected_content_entities)
+        gap_result = detect_entity_gap(content=content, competitor_entities=competitor_entities, detected_content_entities=detected_content_entities)
     else:
         gap_result = {
             "status": "NO_DATA",
@@ -1092,7 +1136,7 @@ def perform_advanced_semantic_analysis(
             all_recommendations.append({
                 "type": "ENTITY_GAP",
                 "priority": "HIGH",
-                "action": f"Dodaj wzmiankę o: {entity['entity']} ({entity['type_description']})",
+                "action": f"Dodaj wzmiankę o: {entity['entity']} ({entity.get('type', 'UNKNOWN')})",
                 "importance": entity.get("importance", 0.5)
             })
     
