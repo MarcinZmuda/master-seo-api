@@ -1483,11 +1483,23 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
             
             kw_type = meta.get("type", "BASIC").upper()
             actual = meta.get("actual_uses", 0)
-            target_max = meta.get("target_max", 999)
             target_min = meta.get("target_min", 1)
+            
+            # 🆕 v40.0: Użyj ORYGINALNEGO limitu (przed redukcją nested keywords)
+            # original_max to limit który użytkownik FAKTYCZNIE podał
+            original_max = meta.get("original_max")  # Zapisany przed redukcją
+            target_max_current = meta.get("target_max", target_min * 3)
+            
+            # Jeśli jest original_max → użyj go (fraza była zredukowana)
+            # Jeśli nie ma → użyj target_max (fraza nie była redukowana)
+            target_max = original_max if original_max else target_max_current
             
             # Oblicz tolerancję (30% powyżej max)
             tolerance_max = int(target_max * (1 + TOLERANCE_PERCENT / 100))
+            
+            # Debug log dla zredukowanych fraz
+            if original_max and original_max != target_max_current:
+                print(f"[FINAL REVIEW] ℹ️ '{keyword}': using original_max={original_max} (was reduced to {target_max_current})")
             
             # Sprawdź przekroczenie
             if actual > tolerance_max:
@@ -1499,10 +1511,12 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
                     "type": kw_type,
                     "actual": actual,
                     "target_max": target_max,
+                    "original_max": original_max,  # 🆕 v40.0
                     "tolerance_max": tolerance_max,
                     "exceeded_by": exceeded_by,
                     "over_tolerance_by": over_tolerance_by,
                     "severity": "ERROR",
+                    "was_reduced": original_max is not None and original_max != target_max_current,  # 🆕 v40.0
                     "message": f"'{keyword}' przekroczyła limit nawet z tolerancją 30%: {actual}/{target_max} (max z tolerancją: {tolerance_max})"
                 })
                 print(f"[FINAL REVIEW] ❌ '{keyword}': {actual}/{target_max} (tolerance {tolerance_max}) - EXCEEDED!")
@@ -1514,9 +1528,11 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
                     "type": kw_type,
                     "actual": actual,
                     "target_max": target_max,
+                    "original_max": original_max,  # 🆕 v40.0
                     "tolerance_max": tolerance_max,
                     "exceeded_by": actual - target_max,
                     "severity": "WARNING",
+                    "was_reduced": original_max is not None and original_max != target_max_current,  # 🆕 v40.0
                     "message": f"'{keyword}' lekko przekroczona ale w tolerancji 30%: {actual}/{target_max} (OK)"
                 })
                 print(f"[FINAL REVIEW] ⚠️ '{keyword}': {actual}/{target_max} (within tolerance) - OK")
