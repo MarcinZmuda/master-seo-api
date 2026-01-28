@@ -1,7 +1,7 @@
 # ================================================================
-# 🔍 FINAL REVIEW ROUTES v40.0 - ORIGINAL_MAX FIX
+# 🔍 FINAL REVIEW ROUTES v40.1 - ORIGINAL_MAX FIX
 # ================================================================
-# ZMIANY v40.0:
+# ZMIANY v40.1:
 # - FIX: Używa original_max zamiast target_max dla zredukowanych fraz
 # - TYLKO stuffing (>max) blokuje
 # - Brak frazy (0×) = warning, Claude uzupełni
@@ -29,6 +29,19 @@ except ImportError:
     UNIFIED_COUNTER = False
     print("[FINAL_REVIEW] ⚠️ keyword_counter not available, using legacy regex")
 
+# 🆕 v40.1: Advanced Semantic Features (source effort, topic completeness)
+try:
+    from advanced_semantic_features import (
+        calculate_source_effort_v2,
+        analyze_topic_completeness,
+        perform_advanced_semantic_analysis
+    )
+    ADVANCED_SEMANTIC_ENABLED = True
+    print("[FINAL_REVIEW] ✅ Advanced semantic features loaded")
+except ImportError as e:
+    ADVANCED_SEMANTIC_ENABLED = False
+    print(f"[FINAL_REVIEW] ⚠️ Advanced semantic features not available: {e}")
+
 final_review_routes = Blueprint("final_review_routes", __name__)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -40,16 +53,16 @@ else:
 
 GEMINI_MODEL = "gemini-2.5-flash"
 
-# 🆕 v40.0: Tolerancja dla przekroczenia limitu
+# 🆕 v40.1: Tolerancja dla przekroczenia limitu
 TOLERANCE_PERCENT = 30
 
 
 # ================================================================
-# 1. MISSING KEYWORDS DETECTOR - v40.0 (ORIGINAL_MAX FIX)
+# 1. MISSING KEYWORDS DETECTOR - v40.1 (ORIGINAL_MAX FIX)
 # ================================================================
 def detect_missing_keywords(text, keywords_state):
     """
-    v40.0: Wykrywa brakujące frazy - używa ORIGINAL_MAX dla zredukowanych fraz!
+    v40.1: Wykrywa brakujące frazy - używa ORIGINAL_MAX dla zredukowanych fraz!
     
     WAŻNE:
     - Frazy mogą mieć zredukowany target_max (np. 24→2) przez AUTO-REDUKCJA
@@ -86,7 +99,7 @@ def detect_missing_keywords(text, keywords_state):
             target_min = meta.get("target_min", 1)
             
             # ================================================================
-            # 🆕 v40.0: CRITICAL FIX - użyj ORIGINAL_MAX!
+            # 🆕 v40.1: CRITICAL FIX - użyj ORIGINAL_MAX!
             # ================================================================
             # target_max może być zredukowany przez AUTO-REDUKCJA (np. 24→2)
             # original_max to limit który użytkownik FAKTYCZNIE podał
@@ -126,7 +139,7 @@ def detect_missing_keywords(text, keywords_state):
                 "was_reduced": original_max is not None and original_max != target_max_current
             }
             
-            # v40.0: NOWA LOGIKA - używa original_max!
+            # v40.1: NOWA LOGIKA - używa original_max!
             if actual > tolerance_max:
                 # CRITICAL: stuffing POZA tolerancją - JEDYNY BLOKER!
                 info["severity"] = "stuffing_critical"
@@ -155,7 +168,7 @@ def detect_missing_keywords(text, keywords_state):
         
         missing_basic.sort(key=lambda x: x["missing"], reverse=True)
         
-        # v40.0: needs_correction TYLKO dla stuffing POZA tolerancją!
+        # v40.1: needs_correction TYLKO dla stuffing POZA tolerancją!
         has_critical_stuffing = len(stuffing) > 0
         
         return {
@@ -169,7 +182,7 @@ def detect_missing_keywords(text, keywords_state):
                 "to_add_by_claude": missing_basic + missing_extended,  # Claude uzupełni
                 "ok": underused_basic + underused_extended     # OK, nie trzeba nic robić
             },
-            "needs_correction": has_critical_stuffing,  # v40.0: TYLKO stuffing POZA tolerancją blokuje!
+            "needs_correction": has_critical_stuffing,  # v40.1: TYLKO stuffing POZA tolerancją blokuje!
             "needs_claude_help": len(missing_basic) + len(missing_extended) > 0,
             "summary": {
                 "missing_count": len(missing_basic) + len(missing_extended),
@@ -178,7 +191,7 @@ def detect_missing_keywords(text, keywords_state):
                 "stuffing_warning_count": len(within_tolerance),
                 "tolerance_percent": TOLERANCE_PERCENT
             },
-            "version": "v40.0"
+            "version": "v40.1"
         }
     except Exception as e:
         print(f"[FINAL_REVIEW] ❌ detect_missing_keywords error: {e}")
@@ -423,11 +436,11 @@ def check_ngrams(text, s1_data):
 
 
 # ================================================================
-# 7. 🆕 v40.0: KEYWORDS SUMMARY WITH TOLERANCE
+# 7. 🆕 v40.1: KEYWORDS SUMMARY WITH TOLERANCE
 # ================================================================
 def get_keywords_validation_summary(missing_kw):
     """
-    v40.0: Generuje podsumowanie walidacji keywords z tolerancją 30%.
+    v40.1: Generuje podsumowanie walidacji keywords z tolerancją 30%.
     
     Returns:
         {
@@ -527,14 +540,14 @@ def get_final_review(project_id):
 @final_review_routes.post("/api/project/<project_id>/final_review")
 def perform_final_review(project_id):
     """
-    v40.0: Kompleksowy audyt końcowy artykułu.
+    v40.1: Kompleksowy audyt końcowy artykułu.
     
-    ZMIANY v40.0:
+    ZMIANY v40.1:
     - Używa original_max zamiast target_max dla zredukowanych fraz
     - Tolerancja 30% dla przekroczenia
     - Szczegółowe podsumowanie keywords_validation
     """
-    print(f"[FINAL_REVIEW] 🔍 Starting review v40.0 for project: {project_id}")
+    print(f"[FINAL_REVIEW] 🔍 Starting review v40.1 for project: {project_id}")
     
     try:
         db = firestore.client()
@@ -572,7 +585,7 @@ def perform_final_review(project_id):
         print("[FINAL_REVIEW] 🔍 Running validations...")
         
         missing_kw = detect_missing_keywords(full_text, keywords_state)
-        print(f"[FINAL_REVIEW] ✅ Missing keywords check done (v40.0 with original_max)")
+        print(f"[FINAL_REVIEW] ✅ Missing keywords check done (v40.1 with original_max)")
         
         main_syn = check_main_vs_synonyms(full_text, main_keyword, keywords_state)
         print(f"[FINAL_REVIEW] ✅ Main vs synonyms check done")
@@ -589,7 +602,7 @@ def perform_final_review(project_id):
         ngram_val = check_ngrams(full_text, s1_data)
         print(f"[FINAL_REVIEW] ✅ N-gram check done")
         
-        # 🆕 v40.0: Keywords validation summary
+        # 🆕 v40.1: Keywords validation summary
         keywords_validation = get_keywords_validation_summary(missing_kw)
         
         # ================================================================
@@ -597,7 +610,7 @@ def perform_final_review(project_id):
         # ================================================================
         all_issues = []
         
-        # 🆕 v40.0: Stuffing poza tolerancją = ERROR
+        # 🆕 v40.1: Stuffing poza tolerancją = ERROR
         if missing_kw.get("stuffing"):
             for kw in missing_kw["stuffing"]:
                 all_issues.append({
@@ -610,7 +623,7 @@ def perform_final_review(project_id):
                     "message": f"'{kw['keyword']}': {kw['actual']}/{kw['target_max']} przekracza tolerancję {TOLERANCE_PERCENT}%"
                 })
         
-        # 🆕 v40.0: Stuffing w tolerancji = WARNING
+        # 🆕 v40.1: Stuffing w tolerancji = WARNING
         if missing_kw.get("within_tolerance"):
             for kw in missing_kw["within_tolerance"]:
                 all_issues.append({
@@ -626,7 +639,7 @@ def perform_final_review(project_id):
         if missing_kw.get("missing", {}).get("basic"):
             all_issues.append({
                 "type": "MISSING_BASIC",
-                "severity": "WARNING",  # v40.0: Downgrade z ERROR do WARNING
+                "severity": "WARNING",  # v40.1: Downgrade z ERROR do WARNING
                 "keywords": [k["keyword"] for k in missing_kw["missing"]["basic"][:5]],
                 "message": "Brakujące frazy - Claude uzupełni"
             })
@@ -673,7 +686,7 @@ def perform_final_review(project_id):
         errors = sum(1 for i in all_issues if i.get("severity") == "ERROR")
         warnings = sum(1 for i in all_issues if i.get("severity") == "WARNING")
         
-        # v40.0: TYLKO stuffing poza tolerancją blokuje
+        # v40.1: TYLKO stuffing poza tolerancją blokuje
         status = "WYMAGA_POPRAWEK" if errors > 0 else ("WARN" if warnings > 2 else "OK")
         
         # ================================================================
@@ -729,6 +742,58 @@ def perform_final_review(project_id):
         score = max(0, min(100, score))
         
         # ================================================================
+        # 🆕 v40.1: ADVANCED SEMANTIC ANALYSIS
+        # ================================================================
+        advanced_semantic = None
+        if ADVANCED_SEMANTIC_ENABLED:
+            try:
+                # Source Effort Score - czy artykuł ma sygnały ekspertyzji
+                source_effort = calculate_source_effort_v2(full_text)
+                
+                # Topic Completeness - czy pokrywa temat kompleksowo
+                expected_entities = []
+                entity_seo = s1_data.get("entity_seo", {})
+                for ent in entity_seo.get("entities", [])[:20]:
+                    expected_entities.append(ent.get("name", "") if isinstance(ent, dict) else str(ent))
+                
+                topic_analysis = analyze_topic_completeness(
+                    text=full_text,
+                    expected_topics=expected_entities,
+                    main_keyword=main_keyword
+                )
+                
+                advanced_semantic = {
+                    "source_effort": {
+                        "score": source_effort.get("score", 0),
+                        "status": source_effort.get("status", "UNKNOWN"),
+                        "signals_found": source_effort.get("signals_found", [])[:5],
+                        "recommendations": source_effort.get("recommendations", [])[:3]
+                    },
+                    "topic_completeness": {
+                        "score": topic_analysis.get("score", 0),
+                        "status": topic_analysis.get("status", "UNKNOWN"),
+                        "missing_topics": topic_analysis.get("missing_topics", [])[:5]
+                    }
+                }
+                
+                # Dodaj do score
+                if source_effort.get("score", 50) < 40:
+                    score -= 5
+                    recommendations.append("🔵 Dodaj źródła (badania, ekspertów, orzecznictwo)")
+                
+                if topic_analysis.get("score", 50) < 60:
+                    score -= 5
+                    for topic in topic_analysis.get("missing_topics", [])[:2]:
+                        recommendations.append(f"🔵 Rozwiń temat: {topic}")
+                
+                score = max(0, min(100, score))
+                print(f"[FINAL_REVIEW] ✅ Advanced semantic done: source={source_effort.get('score', 0)}, completeness={topic_analysis.get('score', 0)}")
+                
+            except Exception as adv_error:
+                print(f"[FINAL_REVIEW] ⚠️ Advanced semantic error: {adv_error}")
+                advanced_semantic = {"error": str(adv_error)}
+        
+        # ================================================================
         # Result
         # ================================================================
         result = {
@@ -736,10 +801,13 @@ def perform_final_review(project_id):
             "project_id": project_id,
             "word_count": word_count,
             "score": score,
-            "version": "v40.0",
+            "version": "v40.1",
             
-            # 🆕 v40.0: Keywords validation z tolerancją
+            # 🆕 v40.1: Keywords validation z tolerancją
             "keywords_validation": keywords_validation,
+            
+            # 🆕 v40.1: Advanced semantic analysis
+            "advanced_semantic": advanced_semantic,
             
             "validations": {
                 "missing_keywords": missing_kw,
@@ -832,7 +900,7 @@ def apply_final_corrections(project_id):
             if kw.get("keyword"):
                 keywords_to_add.append({"keyword": kw["keyword"], "times": kw.get("target_min", 1)})
         
-        # 🆕 v40.0: Keywords to remove (stuffing)
+        # 🆕 v40.1: Keywords to remove (stuffing)
         keywords_to_remove = []
         for kw in missing_kw.get("stuffing", [])[:3]:
             if kw.get("keyword"):
