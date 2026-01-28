@@ -1804,9 +1804,63 @@ def create_project():
         return jsonify({"error": "Required field: topic or main_keyword"}), 400
     
     h2_structure = data.get("h2_structure", [])
+    h2_terms = data.get("h2_terms", [])  # v39.0: Hasła do wygenerowania H2
     raw_keywords = data.get("keywords_list") or data.get("keywords", [])
     target_length = data.get("target_length", 3000)
     source = data.get("source", "unknown")
+    s1_data = data.get("s1_data", {})  # v39.0: Dane z S1 do generowania H2
+    
+    # ================================================================
+    # v39.0: AUTO-GENEROWANIE H2 z h2_terms + S1
+    # Jeśli user podał h2_terms (hasła) zamiast gotowych h2_structure,
+    # generujemy pełne H2 używając h2_generator + danych z S1
+    # ================================================================
+    h2_generation_info = None
+    if h2_terms and not h2_structure:
+        print(f"[PROJECT] 🏗️ Generating H2 from h2_terms: {h2_terms}")
+        
+        if H2_GENERATOR_ENABLED:
+            try:
+                # Wyciągnij dane z S1
+                search_intent = s1_data.get("search_intent", "informational")
+                entities = s1_data.get("entity_seo", {}).get("entities", []) or s1_data.get("entities", [])
+                paa_questions = [p.get("question", "") for p in s1_data.get("paa", []) or s1_data.get("paa_questions", [])]
+                competitor_h2 = s1_data.get("serp_analysis", {}).get("competitor_h2", []) or s1_data.get("competitor_h2", [])
+                
+                # Generuj plan H2
+                h2_result = generate_h2_plan(
+                    main_keyword=topic,
+                    h2_phrases=h2_terms,
+                    search_intent=search_intent,
+                    entities=entities[:15] if entities else [],
+                    paa_questions=paa_questions[:10] if paa_questions else [],
+                    competitor_h2=competitor_h2[:20] if competitor_h2 else []
+                )
+                
+                # Wyciągnij wygenerowane H2
+                h2_structure = [h.get("h2", "") for h in h2_result.get("h2_plan", []) if h.get("h2")]
+                
+                h2_generation_info = {
+                    "source": "h2_generator",
+                    "h2_terms_used": h2_terms,
+                    "search_intent": search_intent,
+                    "h2_plan_details": h2_result.get("h2_plan", []),
+                    "coverage": h2_result.get("coverage", {}),
+                    "h3_suggestions": h2_result.get("h3_suggestions", {})
+                }
+                
+                print(f"[PROJECT] ✅ Generated {len(h2_structure)} H2: {h2_structure}")
+                
+            except Exception as e:
+                print(f"[PROJECT] ⚠️ H2 generator failed: {e}, using h2_terms as-is")
+                # Fallback: użyj h2_terms jako proste H2
+                h2_structure = [f"Czym jest {h2_terms[0]}?" if i == 0 else term for i, term in enumerate(h2_terms)]
+                h2_generation_info = {"source": "fallback", "error": str(e)}
+        else:
+            # Fallback bez modułu: proste H2 z terminów
+            print(f"[PROJECT] ⚠️ H2 generator not available, using h2_terms as-is")
+            h2_structure = [f"Czym jest {h2_terms[0]}?" if i == 0 else term for i, term in enumerate(h2_terms)]
+            h2_generation_info = {"source": "fallback_no_module"}
     
     total_planned_batches = data.get("total_planned_batches")
     if not total_planned_batches:
@@ -1890,11 +1944,29 @@ def create_project():
     # 
     # Musimy obniżyć target_max krótszej frazy proporcjonalnie do tego
     # ile razy będzie "dziedziczona" z dłuższych fraz.
+    #
+    # v39.0: SKIP dla fraz w H2 (STRUCTURAL) - nie redukujemy ich limitów!
     # ================================================================
+    
+    # v39.0: Zidentyfikuj frazy STRUCTURAL (w H2 lub MAIN)
+    structural_keywords = set()
+    for h2 in h2_structure:
+        h2_lower = h2.lower()
+        for rid, meta in firestore_keywords.items():
+            kw = meta.get("keyword", "").lower()
+            if kw and (kw in h2_lower or h2_lower in kw or meta.get("type", "").upper() == "MAIN"):
+                structural_keywords.add(rid)
+                firestore_keywords[rid]["is_structural"] = True
+    
     all_keywords = [(rid, meta.get("keyword", "").lower(), meta.get("keyword", "").lower().split()) 
                     for rid, meta in firestore_keywords.items()]
     
     for rid, meta in firestore_keywords.items():
+        # v39.0: SKIP redukcji dla STRUCTURAL keywords
+        if rid in structural_keywords:
+            print(f"[PROJECT] 🔵 STRUCTURAL: '{meta.get('keyword')}' - skipping auto-reduction")
+            continue
+            
         keyword_lower = meta.get("keyword", "").lower()
         keyword_words = set(keyword_lower.split())  # słowa z tej frazy
         original_max = meta.get("target_max", 5)
@@ -2191,6 +2263,8 @@ def create_project():
             "warning": warning
         },
         "h2_sections": len(h2_structure),
+        "h2_structure": h2_structure,  # 🆕 v39.0: Zwracamy wygenerowane H2
+        "h2_generation_info": h2_generation_info,  # 🆕 v39.0: Info o generowaniu
         "total_planned_batches": total_planned_batches,
         "target_length": target_length,
         # 🆕 v35.7: Auto-scaling info
@@ -2203,7 +2277,7 @@ def create_project():
         "legal_module_active": project_data.get("legal_context", {}).get("legal_module_active", False),
         "legal_instruction": project_data.get("legal_instruction"),
         "legal_judgments": project_data.get("legal_judgments", []),
-        "version": "v35.7"
+        "version": "v39.0"
     }), 201
 
 
