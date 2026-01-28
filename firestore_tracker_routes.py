@@ -95,6 +95,19 @@ from google.api_core.exceptions import InvalidArgument
 import google.generativeai as genai
 import os
 
+# v40.2: Import from core_metrics (Single Source of Truth)
+try:
+    from core_metrics import (
+        calculate_burstiness_simple as _calculate_burstiness_core,
+        calculate_transition_score as _calculate_transition_score_core,
+        split_into_sentences,
+        TRANSITION_WORDS_PL as TRANSITION_WORDS_CORE
+    )
+    CORE_METRICS_AVAILABLE = True
+except ImportError:
+    CORE_METRICS_AVAILABLE = False
+    print("[FIRESTORE_TRACKER] ⚠️ core_metrics not available, using local functions")
+
 # ================================================================
 # 🆕 v36.3: FIRESTORE KEY SANITIZATION
 # ================================================================
@@ -434,19 +447,25 @@ def validate_structure(text):
     return {"valid": True}
 
 
-def calculate_burstiness(text):
-    """Target: 3.2-3.8"""
-    sentences = re.split(r'[.!?]+', text)
-    sentences = [s.strip() for s in sentences if s.strip()]
-    if len(sentences) < 3:
-        return 0.0
-    lengths = [len(s.split()) for s in sentences]
-    mean = sum(lengths) / len(lengths)
-    variance = sum((x - mean) ** 2 for x in lengths) / len(lengths)
-    if not mean:
-        return 0.0
-    raw_score = math.sqrt(variance) / mean
-    return round(raw_score * 5, 2)
+# v40.2: Use core_metrics if available, fallback to local implementation
+if CORE_METRICS_AVAILABLE:
+    def calculate_burstiness(text):
+        """Deleguje do core_metrics.calculate_burstiness_simple"""
+        return _calculate_burstiness_core(text)
+else:
+    def calculate_burstiness(text):
+        """Target: 3.2-3.8 (FALLBACK - use core_metrics instead)"""
+        sentences = re.split(r'[.!?]+', text)
+        sentences = [s.strip() for s in sentences if s.strip()]
+        if len(sentences) < 3:
+            return 0.0
+        lengths = [len(s.split()) for s in sentences]
+        mean = sum(lengths) / len(lengths)
+        variance = sum((x - mean) ** 2 for x in lengths) / len(lengths)
+        if not mean:
+            return 0.0
+        raw_score = math.sqrt(variance) / mean
+        return round(raw_score * 5, 2)
 
 
 TRANSITION_WORDS_PL = [
