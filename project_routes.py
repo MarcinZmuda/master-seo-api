@@ -1,7 +1,7 @@
 """
-PROJECT ROUTES - v36.3 BRAJEN SEO Engine - FIRESTORE FIX
+PROJECT ROUTES - v40.1 BRAJEN SEO Engine - FIRESTORE FIX
 
-ZMIANY v36.3:
+ZMIANY v40.1:
 - 🆕 FIRESTORE FIX: sanitize_for_firestore() dla kluczy ze znakami . / [ ]
 - 🆕 Sanityzacja przed każdym doc_ref.set() i doc_ref.update()
 - 🆕 Naprawiono ValueError: One or more components is not a string or is empty
@@ -60,8 +60,17 @@ from firestore_tracker_routes import process_batch_in_firestore
 import google.generativeai as genai
 from seo_optimizer import unified_prevalidation
 
+# 🆕 v40.1: Keyword Conflict Validator - zapobiega stuffing/rewrite loop
+try:
+    from keyword_conflict_validator import validate_keywords_before_create
+    KEYWORD_CONFLICT_VALIDATOR_ENABLED = True
+    print("[PROJECT_ROUTES] ✅ keyword_conflict_validator loaded")
+except ImportError as e:
+    KEYWORD_CONFLICT_VALIDATOR_ENABLED = False
+    print(f"[PROJECT_ROUTES] ⚠️ keyword_conflict_validator not available: {e}")
+
 # ================================================================
-# 🆕 v36.3: FIRESTORE KEY SANITIZATION
+# 🆕 v40.1: FIRESTORE KEY SANITIZATION
 # Firestore nie akceptuje pustych kluczy ani znaków . / [ ] w kluczach
 # ================================================================
 def sanitize_for_firestore(data, depth=0, max_depth=50):
@@ -1869,6 +1878,44 @@ def create_project():
     main_keyword_synonyms = detect_main_keyword_synonyms(topic)
     print(f"[PROJECT]  Main keyword synonyms for '{topic}': {main_keyword_synonyms}")
 
+    # ================================================================
+    # 🆕 v40.1: WALIDACJA KONFLIKTÓW FRAZ
+    # Zapobiega tworzeniu projektów gdzie BASIC keyword ⊂ MAIN lub H2
+    # (co prowadzi do nieskończonej pętli REWRITE)
+    # ================================================================
+    keyword_conflict_info = None
+    if KEYWORD_CONFLICT_VALIDATOR_ENABLED and raw_keywords:
+        try:
+            conflict_result = validate_keywords_before_create(
+                main_keyword=topic,
+                h2_structure=h2_structure,
+                keywords_list=raw_keywords,
+                auto_fix=True  # Automatycznie napraw konflikty (degradacja BASIC → EXTENDED)
+            )
+            
+            keyword_conflict_info = {
+                "conflicts_found": len(conflict_result.get("conflicts", [])),
+                "critical_fixed": conflict_result.get("critical_count", 0),
+                "warnings": conflict_result.get("warning_count", 0),
+                "message": conflict_result.get("message", "")
+            }
+            
+            # Jeśli auto_fix naprawił konflikty, użyj poprawionej listy
+            if conflict_result.get("fixed_keywords"):
+                raw_keywords = conflict_result["fixed_keywords"]
+                print(f"[PROJECT] 🔧 Keyword conflicts auto-fixed: {keyword_conflict_info}")
+            
+            if not conflict_result.get("can_create", True):
+                return jsonify({
+                    "error": "Keyword conflicts detected",
+                    "conflicts": conflict_result.get("conflicts", []),
+                    "message": conflict_result.get("message", "")
+                }), 400
+                
+        except Exception as e:
+            print(f"[PROJECT] ⚠️ Keyword conflict validation failed: {e}")
+            keyword_conflict_info = {"error": str(e)}
+
     firestore_keywords = {}
     main_keyword_found = False
     
@@ -2177,7 +2224,7 @@ def create_project():
         except Exception as e:
             print(f"[PROJECT] ⚠️ Anti-Frankenstein error: {e}")
     
-    # 🆕 v36.3: Sanitize keys before Firestore save
+    # 🆕 v40.1: Sanitize keys before Firestore save
     try:
         project_data = sanitize_for_firestore(project_data)
         print(f"[PROJECT] ✅ Data sanitized for Firestore")
@@ -2265,6 +2312,7 @@ def create_project():
         "h2_sections": len(h2_structure),
         "h2_structure": h2_structure,  # 🆕 v39.0: Zwracamy wygenerowane H2
         "h2_generation_info": h2_generation_info,  # 🆕 v39.0: Info o generowaniu
+        "keyword_conflict_info": keyword_conflict_info,  # 🆕 v40.1: Info o konfliktach fraz
         "total_planned_batches": total_planned_batches,
         "target_length": target_length,
         # 🆕 v35.7: Auto-scaling info
@@ -2277,7 +2325,7 @@ def create_project():
         "legal_module_active": project_data.get("legal_context", {}).get("legal_module_active", False),
         "legal_instruction": project_data.get("legal_instruction"),
         "legal_judgments": project_data.get("legal_judgments", []),
-        "version": "v39.0"
+        "version": "v40.1"
     }), 201
 
 
@@ -3654,9 +3702,12 @@ def get_pre_batch_info(project_id):
                 entity_state=data.get("entity_state", {}),
                 style_fingerprint=data.get("style_fingerprint", {}),
                 is_ymyl=data.get("is_ymyl", False),
-                is_legal=data.get("is_legal", False) or data.get("detected_category") == "prawo"
+                is_legal=data.get("is_legal", False) or data.get("detected_category") == "prawo",
+                batch_plan=batch_plan  # 🆕 v40.1: Przekaż batch_plan z h2_sections
             )
-            print(f"[PRE_BATCH] 🎯 Enhanced instructions: {len(enhanced_info.get('entities_to_define', []))} entities, {len(enhanced_info.get('relations_to_establish', []))} relations")
+            # 🆕 v40.1: Log ile H2 w batchu
+            h2_in_batch = enhanced_info.get("h2_count_in_batch", 0)
+            print(f"[PRE_BATCH] 🎯 Enhanced: {len(enhanced_info.get('entities_to_define', []))} entities, {len(enhanced_info.get('relations_to_establish', []))} relations, {h2_in_batch} H2 in batch")
         except Exception as e:
             print(f"[PRE_BATCH] ⚠️ Enhanced pre-batch error: {e}")
             import traceback
