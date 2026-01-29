@@ -1128,7 +1128,8 @@ def generate_enhanced_pre_batch_info(
     is_ymyl: bool = False,
     is_legal: bool = False,
     batch_plan: Dict = None,  # 🆕 v40.1: Plan batcha z h2_sections
-    detected_articles: List[str] = None  # 🆕 v41.4: Artykuły prawne do opisania
+    detected_articles: List[str] = None,  # 🆕 v41.4: Artykuły prawne do opisania
+    legal_judgments: List[Dict] = None  # 🆕 v41.4: Orzeczenia z URL do cytowania
 ) -> Dict[str, Any]:
     """Generuje KOMPLETNE enhanced pre_batch_info z konkretnymi instrukcjami."""
     if entity_state is None:
@@ -1139,6 +1140,8 @@ def generate_enhanced_pre_batch_info(
         batch_plan = {}
     if detected_articles is None:
         detected_articles = []
+    if legal_judgments is None:
+        legal_judgments = []
     
     remaining_batches = max(1, total_batches - len(batches))
     
@@ -1354,8 +1357,11 @@ def generate_enhanced_pre_batch_info(
     
     enhanced["legal_article_requirement"] = legal_article_requirement
     
+    # 🆕 v41.4: Orzeczenia do cytowania (z URL!)
+    enhanced["legal_judgments"] = legal_judgments if is_legal and legal_judgments else []
+    
     # GPT PROMPT SECTION
-    enhanced["gpt_instructions"] = _generate_gpt_prompt_section(enhanced, is_legal, detected_articles)
+    enhanced["gpt_instructions"] = _generate_gpt_prompt_section(enhanced, is_legal, detected_articles, legal_judgments)
     
     # 🆕 v40.2: CONCEPT MAP (Semantic Entity SEO)
     if CONCEPT_MAP_AVAILABLE and current_batch_num == 1:
@@ -1549,7 +1555,7 @@ def _generate_legal_article_instruction(article: str, level: str, topic: str) ->
     return instruction.strip()
 
 
-def _generate_gpt_prompt_section(enhanced: Dict, is_legal: bool = False, detected_articles: List[str] = None) -> str:
+def _generate_gpt_prompt_section(enhanced: Dict, is_legal: bool = False, detected_articles: List[str] = None, legal_judgments: List[Dict] = None) -> str:
     """Generuje gotową sekcję promptu dla GPT.
     
     🆕 v41.3: Logika akapitów PER SEKCJA H2, nie per batch.
@@ -1619,6 +1625,50 @@ def _generate_gpt_prompt_section(enhanced: Dict, is_legal: bool = False, detecte
         lines.append("=" * 60)
         lines.append(legal_req["instruction"])
         lines.append("=" * 60)
+        lines.append("")
+    
+    # ================================================================
+    # 🆕 v41.4: ORZECZENIA DO CYTOWANIA (standard prawniczy)
+    # ================================================================
+    judgments = enhanced.get("legal_judgments", []) or legal_judgments or []
+    if judgments and is_legal:
+        lines.append("🏛️ ORZECZENIA DO CYTOWANIA (użyj min. 1 w artykule):")
+        lines.append("=" * 50)
+        lines.append("")
+        lines.append("   📋 STANDARD PRAWNICZY:")
+        lines.append("   • Sygnatura + data + sąd = OBOWIĄZKOWE")
+        lines.append("   • Portal (domena) = na końcu cytatu")
+        lines.append("   • Pełny URL = NIE WKLEJAJ!")
+        lines.append("")
+        
+        for i, j in enumerate(judgments[:2], 1):
+            sig = j.get("signature", "")
+            court = j.get("court", "")
+            date = j.get("date", j.get("formatted_date", ""))
+            
+            # Portal - tylko domena
+            official_portal = j.get("official_portal", "")
+            if official_portal:
+                portal_domain = official_portal.replace("https://", "").replace("http://", "").rstrip("/")
+            else:
+                portal_domain = "orzeczenia.ms.gov.pl"
+            
+            excerpt = j.get("excerpt", "")[:150] if j.get("excerpt") else ""
+            
+            lines.append(f"   ═══ ORZECZENIE #{i} ═══")
+            lines.append(f"   📌 {sig} z dnia {date}")
+            lines.append(f"   🏛️ {court}")
+            lines.append(f"   🌐 Portal: {portal_domain}")
+            if excerpt:
+                lines.append(f"   📝 \"{excerpt}...\"")
+            lines.append("")
+        
+        lines.append("   ✅ PRZYKŁAD CYTOWANIA:")
+        lines.append("   \"Jak wskazał Sąd Okręgowy w Łodzi w wyroku")
+        lines.append("   z dnia 2 października 2019 r. (sygn. II C 895/18),")
+        lines.append("   [TREŚĆ ORZECZENIA] (orzeczenie dostępne na:")
+        lines.append("   orzeczenia.lodz.so.gov.pl).\"")
+        lines.append("=" * 50)
         lines.append("")
     
     # ================================================================
