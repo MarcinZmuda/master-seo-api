@@ -469,35 +469,37 @@ def get_section_length_guidance(batch_num: int, total_batches: int, batch_type: 
     """
     Zwraca guidance o różnej długości sekcji.
     Każdy batch dostaje INNĄ zalecaną długość żeby uniknąć monotonii.
+    
+    🆕 v41.3: Minimum 150 słów per batch, max 2-4 akapity
     """
-    # Wzorce długości dla różnych batchów
+    # Wzorce długości dla różnych batchów - 🆕 v41.3
     LENGTH_PATTERNS = {
-        1: {"profile": "SHORT", "range": "180-220", "reason": "Intro - zwięzłe wprowadzenie"},
-        2: {"profile": "LONG", "range": "350-400", "reason": "Główny temat - rozbudowana treść"},
-        3: {"profile": "MEDIUM", "range": "250-300", "reason": "Rozwinięcie tematu"},
-        4: {"profile": "LONG", "range": "320-380", "reason": "Praktyczne porady - więcej szczegółów"},
-        5: {"profile": "MEDIUM", "range": "240-280", "reason": "Uzupełnienie tematu"},
-        6: {"profile": "SHORT", "range": "200-250", "reason": "Sekcja przed FAQ - krótsza"},
+        1: {"profile": "SHORT", "range": "150-250", "reason": "Intro - zwięzłe wprowadzenie"},
+        2: {"profile": "LONG", "range": "400-550", "reason": "Główny temat - rozbudowana treść"},
+        3: {"profile": "MEDIUM", "range": "300-400", "reason": "Rozwinięcie tematu"},
+        4: {"profile": "LONG", "range": "400-500", "reason": "Praktyczne porady - więcej szczegółów"},
+        5: {"profile": "MEDIUM", "range": "250-350", "reason": "Uzupełnienie tematu"},
+        6: {"profile": "SHORT", "range": "200-300", "reason": "Sekcja końcowa"},
     }
     
     # Pobierz pattern dla tego batcha
-    pattern = LENGTH_PATTERNS.get(batch_num, {"profile": "MEDIUM", "range": "250-300", "reason": "Standardowa sekcja"})
+    pattern = LENGTH_PATTERNS.get(batch_num, {"profile": "MEDIUM", "range": "300-400", "reason": "Standardowa sekcja"})
     
     # Specjalne przypadki
     if batch_type == "INTRO":
-        pattern = {"profile": "SHORT", "range": "150-200", "reason": "Intro musi być zwięzłe"}
+        pattern = {"profile": "SHORT", "range": "150-250", "reason": "Intro - angażujące wprowadzenie"}
     elif batch_type == "FAQ":
-        pattern = {"profile": "VARIABLE", "range": "40-60 per answer", "reason": "FAQ - różne długości odpowiedzi"}
+        pattern = {"profile": "VARIABLE", "range": "50-80 per answer", "reason": "FAQ - różne długości odpowiedzi"}
     
     return {
         "batch_number": batch_num,
         "recommended_profile": pattern["profile"],
         "recommended_range": pattern["range"],
         "reason": pattern["reason"],
-        "variety_reminder": "⚠️ Sekcje MUSZĄ mieć RÓŻNE długości! NIE pisz wszystkich po ~250 słów!",
+        "variety_reminder": "⚠️ Sekcje MUSZĄ mieć RÓŻNE długości!",
         "distribution_hint": {
-            "short_sections": "1-2 sekcje: 180-220 słów",
-            "medium_sections": "2-3 sekcje: 250-300 słów",
+            "short_sections": "1-2 sekcje: 150-250 słów",
+            "medium_sections": "2-3 sekcje: 300-400 słów",
             "long_sections": "1-2 sekcje: 350-400 słów"
         }
     }
@@ -971,12 +973,13 @@ FRAZY KLUCZOWE DO WPLECENIA W H2:
 {competitor_context}
 {keywords_context}
 
-KRYTYCZNE ZASADY:
-1. MAX 1 H2 z frazą główną "{topic}"! Reszta: synonimy lub naturalne tytuły
-2. NIE UŻYWAJ ogólników: "dokument", "wniosek", "sprawa", "proces"
-3. Każdy H2 powinien mieć 5-8 słów (max 70 znaków)
-4. Minimum 30% H2 w formie pytania (Jak...?, Ile...?, Gdzie...?)
-5. NIE używaj: "Wstęp", "Podsumowanie", "Zakończenie", "FAQ"
+ZASADY:
+1. Bazuj na H2 konkurencji - zidentyfikuj TEMATY które poruszają i ujmij je własnymi słowami
+2. MAX 1 H2 z frazą główną "{topic}"! Reszta: synonimy lub naturalne tytuły
+3. WŁĄCZ frazy kluczowe do H2 (naturalnie!)
+4. Każdy H2: 5-10 słów (max 70 znaków)
+5. Minimum 30% H2 w formie pytania
+6. NIE używaj: "Wstęp", "Podsumowanie", "Zakończenie" jako samodzielnych H2
 
 FORMAT: Zwróć TYLKO listę {target_count} H2, każdy w nowej linii, bez numeracji."""
     
@@ -3558,20 +3561,20 @@ def get_pre_batch_info(project_id):
         
         # Podstawowa długość zależy od typu batcha - ZMNIEJSZONE WARTOŚCI!
         if batch_type == "INTRO":
-            base_min_words = 120
-            base_max_words = 180
+            base_min_words = 150  # 🆕 v41.3: minimum 150 słów
+            base_max_words = 250
         elif batch_type == "FINAL":
-            base_min_words = 250
-            base_max_words = 400
+            base_min_words = 200  # 🆕 v41.3
+            base_max_words = 350
         else:
-            base_min_words = 280
+            base_min_words = 250  # 🆕 v41.3
             base_max_words = 450
         
         # Weź większą z: bazowej i obliczonej dla density
         suggested_min_words = max(base_min_words, min_words_for_density)
         suggested_max_words = max(base_max_words, suggested_min_words + 100)
         
-        # Limit maksymalny
+        # Limit maksymalny - 🆕 v41.3
         suggested_min_words = min(suggested_min_words, 600)
         suggested_max_words = min(suggested_max_words, 800)
     
