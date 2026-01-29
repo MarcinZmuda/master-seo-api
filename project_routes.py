@@ -3687,6 +3687,11 @@ def get_pre_batch_info(project_id):
     
     gpt_prompt = "\n".join(prompt_sections)
     
+    # 🆕 v41.4: Limit rozmiaru gpt_prompt (max 15000 znaków)
+    if len(gpt_prompt) > 15000:
+        print(f"[PRE_BATCH] ⚠️ gpt_prompt too long ({len(gpt_prompt)} chars), truncating...")
+        gpt_prompt = gpt_prompt[:15000] + "\n\n[... SKRÓCONO - pełne instrukcje w gpt_instructions_v39 ...]"
+    
     # ================================================================
     # 🆕 v39.0: ENHANCED PRE-BATCH INSTRUCTIONS
     # Konkretne instrukcje zamiast surowych danych
@@ -3707,13 +3712,16 @@ def get_pre_batch_info(project_id):
                 is_ymyl=data.get("is_ymyl", False),
                 is_legal=data.get("is_legal", False) or data.get("detected_category") == "prawo",
                 batch_plan=batch_plan,  # 🆕 v40.1: Przekaż batch_plan z h2_sections
-                detected_articles=data.get("detected_articles", [])  # 🆕 v41.4: Artykuły prawne
+                detected_articles=data.get("detected_articles", []),  # 🆕 v41.4: Artykuły prawne
+                legal_judgments=data.get("legal_judgments", [])  # 🆕 v41.4: Orzeczenia z URL
             )
             # 🆕 v40.1: Log ile H2 w batchu
             h2_in_batch = enhanced_info.get("h2_count_in_batch", 0)
             legal_req = enhanced_info.get("legal_article_requirement")
             legal_info = f", legal_article={legal_req.get('article')}" if legal_req else ""
-            print(f"[PRE_BATCH] 🎯 Enhanced: {len(enhanced_info.get('entities_to_define', []))} entities, {len(enhanced_info.get('relations_to_establish', []))} relations, {h2_in_batch} H2 in batch{legal_info}")
+            judgments_count = len(enhanced_info.get("legal_judgments", []))
+            judgments_info = f", judgments={judgments_count}" if judgments_count > 0 else ""
+            print(f"[PRE_BATCH] 🎯 Enhanced: {len(enhanced_info.get('entities_to_define', []))} entities, {len(enhanced_info.get('relations_to_establish', []))} relations, {h2_in_batch} H2 in batch{legal_info}{judgments_info}")
         except Exception as e:
             print(f"[PRE_BATCH] ⚠️ Enhanced pre-batch error: {e}")
             import traceback
@@ -3756,50 +3764,53 @@ def get_pre_batch_info(project_id):
         },
         
         "keywords": {
-            "basic_must_use": basic_must_use,
-            "basic_target": basic_target,
-            "basic_done": [kw["keyword"] for kw in basic_done],
-            "extended_this_batch": extended_this_batch,
-            "extended_done": extended_done,
-            "extended_scheduled": extended_scheduled,
-            "locked_exceeded": locked_exceeded
+            "basic_must_use": basic_must_use[:10],  # 🆕 v41.4: max 10
+            "basic_target": basic_target[:10],
+            "basic_done": [kw["keyword"] for kw in basic_done][:10],
+            "extended_this_batch": extended_this_batch[:15],
+            "extended_done": extended_done[:10],
+            "extended_scheduled": extended_scheduled[:10],
+            "locked_exceeded": locked_exceeded[:5]
         },
         
-        "ngrams_for_batch": batch_ngrams,
+        "ngrams_for_batch": batch_ngrams[:10],  # 🆕 v41.4: max 10
         
         # v28.0: Entity SEO
+        # 🆕 v41.4: Skrócone
         "entity_seo": {
-            "top_entities": top_entities,
-            "relationships": top_relationships,
-            "must_topics": must_topics,
+            "top_entities": top_entities[:8],  # 🆕 v41.4: max 8
+            "relationships": top_relationships[:3],  # 🆕 v41.4: max 3
+            "must_topics": must_topics[:3],  # 🆕 v41.4: max 3
             "total_entities": len(entities),
             "enabled": bool(entity_seo)
         },
         
         # v29.3: Entity guidance for batch
+        # 🆕 v41.4: Ograniczone listy
         "entities_for_batch": {
             "to_introduce": get_entities_to_introduce(
                 top_entities, 
                 current_batch_num, 
                 total_planned_batches,
                 [b.get("text", "") for b in data.get("batches", [])]
-            ),
+            )[:5],  # 🆕 v41.4: max 5
             "already_defined": get_already_defined_entities(
                 [b.get("text", "") for b in data.get("batches", [])]
-            ),
+            )[:10],  # 🆕 v41.4: max 10
             "suggested_relationships": top_relationships[:2] if current_batch_num > 1 else []
         },
         
         # v29.3: N-gram diversity guidance
+        # 🆕 v41.4: Ograniczone listy
         "ngram_guidance": {
             "overused_phrases": get_overused_phrases(
                 [b.get("text", "") for b in data.get("batches", [])],
                 main_keyword
-            ),
+            )[:5],  # 🆕 v41.4: max 5
             "suggested_synonyms": get_synonyms_for_overused(
                 [b.get("text", "") for b in data.get("batches", [])],
                 main_keyword
-            ),
+            )[:5],  # 🆕 v41.4: max 5
             "lsi_to_include": lsi_keywords[:3] if lsi_keywords else batch_ngrams[:3]
         },
         
@@ -3811,18 +3822,23 @@ def get_pre_batch_info(project_id):
         ),
         
         # v28.0: Dodatkowe dane SERP
+        # 🆕 v41.4: Ograniczone listy
         "serp_enrichment": {
-            "paa_for_batch": paa_for_batch,
-            "lsi_keywords": lsi_keywords,
-            "related_searches": related_searches
+            "paa_for_batch": paa_for_batch[:3] if paa_for_batch else [],
+            "lsi_keywords": lsi_keywords[:5] if lsi_keywords else [],
+            "related_searches": related_searches[:3] if related_searches else []
         },
         
-        "h2_remaining": remaining_h2,
-        "h2_used": used_h2,
+        "h2_remaining": remaining_h2[:8],  # 🆕 v41.4: max 8
+        "h2_used": used_h2[:8],  # 🆕 v41.4: max 8
         
         # v29.2: H2 Plan z generatora
-        "h2_plan": data.get("h2_plan", []),
-        "h2_plan_meta": data.get("h2_plan_meta", {}),
+        # 🆕 v41.4: Tylko podstawowe dane
+        "h2_plan": [{"title": h.get("title", h) if isinstance(h, dict) else h} for h in data.get("h2_plan", [])[:10]],
+        "h2_plan_meta": {
+            "total": data.get("h2_plan_meta", {}).get("total", 0),
+            "source": data.get("h2_plan_meta", {}).get("source", "")
+        },
         
         # 🆕 v35.9: Wyraźne limity fraz na batch
         "keyword_limits": {
@@ -3836,55 +3852,93 @@ def get_pre_batch_info(project_id):
             }
         },
         
-        # 🆕 v36.0: Semantic batch plan
-        "semantic_batch_plan": semantic_batch_plan if semantic_batch_plan else None,
+        # 🆕 v36.0: Semantic batch plan (skrócony)
+        # 🆕 v41.4: Ogranicz rozmiar semantic_batch_plan
+        "semantic_batch_plan": {
+            "batch_num": semantic_batch_plan.get("batch_num"),
+            "h2": semantic_batch_plan.get("h2"),
+            "h2_category": semantic_batch_plan.get("h2_category"),
+            "assigned_keywords": semantic_batch_plan.get("assigned_keywords", [])[:15],
+            "universal_keywords": semantic_batch_plan.get("universal_keywords", [])[:10],
+            "complexity_score": semantic_batch_plan.get("complexity_score"),
+        } if semantic_batch_plan else None,
         
         # 🆕 v36.2: Anti-Frankenstein dynamic sections (Token Budgeting)
-        "dynamic_sections": dynamic_sections_data,
+        # 🆕 v41.4: Usunięte z głównej odpowiedzi (za duże) - są w gpt_prompt
+        "dynamic_sections": None,  # Przeniesione do gpt_prompt
         
         # 🆕 v36.9: Article Memory - kontekst z poprzednich batchów
-        "article_memory": article_memory_data,
+        # 🆕 v41.4: Skrócone
+        "article_memory": {
+            "claims": article_memory_data.get("claims", [])[:5] if article_memory_data else [],
+            "batch_count": article_memory_data.get("batch_count", 0) if article_memory_data else 0
+        } if article_memory_data else None,
         
         # 🆕 v36.9: Style Instructions - utrzymanie spójnego tonu
-        "style_instructions": style_instructions_data,
+        # 🆕 v41.4: Skrócone
+        "style_instructions": {
+            "formality": style_instructions_data.get("formality") if style_instructions_data else None,
+            "pronouns": style_instructions_data.get("pronouns") if style_instructions_data else None
+        } if style_instructions_data else None,
         
         # 🆕 v36.9: Soft Cap Recommendations - elastyczne limity
-        "soft_cap_recommendations": soft_cap_data,
+        "soft_cap_recommendations": soft_cap_data[:5] if soft_cap_data and isinstance(soft_cap_data, list) else None,
         
         # 🆕 v36.5: Legal context - przepisy prawne i instrukcje cytowania
+        # 🆕 v41.4: Standard prawniczy - tylko domena portalu, nie pełny URL
+        # 🆕 v41.4: Ograniczony rozmiar legal_instruction
         "legal_context": {
             "active": data.get("detected_category") == "prawo",
-            "detected_articles": data.get("detected_articles", []),
-            "legal_instruction": data.get("legal_instruction", ""),
+            "detected_articles": data.get("detected_articles", [])[:5],
+            "legal_instruction": (data.get("legal_instruction", "") or "")[:2000],  # 🆕 v41.4: max 2000 chars
             "top_judgments": [
                 {
                     "signature": j.get("signature", j.get("caseNumber", "")),
                     "court": j.get("court", j.get("courtName", "")),
                     "date": j.get("date", j.get("judgmentDate", "")),
-                    "relevance_score": j.get("relevance_score", 0)
+                    "relevance_score": j.get("relevance_score", 0),
+                    # 🆕 v41.4: Tylko DOMENA portalu (standard prawniczy)
+                    "official_portal": j.get("official_portal", "orzeczenia.ms.gov.pl"),
+                    "source_note": j.get("source_note", ""),
+                    "excerpt": (j.get("excerpt", "") or "")[:150]  # 🆕 v41.4: skrócony excerpt
                 }
-                for j in data.get("legal_judgments", [])[:3]
+                for j in data.get("legal_judgments", [])[:2]  # 🆕 v41.4: max 2 judgments
             ],
             "must_cite": len(data.get("detected_articles", [])) > 0,
-            "citation_hint": f"Odwołaj się do: {', '.join(data.get('detected_articles', []))}" 
-                if data.get("detected_articles") else None
+            "citation_hint": f"Odwołaj się do: {', '.join(data.get('detected_articles', [])[:3])}" 
+                if data.get("detected_articles") else None,
+            # 🆕 v41.4: Standard prawniczy
+            "citation_format": "sygnatura + data + sąd + (dostępny na: [domena portalu])"
         } if data.get("detected_category") == "prawo" else None,
         
         "gpt_prompt": gpt_prompt,
         
         # 🆕 v39.0: Enhanced Pre-Batch Instructions
-        "enhanced": enhanced_info,
+        # 🆕 v41.4: NIE wysyłaj całego enhanced (za duże!) - tylko potrzebne pola
+        "enhanced": {
+            "h2_sections": enhanced_info.get("h2_sections", []) if enhanced_info else [],
+            "h2_count_in_batch": enhanced_info.get("h2_count_in_batch", 0) if enhanced_info else 0,
+            "paragraph_structure": enhanced_info.get("paragraph_structure", {}) if enhanced_info else {},
+            "legal_article_requirement": enhanced_info.get("legal_article_requirement") if enhanced_info else None,
+            "legal_judgments": enhanced_info.get("legal_judgments", [])[:2] if enhanced_info else [],
+            # NIE wysyłaj gpt_instructions tutaj - jest w gpt_instructions_v39
+        } if enhanced_info else None,
         
         # 🆕 v39.0: Konkretne instrukcje (wyodrębnione dla łatwości użycia)
-        "entities_to_define": enhanced_info.get("entities_to_define", []) if enhanced_info else [],
-        "relations_to_establish": enhanced_info.get("relations_to_establish", []) if enhanced_info else [],
+        "entities_to_define": enhanced_info.get("entities_to_define", [])[:5] if enhanced_info else [],
+        "relations_to_establish": enhanced_info.get("relations_to_establish", [])[:3] if enhanced_info else [],
         "semantic_context": enhanced_info.get("semantic_context", {}) if enhanced_info else {},
         "style_instructions_v39": enhanced_info.get("style_instructions", {}) if enhanced_info else {},
         "continuation_v39": enhanced_info.get("continuation", {}) if enhanced_info else {},
-        "keyword_tracking": enhanced_info.get("keyword_tracking", {}) if enhanced_info else {},
-        "gpt_instructions_v39": enhanced_info.get("gpt_instructions", "") if enhanced_info else "",
+        "keyword_tracking": {
+            "unused_basic": enhanced_info.get("keyword_tracking", {}).get("unused_basic", [])[:10],
+            "unused_extended": enhanced_info.get("keyword_tracking", {}).get("unused_extended", [])[:10],
+            "summary": enhanced_info.get("keyword_tracking", {}).get("summary", "")
+        } if enhanced_info and enhanced_info.get("keyword_tracking") else {},
+        # 🆕 v41.4: Skrócony gpt_instructions (max 8000 znaków)
+        "gpt_instructions_v39": enhanced_info.get("gpt_instructions", "")[:8000] if enhanced_info else "",
         
-        "version": "v39.0"
+        "version": "v41.4"
     }), 200
 
 
