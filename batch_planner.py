@@ -92,44 +92,44 @@ H2_TYPE_FALLBACK = {
     "tutorial": {
         "patterns": ["krok po kroku", "poradnik", "instrukcja", "jak zrobić", "jak wykonać"],
         "profile": "long",
-        "words": (500, 700),  # 🆕 v41.2: +100 (było 400-600)
+        "words": (350, 500),  # 🆕 v41.3
         "paragraphs": (3, 4)
     },
     "definition": {
         "patterns": ["co to", "czym jest", "definicja", "co oznacza"],
         "profile": "short",
-        "words": (300, 450),  # 🆕 v41.2: +100 (było 200-350)
+        "words": (200, 300),  # 🆕 v41.3
         "paragraphs": (2, 3)
     },
     "yes_no": {
         "patterns": ["czy można", "czy warto", "czy trzeba", "czy należy"],
         "profile": "short",
-        "words": (300, 450),  # 🆕 v41.2: +100 (było 200-350)
+        "words": (200, 300),  # 🆕 v41.3
         "paragraphs": (2, 3)
     },
     "comparison": {
         "patterns": ["vs", "porównanie", "różnice", "co lepsze"],
         "profile": "long",
-        "words": (500, 700),  # 🆕 v41.2: +100 (było 400-600)
+        "words": (350, 500),  # 🆕 v41.3
         "paragraphs": (3, 4)
     },
     "list": {
         "patterns": ["najlepsze", "top", "ranking", "rodzaje", "typy"],
         "profile": "extended",
-        "words": (600, 850),  # 🆕 v41.2: +100 (było 500-750)
-        "paragraphs": (3, 4)  # 🆕 v41.2: max 4 (było 5-7)
+        "words": (400, 600),  # 🆕 v41.3
+        "paragraphs": (3, 4)
     },
     "explanation": {
         "patterns": ["jak ", "dlaczego", "w jaki sposób"],
         "profile": "long",
-        "words": (500, 700),  # 🆕 v41.2: +100 (było 400-600)
+        "words": (350, 500),  # 🆕 v41.3
         "paragraphs": (3, 4)
     }
 }
 
 DEFAULT_FALLBACK = {
     "profile": "medium",
-    "words": (400, 600),  # 🆕 v41.2: +100 (było 300-500)
+    "words": (250, 400),  # 🆕 v41.3
     "paragraphs": (2, 4)
 }
 
@@ -154,8 +154,8 @@ def calculate_length_fallback(
 ) -> Dict:
     """Fallback obliczania długości bez batch_complexity."""
     
-    # 🆕 v41.2: MINIMUM 250 słów per H2! (było 150)
-    MIN_WORDS_PER_H2 = 250
+    # 🆕 v41.3: MINIMUM 150 słów per batch
+    MIN_WORDS_PER_H2 = 150
     h2_count = len(h2_sections) if h2_sections else 1
     
     if is_intro:
