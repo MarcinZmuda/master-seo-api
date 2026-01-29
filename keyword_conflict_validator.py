@@ -80,8 +80,20 @@ class KeywordConflictValidator:
         fixed_keywords = []
         
         for kw in keywords_list:
-            term = kw.get("term", "").lower().strip()
+            # 🆕 v41.4: FIX - obsługa "keyword", "term", "phrase" i "text"
+            term = (
+                kw.get("keyword") or 
+                kw.get("term") or 
+                kw.get("phrase") or 
+                kw.get("text") or 
+                ""
+            ).lower().strip()
             kw_type = kw.get("type", "BASIC")
+            
+            # Pomiń puste keywordy
+            if not term:
+                fixed_keywords.append(kw)
+                continue
             
             if kw_type != "BASIC":
                 fixed_keywords.append(kw)
