@@ -221,12 +221,76 @@ except ImportError as e:
 
 # 🆕 v37.1: Batch Review System z auto-poprawkami
 # ⚠️ FIX v1.2: Usunięto circular import (plik importował sam siebie)
+# ⚠️ FIX v1.3: Naprawiono niezgodność sygnatur review_batch
 # Te funkcje powinny być zaimportowane z claude_reviewer.py lub zdefiniowane tutaj
 try:
     from claude_reviewer import (
         ReviewResult,
-        review_batch as review_batch_comprehensive,  # alias
+        review_batch as _review_batch_original,  # oryginalna funkcja
     )
+    
+    # 🆕 FIX v1.3: Wrapper dostosowujący sygnatury
+    def review_batch_comprehensive(
+        batch_text: str = None,
+        text: str = None,  # alternatywna nazwa
+        keywords_state: dict = None,
+        batch_counts: dict = None,
+        previous_batch_text: str = None,
+        auto_fix: bool = True,
+        use_claude_for_complex: bool = False,
+        context: dict = None,  # dla kompatybilności wstecznej
+        **kwargs
+    ):
+        """
+        Wrapper dla review_batch z claude_reviewer.py
+        Tłumaczy stare argumenty na nowy format.
+        """
+        # Użyj text lub batch_text
+        actual_text = batch_text or text or ""
+        
+        # Buduj context jeśli nie podany
+        if context is None:
+            context = {}
+        
+        # Dodaj argumenty do context
+        if keywords_state:
+            context["keywords_state"] = keywords_state
+            # Buduj required_keywords z keywords_state
+            required = []
+            for kw_id, meta in keywords_state.items():
+                if isinstance(meta, dict):
+                    required.append({
+                        "phrase": meta.get("keyword", kw_id),
+                        "min": meta.get("target_min", 1),
+                        "max": meta.get("target_max", 5),
+                        "priority": meta.get("priority", "EXTENDED")
+                    })
+            context["required_keywords"] = required
+        
+        if batch_counts:
+            context["batch_counts"] = batch_counts
+        
+        if previous_batch_text:
+            context["previous_batch_text"] = previous_batch_text
+        
+        # skip_claude = not use_claude_for_complex
+        skip_claude = not use_claude_for_complex
+        
+        try:
+            return _review_batch_original(actual_text, context, skip_claude)
+        except Exception as e:
+            print(f"[BATCH_REVIEW] ⚠️ review_batch error: {e}")
+            # Zwróć pusty wynik zamiast None
+            return ReviewResult(
+                status="ERROR",
+                original_text=actual_text,
+                corrected_text=None,
+                issues=[],
+                summary=f"Review error: {e}",
+                word_count=len(actual_text.split()),
+                paragraph_count=len(actual_text.split('\n\n'))
+            )
+    
     # Stub dla brakujących funkcji
     def get_review_summary(result): return result.__dict__ if result else {}
     def generate_claude_fix_prompt(text, issues): return f"Fix: {issues}"
@@ -245,7 +309,20 @@ except ImportError as e:
     print(f"[TRACKER] ⚠️ Batch Review System not available: {e}")
     # Fallback stubs
     class ReviewResult:
-        pass
+        status: str = "ERROR"
+        original_text: str = ""
+        corrected_text: str = None
+        issues: list = None
+        summary: str = ""
+        word_count: int = 0
+        paragraph_count: int = 0
+        fixed_text: str = None
+        auto_fixes_applied: list = None
+        def __init__(self, **kwargs):
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+            self.issues = self.issues or []
+            self.auto_fixes_applied = self.auto_fixes_applied or []
     class SmartFixResult:
         def __init__(self, text="", fixes=None):
             self.fixed_text = text
