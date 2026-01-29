@@ -1,6 +1,6 @@
 """
 ===============================================================================
-🔍 MOE BATCH VALIDATOR v1.1 - Mixture of Experts Post-Batch Validation
+🔍 MOE BATCH VALIDATOR v1.2 - Mixture of Experts Post-Batch Validation
 ===============================================================================
 Kompleksowa walidacja batcha po wygenerowaniu przez GPT.
 
@@ -9,13 +9,14 @@ EKSPERCI (MoE):
 2. SEO EXPERT - BASIC/EXTENDED keywords, encje, n-gramy
 3. LANGUAGE EXPERT - gramatyka polska (LanguageTool), styl
 4. AI DETECTION EXPERT - burstiness, TTR, rozkład zdań
-5. 🆕 UNIFIED BRIDGE EXPERT - mostek do unified_validator (optional)
+5. UNIFIED BRIDGE EXPERT - mostek do unified_validator (optional)
+6. 🆕 CORPUS INSIGHTS - metryki NKJP (informacyjne, nie blokuje!)
 
-🆕 v1.1 ZMIANY:
-- Dodano UnifiedBridgeExpert jako opcjonalny ekspert
-- UnifiedBridgeExpert NIE duplikuje kodu - wywołuje funkcje z unified_validator
-- Dodano import dynamicznych progów CV (humanness_weights_v41)
-- Dodano import calculate_burstiness_dynamic
+🆕 v1.2 ZMIANY:
+- Dodano integrację z polish_corpus_metrics_v41 (NKJP insights)
+- Corpus insights NIE blokują walidacji - tylko informacyjne
+- Dodano pole corpus_insights do ValidationResult
+- Dodano naturalness_hints do response
 
 TRYBY:
 - SOFT: tylko warnings, batch zapisuje się
@@ -48,7 +49,7 @@ except ImportError:
 try:
     from ai_detection_metrics import (
         calculate_burstiness, 
-        calculate_burstiness_dynamic,  # 🆕 v41.1
+        calculate_burstiness_dynamic,
         calculate_vocabulary_richness,
         analyze_sentence_distribution,
         check_word_repetition_detailed,
@@ -73,7 +74,7 @@ except ImportError:
     KEYWORD_COUNTER_AVAILABLE = False
     print("[MOE_VALIDATOR] ⚠️ Keyword Counter not available")
 
-# 🆕 v41.1: UNIFIED VALIDATOR BRIDGE (optional)
+# UNIFIED VALIDATOR BRIDGE (optional)
 try:
     from unified_validator import (
         validate_content,
@@ -89,7 +90,7 @@ except (ImportError, NameError, Exception) as e:
     UNIFIED_VALIDATOR_AVAILABLE = False
     print(f"[MOE_VALIDATOR] ⚠️ Unified Validator not available: {e}")
 
-# 🆕 v41.1: DYNAMIC CV THRESHOLDS
+# DYNAMIC CV THRESHOLDS
 try:
     from humanness_weights_v41 import (
         get_dynamic_cv_thresholds,
@@ -99,6 +100,36 @@ try:
 except ImportError:
     DYNAMIC_CV_AVAILABLE = False
     print("[MOE_VALIDATOR] ⚠️ Dynamic CV thresholds not available")
+
+# 🆕 v1.2: POLISH CORPUS INSIGHTS (optional, NEVER blocks!)
+try:
+    from polish_corpus_metrics_v41 import (
+        get_corpus_insights_for_moe,
+        get_naturalness_hints,
+        analyze_corpus_metrics,
+        ENABLE_CORPUS_INSIGHTS
+    )
+    CORPUS_INSIGHTS_AVAILABLE = True
+    print("[MOE_VALIDATOR] ✅ Polish Corpus Insights enabled")
+except ImportError:
+    CORPUS_INSIGHTS_AVAILABLE = False
+    ENABLE_CORPUS_INSIGHTS = False
+    print("[MOE_VALIDATOR] ℹ️ Polish Corpus Insights not available (optional)")
+    
+    # Fallback functions - zwracają puste wyniki, NIGDY nie blokują
+    def get_corpus_insights_for_moe(text: str, **kwargs) -> dict:
+        return {
+            "enabled": False, 
+            "affects_validation": False,
+            "is_blocking": False,
+            "blocks_action": False
+        }
+    
+    def get_naturalness_hints(text: str) -> list:
+        return []
+    
+    def analyze_corpus_metrics(text: str, **kwargs):
+        return None
 
 
 # ================================================================
@@ -137,6 +168,9 @@ class ValidationConfig:
     
     # POWTÓRZENIA
     max_word_repetition: int = 6         # Max powtórzeń jednego słowa
+    
+    # 🆕 v1.2: CORPUS INSIGHTS
+    include_corpus_insights: bool = True  # Czy dodawać corpus insights
 
 
 @dataclass
@@ -161,9 +195,12 @@ class ValidationResult:
     fix_instructions: List[str]
     auto_fixes_applied: List[str] = field(default_factory=list)
     corrected_text: Optional[str] = None
+    # 🆕 v1.2: Corpus insights (NIGDY nie wpływa na passed/status!)
+    corpus_insights: Optional[Dict] = None
+    naturalness_hints: List[Dict] = field(default_factory=list)
     
     def to_dict(self) -> Dict:
-        return {
+        result = {
             "passed": self.passed,
             "status": self.status,
             "issues": [asdict(i) for i in self.issues],
@@ -172,6 +209,14 @@ class ValidationResult:
             "auto_fixes_applied": self.auto_fixes_applied,
             "has_corrected_text": self.corrected_text is not None
         }
+        
+        # 🆕 v1.2: Dodaj corpus insights (jeśli dostępne)
+        if self.corpus_insights:
+            result["corpus_insights"] = self.corpus_insights
+        if self.naturalness_hints:
+            result["naturalness_hints"] = self.naturalness_hints
+            
+        return result
 
 
 # ================================================================
@@ -374,11 +419,11 @@ class SEOExpert:
                 basic_used.append({"keyword": keyword, "count": batch_use})
         
         # === ENCJE ===
-        entity_issues = []
+        coverage = 0
+        entities_missing = []
         if s1_entities:
             text_lower = batch_text.lower()
             entities_in_batch = []
-            entities_missing = []
             
             for entity in s1_entities[:15]:  # Top 15 encji
                 name = entity.get("name", "") if isinstance(entity, dict) else str(entity)
@@ -431,9 +476,7 @@ class LanguageExpert:
         if LANGUAGETOOL_AVAILABLE:
             try:
                 lt_result = validate_batch_grammar(batch_text)
-                # GrammarValidation is a dataclass, not a dict!
                 grammar_errors = lt_result.errors if hasattr(lt_result, 'errors') else []
-                # Filter critical errors from the errors list
                 critical_errors = [e for e in grammar_errors if e.get("rule", {}).get("category", {}).get("id") in ["GRAMMAR", "TYPOS"]] if grammar_errors else []
                 
                 # Critical grammar errors
@@ -483,7 +526,6 @@ class LanguageExpert:
             (r'\bw między\b', 'w między → wśród/między', 'Błędna konstrukcja "w między"'),
             (r'\bw skutek\b', 'w skutek → wskutek', 'Pisownia łączna "wskutek"'),
             (r'\bz pod\b', 'z pod → spod', 'Pisownia łączna "spod"'),
-            (r'\bna pewno\b(?!\s)', 'na pewno', 'OK - pisownia rozłączna'),  # To jest OK
             (r'\bz\s+nad\b', 'z nad → znad', 'Pisownia łączna "znad"'),
             (r'\bpo mimo\b', 'po mimo → pomimo', 'Pisownia łączna "pomimo"'),
         ]
@@ -491,15 +533,14 @@ class LanguageExpert:
         text_lower = text.lower()
         for pattern, fix, msg in common_errors:
             if re.search(pattern, text_lower):
-                if 'OK' not in msg:
-                    issues.append(ValidationIssue(
-                        expert="language",
-                        severity="warning",
-                        code="POLISH_SPELLING",
-                        message=msg,
-                        fix_instruction=fix,
-                        auto_fixable=True
-                    ))
+                issues.append(ValidationIssue(
+                    expert="language",
+                    severity="warning",
+                    code="POLISH_SPELLING",
+                    message=msg,
+                    fix_instruction=fix,
+                    auto_fixable=True
+                ))
         
         return issues
 
@@ -612,7 +653,7 @@ class AIDetectionExpert:
 
 
 # ================================================================
-# 🆕 v41.1: 5️⃣ UNIFIED BRIDGE EXPERT (optional)
+# 5️⃣ UNIFIED BRIDGE EXPERT (optional)
 # ================================================================
 class UnifiedBridgeExpert:
     """
@@ -620,11 +661,6 @@ class UnifiedBridgeExpert:
     
     Nie duplikuje logiki - WYWOŁUJE funkcje z unified_validator
     i tłumaczy wyniki na format MoE.
-    
-    Korzyści:
-    - Zero duplikacji kodu
-    - Centralne źródło prawdy w unified_validator
-    - Dodatkowe metryki (semantic enhancement, template patterns)
     """
     
     def __init__(self, config: ValidationConfig):
@@ -638,12 +674,7 @@ class UnifiedBridgeExpert:
         s1_data: Dict = None,
         main_keyword: str = ""
     ) -> Tuple[List[ValidationIssue], Dict]:
-        """
-        Waliduje batch używając unified_validator.
-        
-        Returns:
-            (issues, summary) - skonwertowane na format MoE
-        """
+        """Waliduje batch używając unified_validator."""
         issues = []
         metrics = {
             "enabled": self.enabled,
@@ -654,7 +685,7 @@ class UnifiedBridgeExpert:
             return issues, {"enabled": False, "reason": "unified_validator not available"}
         
         try:
-            # 1. Quick validate (szybka walidacja podstawowa)
+            # 1. Quick validate
             quick_result = quick_validate(batch_text, keywords_state)
             metrics["quick_score"] = quick_result.get("score", 0)
             metrics["checks_performed"].append("quick_validate")
@@ -677,7 +708,7 @@ class UnifiedBridgeExpert:
                     context={"source": "unified_validator.quick_validate"}
                 ))
             
-            # 2. Entity density (jeśli dostępne S1)
+            # 2. Entity density
             if s1_data:
                 entities = s1_data.get("entity_seo", {}).get("entities", [])
                 density_result = calculate_entity_density(batch_text, entities)
@@ -694,12 +725,12 @@ class UnifiedBridgeExpert:
                         context=density_result
                     ))
             
-            # 3. Template patterns (wykrywanie wzorców AI)
+            # 3. Template patterns
             template_issues = check_template_patterns(batch_text)
             metrics["template_patterns_found"] = len(template_issues)
             metrics["checks_performed"].append("template_patterns")
             
-            for t_issue in template_issues[:2]:  # Max 2 żeby nie zalewać
+            for t_issue in template_issues[:2]:
                 issues.append(ValidationIssue(
                     expert="unified_bridge",
                     severity="warning",
@@ -709,7 +740,7 @@ class UnifiedBridgeExpert:
                     context={"source": "unified_validator.check_template_patterns"}
                 ))
             
-            # 4. Semantic enhancement (opcjonalne)
+            # 4. Semantic enhancement
             if s1_data:
                 semantic_result = validate_semantic_enhancement(batch_text, s1_data)
                 metrics["semantic_score"] = semantic_result.get("score", 0)
@@ -746,7 +777,8 @@ def validate_batch_moe(
     project_data: Dict,
     batch_number: int = 1,
     mode: ValidationMode = ValidationMode.SOFT,
-    config: Optional[ValidationConfig] = None
+    config: Optional[ValidationConfig] = None,
+    include_corpus_insights: bool = True  # 🆕 v1.2
 ) -> ValidationResult:
     """
     Główna funkcja walidacji MoE.
@@ -757,6 +789,7 @@ def validate_batch_moe(
         batch_number: Numer batcha (1-7)
         mode: Tryb walidacji (SOFT, STRICT, AUTO_FIX)
         config: Opcjonalna konfiguracja (domyślna jeśli None)
+        include_corpus_insights: Czy dodać corpus insights (default: True)
     
     Returns:
         ValidationResult z wynikami wszystkich ekspertów
@@ -794,7 +827,7 @@ def validate_batch_moe(
     # 1️⃣ STRUCTURE EXPERT
     # ═══════════════════════════════════════════════════════════════
     structure_expert = StructureExpert(config)
-    current_h2 = ""  # TODO: extract from batch_text
+    current_h2 = ""
     structure_issues, structure_summary = structure_expert.validate(
         batch_text, previous_batches, current_h2
     )
@@ -828,8 +861,7 @@ def validate_batch_moe(
     experts_summary["ai_detection"] = ai_summary
     
     # ═══════════════════════════════════════════════════════════════
-    # 🆕 v41.1: 5️⃣ UNIFIED BRIDGE EXPERT (optional)
-    # Nie duplikuje - WYWOŁUJE funkcje z unified_validator
+    # 5️⃣ UNIFIED BRIDGE EXPERT (optional)
     # ═══════════════════════════════════════════════════════════════
     if UNIFIED_VALIDATOR_AVAILABLE:
         try:
@@ -841,7 +873,6 @@ def validate_batch_moe(
                 s1_data=s1_data,
                 main_keyword=main_keyword
             )
-            # Dodaj tylko unikalne issues (unikaj duplikacji z innymi ekspertami)
             existing_codes = {i.code for i in all_issues}
             for issue in unified_issues:
                 if issue.code not in existing_codes:
@@ -850,6 +881,37 @@ def validate_batch_moe(
         except Exception as e:
             print(f"[MOE_VALIDATOR] UnifiedBridgeExpert skipped: {e}")
             experts_summary["unified_bridge"] = {"enabled": False, "error": str(e)}
+    
+    # ═══════════════════════════════════════════════════════════════
+    # 🆕 v1.2: 6️⃣ CORPUS INSIGHTS (NIGDY nie blokuje!)
+    # ═══════════════════════════════════════════════════════════════
+    corpus_insights = None
+    naturalness_hints = []
+    
+    if include_corpus_insights and CORPUS_INSIGHTS_AVAILABLE:
+        try:
+            corpus_insights = get_corpus_insights_for_moe(batch_text)
+            
+            # Wyodrębnij hints do osobnego pola
+            if corpus_insights.get("enabled"):
+                naturalness_hints = corpus_insights.get("suggestions", [])
+                
+                # Dodaj do summary (ale NIE do issues!)
+                experts_summary["corpus_insights"] = {
+                    "enabled": True,
+                    "naturalness_score": corpus_insights.get("naturalness_score", 100),
+                    "style_detected": corpus_insights.get("style_detected", "unknown"),
+                    "suggestions_count": len(naturalness_hints),
+                    # WAŻNE: Jawne oznaczenie że NIE wpływa na walidację
+                    "affects_validation": False,
+                }
+        except Exception as e:
+            print(f"[MOE_VALIDATOR] Corpus insights error (non-blocking): {e}")
+            corpus_insights = {
+                "enabled": False,
+                "error": str(e)[:100],
+                "affects_validation": False
+            }
     
     # ═══════════════════════════════════════════════════════════════
     # AGREGACJA WYNIKÓW
@@ -862,7 +924,7 @@ def validate_batch_moe(
         if issue.fix_instruction and issue.severity in ["critical", "warning"]:
             fix_instructions.append(f"[{issue.expert.upper()}] {issue.fix_instruction}")
     
-    # Ustal status
+    # Ustal status (corpus insights NIGDY nie wpływa na status!)
     if mode == ValidationMode.STRICT and critical_issues:
         status = "REJECTED"
         passed = False
@@ -881,9 +943,11 @@ def validate_batch_moe(
         status=status,
         issues=all_issues,
         experts_summary=experts_summary,
-        fix_instructions=fix_instructions[:10],  # Max 10 instrukcji
+        fix_instructions=fix_instructions[:10],
         auto_fixes_applied=[],
-        corrected_text=None
+        corrected_text=None,
+        corpus_insights=corpus_insights,
+        naturalness_hints=naturalness_hints
     )
 
 
@@ -910,15 +974,39 @@ def format_validation_for_gpt(result: ValidationResult) -> str:
     
     for expert, issues in by_expert.items():
         lines.append(f"\n🔍 {expert.upper()}:")
-        for issue in issues[:3]:  # Max 3 per expert
+        for issue in issues[:3]:
             severity_icon = "❌" if issue.severity == "critical" else "⚠️"
             lines.append(f"  {severity_icon} {issue.message}")
             if issue.fix_instruction:
                 lines.append(f"     → FIX: {issue.fix_instruction}")
     
+    # 🆕 v1.2: Dodaj naturalness hints (informacyjnie)
+    if result.naturalness_hints:
+        lines.append(f"\n💡 SUGESTIE NATURALNOŚCI (informacyjne):")
+        for hint in result.naturalness_hints[:3]:
+            lines.append(f"  ℹ️ [{hint.get('metric', '?')}] {hint.get('suggestion', hint.get('message', ''))}")
+    
     lines.append("\n" + "=" * 60)
     
     return "\n".join(lines)
+
+
+# ================================================================
+# 🆕 v1.2: HELPER - Extract naturalness suggestions
+# ================================================================
+def extract_naturalness_suggestions(result: ValidationResult) -> List[Dict]:
+    """
+    Wyciąga sugestie naturalności z corpus_insights.
+    
+    Użyteczne do dodania do response API.
+    """
+    if not result.corpus_insights:
+        return []
+    
+    if not result.corpus_insights.get("enabled"):
+        return []
+    
+    return result.corpus_insights.get("suggestions", [])
 
 
 # ================================================================
@@ -950,5 +1038,14 @@ if __name__ == "__main__":
     print(f"Issues: {len(result.issues)}")
     for issue in result.issues:
         print(f"  [{issue.expert}] {issue.severity}: {issue.message}")
+    
+    # 🆕 v1.2: Pokaż corpus insights
+    if result.corpus_insights and result.corpus_insights.get("enabled"):
+        print(f"\n📊 Corpus Insights:")
+        print(f"   Naturalness: {result.corpus_insights.get('naturalness_score', 'N/A')}")
+        print(f"   Style: {result.corpus_insights.get('style_detected', 'N/A')}")
+        print(f"   Suggestions: {len(result.naturalness_hints)}")
+        for hint in result.naturalness_hints:
+            print(f"     💡 {hint.get('metric')}: {hint.get('suggestion', hint.get('message', ''))}")
     
     print("\n" + format_validation_for_gpt(result))
