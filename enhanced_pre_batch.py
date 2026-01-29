@@ -774,7 +774,7 @@ def get_structure_instructions(
     longest_section_index = num_h2 // 2
     
     # ================================================================
-    # PARAGRAPHS TARGET (bez zmian - ta logika jest OK)
+    # PARAGRAPHS TARGET - 🆕 v41.3: 2-4 akapity per batch
     # ================================================================
     if batch_type == "INTRO":
         paragraphs_target = 2
@@ -783,13 +783,13 @@ def get_structure_instructions(
         paragraphs_target = 3
         length_profile = "MEDIUM"
     elif h2_index == longest_section_index:
-        paragraphs_target = 5
+        paragraphs_target = 4  # najdłuższa sekcja
         length_profile = "LONG"
     elif h2_index < longest_section_index:
-        paragraphs_target = 2 + h2_index
+        paragraphs_target = 2 + (h2_index % 2)  # 2 lub 3
         length_profile = "MEDIUM" if paragraphs_target >= 3 else "SHORT"
     else:
-        paragraphs_target = 4 - (h2_index - longest_section_index)
+        paragraphs_target = 3 - (h2_index - longest_section_index) % 2  # 2 lub 3
         paragraphs_target = max(2, paragraphs_target)
         length_profile = "MEDIUM" if paragraphs_target >= 3 else "SHORT"
     
@@ -935,11 +935,17 @@ def get_keyword_tracking_info(
     total_batches: int,
     remaining_batches: int
 ) -> Dict[str, Any]:
-    """Generuje informacje o keywords w trybie TRACKING (nie blokującym)."""
+    """Generuje informacje o keywords w trybie TRACKING (nie blokującym).
+    
+    🆕 v41.3: Wyraźne rozdzielenie BASIC i EXTENDED z priorytetem użycia.
+    """
     tracking = {
         "mode": "TRACKING",
         "explanation": "Frazy są ŚLEDZONE w tle. Per-batch nie blokuje. Weryfikacja globalna w final_review.",
         
+        # 🆕 v41.3: Wyraźne sekcje dla BASIC i EXTENDED
+        "basic_keywords": [],      # BASIC - główne frazy
+        "extended_keywords": [],   # EXTENDED - dodatkowe frazy (priorytetowe!)
         "use_naturally": [],
         "available": [],
         "near_limit": [],
@@ -982,6 +988,27 @@ def get_keyword_tracking_info(
         if is_structural:
             kw_info["note"] = "🔵 STRUCTURAL - użyj naturalnie, limit globalny"
             tracking["structural"].append(kw_info)
+        elif kw_type == "EXTENDED":
+            # 🆕 v41.3: EXTENDED - wyraźna kategoria z instrukcją
+            if remaining_needed > 0:
+                kw_info["note"] = f"⭐ EXTENDED - UŻYJ min 1× w tym batchu!"
+                kw_info["priority"] = "HIGH"
+            elif remaining_allowed > 0:
+                kw_info["note"] = "⭐ EXTENDED - opcjonalnie 1×"
+                kw_info["priority"] = "MEDIUM"
+            else:
+                kw_info["note"] = "⭐ EXTENDED - limit osiągnięty"
+                kw_info["priority"] = "LOW"
+            tracking["extended_keywords"].append(kw_info)
+        elif kw_type == "BASIC":
+            # BASIC keywords
+            if remaining_needed > 0:
+                kw_info["note"] = f"🔴 BASIC - użyj ~{suggested}× w tym batchu"
+                kw_info["priority"] = "CRITICAL"
+            else:
+                kw_info["note"] = "🔴 BASIC - w normie"
+                kw_info["priority"] = "OK"
+            tracking["basic_keywords"].append(kw_info)
         elif remaining_allowed <= 2:
             kw_info["note"] = "⚠️ Blisko limitu - max 1× tu"
             tracking["near_limit"].append(kw_info)
@@ -992,12 +1019,25 @@ def get_keyword_tracking_info(
             kw_info["note"] = "✓ W normie, opcjonalnie 1×"
             tracking["available"].append(kw_info)
     
+    # 🆕 v41.3: Sortuj EXTENDED po priorytecie (najpierw te które MUSZĄ być użyte)
+    tracking["extended_keywords"].sort(
+        key=lambda x: (0 if x.get("priority") == "HIGH" else 1 if x.get("priority") == "MEDIUM" else 2)
+    )
+    
+    # 🆕 v41.3: Policz ile EXTENDED wymaga użycia
+    extended_needing_use = len([k for k in tracking["extended_keywords"] if k.get("priority") == "HIGH"])
+    
     tracking["summary"] = {
         "total_keywords": len(keywords_state),
+        "basic_count": len(tracking["basic_keywords"]),
+        "extended_count": len(tracking["extended_keywords"]),
+        "extended_needing_use": extended_needing_use,  # 🆕 v41.3
         "need_usage": len(tracking["use_naturally"]),
         "near_limit": len(tracking["near_limit"]),
         "structural": len(tracking["structural"]),
-        "instruction": "Użyj fraz NATURALNIE. System śledzi ilości automatycznie. Nie rób stuffingu!"
+        "instruction": "Użyj fraz NATURALNIE. System śledzi ilości automatycznie. Nie rób stuffingu!",
+        # 🆕 v41.3: Wyraźna instrukcja o EXTENDED
+        "extended_instruction": f"⭐ WAŻNE: Użyj {min(3, extended_needing_use)} fraz EXTENDED w tym batchu!" if extended_needing_use > 0 else "EXTENDED w normie"
     }
     
     return tracking
@@ -1367,46 +1407,18 @@ def generate_enhanced_pre_batch_info(
     
     # ================================================================
     # 🆕 v41.0: TRIPLET PRIORITY INSTRUCTIONS
-    # ⚠️ FIX v41.1: relations_to_establish to LISTA, nie dict!
     # ================================================================
     if "relations_to_establish" in enhanced:
         try:
-            relations = enhanced.get("relations_to_establish", [])
-            
-            # FIX: relations to lista relacji, nie dict
-            if isinstance(relations, list) and relations:
-                # Zbierz instrukcje z wszystkich relacji
-                triplet_instructions = []
-                for rel in relations:
-                    if isinstance(rel, dict):
-                        # Każda relacja może mieć instruction/prebatch_instruction
-                        instr = rel.get("prebatch_instruction") or rel.get("instruction")
-                        if instr:
-                            triplet_instructions.append(instr)
-                        # Lub wygeneruj instrukcję z from/relation/to
-                        elif rel.get("from") and rel.get("relation") and rel.get("to"):
-                            triplet_instructions.append(
-                                f"Użyj relacji: {rel['from']} → {rel['relation']} → {rel['to']}"
-                            )
-                
-                # Dodaj instrukcje tripletów do encji
-                if triplet_instructions:
-                    if "entities_to_define" not in enhanced:
-                        enhanced["entities_to_define"] = {}
-                    ent_def = enhanced.get("entities_to_define", {})
-                    instructions = ent_def.get("instructions", [])
-                    instructions.extend(triplet_instructions)
-                    enhanced["entities_to_define"]["instructions"] = instructions
-                    
-            # Stara ścieżka dla kompatybilności (gdyby był dict)
-            elif isinstance(relations, dict) and relations.get("prebatch_instruction"):
+            relations = enhanced.get("relations_to_establish", {})
+            if relations.get("prebatch_instruction"):
+                # Dodaj instrukcję tripletów do encji
                 if "entities_to_define" not in enhanced:
                     enhanced["entities_to_define"] = {}
                 ent_def = enhanced.get("entities_to_define", {})
                 instructions = ent_def.get("instructions", [])
                 instructions.append(relations["prebatch_instruction"])
                 enhanced["entities_to_define"]["instructions"] = instructions
-                
         except Exception as e:
             print(f"[ENHANCED_PRE_BATCH] ⚠️ Triplet priority error: {e}")
     
@@ -1414,33 +1426,95 @@ def generate_enhanced_pre_batch_info(
 
 
 def _generate_gpt_prompt_section(enhanced: Dict, is_legal: bool = False) -> str:
-    """Generuje gotową sekcję promptu dla GPT."""
+    """Generuje gotową sekcję promptu dla GPT.
+    
+    🆕 v41.3: Logika akapitów PER SEKCJA H2, nie per batch.
+    Każda kolejna sekcja H2 ma INNĄ liczbę akapitów (2-4).
+    """
     lines = []
     lines.append("=" * 60)
     lines.append(f"📋 BATCH #{enhanced['batch_number']} - {enhanced['batch_type']}")
     lines.append("=" * 60)
     lines.append("")
     
-    # 🆕 v40.1: Pokaż WSZYSTKIE H2 dla tego batcha
+    # Pokaż H2 dla tego batcha
     h2_list = enhanced.get("current_h2_list", [])
     h2_count = enhanced.get("h2_count_in_batch", 0)
+    batch_num = enhanced.get("batch_number", 1)
+    batch_type = enhanced.get("batch_type", "CONTENT")
     
-    # 🆕 v41.2: Różna liczba akapitów dla każdej H2 (2-4)
-    paragraph_options = [2, 3, 4, 3, 2, 4]
+    # 🆕 v41.3: Wzorzec akapitów per sekcja H2 (rotacja 2-3-4-3-2-4...)
+    # Każda KOLEJNA sekcja H2 ma INNĄ liczbę akapitów
+    paragraph_rotation = [2, 3, 4, 3, 2, 4, 3, 2]
     
     if h2_count > 1:
-        lines.append(f"📌 H2 W TYM BATCHU ({h2_count} sekcje):")
-        for i, h2 in enumerate(h2_list, 1):
-            para_count = paragraph_options[(i - 1) % len(paragraph_options)]
-            lines.append(f"   {i}. \"{h2}\" → {para_count} akapity")
+        # Batch z wieloma sekcjami H2
+        lines.append(f"📌 SEKCJE H2 W TYM BATCHU ({h2_count}):")
         lines.append("")
-        lines.append("⚠️ WYMAGANE: Napisz WSZYSTKIE powyższe sekcje H2 w tym batchu!")
-        lines.append("⚠️ WAŻNE: Każda sekcja H2 MUSI mieć INNĄ liczbę akapitów (2-4)!")
+        
+        for i, h2 in enumerate(h2_list):
+            # Każda sekcja H2 dostaje INNĄ liczbę akapitów
+            para_count = paragraph_rotation[i % len(paragraph_rotation)]
+            lines.append(f"   ═══ SEKCJA {i+1}: \"{h2}\" ═══")
+            lines.append(f"   📐 Liczba akapitów: {para_count}")
+            lines.append(f"   📏 Długość sekcji: {para_count * 50}-{para_count * 80} słów")
+            lines.append("")
+        
+        lines.append("⚠️ WAŻNE:")
+        lines.append("   • Napisz WSZYSTKIE powyższe sekcje H2")
+        lines.append("   • Każda sekcja MUSI mieć INNĄ liczbę akapitów!")
+        lines.append("   • Akapity: 2-4 zdania każdy")
+        
     elif h2_count == 1:
-        lines.append(f"📌 H2: \"{enhanced['current_h2']}\" → 3 akapity")
+        # Batch z jedną sekcją H2
+        para_count = paragraph_rotation[batch_num % len(paragraph_rotation)]
+        lines.append(f"📌 SEKCJA H2: \"{enhanced['current_h2']}\"")
+        lines.append(f"   📐 Liczba akapitów: {para_count}")
+        lines.append(f"   📏 Długość: {para_count * 50}-{para_count * 80} słów")
+        
     else:
-        lines.append(f"📌 SEKCJA: {enhanced.get('batch_type', 'CONTENT')}")
+        # INTRO lub sekcja bez H2
+        if batch_type == "INTRO":
+            para_count = 2
+            lines.append("📌 INTRO (bez H2)")
+            lines.append(f"   📐 Liczba akapitów: {para_count}")
+            lines.append("   📏 Długość: 150-250 słów")
+            lines.append("   💡 Angażujące wprowadzenie do tematu")
+        else:
+            para_count = 3
+            lines.append(f"📌 SEKCJA: {batch_type}")
+            lines.append(f"   📐 Liczba akapitów: {para_count}")
+    
     lines.append("")
+    
+    # 🆕 v41.3: EXTENDED KEYWORDS - wyraźna sekcja
+    tracking = enhanced.get("keyword_tracking", {})
+    extended_kws = tracking.get("extended_keywords", [])
+    extended_needing = [k for k in extended_kws if k.get("priority") == "HIGH"]
+    
+    if extended_needing:
+        lines.append("⭐ FRAZY EXTENDED DO UŻYCIA:")
+        for kw in extended_needing[:5]:
+            lines.append(f"   • \"{kw['keyword']}\" → min 1×")
+        lines.append("")
+    elif extended_kws:
+        available_extended = [k for k in extended_kws if k.get("remaining_allowed", 0) > 0][:3]
+        if available_extended:
+            lines.append("⭐ FRAZY EXTENDED (zalecane):")
+            for kw in available_extended:
+                lines.append(f"   • \"{kw['keyword']}\"")
+            lines.append("")
+    
+    # BASIC keywords
+    basic_kws = tracking.get("basic_keywords", [])
+    basic_needing = [k for k in basic_kws if k.get("remaining_needed", 0) > 0]
+    
+    if basic_needing:
+        lines.append("🔴 FRAZY BASIC (wymagane):")
+        for kw in basic_needing[:3]:
+            suggested = kw.get("suggested_this_batch", 1)
+            lines.append(f"   • \"{kw['keyword']}\" → ~{suggested}×")
+        lines.append("")
     
     # Encje do zdefiniowania
     entities = enhanced.get("entities_to_define", [])
@@ -1449,7 +1523,8 @@ def _generate_gpt_prompt_section(enhanced: Dict, is_legal: bool = False) -> str:
         for ent in entities[:4]:
             priority_icon = "🔴" if ent.get("priority") == "MUST" else "🟡"
             lines.append(f"   {priority_icon} {ent['entity']}")
-            lines.append(f"      → {ent['how']}")
+            if ent.get('how'):
+                lines.append(f"      → {ent['how']}")
         lines.append("")
     
     # Relacje
@@ -1458,55 +1533,38 @@ def _generate_gpt_prompt_section(enhanced: Dict, is_legal: bool = False) -> str:
         lines.append("🔗 RELACJE DO USTANOWIENIA:")
         for rel in relations[:3]:
             lines.append(f"   • {rel['from']} → {rel['relation']} → {rel['to']}")
-            if rel.get("example_sentences"):
-                lines.append(f"     Przykład: \"{rel['example_sentences'][0]}\"")
         lines.append("")
     
     # Kontekst semantyczny
     semantic = enhanced.get("semantic_context", {})
     context_terms = semantic.get("context_terms", [])
     if context_terms:
-        lines.append("📚 TERMINY KONTEKSTOWE (użyj naturalnie):")
-        lines.append(f"   {', '.join(context_terms[:5])}")
+        lines.append("📚 TERMINY KONTEKSTOWE:")
+        lines.append(f"   {', '.join(context_terms[:6])}")
         lines.append("")
     
-    # 🆕 v40.1: Krótkie zdania (dynamiczne)
+    # Styl - krótkie zdania
     style = enhanced.get("style_instructions", {})
     short_sentences = style.get("short_sentences_dynamic", {})
     if short_sentences.get("examples"):
-        domain = short_sentences.get("domain", "universal")
-        lines.append(f"✂️ KRÓTKIE ZDANIA ({domain.upper()}):")
-        lines.append(f"   {' | '.join(short_sentences['examples'][:5])}")
+        lines.append("✂️ KRÓTKIE ZDANIA:")
+        lines.append(f"   {' | '.join(short_sentences['examples'][:4])}")
         lines.append("")
     
     # AI patterns do unikania
     if style.get("avoid_ai_patterns"):
-        patterns = style["avoid_ai_patterns"].get("patterns", [])[:5]
-        lines.append("🚫 UNIKAJ (typowe dla AI):")
-        lines.append(f"   {', '.join(patterns)}")
-        lines.append("")
+        patterns = style["avoid_ai_patterns"].get("patterns", [])[:4]
+        if patterns:
+            lines.append("🚫 UNIKAJ:")
+            lines.append(f"   {', '.join(patterns)}")
+            lines.append("")
     
     # Kontynuacja
     continuation = enhanced.get("continuation", {})
-    if not continuation.get("is_first_batch"):
+    if not continuation.get("is_first_batch") and continuation.get("last_paragraph"):
         lines.append("🔄 KONTYNUACJA:")
-        if continuation.get("last_paragraph"):
-            last_p = continuation["last_paragraph"][:200]
-            lines.append(f"   Ostatni akapit: \"{last_p}...\"")
-        
-        established = continuation.get("established_entities", {})
-        if established:
-            defined = [k for k, v in established.items() if v.get("status") == "zdefiniowane"][:5]
-            if defined:
-                lines.append(f"   ✓ Już zdefiniowane: {', '.join(defined)}")
-        lines.append("")
-    
-    # Keywords summary
-    tracking = enhanced.get("keyword_tracking", {})
-    summary = tracking.get("summary", {})
-    if summary:
-        lines.append(f"📊 KEYWORDS: {summary.get('need_usage', 0)} do użycia | {summary.get('near_limit', 0)} blisko limitu")
-        lines.append("   💡 Użyj NATURALNIE - system śledzi automatycznie")
+        last_p = continuation["last_paragraph"][:150]
+        lines.append(f"   \"{last_p}...\"")
         lines.append("")
     
     lines.append("=" * 60)
