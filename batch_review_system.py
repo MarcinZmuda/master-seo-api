@@ -323,6 +323,20 @@ except ImportError as e:
                 setattr(self, k, v)
             self.issues = self.issues or []
             self.auto_fixes_applied = self.auto_fixes_applied or []
+        
+        def to_dict(self):
+            """Konwertuje ReviewResult na dict."""
+            return {
+                "status": getattr(self, "status", "ERROR"),
+                "original_text": getattr(self, "original_text", ""),
+                "corrected_text": getattr(self, "corrected_text", None),
+                "issues": getattr(self, "issues", []),
+                "summary": getattr(self, "summary", ""),
+                "word_count": getattr(self, "word_count", 0),
+                "paragraph_count": getattr(self, "paragraph_count", 0),
+                "fixed_text": getattr(self, "fixed_text", None),
+                "auto_fixes_applied": getattr(self, "auto_fixes_applied", [])
+            }
     class SmartFixResult:
         def __init__(self, text="", fixes=None):
             self.fixed_text = text
