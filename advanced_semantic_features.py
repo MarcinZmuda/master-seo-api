@@ -1,6 +1,6 @@
 """
 ===============================================================================
-🧠 ADVANCED SEMANTIC FEATURES v1.1 - Rozszerzenie dla BRAJEN SEO Writer
+🧠 ADVANCED SEMANTIC FEATURES v1.2 - Rozszerzenie dla BRAJEN SEO Writer
 ===============================================================================
 Nowe mechanizmy zgodne z Google 2024+ dla lepszego rankingu:
 
@@ -23,6 +23,9 @@ Nowe mechanizmy zgodne z Google 2024+ dla lepszego rankingu:
 Autor: BRAJEN Team
 Data: 2025-01
 v1.1: Naprawiono sygnaturę detect_entity_gap (dodano alias 'text')
+v1.2: Dodano WSZYSTKIE aliasy dla kompatybilności:
+      - detect_entity_gap: text, expected_entities, topic
+      - analyze_topic_completeness: text, expected_topics
 ===============================================================================
 """
 
@@ -407,9 +410,11 @@ def analyze_topic_completeness(
     content: str = None,
     competitor_topics: List[Dict] = None,
     competitor_entities: List[Dict] = None,
-    main_keyword: str = "",
+    main_keyword: str = None,
     *,
-    text: str = None  # ✅ ALIAS dla kompatybilności
+    # ✅ v41.2: ALIASY dla kompatybilności
+    text: str = None,                    # Alias dla 'content'
+    expected_topics: List = None         # Alias dla 'competitor_topics'
 ) -> Dict[str, Any]:
     """
     Analizuje kompletność tematyczną vs konkurencja.
@@ -417,28 +422,37 @@ def analyze_topic_completeness(
     Args:
         content: Treść artykułu do oceny (lub użyj 'text' jako alias)
         competitor_topics: Lista tematów z analyze_topical_coverage()
-        competitor_entities: Lista encji z extract_entities()
+        competitor_entities: Lista encji z extract_entities() (opcjonalne)
         main_keyword: Główna fraza kluczowa
-        text: Alias dla 'content' (dla kompatybilności wstecznej)
+        text: Alias dla 'content' (dla kompatybilności)
+        expected_topics: Alias dla 'competitor_topics' (dla kompatybilności)
         
     Returns:
         Dict z oceną kompletności i brakami
     """
-    # ✅ OBSŁUGA ALIASU
+    # ✅ v41.2: OBSŁUGA ALIASÓW
     if content is None and text is not None:
         content = text
+    if competitor_topics is None and expected_topics is not None:
+        competitor_topics = expected_topics
     
-    if content is None:
+    # Walidacja - musi być content
+    if not content:
         return {
             "status": "NO_DATA",
-            "message": "Brak tekstu do analizy"
+            "message": "Brak tekstu do analizy",
+            "score": 0.5,
+            "missing_topics": []
         }
     
-    if competitor_topics is None:
-        competitor_topics = []
-    
-    if competitor_entities is None:
-        competitor_entities = []
+    # Jeśli brak competitor_topics, zwróć domyślny wynik
+    if not competitor_topics:
+        return {
+            "status": "NO_DATA",
+            "message": "Brak danych o tematach konkurencji",
+            "score": 0.5,
+            "missing_topics": []
+        }
     
     content_lower = content.lower()
     config = AdvancedSemanticConfig()
@@ -573,7 +587,10 @@ def detect_entity_gap(
     competitor_entities: List[Dict] = None,
     detected_content_entities: List[Dict] = None,
     *,
-    text: str = None  # ✅ ALIAS dla kompatybilności
+    # ✅ v41.2: WSZYSTKIE ALIASY dla kompatybilności
+    text: str = None,                    # Alias dla 'content'
+    expected_entities: List = None,      # Alias dla 'competitor_entities'
+    topic: str = None                    # Ignorowany (dla kompatybilności)
 ) -> Dict[str, Any]:
     """
     Wykrywa brakujące encje vs konkurencja - AUTOMATYCZNIE z S1.
@@ -586,13 +603,18 @@ def detect_entity_gap(
         competitor_entities: Encje z S1 entity_seo.entities (z konkurencji)
         detected_content_entities: Encje wykryte w naszej treści (opcjonalne)
         text: Alias dla 'content' (dla kompatybilności wstecznej)
+        expected_entities: Alias dla 'competitor_entities' (dla kompatybilności)
+        topic: Ignorowany - zostawiony dla kompatybilności
         
     Returns:
         Dict z analizą braków i rekomendacjami
     """
-    # ✅ OBSŁUGA ALIASU - przyjmij 'text' jeśli 'content' nie podano
+    # ✅ v41.2: OBSŁUGA ALIASÓW
     if content is None and text is not None:
         content = text
+    if competitor_entities is None and expected_entities is not None:
+        competitor_entities = expected_entities
+    # topic jest ignorowany ale akceptowany
     
     if content is None:
         return {
