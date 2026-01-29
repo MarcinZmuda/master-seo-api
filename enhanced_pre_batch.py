@@ -299,10 +299,14 @@ def get_entities_to_define(
 ) -> List[Dict]:
     """
     Zwraca listę encji do zdefiniowania w tym batchu z konkretnymi instrukcjami.
+    
+    🆕 v41.4: Szuka entities w entity_seo LUB na top level (propagated)
     """
     entity_seo = s1_data.get("entity_seo", {})
-    entities = entity_seo.get("entities", [])
-    topical_coverage = entity_seo.get("topical_coverage", [])
+    
+    # 🆕 v41.4: Szukaj entities w obu miejscach
+    entities = entity_seo.get("entities", []) or s1_data.get("entities", [])
+    topical_coverage = entity_seo.get("topical_coverage", []) or s1_data.get("topical_coverage", [])
     
     already_defined = set(entity_state.get("defined", []))
     
@@ -321,15 +325,17 @@ def get_entities_to_define(
                 instruction["priority"] = "MUST"
                 result.append(instruction)
     
-    # 2. Encje HIGH importance
+    # 2. Encje HIGH importance (>= 0.7) lub wszystkie jeśli mało
+    importance_threshold = 0.7 if len(entities) > 10 else 0.3
     for ent in entities:
-        if ent.get("importance", 0) >= 0.7:
-            entity = ent.get("text", ent.get("entity", ""))
+        importance = ent.get("importance", ent.get("score", ent.get("weight", 0)))
+        if importance >= importance_threshold:
+            entity = ent.get("text", ent.get("entity", ent.get("name", "")))
             if entity and entity.lower() not in {e.lower() for e in already_defined}:
                 if entity.lower() not in {r["entity"].lower() for r in result}:
                     instruction = generate_definition_instruction(
                         entity=entity,
-                        context=ent.get("context", ""),
+                        context=ent.get("context", ent.get("description", "")),
                         h2=current_h2
                     )
                     instruction["priority"] = "SHOULD"
@@ -412,9 +418,14 @@ def get_relations_to_establish(
     entity_state: Dict,
     total_batches: int
 ) -> List[Dict]:
-    """Zwraca relacje do ustanowienia w tym batchu."""
+    """Zwraca relacje do ustanowienia w tym batchu.
+    
+    🆕 v41.4: Szuka relationships w entity_seo LUB na top level
+    """
     entity_seo = s1_data.get("entity_seo", {})
-    relationships = entity_seo.get("entity_relationships", [])
+    
+    # 🆕 v41.4: Szukaj relationships w obu miejscach
+    relationships = entity_seo.get("entity_relationships", []) or s1_data.get("entity_relationships", [])
     
     established = set(entity_state.get("relations_established", []))
     
@@ -1448,18 +1459,27 @@ def generate_enhanced_pre_batch_info(
     
     # ================================================================
     # 🆕 v41.0: TRIPLET PRIORITY INSTRUCTIONS
+    # 🆕 v41.4: FIX - relations_to_establish to LISTA, nie dict!
     # ================================================================
     if "relations_to_establish" in enhanced:
         try:
-            relations = enhanced.get("relations_to_establish", {})
-            if relations.get("prebatch_instruction"):
-                # Dodaj instrukcję tripletów do encji
-                if "entities_to_define" not in enhanced:
-                    enhanced["entities_to_define"] = {}
-                ent_def = enhanced.get("entities_to_define", {})
-                instructions = ent_def.get("instructions", [])
-                instructions.append(relations["prebatch_instruction"])
-                enhanced["entities_to_define"]["instructions"] = instructions
+            relations = enhanced.get("relations_to_establish", [])
+            # relations to LISTA relacji, nie dict!
+            if isinstance(relations, list) and len(relations) > 0:
+                # Wyciągnij najważniejszą relację do instrukcji
+                priority_rel = relations[0] if relations else None
+                if priority_rel and isinstance(priority_rel, dict):
+                    prebatch_instruction = priority_rel.get("prebatch_instruction") or priority_rel.get("instruction", "")
+                    if prebatch_instruction:
+                        # Dodaj instrukcję tripletów do encji
+                        if "entities_to_define" not in enhanced:
+                            enhanced["entities_to_define"] = []
+                        # Upewnij się że entities_to_define obsługuje instrukcje
+                        if isinstance(enhanced.get("entities_to_define"), dict):
+                            ent_def = enhanced.get("entities_to_define", {})
+                            instructions = ent_def.get("instructions", [])
+                            instructions.append(prebatch_instruction)
+                            enhanced["entities_to_define"]["instructions"] = instructions
         except Exception as e:
             print(f"[ENHANCED_PRE_BATCH] ⚠️ Triplet priority error: {e}")
     
