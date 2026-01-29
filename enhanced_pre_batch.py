@@ -35,6 +35,20 @@ from paragraph_cv_analyzer_v41 import (
 )
 from triplet_priority_v41 import get_triplet_instructions_for_prebatch
 
+# 🆕 v41.1: IMPORT DYNAMIC STRUCTURE ANALYZER
+try:
+    from dynamic_structure_analyzer import (
+        analyze_structure_requirements,
+        should_batch_have_h3,
+        should_batch_have_list,
+        StructureRequirements
+    )
+    DYNAMIC_STRUCTURE_AVAILABLE = True
+    print("[ENHANCED_PRE_BATCH] ✅ dynamic_structure_analyzer v1.0 loaded")
+except ImportError as e:
+    DYNAMIC_STRUCTURE_AVAILABLE = False
+    print(f"[ENHANCED_PRE_BATCH] ⚠️ dynamic_structure_analyzer not available: {e}")
+
 
 # ============================================================================
 # 🆕 v40.2: IMPORT CONCEPT MAP EXTRACTOR (Semantic Entity SEO)
@@ -728,9 +742,28 @@ def get_structure_instructions(
     total_batches: int,
     h2_structure: List[str],
     current_h2: str,
-    batch_type: str
+    batch_type: str,
+    # 🆕 v41.1: Opcjonalne parametry dla dynamic_structure_analyzer
+    s1_data: Dict = None,
+    target_length: int = None,
+    structure_requirements: 'StructureRequirements' = None
 ) -> Dict[str, Any]:
-    """Generuje instrukcje strukturalne dla batcha."""
+    """
+    Generuje instrukcje strukturalne dla batcha.
+    
+    🆕 v41.1: Obsługuje dynamic_structure_analyzer gdy dostępne dane S1.
+    Fallback na sztywną logikę gdy brak danych.
+    
+    Args:
+        current_batch_num: Numer bieżącego batcha
+        total_batches: Całkowita liczba batchy
+        h2_structure: Lista nagłówków H2
+        current_h2: Bieżący nagłówek H2
+        batch_type: Typ batcha (INTRO/CONTENT/FINAL)
+        s1_data: Opcjonalne dane z S1 Analysis (dla dynamic structure)
+        target_length: Opcjonalna docelowa długość artykułu
+        structure_requirements: Opcjonalne wcześniej obliczone wymagania struktury
+    """
     h2_index = 0
     for i, h2 in enumerate(h2_structure):
         if h2.lower() == current_h2.lower() or current_h2.lower() in h2.lower():
@@ -740,6 +773,9 @@ def get_structure_instructions(
     num_h2 = len(h2_structure)
     longest_section_index = num_h2 // 2
     
+    # ================================================================
+    # PARAGRAPHS TARGET (bez zmian - ta logika jest OK)
+    # ================================================================
     if batch_type == "INTRO":
         paragraphs_target = 2
         length_profile = "SHORT"
@@ -757,6 +793,78 @@ def get_structure_instructions(
         paragraphs_target = max(2, paragraphs_target)
         length_profile = "MEDIUM" if paragraphs_target >= 3 else "SHORT"
     
+    # ================================================================
+    # 🆕 v41.1: DYNAMIC STRUCTURE (jeśli dostępne)
+    # ================================================================
+    dynamic_source = False
+    
+    if DYNAMIC_STRUCTURE_AVAILABLE and (s1_data or structure_requirements):
+        try:
+            # Użyj przekazanych wymagań lub oblicz nowe
+            if structure_requirements is None and s1_data:
+                structure_requirements = analyze_structure_requirements(
+                    s1_data=s1_data,
+                    target_length=target_length or 2500
+                )
+            
+            if structure_requirements:
+                # Użyj dynamicznej analizy
+                has_h3 = should_batch_have_h3(
+                    batch_number=current_batch_num,
+                    total_batches=total_batches,
+                    requirements=structure_requirements
+                )
+                has_list = should_batch_have_list(
+                    batch_number=current_batch_num,
+                    total_batches=total_batches,
+                    requirements=structure_requirements,
+                    lists_used_so_far=0  # TODO: śledzić użyte listy
+                )
+                
+                dynamic_source = True
+                h3_instruction = None
+                list_instruction = None
+                
+                if has_h3:
+                    h3_instruction = (
+                        f"Ta sekcja MOŻE mieć H3 (na podstawie analizy {structure_requirements.h3.source}). "
+                        f"Max sekcji z H3 w artykule: {structure_requirements.h3.max_sections}"
+                    )
+                
+                if has_list:
+                    list_instruction = (
+                        f"Ta sekcja MOŻE zawierać listę ({', '.join(structure_requirements.list.types_allowed)}). "
+                        f"Max list w artykule: {structure_requirements.list.max_count}"
+                    )
+                
+                return {
+                    "paragraphs_target": paragraphs_target,
+                    "length_profile": length_profile,
+                    "has_h3": has_h3,
+                    "h3_instruction": h3_instruction,
+                    "h3_required": structure_requirements.h3.required,
+                    "h3_max_sections": structure_requirements.h3.max_sections,
+                    "has_list": has_list,
+                    "list_instruction": list_instruction,
+                    "list_required": structure_requirements.list.required,
+                    "list_max_count": structure_requirements.list.max_count,
+                    "list_types_allowed": structure_requirements.list.types_allowed,
+                    "is_longest_section": h2_index == longest_section_index,
+                    "section_index": h2_index,
+                    "total_sections": num_h2,
+                    "source": "dynamic_structure_analyzer",
+                    "confidence": min(structure_requirements.h3.confidence, structure_requirements.list.confidence),
+                    "summary": _get_structure_summary_dynamic(
+                        paragraphs_target, has_h3, has_list, length_profile, structure_requirements
+                    )
+                }
+                
+        except Exception as e:
+            print(f"[ENHANCED_PRE_BATCH] ⚠️ Dynamic structure error, using fallback: {e}")
+    
+    # ================================================================
+    # FALLBACK: Oryginalna sztywna logika (backwards compatible)
+    # ================================================================
     has_h3 = (h2_index == longest_section_index and length_profile == "LONG")
     
     has_list = (
@@ -778,8 +886,33 @@ def get_structure_instructions(
         "is_longest_section": h2_index == longest_section_index,
         "section_index": h2_index,
         "total_sections": num_h2,
+        "source": "legacy_fixed_rules",
         "summary": _get_structure_summary(paragraphs_target, has_h3, has_list, length_profile)
     }
+
+
+def _get_structure_summary_dynamic(
+    paragraphs: int, 
+    has_h3: bool, 
+    has_list: bool, 
+    profile: str,
+    requirements: 'StructureRequirements'
+) -> str:
+    """Generuje podsumowanie struktury z dynamiczną analizą."""
+    parts = [f"{paragraphs} paragrafów ({profile})"]
+    
+    if has_h3:
+        confidence_str = f"{requirements.h3.confidence:.0%}" if requirements else ""
+        parts.append(f"+ H3 (confidence: {confidence_str})")
+    
+    if has_list:
+        list_types = ", ".join(requirements.list.types_allowed) if requirements else "bullet"
+        parts.append(f"+ lista ({list_types})")
+    
+    source = requirements.h3.source if requirements else "unknown"
+    parts.append(f"[source: {source}]")
+    
+    return ", ".join(parts)
 
 
 def _get_structure_summary(paragraphs: int, has_h3: bool, has_list: bool, profile: str) -> str:
@@ -1098,12 +1231,15 @@ def generate_enhanced_pre_batch_info(
         ),
         
         # 7. STRUCTURE INSTRUCTIONS - H3, listy, długość
+        # 🆕 v41.1: Przekazujemy s1_data dla dynamic_structure_analyzer
         "structure_instructions": get_structure_instructions(
             current_batch_num=current_batch_num,
             total_batches=total_batches,
             h2_structure=h2_structure,
             current_h2=current_h2,
-            batch_type=batch_type
+            batch_type=batch_type,
+            s1_data=s1_data,  # 🆕 v41.1
+            target_length=batch_plan.get("total_target_words") if batch_plan else None  # 🆕 v41.1
         )
     }
     
