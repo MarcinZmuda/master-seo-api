@@ -291,6 +291,31 @@ class ReviewResult:
     semantic_diversity: Optional[Dict] = None
     grammar_lt: Optional[Dict] = None
     auto_fixes_applied: List[str] = field(default_factory=list)  # 🆕 v33.5
+    fixed_text: Optional[str] = None  # 🆕 v41.3: Alias dla corrected_text
+    
+    def __post_init__(self):
+        """🆕 v41.3: Synchronizuj fixed_text z corrected_text."""
+        if self.fixed_text is None and self.corrected_text:
+            self.fixed_text = self.corrected_text
+        elif self.corrected_text is None and self.fixed_text:
+            self.corrected_text = self.fixed_text
+    
+    def to_dict(self) -> Dict:
+        """🆕 v41.3: Konwertuje ReviewResult na dict."""
+        return {
+            "status": self.status,
+            "original_text": self.original_text,
+            "corrected_text": self.corrected_text,
+            "issues": [asdict(issue) if hasattr(issue, '__dataclass_fields__') else issue for issue in (self.issues or [])],
+            "summary": self.summary,
+            "word_count": self.word_count,
+            "paragraph_count": self.paragraph_count,
+            "diff": asdict(self.diff) if self.diff and hasattr(self.diff, '__dataclass_fields__') else self.diff,
+            "semantic_diversity": self.semantic_diversity,
+            "grammar_lt": self.grammar_lt,
+            "auto_fixes_applied": self.auto_fixes_applied,
+            "fixed_text": self.fixed_text
+        }
 
 
 # ================================================================
