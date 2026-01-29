@@ -64,7 +64,12 @@ from forbidden_phrases_v41 import (
 )
 from paragraph_cv_analyzer_v41 import calculate_paragraph_cv
 from mattr_calculator_v41 import calculate_mattr
-from humanness_weights_v41 import WEIGHTS_V41
+from humanness_weights_v41 import (
+    WEIGHTS_V41,
+    get_dynamic_cv_thresholds,
+    evaluate_cv_dynamic,
+    DYNAMIC_CV_THRESHOLDS
+)
 
 # ================================================================
 # 📦 Opcjonalny import wordfreq
@@ -294,6 +299,121 @@ def calculate_burstiness(text: str) -> Dict[str, Any]:
             "ok_max": config.BURSTINESS_OK_MAX,
             "warning_high": config.BURSTINESS_WARNING_HIGH,
             "critical_high": config.BURSTINESS_CRITICAL_HIGH
+        }
+    }
+
+
+# ================================================================
+# 🆕 v41.1: BURSTINESS Z DYNAMICZNYMI PROGAMI CV
+# ================================================================
+def calculate_burstiness_dynamic(text: str) -> Dict[str, Any]:
+    """
+    Oblicza burstiness z DYNAMICZNYMI progami CV zależnymi od długości tekstu.
+    
+    🆕 v41.1: Nowa funkcja wykorzystująca get_dynamic_cv_thresholds()
+    
+    Zalety nad calculate_burstiness():
+    - Progi dostosowane do długości tekstu
+    - Dłuższe teksty = wyższe wymagania (AI się "wygładza")
+    - Krótkie batche = niższe wymagania (naturalnie mniejsza wariancja)
+    
+    Args:
+        text: Tekst do analizy
+        
+    Returns:
+        Dict z wynikami + informacją o użytych dynamicznych progach
+    """
+    sentences = split_into_sentences(text)
+    word_count = len(text.split())
+    
+    if len(sentences) < 5:
+        return {
+            "value": 0,
+            "cv": 0,
+            "status": Severity.WARNING.value,
+            "message": "Za mało zdań do analizy (min 5)",
+            "sentence_count": len(sentences),
+            "word_count": word_count,
+            "dynamic_thresholds": None,
+            "using_dynamic": False
+        }
+    
+    lengths = [len(s.split()) for s in sentences]
+    mean_len = statistics.mean(lengths)
+    std_len = statistics.stdev(lengths) if len(lengths) > 1 else 0
+    
+    # Współczynnik zmienności (CV)
+    cv_value = std_len / mean_len if mean_len > 0 else 0
+    burstiness = round(cv_value * 5, 2)  # burstiness = CV * 5
+    
+    # 🆕 v41.1: Użyj dynamicznych progów
+    cv_evaluation = evaluate_cv_dynamic(cv_value, word_count)
+    thresholds = cv_evaluation["thresholds"]
+    
+    # Mapuj status z evaluate_cv_dynamic na Severity
+    status_mapping = {
+        "CRITICAL": Severity.CRITICAL,
+        "WARNING": Severity.WARNING,
+        "OK_LOW": Severity.OK,
+        "OK": Severity.OK,
+        "EXCELLENT": Severity.OK
+    }
+    status = status_mapping.get(cv_evaluation["status"], Severity.WARNING)
+    
+    # Wygeneruj komunikat
+    if cv_evaluation["status"] == "CRITICAL":
+        message = (
+            f"⚠️ SYGNAŁ AI: CV {cv_value:.3f} < {thresholds['critical']} "
+            f"(CRITICAL dla {thresholds['label']}, {word_count} słów). "
+            f"Dodaj krótkie zdania 2-10 słów."
+        )
+    elif cv_evaluation["status"] == "WARNING":
+        message = (
+            f"CV {cv_value:.3f} < {thresholds['warning']} "
+            f"(WARNING dla {thresholds['label']}, {word_count} słów). "
+            f"Dodaj więcej krótkich zdań."
+        )
+    elif cv_evaluation["status"] == "OK_LOW":
+        message = (
+            f"CV {cv_value:.3f} - minimalnie akceptowalne dla {thresholds['label']}. "
+            f"Rozważ poprawę wariancji."
+        )
+    elif cv_evaluation["status"] == "EXCELLENT":
+        message = (
+            f"CV {cv_value:.3f} - doskonała wariancja dla {thresholds['label']} "
+            f"(powyżej {thresholds['excellent']})."
+        )
+    else:
+        message = (
+            f"CV {cv_value:.3f} - dobra wariancja dla {thresholds['label']} "
+            f"({word_count} słów)."
+        )
+    
+    return {
+        "value": burstiness,
+        "cv": round(cv_value, 4),
+        "status": status.value,
+        "message": message,
+        "sentence_count": len(sentences),
+        "word_count": word_count,
+        "mean_length": round(mean_len, 1),
+        "std_length": round(std_len, 1),
+        "min_length": min(lengths),
+        "max_length": max(lengths),
+        # 🆕 v41.1: Informacje o dynamicznych progach
+        "using_dynamic": True,
+        "dynamic_thresholds": {
+            "label": thresholds["label"],
+            "critical": thresholds["critical"],
+            "warning": thresholds["warning"],
+            "ok_min": thresholds["ok_min"],
+            "excellent": thresholds["excellent"]
+        },
+        "cv_evaluation": {
+            "status": cv_evaluation["status"],
+            "passed": cv_evaluation["passed"],
+            "action": cv_evaluation["action"],
+            "margin": cv_evaluation["margin"]
         }
     }
 
@@ -1209,6 +1329,216 @@ def quick_ai_check(text: str) -> Dict[str, Any]:
         "humanness_score": humanness["humanness_score"],
         "status": humanness["status"],
         "burstiness": burstiness["value"],
+        "top_warning": humanness["warnings"][0] if humanness["warnings"] else None
+    }
+
+
+# ================================================================
+# 🆕 v41.1: HUMANNESS SCORE Z DYNAMICZNYMI PROGAMI CV
+# ================================================================
+def calculate_humanness_score_dynamic(text: str) -> Dict[str, Any]:
+    """
+    Oblicza humanness score z DYNAMICZNYMI progami CV zależnymi od długości tekstu.
+    
+    🆕 v41.1: Nowa funkcja wykorzystująca calculate_burstiness_dynamic()
+    
+    Zalety nad calculate_humanness_score():
+    - Progi CV dostosowane do długości tekstu
+    - Lepsza detekcja AI w długich tekstach
+    - Mniej false positives w krótkich batchach
+    
+    Args:
+        text: Tekst do analizy
+        
+    Returns:
+        Dict z wynikami + informacją o użytych dynamicznych progach
+    """
+    config = AIDetectionConfig()
+    word_count = len(text.split())
+    
+    # 🆕 v41.1: Użyj dynamicznej wersji burstiness
+    burstiness = calculate_burstiness_dynamic(text)
+    
+    vocabulary = calculate_vocabulary_richness(text)
+    sophistication = calculate_lexical_sophistication(text)
+    entropy = calculate_starter_entropy(text)
+    repetition = calculate_word_repetition(text)
+    pos_diversity = calculate_pos_diversity(text)
+    template_diversity = calculate_template_diversity_score(text)
+    paragraph_cv = calculate_paragraph_cv(text)
+    
+    # 🆕 v41.1: Dynamiczna normalizacja burstiness
+    def normalize_burstiness_dynamic(burstiness_result: Dict) -> float:
+        """Normalizuje burstiness używając dynamicznych progów."""
+        cv_value = burstiness_result.get("cv", 0)
+        
+        if not burstiness_result.get("using_dynamic", False):
+            # Fallback do statycznych progów
+            val = burstiness_result.get("value", 0)
+            if val < config.BURSTINESS_CRITICAL_LOW:
+                return 0.0
+            elif val < config.BURSTINESS_OK_MIN:
+                return (val - config.BURSTINESS_CRITICAL_LOW) / (config.BURSTINESS_OK_MIN - config.BURSTINESS_CRITICAL_LOW) * 0.5
+            elif val <= config.BURSTINESS_OK_MAX:
+                return 1.0
+            else:
+                return 0.5
+        
+        # Użyj dynamicznych progów
+        thresholds = burstiness_result.get("dynamic_thresholds", {})
+        critical = thresholds.get("critical", 0.26)
+        ok_min = thresholds.get("ok_min", 0.40)
+        excellent = thresholds.get("excellent", 0.55)
+        
+        if cv_value < critical:
+            return 0.0
+        elif cv_value < ok_min:
+            return (cv_value - critical) / (ok_min - critical) * 0.5
+        elif cv_value >= excellent:
+            return 1.0
+        else:
+            return 0.5 + (cv_value - ok_min) / (excellent - ok_min) * 0.5
+    
+    def normalize_ttr(val):
+        if val >= config.TTR_OK:
+            return 1.0
+        elif val >= config.TTR_WARNING:
+            return 0.5 + (val - config.TTR_WARNING) / (config.TTR_OK - config.TTR_WARNING) * 0.5
+        elif val >= config.TTR_CRITICAL:
+            return (val - config.TTR_CRITICAL) / (config.TTR_WARNING - config.TTR_CRITICAL) * 0.5
+        else:
+            return 0.0
+    
+    def normalize_zipf(val):
+        if not WORDFREQ_AVAILABLE or val == 0:
+            return 0.5
+        if val <= config.ZIPF_OK:
+            return 1.0
+        elif val <= config.ZIPF_WARNING:
+            return 0.5 + (config.ZIPF_WARNING - val) / (config.ZIPF_WARNING - config.ZIPF_OK) * 0.5
+        elif val <= config.ZIPF_CRITICAL:
+            return (config.ZIPF_CRITICAL - val) / (config.ZIPF_CRITICAL - config.ZIPF_WARNING) * 0.5
+        else:
+            return 0.0
+    
+    def normalize_entropy(val):
+        if val >= config.ENTROPY_OK:
+            return 1.0
+        elif val >= config.ENTROPY_WARNING:
+            return 0.5 + (val - config.ENTROPY_WARNING) / (config.ENTROPY_OK - config.ENTROPY_WARNING) * 0.5
+        elif val >= config.ENTROPY_CRITICAL:
+            return (val - config.ENTROPY_CRITICAL) / (config.ENTROPY_WARNING - config.ENTROPY_CRITICAL) * 0.5
+        else:
+            return 0.0
+    
+    def normalize_pos(val):
+        if not SPACY_POS_AVAILABLE or val == 0:
+            return 0.5
+        if val >= 0.6:
+            return 1.0
+        elif val >= 0.4:
+            return 0.5 + (val - 0.4) / 0.2 * 0.5
+        else:
+            return val / 0.4 * 0.5
+    
+    scores = {
+        "burstiness": normalize_burstiness_dynamic(burstiness),  # 🆕 v41.1
+        "vocabulary": normalize_ttr(vocabulary.get("value", 0)),
+        "sophistication": normalize_zipf(sophistication.get("value", 0)),
+        "entropy": normalize_entropy(entropy.get("value", 0)),
+        "repetition": repetition.get("value", 1.0),
+        "pos_diversity": normalize_pos(pos_diversity.get("value", 0.5)),
+        "template_diversity": template_diversity.get("value", 0.5),
+        "paragraph_cv": paragraph_cv.get("score", 50) / 100,
+        "sentence_distribution": 0.5
+    }
+    
+    weights = config.WEIGHTS
+    humanness = sum(scores[k] * weights.get(k, 0) for k in scores)
+    humanness_score = round(humanness * 100, 0)
+    
+    if humanness_score < config.HUMANNESS_CRITICAL:
+        status = Severity.CRITICAL
+        overall_message = f"CRITICAL: Tekst wygląda na AI (score {humanness_score}). Przepisz!"
+    elif humanness_score < config.HUMANNESS_WARNING:
+        status = Severity.WARNING
+        overall_message = f"WARNING: Tekst wymaga poprawy (score {humanness_score})"
+    else:
+        status = Severity.OK
+        overall_message = f"OK: Tekst wygląda naturalnie (score {humanness_score})"
+    
+    all_warnings = []
+    if burstiness.get("status") != "OK":
+        all_warnings.append(burstiness.get("message"))
+    if vocabulary.get("status") != "OK":
+        all_warnings.append(vocabulary.get("message"))
+    if sophistication.get("status") not in ["OK", "WARNING"] or sophistication.get("value", 0) > config.ZIPF_WARNING:
+        all_warnings.append(sophistication.get("message"))
+    if entropy.get("status") != "OK":
+        all_warnings.append(entropy.get("message"))
+    if repetition.get("status") != "OK":
+        all_warnings.append(repetition.get("message"))
+    if pos_diversity.get("status") not in ["OK", "DISABLED"] and pos_diversity.get("enabled", True):
+        all_warnings.append(pos_diversity.get("message"))
+    if template_diversity.get("status") not in ["OK"]:
+        all_warnings.append(template_diversity.get("message"))
+    
+    all_suggestions = []
+    all_suggestions.extend(entropy.get("suggestions", []))
+    all_suggestions.extend(repetition.get("suggestions", []))
+    
+    # 🆕 v41.1: Dodaj sugestie z cv_evaluation
+    cv_eval = burstiness.get("cv_evaluation", {})
+    if cv_eval.get("action") == "REWRITE":
+        all_suggestions.insert(0, "REWRITE: Tekst zbyt monotonny - przepisz z większą wariancją zdań")
+    elif cv_eval.get("action") == "IMPROVE":
+        all_suggestions.insert(0, "IMPROVE: Dodaj krótkie zdania (3-8 słów) dla lepszej wariancji")
+    
+    return {
+        "humanness_score": int(humanness_score),
+        "status": status.value,
+        "message": overall_message,
+        "word_count": word_count,
+        "components": {
+            "burstiness": burstiness,
+            "vocabulary_richness": vocabulary,
+            "lexical_sophistication": sophistication,
+            "starter_entropy": entropy,
+            "word_repetition": repetition,
+            "pos_diversity": pos_diversity,
+            "template_diversity": template_diversity,
+            "paragraph_cv": paragraph_cv
+        },
+        "normalized_scores": scores,
+        "warnings": all_warnings[:5],
+        "suggestions": all_suggestions[:5],
+        # 🆕 v41.1: Informacje o dynamicznych progach
+        "dynamic_cv": {
+            "using_dynamic": burstiness.get("using_dynamic", False),
+            "thresholds": burstiness.get("dynamic_thresholds"),
+            "evaluation": burstiness.get("cv_evaluation")
+        }
+    }
+
+
+def quick_ai_check_dynamic(text: str) -> Dict[str, Any]:
+    """
+    Szybka wersja AI check z dynamicznymi progami CV.
+    
+    🆕 v41.1
+    """
+    burstiness = calculate_burstiness_dynamic(text)
+    humanness = calculate_humanness_score_dynamic(text)
+    
+    return {
+        "humanness_score": humanness["humanness_score"],
+        "status": humanness["status"],
+        "burstiness": burstiness["value"],
+        "cv": burstiness["cv"],
+        "cv_status": burstiness.get("cv_evaluation", {}).get("status", "UNKNOWN"),
+        "cv_action": burstiness.get("cv_evaluation", {}).get("action", "UNKNOWN"),
+        "word_count": burstiness.get("word_count", 0),
+        "thresholds_label": burstiness.get("dynamic_thresholds", {}).get("label", "UNKNOWN"),
         "top_warning": humanness["warnings"][0] if humanness["warnings"] else None
     }
 
