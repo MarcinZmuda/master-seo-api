@@ -1,6 +1,6 @@
 """
 ===============================================================================
-🔍 MOE BATCH VALIDATOR v1.0 - Mixture of Experts Post-Batch Validation
+🔍 MOE BATCH VALIDATOR v1.1 - Mixture of Experts Post-Batch Validation
 ===============================================================================
 Kompleksowa walidacja batcha po wygenerowaniu przez GPT.
 
@@ -9,6 +9,13 @@ EKSPERCI (MoE):
 2. SEO EXPERT - BASIC/EXTENDED keywords, encje, n-gramy
 3. LANGUAGE EXPERT - gramatyka polska (LanguageTool), styl
 4. AI DETECTION EXPERT - burstiness, TTR, rozkład zdań
+5. 🆕 UNIFIED BRIDGE EXPERT - mostek do unified_validator (optional)
+
+🆕 v1.1 ZMIANY:
+- Dodano UnifiedBridgeExpert jako opcjonalny ekspert
+- UnifiedBridgeExpert NIE duplikuje kodu - wywołuje funkcje z unified_validator
+- Dodano import dynamicznych progów CV (humanness_weights_v41)
+- Dodano import calculate_burstiness_dynamic
 
 TRYBY:
 - SOFT: tylko warnings, batch zapisuje się
@@ -41,6 +48,7 @@ except ImportError:
 try:
     from ai_detection_metrics import (
         calculate_burstiness, 
+        calculate_burstiness_dynamic,  # 🆕 v41.1
         calculate_vocabulary_richness,
         analyze_sentence_distribution,
         check_word_repetition_detailed,
@@ -64,6 +72,33 @@ try:
 except ImportError:
     KEYWORD_COUNTER_AVAILABLE = False
     print("[MOE_VALIDATOR] ⚠️ Keyword Counter not available")
+
+# 🆕 v41.1: UNIFIED VALIDATOR BRIDGE (optional)
+try:
+    from unified_validator import (
+        validate_content,
+        quick_validate,
+        calculate_entity_density,
+        validate_semantic_enhancement,
+        check_template_patterns,
+        ValidationConfig as UnifiedValidationConfig
+    )
+    UNIFIED_VALIDATOR_AVAILABLE = True
+    print("[MOE_VALIDATOR] ✅ Unified Validator bridge enabled")
+except (ImportError, NameError, Exception) as e:
+    UNIFIED_VALIDATOR_AVAILABLE = False
+    print(f"[MOE_VALIDATOR] ⚠️ Unified Validator not available: {e}")
+
+# 🆕 v41.1: DYNAMIC CV THRESHOLDS
+try:
+    from humanness_weights_v41 import (
+        get_dynamic_cv_thresholds,
+        evaluate_cv_dynamic
+    )
+    DYNAMIC_CV_AVAILABLE = True
+except ImportError:
+    DYNAMIC_CV_AVAILABLE = False
+    print("[MOE_VALIDATOR] ⚠️ Dynamic CV thresholds not available")
 
 
 # ================================================================
@@ -577,6 +612,133 @@ class AIDetectionExpert:
 
 
 # ================================================================
+# 🆕 v41.1: 5️⃣ UNIFIED BRIDGE EXPERT (optional)
+# ================================================================
+class UnifiedBridgeExpert:
+    """
+    Ekspert mostkowy do unified_validator.
+    
+    Nie duplikuje logiki - WYWOŁUJE funkcje z unified_validator
+    i tłumaczy wyniki na format MoE.
+    
+    Korzyści:
+    - Zero duplikacji kodu
+    - Centralne źródło prawdy w unified_validator
+    - Dodatkowe metryki (semantic enhancement, template patterns)
+    """
+    
+    def __init__(self, config: ValidationConfig):
+        self.config = config
+        self.enabled = UNIFIED_VALIDATOR_AVAILABLE
+    
+    def validate(
+        self, 
+        batch_text: str,
+        keywords_state: Dict,
+        s1_data: Dict = None,
+        main_keyword: str = ""
+    ) -> Tuple[List[ValidationIssue], Dict]:
+        """
+        Waliduje batch używając unified_validator.
+        
+        Returns:
+            (issues, summary) - skonwertowane na format MoE
+        """
+        issues = []
+        metrics = {
+            "enabled": self.enabled,
+            "checks_performed": []
+        }
+        
+        if not self.enabled:
+            return issues, {"enabled": False, "reason": "unified_validator not available"}
+        
+        try:
+            # 1. Quick validate (szybka walidacja podstawowa)
+            quick_result = quick_validate(batch_text, keywords_state)
+            metrics["quick_score"] = quick_result.get("score", 0)
+            metrics["checks_performed"].append("quick_validate")
+            
+            # Konwertuj issues z quick_validate
+            for issue in quick_result.get("issues", []):
+                if isinstance(issue, dict):
+                    severity = issue.get("severity", "WARNING")
+                else:
+                    severity = getattr(issue, "severity", "WARNING")
+                    if hasattr(severity, "value"):
+                        severity = severity.value
+                
+                issues.append(ValidationIssue(
+                    expert="unified_bridge",
+                    severity=severity.lower() if severity != "CRITICAL" else "critical",
+                    code=issue.get("code", "UNIFIED_ISSUE") if isinstance(issue, dict) else getattr(issue, "code", "UNIFIED_ISSUE"),
+                    message=issue.get("message", str(issue)) if isinstance(issue, dict) else getattr(issue, "message", str(issue)),
+                    fix_instruction="",
+                    context={"source": "unified_validator.quick_validate"}
+                ))
+            
+            # 2. Entity density (jeśli dostępne S1)
+            if s1_data:
+                entities = s1_data.get("entity_seo", {}).get("entities", [])
+                density_result = calculate_entity_density(batch_text, entities)
+                metrics["entity_density"] = density_result.get("density", 0)
+                metrics["checks_performed"].append("entity_density")
+                
+                if density_result.get("status") == "CRITICAL":
+                    issues.append(ValidationIssue(
+                        expert="unified_bridge",
+                        severity="warning",
+                        code="ENTITY_DENSITY_LOW",
+                        message=f"Niska gęstość encji: {density_result.get('density', 0):.2f}",
+                        fix_instruction="Dodaj więcej encji z S1 Analysis",
+                        context=density_result
+                    ))
+            
+            # 3. Template patterns (wykrywanie wzorców AI)
+            template_issues = check_template_patterns(batch_text)
+            metrics["template_patterns_found"] = len(template_issues)
+            metrics["checks_performed"].append("template_patterns")
+            
+            for t_issue in template_issues[:2]:  # Max 2 żeby nie zalewać
+                issues.append(ValidationIssue(
+                    expert="unified_bridge",
+                    severity="warning",
+                    code="TEMPLATE_PATTERN",
+                    message=t_issue.message if hasattr(t_issue, "message") else str(t_issue),
+                    fix_instruction="Przepisz fragment unikając powtarzalnych struktur",
+                    context={"source": "unified_validator.check_template_patterns"}
+                ))
+            
+            # 4. Semantic enhancement (opcjonalne)
+            if s1_data:
+                semantic_result = validate_semantic_enhancement(batch_text, s1_data)
+                metrics["semantic_score"] = semantic_result.get("score", 0)
+                metrics["checks_performed"].append("semantic_enhancement")
+                
+                if semantic_result.get("score", 100) < 50:
+                    issues.append(ValidationIssue(
+                        expert="unified_bridge",
+                        severity="info",
+                        code="SEMANTIC_LOW",
+                        message=f"Niski semantic score: {semantic_result.get('score', 0)}",
+                        fix_instruction="Wzmocnij powiązania semantyczne z encjami S1",
+                        context=semantic_result
+                    ))
+            
+        except Exception as e:
+            print(f"[MOE_VALIDATOR] UnifiedBridgeExpert error: {e}")
+            metrics["error"] = str(e)
+        
+        summary = {
+            "enabled": True,
+            "metrics": metrics,
+            "issues_count": len(issues)
+        }
+        
+        return issues, summary
+
+
+# ================================================================
 # 🎯 GŁÓWNA FUNKCJA WALIDACJI MOE
 # ================================================================
 def validate_batch_moe(
@@ -664,6 +826,30 @@ def validate_batch_moe(
     ai_issues, ai_summary = ai_expert.validate(batch_text)
     all_issues.extend(ai_issues)
     experts_summary["ai_detection"] = ai_summary
+    
+    # ═══════════════════════════════════════════════════════════════
+    # 🆕 v41.1: 5️⃣ UNIFIED BRIDGE EXPERT (optional)
+    # Nie duplikuje - WYWOŁUJE funkcje z unified_validator
+    # ═══════════════════════════════════════════════════════════════
+    if UNIFIED_VALIDATOR_AVAILABLE:
+        try:
+            unified_expert = UnifiedBridgeExpert(config)
+            main_keyword = project_data.get("main_keyword", "")
+            unified_issues, unified_summary = unified_expert.validate(
+                batch_text=batch_text,
+                keywords_state=keywords_state,
+                s1_data=s1_data,
+                main_keyword=main_keyword
+            )
+            # Dodaj tylko unikalne issues (unikaj duplikacji z innymi ekspertami)
+            existing_codes = {i.code for i in all_issues}
+            for issue in unified_issues:
+                if issue.code not in existing_codes:
+                    all_issues.append(issue)
+            experts_summary["unified_bridge"] = unified_summary
+        except Exception as e:
+            print(f"[MOE_VALIDATOR] UnifiedBridgeExpert skipped: {e}")
+            experts_summary["unified_bridge"] = {"enabled": False, "error": str(e)}
     
     # ═══════════════════════════════════════════════════════════════
     # AGREGACJA WYNIKÓW
