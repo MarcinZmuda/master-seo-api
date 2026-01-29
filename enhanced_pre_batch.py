@@ -1261,14 +1261,19 @@ def _generate_gpt_prompt_section(enhanced: Dict, is_legal: bool = False) -> str:
     h2_list = enhanced.get("current_h2_list", [])
     h2_count = enhanced.get("h2_count_in_batch", 0)
     
+    # 🆕 v41.2: Różna liczba akapitów dla każdej H2 (2-4)
+    paragraph_options = [2, 3, 4, 3, 2, 4]
+    
     if h2_count > 1:
         lines.append(f"📌 H2 W TYM BATCHU ({h2_count} sekcje):")
         for i, h2 in enumerate(h2_list, 1):
-            lines.append(f"   {i}. \"{h2}\"")
+            para_count = paragraph_options[(i - 1) % len(paragraph_options)]
+            lines.append(f"   {i}. \"{h2}\" → {para_count} akapity")
         lines.append("")
         lines.append("⚠️ WYMAGANE: Napisz WSZYSTKIE powyższe sekcje H2 w tym batchu!")
+        lines.append("⚠️ WAŻNE: Każda sekcja H2 MUSI mieć INNĄ liczbę akapitów (2-4)!")
     elif h2_count == 1:
-        lines.append(f"📌 H2: \"{enhanced['current_h2']}\"")
+        lines.append(f"📌 H2: \"{enhanced['current_h2']}\" → 3 akapity")
     else:
         lines.append(f"📌 SEKCJA: {enhanced.get('batch_type', 'CONTENT')}")
     lines.append("")
