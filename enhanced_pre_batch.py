@@ -1127,7 +1127,8 @@ def generate_enhanced_pre_batch_info(
     style_fingerprint: Dict = None,
     is_ymyl: bool = False,
     is_legal: bool = False,
-    batch_plan: Dict = None  # 🆕 v40.1: Plan batcha z h2_sections
+    batch_plan: Dict = None,  # 🆕 v40.1: Plan batcha z h2_sections
+    detected_articles: List[str] = None  # 🆕 v41.4: Artykuły prawne do opisania
 ) -> Dict[str, Any]:
     """Generuje KOMPLETNE enhanced pre_batch_info z konkretnymi instrukcjami."""
     if entity_state is None:
@@ -1136,6 +1137,8 @@ def generate_enhanced_pre_batch_info(
         style_fingerprint = {}
     if batch_plan is None:
         batch_plan = {}
+    if detected_articles is None:
+        detected_articles = []
     
     remaining_batches = max(1, total_batches - len(batches))
     
@@ -1319,8 +1322,40 @@ def generate_enhanced_pre_batch_info(
             print(f"[ENHANCED_PRE_BATCH] ⚠️ Advanced semantic error: {e}")
             enhanced["advanced_semantic"] = {"error": str(e)}
     
+    # ================================================================
+    # 🆕 v41.4: LEGAL ARTICLE REQUIREMENT
+    # Dla projektów LEGAL - WYMUŚ opisanie artykułu prawnego
+    # ================================================================
+    legal_article_requirement = None
+    if is_legal and detected_articles:
+        # Strategia: batch 2 = główny artykuł, batch 3 = dodatkowy
+        article_to_describe = None
+        
+        if current_batch_num == 2 and len(detected_articles) >= 1:
+            # Batch 2: GŁÓWNY artykuł (pierwszy na liście)
+            article_to_describe = detected_articles[0]
+            requirement_level = "MUST"  # Obowiązkowe
+        elif current_batch_num == 3 and len(detected_articles) >= 2:
+            # Batch 3: Dodatkowy artykuł (jeśli jest)
+            article_to_describe = detected_articles[1]
+            requirement_level = "SHOULD"  # Zalecane
+        elif current_batch_num >= 4 and len(detected_articles) >= 1:
+            # Późniejsze batche: opcjonalnie dowolny artykuł
+            article_to_describe = None
+            requirement_level = "OPTIONAL"
+        
+        if article_to_describe:
+            legal_article_requirement = {
+                "article": article_to_describe,
+                "level": requirement_level,
+                "all_articles": detected_articles,
+                "instruction": _generate_legal_article_instruction(article_to_describe, requirement_level, main_keyword)
+            }
+    
+    enhanced["legal_article_requirement"] = legal_article_requirement
+    
     # GPT PROMPT SECTION
-    enhanced["gpt_instructions"] = _generate_gpt_prompt_section(enhanced, is_legal)
+    enhanced["gpt_instructions"] = _generate_gpt_prompt_section(enhanced, is_legal, detected_articles)
     
     # 🆕 v40.2: CONCEPT MAP (Semantic Entity SEO)
     if CONCEPT_MAP_AVAILABLE and current_batch_num == 1:
@@ -1425,7 +1460,96 @@ def generate_enhanced_pre_batch_info(
     return enhanced
 
 
-def _generate_gpt_prompt_section(enhanced: Dict, is_legal: bool = False) -> str:
+def _generate_legal_article_instruction(article: str, level: str, topic: str) -> str:
+    """
+    🆕 v41.4: Generuje konkretną instrukcję opisania artykułu prawnego.
+    
+    Zamiast ogólnego "cytuj przepisy", daje KONKRETNY przepis do opisania.
+    """
+    # Mapowanie popularnych artykułów na kontekst
+    ARTICLE_CONTEXT = {
+        "art. 211 k.k.": {
+            "name": "Uprowadzenie lub zatrzymanie małoletniego",
+            "context": "penalizuje bezprawne zabranie lub zatrzymanie małoletniego wbrew woli osoby sprawującej opiekę",
+            "elements": ["podmiot (osoba nieuprawniona)", "zachowanie (uprowadza/zatrzymuje)", "przedmiot (małoletni)", "wbrew woli opiekuna"]
+        },
+        "art. 13 k.c.": {
+            "name": "Ubezwłasnowolnienie całkowite",
+            "context": "określa przesłanki ubezwłasnowolnienia całkowitego osoby dorosłej",
+            "elements": ["choroba psychiczna", "niedorozwój umysłowy", "zaburzenia psychiczne", "niemożność kierowania swoim postępowaniem"]
+        },
+        "art. 56 k.r.o.": {
+            "name": "Przesłanki rozwodu",
+            "context": "określa warunki orzeczenia rozwodu przez sąd",
+            "elements": ["zupełny rozkład pożycia", "trwały rozkład pożycia", "dobro małoletnich dzieci"]
+        },
+        "art. 991 k.c.": {
+            "name": "Zachowek",
+            "context": "określa prawo do zachowku i jego wysokość",
+            "elements": ["uprawnieni do zachowku", "wysokość zachowku", "obliczanie substratu"]
+        },
+        "art. 415 k.c.": {
+            "name": "Odpowiedzialność deliktowa",
+            "context": "ustanawia zasadę odpowiedzialności za szkodę wyrządzoną z winy",
+            "elements": ["wina", "szkoda", "związek przyczynowy"]
+        },
+        "art. 133 k.r.o.": {
+            "name": "Obowiązek alimentacyjny rodziców",
+            "context": "określa zakres obowiązku alimentacyjnego rodziców wobec dzieci",
+            "elements": ["obowiązek utrzymania", "możliwości zarobkowe", "usprawiedliwione potrzeby"]
+        }
+    }
+    
+    # Normalizuj artykuł
+    article_normalized = article.strip().lower()
+    context_info = None
+    for key, val in ARTICLE_CONTEXT.items():
+        if key.lower() in article_normalized or article_normalized in key.lower():
+            context_info = val
+            break
+    
+    if level == "MUST":
+        level_text = "⚖️ OBOWIĄZKOWE"
+        action = "MUSISZ opisać"
+    elif level == "SHOULD":
+        level_text = "⚖️ ZALECANE"
+        action = "Powinieneś opisać"
+    else:
+        level_text = "⚖️ OPCJONALNE"
+        action = "Możesz opisać"
+    
+    instruction = f"""
+{level_text}: OPISZ {article} w tym batchu!
+
+{action} ten przepis w kontekście tematu "{topic}".
+"""
+    
+    if context_info:
+        instruction += f"""
+📋 {article} - {context_info['name']}:
+   {context_info['context']}
+   
+   Elementy do uwzględnienia:
+   • {chr(10) + '   • '.join(context_info['elements'])}
+"""
+    
+    instruction += """
+✅ JAK OPISAĆ POPRAWNIE:
+   • Wspomnij numer artykułu i ustawę (np. "Zgodnie z art. 211 k.k.")
+   • Opisz CO reguluje ten przepis (1-2 zdania)
+   • Połącz z tematem artykułu (dlaczego to ważne)
+   • NIE cytuj pełnej treści przepisu - opisz własnymi słowami
+
+❌ UNIKAJ:
+   • Pełnego cytowania tekstu ustawy
+   • Interpretacji prawnej (to nie porada!)
+   • Dawania instrukcji "co robić"
+"""
+    
+    return instruction.strip()
+
+
+def _generate_gpt_prompt_section(enhanced: Dict, is_legal: bool = False, detected_articles: List[str] = None) -> str:
     """Generuje gotową sekcję promptu dla GPT.
     
     🆕 v41.3: Logika akapitów PER SEKCJA H2, nie per batch.
@@ -1487,9 +1611,56 @@ def _generate_gpt_prompt_section(enhanced: Dict, is_legal: bool = False) -> str:
     
     lines.append("")
     
-    # 🆕 v41.3: EXTENDED KEYWORDS - wyraźna sekcja
+    # ================================================================
+    # 🆕 v41.4: LEGAL ARTICLE REQUIREMENT
+    # ================================================================
+    legal_req = enhanced.get("legal_article_requirement")
+    if legal_req and legal_req.get("article"):
+        lines.append("=" * 60)
+        lines.append(legal_req["instruction"])
+        lines.append("=" * 60)
+        lines.append("")
+    
+    # ================================================================
+    # 🆕 v41.4: NIEUŻYTE FRAZY - KRYTYCZNA SEKCJA
+    # Pokazuje WSZYSTKIE frazy które jeszcze nie zostały użyte
+    # ================================================================
     tracking = enhanced.get("keyword_tracking", {})
+    
+    # Zbierz WSZYSTKIE nieużyte frazy (actual = 0)
+    basic_kws = tracking.get("basic_keywords", [])
     extended_kws = tracking.get("extended_keywords", [])
+    
+    unused_basic = [k for k in basic_kws if k.get("actual_total", 0) == 0]
+    unused_extended = [k for k in extended_kws if k.get("actual_total", 0) == 0]
+    
+    if unused_basic or unused_extended:
+        lines.append("🚨 NIEUŻYTE FRAZY - UŻYJ W TYM LUB NASTĘPNYCH BATCHACH!")
+        lines.append("=" * 50)
+        
+        if unused_basic:
+            lines.append(f"   🔴 BASIC nieużyte ({len(unused_basic)}):")
+            # Pokaż do 10 nieużytych BASIC
+            for kw in unused_basic[:10]:
+                target = kw.get("target", "1-2")
+                lines.append(f"      • \"{kw['keyword']}\" (cel: {target})")
+            if len(unused_basic) > 10:
+                lines.append(f"      ... i {len(unused_basic) - 10} więcej")
+        
+        if unused_extended:
+            lines.append(f"   ⭐ EXTENDED nieużyte ({len(unused_extended)}):")
+            # Pokaż do 10 nieużytych EXTENDED
+            for kw in unused_extended[:10]:
+                lines.append(f"      • \"{kw['keyword']}\"")
+            if len(unused_extended) > 10:
+                lines.append(f"      ... i {len(unused_extended) - 10} więcej")
+        
+        lines.append("")
+        lines.append("   💡 Wpleć 3-5 z powyższych fraz NATURALNIE w treść!")
+        lines.append("=" * 50)
+        lines.append("")
+    
+    # 🆕 v41.3: EXTENDED KEYWORDS - wyraźna sekcja
     extended_needing = [k for k in extended_kws if k.get("priority") == "HIGH"]
     
     if extended_needing:
