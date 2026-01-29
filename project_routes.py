@@ -3706,11 +3706,14 @@ def get_pre_batch_info(project_id):
                 style_fingerprint=data.get("style_fingerprint", {}),
                 is_ymyl=data.get("is_ymyl", False),
                 is_legal=data.get("is_legal", False) or data.get("detected_category") == "prawo",
-                batch_plan=batch_plan  # 🆕 v40.1: Przekaż batch_plan z h2_sections
+                batch_plan=batch_plan,  # 🆕 v40.1: Przekaż batch_plan z h2_sections
+                detected_articles=data.get("detected_articles", [])  # 🆕 v41.4: Artykuły prawne
             )
             # 🆕 v40.1: Log ile H2 w batchu
             h2_in_batch = enhanced_info.get("h2_count_in_batch", 0)
-            print(f"[PRE_BATCH] 🎯 Enhanced: {len(enhanced_info.get('entities_to_define', []))} entities, {len(enhanced_info.get('relations_to_establish', []))} relations, {h2_in_batch} H2 in batch")
+            legal_req = enhanced_info.get("legal_article_requirement")
+            legal_info = f", legal_article={legal_req.get('article')}" if legal_req else ""
+            print(f"[PRE_BATCH] 🎯 Enhanced: {len(enhanced_info.get('entities_to_define', []))} entities, {len(enhanced_info.get('relations_to_establish', []))} relations, {h2_in_batch} H2 in batch{legal_info}")
         except Exception as e:
             print(f"[PRE_BATCH] ⚠️ Enhanced pre-batch error: {e}")
             import traceback
