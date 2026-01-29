@@ -175,6 +175,8 @@ def generate_h2_plan(
     """
     Generuje optymalny plan H2.
     
+    🆕 v41.3: Faktyczna analiza competitor_h2!
+    
     Args:
         main_keyword: Główna fraza (H1)
         h2_phrases: Frazy które MUSZĄ być w H2
@@ -195,13 +197,21 @@ def generate_h2_plan(
     # 1. Określ template na podstawie intent
     template = get_intent_template(search_intent)
     
-    # 2. Określ ilość H2
+    # 🆕 v41.3: Analizuj H2 konkurencji
+    competitor_analysis = analyze_competitor_h2(competitor_h2, main_keyword)
+    
+    # 2. Określ ilość H2 (bazując też na konkurencji)
     if article_h2_count is None:
-        article_h2_count = calculate_h2_count(len(h2_phrases), len(template["structure"]))
+        # Weź średnią z konkurencji jeśli dostępna
+        if competitor_analysis.get("avg_h2_count", 0) > 0:
+            competitor_avg = competitor_analysis["avg_h2_count"]
+            article_h2_count = max(5, min(8, int(competitor_avg)))
+        else:
+            article_h2_count = calculate_h2_count(len(h2_phrases), len(template["structure"]))
     
     # 3. Generuj bazowy plan H2
     h2_plan = []
-    used_phrases = []
+    used_types = set()
     
     # 4. Pierwszy H2 - ZAWSZE definicja z główną frazą
     first_h2 = generate_natural_h2(main_keyword, "definition")
@@ -213,6 +223,7 @@ def generate_h2_plan(
         "relevancy_score": 100,
         "source": "main_keyword"
     })
+    used_types.add("definition")
     
     # 5. Wpleć frazy użytkownika
     position = 2
@@ -220,8 +231,13 @@ def generate_h2_plan(
         if phrase.lower() == main_keyword.lower():
             continue  # Główna fraza już użyta
             
-        # Znajdź najlepszy typ H2 dla tej frazy
-        h2_type = detect_phrase_type(phrase, template["structure"], position)
+        # 🆕 v41.3: Znajdź najlepszy typ H2 bazując na konkurencji
+        h2_type = detect_phrase_type_with_competitor(
+            phrase, 
+            template["structure"], 
+            position,
+            competitor_analysis.get("common_types", [])
+        )
         
         # Wygeneruj naturalny nagłówek
         h2_text = generate_natural_h2(phrase, h2_type)
@@ -237,11 +253,37 @@ def generate_h2_plan(
             "relevancy_score": relevancy,
             "source": "user_phrase"
         })
-        used_phrases.append(phrase)
+        used_types.add(h2_type)
         position += 1
     
+    # 🆕 v41.3: Uzupełnij brakującymi tematami z konkurencji
+    remaining_slots = article_h2_count - len(h2_plan) - 1  # -1 na FAQ
+    if remaining_slots > 0 and competitor_analysis.get("common_topics"):
+        for topic_info in competitor_analysis["common_topics"]:
+            if remaining_slots <= 0:
+                break
+            
+            topic_type = topic_info.get("type", "additional")
+            if topic_type in used_types:
+                continue
+                
+            # Wygeneruj H2 dla tego tematu
+            h2_text = generate_natural_h2(main_keyword, topic_type)
+            
+            h2_plan.append({
+                "position": position,
+                "h2": h2_text,
+                "phrase_used": None,
+                "type": topic_type,
+                "relevancy_score": 75,
+                "source": "competitor_analysis"
+            })
+            used_types.add(topic_type)
+            position += 1
+            remaining_slots -= 1
+    
     # 6. Uzupełnij strukturę z template (jeśli potrzeba więcej H2)
-    remaining_slots = article_h2_count - len(h2_plan)
+    remaining_slots = article_h2_count - len(h2_plan) - 1
     if remaining_slots > 0:
         additional_h2s = fill_from_template(
             template, 
@@ -277,6 +319,153 @@ def generate_h2_plan(
     
     # 10. Generuj sugestie H3
     h3_suggestions = generate_h3_suggestions(h2_plan, entities, paa_questions)
+    
+    # 11. Raport pokrycia
+    coverage = generate_coverage_report(h2_plan, h2_phrases, main_keyword)
+    
+    # 🆕 v41.3: Dodaj info o analizie konkurencji
+    coverage["competitor_analysis"] = {
+        "h2_analyzed": len(competitor_h2),
+        "common_topics_found": len(competitor_analysis.get("common_topics", [])),
+        "avg_competitor_h2": competitor_analysis.get("avg_h2_count", 0)
+    }
+    
+    return {
+        "h2_plan": h2_plan,
+        "h3_suggestions": h3_suggestions,
+        "coverage": coverage,
+        "meta": {
+            "intent": search_intent,
+            "template_used": template["description"],
+            "total_h2": len(h2_plan),
+            "competitor_h2_used": len(competitor_h2) > 0
+        }
+    }
+
+
+def analyze_competitor_h2(competitor_h2: List[str], main_keyword: str) -> Dict:
+    """
+    🆕 v41.3: Analizuje H2 konkurencji i wyciąga wzorce.
+    
+    Returns:
+        Dict z:
+        - common_types: najczęstsze typy H2
+        - common_topics: tematy poruszane przez konkurencję
+        - avg_h2_count: średnia liczba H2 na stronie
+        - question_ratio: procent H2 w formie pytania
+    """
+    if not competitor_h2:
+        return {
+            "common_types": [],
+            "common_topics": [],
+            "avg_h2_count": 0,
+            "question_ratio": 0
+        }
+    
+    type_counts = {}
+    topics = []
+    question_count = 0
+    
+    for h2 in competitor_h2:
+        h2_lower = h2.lower().strip()
+        
+        # Wykryj typ H2
+        h2_type = detect_h2_type_from_text(h2_lower)
+        type_counts[h2_type] = type_counts.get(h2_type, 0) + 1
+        
+        # Czy to pytanie?
+        if "?" in h2 or h2_lower.startswith(("jak ", "co ", "czy ", "ile ", "kiedy ", "gdzie ", "dlaczego ")):
+            question_count += 1
+        
+        # Zapisz temat
+        topics.append({
+            "original": h2,
+            "type": h2_type,
+            "is_question": "?" in h2
+        })
+    
+    # Sortuj typy po częstości
+    sorted_types = sorted(type_counts.items(), key=lambda x: x[1], reverse=True)
+    common_types = [t[0] for t in sorted_types[:5]]
+    
+    # Deduplikuj tematy po typie
+    seen_types = set()
+    unique_topics = []
+    for topic in topics:
+        if topic["type"] not in seen_types:
+            unique_topics.append(topic)
+            seen_types.add(topic["type"])
+    
+    return {
+        "common_types": common_types,
+        "common_topics": unique_topics[:6],  # Max 6 tematów
+        "avg_h2_count": len(competitor_h2) // max(1, len(set(h2.split()[0] for h2 in competitor_h2 if h2))),
+        "question_ratio": round(question_count / len(competitor_h2) * 100, 1) if competitor_h2 else 0,
+        "type_distribution": type_counts
+    }
+
+
+def detect_h2_type_from_text(h2_text: str) -> str:
+    """Wykrywa typ H2 na podstawie tekstu."""
+    h2_lower = h2_text.lower()
+    
+    # Mapowanie słów kluczowych na typy
+    type_keywords = {
+        "definition": ["czym jest", "co to", "definicja", "pojęcie", "znaczenie"],
+        "types": ["rodzaje", "typy", "odmiany", "kategorie", "klasyfikacja"],
+        "benefits": ["korzyści", "zalety", "plusy", "dlaczego warto", "przewagi"],
+        "how_it_works": ["jak działa", "mechanizm", "zasada", "princip"],
+        "how_to": ["jak zrobić", "jak stworzyć", "krok po kroku", "instrukcja", "poradnik"],
+        "price": ["cena", "koszt", "ile kosztuje", "cennik", "opłaty"],
+        "comparison": ["porównanie", "vs", "różnice", "co lepsze", "zestawienie"],
+        "when": ["kiedy", "w jakich przypadkach", "przesłanki", "warunki"],
+        "where": ["gdzie", "w jakim", "lokalizacja"],
+        "mistakes": ["błędy", "problemy", "czego unikać", "pułapki"],
+        "tips": ["wskazówki", "porady", "triki", "sekrety"],
+        "examples": ["przykłady", "case study", "wzory"],
+        "faq": ["pytania", "faq", "q&a", "odpowiedzi"]
+    }
+    
+    for h2_type, keywords in type_keywords.items():
+        for kw in keywords:
+            if kw in h2_lower:
+                return h2_type
+    
+    return "additional"
+
+
+def detect_phrase_type_with_competitor(
+    phrase: str, 
+    structure: List[Dict], 
+    position: int,
+    competitor_common_types: List[str]
+) -> str:
+    """
+    🆕 v41.3: Wykrywa typ H2 biorąc pod uwagę analizę konkurencji.
+    """
+    phrase_lower = phrase.lower()
+    
+    # Najpierw sprawdź czy fraza zawiera słowa kluczowe dla typu
+    for h2_type, keywords in PHRASE_TYPE_HINTS.items():
+        for kw in keywords:
+            if kw in phrase_lower:
+                return h2_type
+    
+    # Jeśli konkurencja często używa danego typu na tej pozycji, użyj go
+    if competitor_common_types and position - 1 < len(competitor_common_types):
+        return competitor_common_types[position - 1]
+    
+    # Fallback: dobierz na podstawie pozycji
+    position_types = {
+        2: "context",
+        3: "types",
+        4: "benefits",
+        5: "application",
+        6: "how_to",
+        7: "tips"
+    }
+    
+    return position_types.get(position, "additional")
     
     # 11. Raport pokrycia
     coverage = generate_coverage_report(h2_plan, h2_phrases, main_keyword)
