@@ -1367,18 +1367,46 @@ def generate_enhanced_pre_batch_info(
     
     # ================================================================
     # 🆕 v41.0: TRIPLET PRIORITY INSTRUCTIONS
+    # ⚠️ FIX v41.1: relations_to_establish to LISTA, nie dict!
     # ================================================================
     if "relations_to_establish" in enhanced:
         try:
-            relations = enhanced.get("relations_to_establish", {})
-            if relations.get("prebatch_instruction"):
-                # Dodaj instrukcję tripletów do encji
+            relations = enhanced.get("relations_to_establish", [])
+            
+            # FIX: relations to lista relacji, nie dict
+            if isinstance(relations, list) and relations:
+                # Zbierz instrukcje z wszystkich relacji
+                triplet_instructions = []
+                for rel in relations:
+                    if isinstance(rel, dict):
+                        # Każda relacja może mieć instruction/prebatch_instruction
+                        instr = rel.get("prebatch_instruction") or rel.get("instruction")
+                        if instr:
+                            triplet_instructions.append(instr)
+                        # Lub wygeneruj instrukcję z from/relation/to
+                        elif rel.get("from") and rel.get("relation") and rel.get("to"):
+                            triplet_instructions.append(
+                                f"Użyj relacji: {rel['from']} → {rel['relation']} → {rel['to']}"
+                            )
+                
+                # Dodaj instrukcje tripletów do encji
+                if triplet_instructions:
+                    if "entities_to_define" not in enhanced:
+                        enhanced["entities_to_define"] = {}
+                    ent_def = enhanced.get("entities_to_define", {})
+                    instructions = ent_def.get("instructions", [])
+                    instructions.extend(triplet_instructions)
+                    enhanced["entities_to_define"]["instructions"] = instructions
+                    
+            # Stara ścieżka dla kompatybilności (gdyby był dict)
+            elif isinstance(relations, dict) and relations.get("prebatch_instruction"):
                 if "entities_to_define" not in enhanced:
                     enhanced["entities_to_define"] = {}
                 ent_def = enhanced.get("entities_to_define", {})
                 instructions = ent_def.get("instructions", [])
                 instructions.append(relations["prebatch_instruction"])
                 enhanced["entities_to_define"]["instructions"] = instructions
+                
         except Exception as e:
             print(f"[ENHANCED_PRE_BATCH] ⚠️ Triplet priority error: {e}")
     
