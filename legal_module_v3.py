@@ -372,18 +372,30 @@ def get_legal_context_for_article(
 
 
 def _build_citation_instruction(keyword: str, judgments: List[Dict]) -> str:
-    """Buduje instrukcję cytowania dla GPT."""
+    """Buduje instrukcję cytowania dla GPT.
+    
+    🆕 v41.4: Profesjonalne cytowanie prawnicze - portal + sygnatura.
+    Standard: czytelnik sam wyszukuje orzeczenie po sygnaturze.
+    """
     
     lines = [
-        f"ORZECZENIA DLA TEMATU: {keyword}",
+        f"⚖️ ORZECZENIA DLA TEMATU: {keyword}",
         f"Znaleziono: {len(judgments)} orzeczeń",
         "",
-        "ZASADY CYTOWANIA:",
-        f"- Użyj MAKSYMALNIE {CONFIG.MAX_CITATIONS_PER_ARTICLE} orzeczeń",
-        "- Cytuj sygnaturę, datę i sąd",
-        "- Nie wymyślaj sygnatur!",
+        "📋 STANDARD CYTOWANIA PRAWNICZEGO:",
+        f"- Użyj MAKSYMALNIE {CONFIG.MAX_CITATIONS_PER_ARTICLE} orzeczeń w tekście",
+        "- Format: sygnatura, data, sąd + portal gdzie dostępne",
+        "- NIE wklejaj pełnych URL - to nieprofesjonalne!",
+        "- Czytelnik sam wyszuka po sygnaturze",
         "",
-        "DOSTĘPNE ORZECZENIA:"
+        "✅ PRZYKŁAD POPRAWNEGO CYTOWANIA:",
+        "",
+        "   \"Jak wskazał Sąd Okręgowy w Łodzi w wyroku z dnia 2 października 2019 r.",
+        "   (sygn. II C 895/18), długotrwały konflikt między rodzicami może uzasadniać",
+        "   ingerencję sądu w sposób sprawowania opieki (orzeczenie dostępne na:",
+        "   orzeczenia.lodz.so.gov.pl).\"",
+        "",
+        "🏛️ DOSTĘPNE ORZECZENIA:"
     ]
     
     for i, j in enumerate(judgments[:CONFIG.MAX_CITATIONS_PER_ARTICLE], 1):
@@ -392,14 +404,39 @@ def _build_citation_instruction(keyword: str, judgments: List[Dict]) -> str:
         court = j.get("court", "")
         score = j.get("relevance_score", "?")
         
-        lines.append(f"{i}. {sig} z dnia {date}")
-        lines.append(f"   Sąd: {court}")
-        lines.append(f"   Relevantność: {score}/100")
+        # Portal (tylko domena)
+        official_portal = j.get("official_portal", "")
+        if official_portal:
+            # Wyczyść do samej domeny
+            portal_domain = official_portal.replace("https://", "").replace("http://", "").rstrip("/")
+        else:
+            portal_domain = "orzeczenia.ms.gov.pl"
+        
+        lines.append(f"")
+        lines.append(f"═══ ORZECZENIE #{i} ═══")
+        lines.append(f"   📌 Sygnatura: {sig}")
+        lines.append(f"   📅 Data: {date}")
+        lines.append(f"   🏛️ Sąd: {court}")
+        lines.append(f"   ⭐ Relevantność: {score}/100")
+        lines.append(f"   🌐 Portal: {portal_domain}")
+        lines.append(f"")
+        lines.append(f"   ✍️ CYTUJ TAK:")
+        lines.append(f"   \"...{court} w wyroku z dnia {date} (sygn. {sig})...\"")
+        lines.append(f"   \"...(orzeczenie dostępne na: {portal_domain}).\"")
         
         excerpt = j.get("excerpt", "")
         if excerpt:
-            lines.append(f"   Fragment: \"{excerpt[:150]}...\"")
-        lines.append("")
+            lines.append(f"")
+            lines.append(f"   📝 Fragment do wykorzystania:")
+            lines.append(f"   \"{excerpt[:250]}...\"")
+    
+    lines.append("")
+    lines.append("=" * 50)
+    lines.append("⚠️ PAMIĘTAJ:")
+    lines.append("   • Sygnatura + data + sąd = OBOWIĄZKOWE")
+    lines.append("   • Portal (domena) = na końcu cytatu")
+    lines.append("   • Pełny URL = NIE WKLEJAJ (nieprofesjonalne)")
+    lines.append("=" * 50)
     
     return "\n".join(lines)
 
