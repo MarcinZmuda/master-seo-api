@@ -92,45 +92,45 @@ H2_TYPE_FALLBACK = {
     "tutorial": {
         "patterns": ["krok po kroku", "poradnik", "instrukcja", "jak zrobić", "jak wykonać"],
         "profile": "long",
-        "words": (400, 600),  # 🆕 v41.1: było 350-520
-        "paragraphs": (4, 6)
+        "words": (500, 700),  # 🆕 v41.2: +100 (było 400-600)
+        "paragraphs": (3, 4)
     },
     "definition": {
         "patterns": ["co to", "czym jest", "definicja", "co oznacza"],
         "profile": "short",
-        "words": (200, 350),  # 🆕 v41.1: było 150-280 (za mało!)
-        "paragraphs": (3, 4)
+        "words": (300, 450),  # 🆕 v41.2: +100 (było 200-350)
+        "paragraphs": (2, 3)
     },
     "yes_no": {
         "patterns": ["czy można", "czy warto", "czy trzeba", "czy należy"],
         "profile": "short",
-        "words": (200, 350),  # 🆕 v41.1: było 150-280 (za mało!)
-        "paragraphs": (3, 4)
+        "words": (300, 450),  # 🆕 v41.2: +100 (było 200-350)
+        "paragraphs": (2, 3)
     },
     "comparison": {
         "patterns": ["vs", "porównanie", "różnice", "co lepsze"],
         "profile": "long",
-        "words": (400, 600),  # 🆕 v41.1: było 350-520
-        "paragraphs": (4, 6)
+        "words": (500, 700),  # 🆕 v41.2: +100 (było 400-600)
+        "paragraphs": (3, 4)
     },
     "list": {
         "patterns": ["najlepsze", "top", "ranking", "rodzaje", "typy"],
         "profile": "extended",
-        "words": (500, 750),  # 🆕 v41.1: było 450-650
-        "paragraphs": (5, 7)
+        "words": (600, 850),  # 🆕 v41.2: +100 (było 500-750)
+        "paragraphs": (3, 4)  # 🆕 v41.2: max 4 (było 5-7)
     },
     "explanation": {
         "patterns": ["jak ", "dlaczego", "w jaki sposób"],
         "profile": "long",
-        "words": (400, 600),  # 🆕 v41.1: było 350-520
-        "paragraphs": (4, 6)
+        "words": (500, 700),  # 🆕 v41.2: +100 (było 400-600)
+        "paragraphs": (3, 4)
     }
 }
 
 DEFAULT_FALLBACK = {
     "profile": "medium",
-    "words": (300, 500),  # 🆕 v41.1: było 250-400
-    "paragraphs": (3, 5)
+    "words": (400, 600),  # 🆕 v41.2: +100 (było 300-500)
+    "paragraphs": (2, 4)
 }
 
 
@@ -154,22 +154,20 @@ def calculate_length_fallback(
 ) -> Dict:
     """Fallback obliczania długości bez batch_complexity."""
     
-    # 🆕 v41.1: MINIMUM 150 słów per H2!
-    MIN_WORDS_PER_H2 = 150
+    # 🆕 v41.2: MINIMUM 250 słów per H2! (było 150)
+    MIN_WORDS_PER_H2 = 250
     h2_count = len(h2_sections) if h2_sections else 1
     
     if is_intro:
-        # 🆕 v41.1: INTRO skaluje się z liczbą H2!
-        # Było: 100-160 słów niezależnie od H2 (za mało!)
-        # Teraz: minimum 150 słów per H2
-        base_min = max(200, h2_count * MIN_WORDS_PER_H2)
-        base_max = max(300, h2_count * 200)
+        # 🆕 v41.2: INTRO skaluje się z liczbą H2
+        base_min = max(300, h2_count * MIN_WORDS_PER_H2)
+        base_max = max(450, h2_count * 350)
         return {
             "profile": "intro",
             "words_min": base_min,
             "words_max": base_max,
             "paragraphs_min": max(2, h2_count * 2),
-            "paragraphs_max": max(3, h2_count * 3),
+            "paragraphs_max": min(h2_count * 4, 12),  # Max 4 per H2, max 12 total
             "score": 30,
             "factors": {"type": "intro", "h2_count": h2_count},
             "reasoning": [f"INTRO: {h2_count} H2 × {MIN_WORDS_PER_H2} słów = {base_min}-{base_max} słów"]
@@ -184,22 +182,21 @@ def calculate_length_fallback(
     words_min, words_max = best_config["words"]
     para_min, para_max = best_config["paragraphs"]
     
-    # 🆕 v41.1: MNOŻNIK PER H2!
-    # Jeśli batch ma więcej niż 1 H2, skaluj proporcjonalnie
+    # 🆕 v41.2: MNOŻNIK PER H2 z max 4 akapitów per sekcja
     if h2_count > 1:
         # Każda dodatkowa H2 dodaje ~80% bazowej długości
         h2_multiplier = 1 + (h2_count - 1) * 0.8
         words_min = int(words_min * h2_multiplier)
         words_max = int(words_max * h2_multiplier)
-        para_min = max(para_min, h2_count * 2)  # Min 2 akapity per H2
-        para_max = max(para_max, h2_count * 3)  # Max 3 akapity per H2
+        # 🆕 v41.2: Max 4 akapity per H2, różna liczba dla każdej
+        para_min = h2_count * 2  # Min 2 akapity per H2
+        para_max = h2_count * 4  # Max 4 akapity per H2
     
-    # Enforce absolute minimum: 150 słów per H2
+    # Enforce absolute minimum: 250 słów per H2 (było 150)
     words_min = max(words_min, h2_count * MIN_WORDS_PER_H2)
     
     if keywords_count > 10:
         words_max = int(words_max * 1.2)
-        para_max = min(para_max + 1, 8)
     elif keywords_count < 5:
         words_min = int(words_min * 0.9)
     
@@ -214,7 +211,7 @@ def calculate_length_fallback(
         "paragraphs_max": para_max,
         "score": 50,
         "factors": {"fallback": True, "h2_count": h2_count},
-        "reasoning": [f"Batch z {h2_count} H2 × {MIN_WORDS_PER_H2} min = {words_min}-{words_max} słów"]
+        "reasoning": [f"Batch z {h2_count} H2 × {MIN_WORDS_PER_H2} min = {words_min}-{words_max} słów, {para_min}-{para_max} akapitów"]
     }
 
 
@@ -646,8 +643,14 @@ def get_batch_instructions(
     
     if batch_plan.h2_sections:
         prompt_lines.append("✏️ H2 DO NAPISANIA:")
-        for h2 in batch_plan.h2_sections:
+        # 🆕 v41.2: Różna liczba akapitów dla każdej H2 (2-4, różne)
+        paragraph_options = [2, 3, 4, 3, 2, 4]  # Cykliczna lista dla różnorodności
+        for i, h2 in enumerate(batch_plan.h2_sections):
+            para_count = paragraph_options[i % len(paragraph_options)]
             prompt_lines.append(f"   • {h2}")
+            prompt_lines.append(f"     → {para_count} akapity (różna liczba dla każdej sekcji!)")
+        prompt_lines.append("")
+        prompt_lines.append("   ⚠️ WAŻNE: Każda sekcja H2 MUSI mieć INNĄ liczbę akapitów!")
         prompt_lines.append("")
     
     if batch_plan.ngrams_to_use:
@@ -655,6 +658,12 @@ def get_batch_instructions(
         for ng in batch_plan.ngrams_to_use[:5]:
             prompt_lines.append(f"   • \"{ng}\"")
         prompt_lines.append("")
+    
+    # 🆕 v41.2: Wygeneruj różne liczby akapitów dla każdej H2
+    paragraph_options = [2, 3, 4, 3, 2, 4]
+    h2_paragraph_counts = {}
+    for i, h2 in enumerate(batch_plan.h2_sections):
+        h2_paragraph_counts[h2] = paragraph_options[i % len(paragraph_options)]
     
     return {
         "batch_number": batch_number,
@@ -666,6 +675,7 @@ def get_batch_instructions(
         "complexity_reasoning": batch_plan.complexity_reasoning,
         "snippet_required": batch_plan.snippet_required,
         "h2_sections": batch_plan.h2_sections,
+        "h2_paragraph_counts": h2_paragraph_counts,  # 🆕 v41.2
         "keywords": {"critical": critical_keywords, "high_priority": high_priority, "normal": keywords_instructions},
         "ngrams": batch_plan.ngrams_to_use,
         "notes": batch_plan.notes,
