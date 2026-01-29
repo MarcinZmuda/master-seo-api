@@ -228,13 +228,10 @@ except ImportError as e:
     print(f"[TRACKER] ⚠️ Batch Review System not available: {e}")
 
 # 🆕 v37.1: MoE Batch Validator
-try:
-    from moe_batch_validator import validate_batch_moe, format_validation_for_gpt, ValidationMode
-    MOE_VALIDATOR_ENABLED = True
-    print("[TRACKER] ✅ MoE Batch Validator loaded")
-except ImportError as e:
-    MOE_VALIDATOR_ENABLED = False
-    print(f"[TRACKER] ⚠️ MoE Validator not available: {e}")
+# ⚠️ FIX v1.2: Lazy import - unikamy circular import
+# Import przeniesiony do funkcji gdzie jest używany
+MOE_VALIDATOR_ENABLED = True  # Zakładamy że jest, sprawdzimy w runtime
+print("[TRACKER] ✅ MoE Batch Validator (lazy load)")
 
 # 🆕 v37.4: Quality Score Module
 try:
@@ -1056,6 +1053,9 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
     
     if MOE_VALIDATOR_ENABLED:
         try:
+            # 🆕 FIX v1.2: Lazy import - unikamy circular import
+            from moe_batch_validator import validate_batch_moe, format_validation_for_gpt, ValidationMode
+            
             batches_done = len(project_data.get("batches", []))
             moe_validation_result = validate_batch_moe(
                 batch_text=batch_text,
