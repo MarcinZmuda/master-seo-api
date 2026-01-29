@@ -1,6 +1,6 @@
 """
 ===============================================================================
-⚖️ HUMANNESS WEIGHTS v41.0 - Nowe wagi dla AI detection
+⚖️ HUMANNESS WEIGHTS v41.1 - Nowe wagi + Dynamiczne progi CV
 ===============================================================================
 
 Aktualizacja wag w calculate_humanness_score() na podstawie:
@@ -19,6 +19,19 @@ ZMIANY WZGLĘDEM v36.5:
 - ZWIĘKSZONO: template_diversity (0.15 → 0.16) - ważne dla wzorców AI
 
 SUMA WAG: 1.00 (bez zmian)
+
+🆕 v41.1 ZMIANY:
+- DODANO: Dynamiczne progi CV w zależności od długości tekstu
+- DODANO: get_dynamic_cv_thresholds(word_count) - zwraca progi dla danej długości
+- DODANO: evaluate_cv_dynamic(cv_value, word_count) - ocena CV z dynamicznymi progami
+- DODANO: DYNAMIC_CV_THRESHOLDS - lista progów per zakres słów
+
+UZASADNIENIE DYNAMICZNYCH PROGÓW:
+- Dłuższe teksty AI mają tendencję do "wygładzania" wariancji
+- SHORT (<200 słów): CV >= 0.35 (krótkie batche mają naturalnie mniejszą wariancję)
+- MEDIUM (200-400 słów): CV >= 0.40 (standardowy batch)
+- LONG (400-600 słów): CV >= 0.43 (większe wymagania)
+- EXTENDED (>600 słów): CV >= 0.45 (najwyższe wymagania - AI się "wygładza")
 
 ===============================================================================
 """
@@ -108,7 +121,7 @@ assert abs(sum(WEIGHTS_V41.values()) - 1.0) < 0.001, "Wagi muszą sumować się 
 
 @dataclass
 class ThresholdsV41:
-    """Progi dla metryk v41."""
+    """Progi dla metryk v41 (statyczne - legacy)."""
     
     # Paragraph CV (NOWE)
     PARAGRAPH_CV_CRITICAL_LOW: float = 0.25
@@ -125,6 +138,185 @@ class ThresholdsV41:
 
 
 THRESHOLDS_V41 = ThresholdsV41()
+
+
+# ============================================================================
+# 🆕 v41.1: DYNAMICZNE PROGI CV (w zależności od długości tekstu)
+# ============================================================================
+# Uzasadnienie: Dłuższe teksty AI mają tendencję do "wygładzania" wariancji.
+# Im dłuższy tekst, tym wyższe wymagania dla naturalności (CV).
+#
+# Badania empiryczne (BRAJEN v40.2):
+# - SHORT (<200 słów): CV 0.35 wystarcza (krótkie batche mają naturalnie mniejszą wariancję)
+# - MEDIUM (200-400 słów): CV 0.40 wymagane (standardowy batch)
+# - EXTENDED (>400 słów): CV 0.45 wymagane (długie teksty AI "wygładzają się")
+# ============================================================================
+
+@dataclass
+class DynamicCVThresholds:
+    """Dynamiczne progi CV dla danego zakresu słów."""
+    word_count_min: int
+    word_count_max: int
+    cv_critical: float      # Poniżej = REWRITE
+    cv_warning: float       # Poniżej = WARNING
+    cv_ok_min: float        # Powyżej = OK
+    cv_excellent: float     # Powyżej = EXCELLENT
+    label: str
+
+
+# Definicja progów per zakres długości
+DYNAMIC_CV_THRESHOLDS = [
+    DynamicCVThresholds(
+        word_count_min=0,
+        word_count_max=199,
+        cv_critical=0.25,
+        cv_warning=0.30,
+        cv_ok_min=0.35,
+        cv_excellent=0.50,
+        label="SHORT"
+    ),
+    DynamicCVThresholds(
+        word_count_min=200,
+        word_count_max=399,
+        cv_critical=0.26,
+        cv_warning=0.33,
+        cv_ok_min=0.40,
+        cv_excellent=0.55,
+        label="MEDIUM"
+    ),
+    DynamicCVThresholds(
+        word_count_min=400,
+        word_count_max=599,
+        cv_critical=0.28,
+        cv_warning=0.36,
+        cv_ok_min=0.43,
+        cv_excellent=0.58,
+        label="LONG"
+    ),
+    DynamicCVThresholds(
+        word_count_min=600,
+        word_count_max=99999,
+        cv_critical=0.30,
+        cv_warning=0.38,
+        cv_ok_min=0.45,
+        cv_excellent=0.60,
+        label="EXTENDED"
+    ),
+]
+
+
+def get_dynamic_cv_thresholds(word_count: int) -> Dict[str, Any]:
+    """
+    Zwraca dynamiczne progi CV w zależności od długości tekstu.
+    
+    Args:
+        word_count: Liczba słów w tekście/batchu
+        
+    Returns:
+        Dict z progami i etykietą zakresu:
+        {
+            "critical": float,    # Poniżej = REWRITE required
+            "warning": float,     # Poniżej = WARNING
+            "ok_min": float,      # Powyżej = PASS
+            "excellent": float,   # Powyżej = EXCELLENT
+            "label": str,         # "SHORT" | "MEDIUM" | "LONG" | "EXTENDED"
+            "word_count": int,
+            "rationale": str
+        }
+    
+    Example:
+        >>> get_dynamic_cv_thresholds(150)
+        {"critical": 0.25, "warning": 0.30, "ok_min": 0.35, "label": "SHORT", ...}
+        
+        >>> get_dynamic_cv_thresholds(450)
+        {"critical": 0.28, "warning": 0.36, "ok_min": 0.43, "label": "LONG", ...}
+    """
+    for threshold in DYNAMIC_CV_THRESHOLDS:
+        if threshold.word_count_min <= word_count <= threshold.word_count_max:
+            return {
+                "critical": threshold.cv_critical,
+                "warning": threshold.cv_warning,
+                "ok_min": threshold.cv_ok_min,
+                "excellent": threshold.cv_excellent,
+                "label": threshold.label,
+                "word_count": word_count,
+                "rationale": f"Batch {threshold.label} ({word_count} słów): "
+                            f"CV >= {threshold.cv_ok_min} required for PASS"
+            }
+    
+    # Fallback (nie powinno wystąpić)
+    return {
+        "critical": 0.26,
+        "warning": 0.33,
+        "ok_min": 0.40,
+        "excellent": 0.55,
+        "label": "MEDIUM",
+        "word_count": word_count,
+        "rationale": "Fallback to MEDIUM thresholds"
+    }
+
+
+def evaluate_cv_dynamic(cv_value: float, word_count: int) -> Dict[str, Any]:
+    """
+    Ocenia wartość CV względem dynamicznych progów.
+    
+    Args:
+        cv_value: Obliczona wartość CV (Coefficient of Variation)
+        word_count: Liczba słów w tekście
+        
+    Returns:
+        Dict z oceną:
+        {
+            "status": "CRITICAL" | "WARNING" | "OK" | "EXCELLENT",
+            "passed": bool,
+            "cv_value": float,
+            "threshold_used": float,
+            "margin": float,        # Różnica od progu ok_min
+            "action": str,          # "REWRITE" | "IMPROVE" | "CONTINUE"
+            "details": str
+        }
+    """
+    thresholds = get_dynamic_cv_thresholds(word_count)
+    
+    if cv_value < thresholds["critical"]:
+        status = "CRITICAL"
+        passed = False
+        action = "REWRITE"
+        details = (f"CV {cv_value:.3f} < {thresholds['critical']} (CRITICAL dla {thresholds['label']}). "
+                   f"Tekst zbyt monotonny - wymaga przepisania z większą wariancją zdań.")
+    elif cv_value < thresholds["warning"]:
+        status = "WARNING"
+        passed = False
+        action = "IMPROVE"
+        details = (f"CV {cv_value:.3f} < {thresholds['warning']} (WARNING dla {thresholds['label']}). "
+                   f"Dodaj krótkie zdania (3-8 słów) i zróżnicuj długości.")
+    elif cv_value < thresholds["ok_min"]:
+        status = "OK_LOW"
+        passed = True
+        action = "CONTINUE"
+        details = (f"CV {cv_value:.3f} - minimalnie akceptowalne dla {thresholds['label']}. "
+                   f"Rozważ poprawę wariancji.")
+    elif cv_value >= thresholds["excellent"]:
+        status = "EXCELLENT"
+        passed = True
+        action = "CONTINUE"
+        details = f"CV {cv_value:.3f} - doskonała wariancja dla {thresholds['label']}."
+    else:
+        status = "OK"
+        passed = True
+        action = "CONTINUE"
+        details = f"CV {cv_value:.3f} - dobra wariancja dla {thresholds['label']}."
+    
+    return {
+        "status": status,
+        "passed": passed,
+        "cv_value": round(cv_value, 4),
+        "threshold_used": thresholds["ok_min"],
+        "margin": round(cv_value - thresholds["ok_min"], 4),
+        "action": action,
+        "details": details,
+        "thresholds": thresholds
+    }
 
 
 # ============================================================================
@@ -253,8 +445,8 @@ def validate_weights_config() -> Dict[str, Any]:
 # ============================================================================
 
 if __name__ == "__main__":
-    print("⚖️ HUMANNESS WEIGHTS v41.0")
-    print("=" * 50)
+    print("⚖️ HUMANNESS WEIGHTS v41.1 (+ Dynamic CV Thresholds)")
+    print("=" * 60)
     
     print("\n📊 Nowe wagi:")
     for metric, weight in sorted(WEIGHTS_V41.items(), key=lambda x: -x[1]):
@@ -270,10 +462,41 @@ if __name__ == "__main__":
         else:
             print(f"   {metric}: {change['old']:.2f} → {change['new']:.2f} ({change['change']})")
     
-    print("\n✅ Walidacja:")
+    print("\n✅ Walidacja wag:")
     validation = validate_weights_config()
     print(f"   Valid: {validation['valid']}")
     if validation['issues']:
         print(f"   Issues: {validation['issues']}")
     if validation['warnings']:
         print(f"   Warnings: {validation['warnings']}")
+    
+    # ═══════════════════════════════════════════════════════════════
+    # 🆕 TEST DYNAMICZNYCH PROGÓW CV
+    # ═══════════════════════════════════════════════════════════════
+    print("\n" + "=" * 60)
+    print("🆕 DYNAMICZNE PROGI CV (v41.1)")
+    print("=" * 60)
+    
+    print("\n📏 Progi per zakres długości:")
+    print(f"   {'Zakres':<12} {'Label':<10} {'Critical':<10} {'Warning':<10} {'OK min':<10} {'Excellent':<10}")
+    print("   " + "-" * 62)
+    for t in DYNAMIC_CV_THRESHOLDS:
+        range_str = f"{t.word_count_min}-{t.word_count_max}"
+        print(f"   {range_str:<12} {t.label:<10} {t.cv_critical:<10.2f} {t.cv_warning:<10.2f} {t.cv_ok_min:<10.2f} {t.cv_excellent:<10.2f}")
+    
+    print("\n🧪 Test evaluate_cv_dynamic():")
+    test_cases = [
+        (0.22, 150),   # SHORT, CRITICAL
+        (0.32, 150),   # SHORT, OK
+        (0.35, 300),   # MEDIUM, WARNING
+        (0.42, 300),   # MEDIUM, OK
+        (0.38, 500),   # LONG, WARNING
+        (0.48, 500),   # LONG, OK
+        (0.40, 700),   # EXTENDED, WARNING
+        (0.52, 700),   # EXTENDED, OK
+    ]
+    
+    for cv, words in test_cases:
+        result = evaluate_cv_dynamic(cv, words)
+        icon = "✅" if result["passed"] else "❌"
+        print(f"   {icon} CV={cv:.2f}, {words}w → {result['status']:<10} ({result['thresholds']['label']}) | {result['action']}")
