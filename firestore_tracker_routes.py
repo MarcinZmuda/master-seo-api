@@ -1190,6 +1190,24 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
             print(f"[TRACKER] ⚠️ Legal Validation error: {e}")
 
     # Save batch
+    # 🆕 v41.3: Bezpieczne wywołanie to_dict() - chroni przed błędami
+    def safe_to_dict(obj):
+        """Bezpiecznie konwertuje obiekt na dict."""
+        if obj is None:
+            return None
+        if hasattr(obj, 'to_dict') and callable(obj.to_dict):
+            try:
+                return obj.to_dict()
+            except Exception as e:
+                print(f"[TRACKER] ⚠️ safe_to_dict error: {e}")
+                return {"error": str(e), "type": type(obj).__name__}
+        if isinstance(obj, dict):
+            return obj
+        # Fallback - spróbuj __dict__
+        if hasattr(obj, '__dict__'):
+            return {k: v for k, v in obj.__dict__.items() if not k.startswith('_')}
+        return {"raw": str(obj)}
+    
     batch_entry = {
         "text": batch_text,
         "meta_trace": meta_trace or {},
@@ -1206,14 +1224,14 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         },
         "warnings": warnings,
         "status": status,
-        # 🆕 v37.1: MoE Validation results
-        "moe_validation": moe_validation_result.to_dict() if moe_validation_result else None,
+        # 🆕 v37.1: MoE Validation results - używamy safe_to_dict
+        "moe_validation": safe_to_dict(moe_validation_result),
         "moe_fix_instructions": moe_fix_instructions,
         # 🆕 v38: Entity Coverage results
-        "entity_validation": entity_validation_result.to_dict() if entity_validation_result else None,
+        "entity_validation": safe_to_dict(entity_validation_result),
         "entity_fix_instructions": entity_fix_instructions,
         # 🆕 v38: Legal Validation results
-        "legal_validation": legal_validation_result.to_dict() if legal_validation_result else None,
+        "legal_validation": safe_to_dict(legal_validation_result),
         "legal_removals": legal_removals
     }
 
@@ -1388,23 +1406,27 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
                 use_claude_for_complex=False  # Na razie bez Claude
             )
             
+            # 🆕 v41.3: Bezpieczny dostęp do atrybutów
+            fixed_text_val = getattr(batch_review_result, 'fixed_text', None) or getattr(batch_review_result, 'corrected_text', None)
+            auto_fixes_val = getattr(batch_review_result, 'auto_fixes_applied', []) or []
+            
             # Jeśli były auto-poprawki, zaktualizuj batch w Firestore
-            if batch_review_result.fixed_text and batch_review_result.fixed_text != batch_text:
-                auto_fixed_text = batch_review_result.fixed_text
+            if fixed_text_val and fixed_text_val != batch_text:
+                auto_fixed_text = fixed_text_val
                 
                 # Zaktualizuj ostatni batch w project_data
                 if project_data.get("batches"):
                     project_data["batches"][-1]["text"] = auto_fixed_text
                     project_data["batches"][-1]["auto_fixed"] = True
-                    project_data["batches"][-1]["auto_fixes"] = batch_review_result.auto_fixes_applied
+                    project_data["batches"][-1]["auto_fixes"] = auto_fixes_val
                     
                     # Zapisz do Firestore
                     doc_ref.update({
                         "batches": sanitize_for_firestore(project_data["batches"])
                     })
                 
-                print(f"[TRACKER] ✅ Auto-fixed {len(batch_review_result.auto_fixes_applied)} issues")
-                for fix in batch_review_result.auto_fixes_applied[:3]:
+                print(f"[TRACKER] ✅ Auto-fixed {len(auto_fixes_val)} issues")
+                for fix in auto_fixes_val[:3]:
                     print(f"[TRACKER]    • {fix}")
                 
                 # ================================================================
@@ -1468,7 +1490,9 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
                 print(f"[TRACKER] ✅ Keywords recounted: {len(recount_changes)} changes, state saved to Firestore")
             
             # Loguj review summary
-            print(f"[TRACKER] 📋 Review: {batch_review_result.status}, issues: {len(batch_review_result.issues)}")
+            review_status = getattr(batch_review_result, 'status', 'UNKNOWN')
+            review_issues = getattr(batch_review_result, 'issues', []) or []
+            print(f"[TRACKER] 📋 Review: {review_status}, issues: {len(review_issues)}")
             
         except Exception as e:
             print(f"[TRACKER] ⚠️ Batch review error: {e}")
@@ -1596,8 +1620,8 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
                 "has_h2": True,  # Już sprawdzone wcześniej
                 "batch_text": batch_text,
                 "batch_role": "INTRO" if batches_done == 1 else ("FINAL" if is_last_batch else "CONTENT"),
-                "moe_validation": moe_validation_result.to_dict() if moe_validation_result else {},
-                "batch_review": batch_review_result.to_dict() if batch_review_result else {}
+                "moe_validation": safe_to_dict(moe_validation_result) if 'safe_to_dict' in dir() else (moe_validation_result.to_dict() if moe_validation_result and hasattr(moe_validation_result, 'to_dict') else {}),
+                "batch_review": safe_to_dict(batch_review_result) if 'safe_to_dict' in dir() else (batch_review_result.to_dict() if batch_review_result and hasattr(batch_review_result, 'to_dict') else {})
             }
             
             # Oblicz quality score
@@ -1803,14 +1827,14 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
             "isolated_keywords": isolated_keywords[:5]
         },
         "soft_cap_validation": soft_cap_result,
-        # 🆕 v37.1: MoE Validation
-        "moe_validation": moe_validation_result.to_dict() if moe_validation_result else None,
+        # 🆕 v37.1: MoE Validation - używamy safe_to_dict
+        "moe_validation": safe_to_dict(moe_validation_result) if 'safe_to_dict' in dir() else (moe_validation_result.to_dict() if moe_validation_result and hasattr(moe_validation_result, 'to_dict') else None),
         "moe_fix_instructions": moe_fix_instructions,
-        # 🆕 v37.1: Batch Review + Auto-Fix
-        "batch_review": batch_review_result.to_dict() if batch_review_result else None,
+        # 🆕 v37.1: Batch Review + Auto-Fix - używamy safe_to_dict
+        "batch_review": safe_to_dict(batch_review_result) if 'safe_to_dict' in dir() else (batch_review_result.to_dict() if batch_review_result and hasattr(batch_review_result, 'to_dict') else None),
         "auto_fixed": auto_fixed_text is not None,
         "auto_fixed_text": auto_fixed_text,
-        "claude_fixes_needed": batch_review_result.claude_fixes_needed if batch_review_result else [],
+        "claude_fixes_needed": getattr(batch_review_result, 'claude_fixes_needed', []) if batch_review_result else [],
         # 🆕 v36.9: Info o postępie i auto-merge
         "batch_number": batches_done,
         "total_planned_batches": total_planned,
@@ -1859,7 +1883,7 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
             "is_valid": legal_validation_result.is_valid if legal_validation_result else True,
             "violations_count": len(legal_validation_result.violations) if legal_validation_result else 0,
             "auto_removed_count": len(legal_validation_result.removals) if legal_validation_result else 0,
-            "removals": [r.to_dict() for r in legal_validation_result.removals] if legal_validation_result else []
+            "removals": [safe_to_dict(r) if 'safe_to_dict' in dir() else (r.to_dict() if hasattr(r, 'to_dict') else str(r)) for r in legal_validation_result.removals] if legal_validation_result and hasattr(legal_validation_result, 'removals') else []
         } if legal_validation_result else None,
         # 🆕 v38.1: Override info
         "v38_overrides": v38_overrides if 'v38_overrides' in dir() and v38_overrides else None,
