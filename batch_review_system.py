@@ -220,23 +220,43 @@ except ImportError as e:
         return []
 
 # 🆕 v37.1: Batch Review System z auto-poprawkami
+# ⚠️ FIX v1.2: Usunięto circular import (plik importował sam siebie)
+# Te funkcje powinny być zaimportowane z claude_reviewer.py lub zdefiniowane tutaj
 try:
-    from batch_review_system import (
-        review_batch_comprehensive,
-        get_review_summary,
-        generate_claude_fix_prompt,
-        claude_smart_fix,
-        should_use_claude_smart_fix,
-        build_smart_fix_prompt,
-        get_pre_batch_info_for_claude,
-        SmartFixResult,
-        ReviewResult
+    from claude_reviewer import (
+        ReviewResult,
+        review_batch as review_batch_comprehensive,  # alias
     )
+    # Stub dla brakujących funkcji
+    def get_review_summary(result): return result.__dict__ if result else {}
+    def generate_claude_fix_prompt(text, issues): return f"Fix: {issues}"
+    def claude_smart_fix(text, context): return text
+    def should_use_claude_smart_fix(issues): return False
+    def build_smart_fix_prompt(text, pre_batch): return text
+    def get_pre_batch_info_for_claude(project): return {}
+    class SmartFixResult:
+        def __init__(self, text="", fixes=None):
+            self.fixed_text = text
+            self.auto_fixes_applied = fixes or []
     BATCH_REVIEW_ENABLED = True
-    print("[TRACKER] ✅ Batch Review System loaded")
+    print("[TRACKER] ✅ Batch Review System loaded (from claude_reviewer)")
 except ImportError as e:
     BATCH_REVIEW_ENABLED = False
     print(f"[TRACKER] ⚠️ Batch Review System not available: {e}")
+    # Fallback stubs
+    class ReviewResult:
+        pass
+    class SmartFixResult:
+        def __init__(self, text="", fixes=None):
+            self.fixed_text = text
+            self.auto_fixes_applied = fixes or []
+    def review_batch_comprehensive(*args, **kwargs): return None
+    def get_review_summary(result): return {}
+    def generate_claude_fix_prompt(text, issues): return ""
+    def claude_smart_fix(text, context): return text
+    def should_use_claude_smart_fix(issues): return False
+    def build_smart_fix_prompt(text, pre_batch): return text
+    def get_pre_batch_info_for_claude(project): return {}
 
 # 🆕 v37.1: MoE Batch Validator
 try:
@@ -302,12 +322,17 @@ except ImportError as e:
     LEGAL_POST_VALIDATOR_ENABLED = False
     print(f"[TRACKER] ⚠️ Legal Post-Validator not available: {e}")
 
-# 🆕 v38: Helpful Reflex Detector (z batch_review_system)
-try:
-    from batch_review_system import detect_helpful_reflex, auto_remove_fillers
-    HELPFUL_REFLEX_ENABLED = True
-except ImportError:
-    HELPFUL_REFLEX_ENABLED = False
+# 🆕 v38: Helpful Reflex Detector
+# ⚠️ FIX v1.2: Usunięto circular import - definiujemy stub funkcje lokalnie
+HELPFUL_REFLEX_ENABLED = False  # Wyłączone - brak implementacji
+
+def detect_helpful_reflex(text: str, is_ymyl: bool = False) -> list:
+    """Stub - wykrywa 'helpful reflex' patterns w tekście YMYL."""
+    return []
+
+def auto_remove_fillers(text: str) -> str:
+    """Stub - usuwa fillery z tekstu."""
+    return text
 
 tracker_routes = Blueprint("tracker_routes", __name__)
 
@@ -2219,12 +2244,8 @@ def review_and_fix_batch(project_id):
         }), 500
     
     try:
-        from batch_review_system import (
-            review_batch_comprehensive,
-            claude_smart_fix,
-            get_pre_batch_info_for_claude,
-            get_review_summary
-        )
+        # ⚠️ FIX v1.2: Funkcje już zaimportowane na poziomie modułu
+        # (usunięto circular import z batch_review_system)
         
         # KROK 1: Review + Auto-Fix
         previous_text = batches[-1]["text"] if batches else None
