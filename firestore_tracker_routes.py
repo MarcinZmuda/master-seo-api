@@ -1061,8 +1061,14 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
                 batch_text=batch_text,
                 project_data=project_data,
                 batch_number=batches_done + 1,
-                mode=ValidationMode.SOFT  # SOFT = warnings nie blokują
+                mode=ValidationMode.AUTO_FIX  # 🆕 v42.1: AUTO_FIX = Content Surgeon aktywny!
             )
+            
+            # 🆕 v42.1: Jeśli Content Surgeon naprawił tekst, użyj poprawionego
+            if moe_validation_result.surgery_applied and moe_validation_result.corrected_text:
+                batch_text = moe_validation_result.corrected_text
+                surgery_stats = getattr(moe_validation_result, 'surgery_stats', {})
+                print(f"[TRACKER] 🔬 Content Surgery applied: {surgery_stats.get('injected', 0)} phrases injected")
             
             # Zbierz fix instructions
             moe_fix_instructions = moe_validation_result.fix_instructions
@@ -1830,6 +1836,9 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         # 🆕 v37.1: MoE Validation - używamy safe_to_dict
         "moe_validation": safe_to_dict(moe_validation_result) if 'safe_to_dict' in dir() else (moe_validation_result.to_dict() if moe_validation_result and hasattr(moe_validation_result, 'to_dict') else None),
         "moe_fix_instructions": moe_fix_instructions,
+        # 🆕 v42.1: Content Surgery info
+        "surgery_applied": moe_validation_result.surgery_applied if moe_validation_result and hasattr(moe_validation_result, 'surgery_applied') else False,
+        "surgery_stats": getattr(moe_validation_result, 'surgery_stats', {}) if moe_validation_result else {},
         # 🆕 v37.1: Batch Review + Auto-Fix - używamy safe_to_dict
         "batch_review": safe_to_dict(batch_review_result) if 'safe_to_dict' in dir() else (batch_review_result.to_dict() if batch_review_result and hasattr(batch_review_result, 'to_dict') else None),
         "auto_fixed": auto_fixed_text is not None,
