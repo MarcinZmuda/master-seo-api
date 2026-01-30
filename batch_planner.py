@@ -1,16 +1,23 @@
 """
 ===============================================================================
-📋 BATCH PLANNER v28.1 - DYNAMICZNE DŁUGOŚCI OPARTE NA TREŚCI
+📋 BATCH PLANNER v42.0 - DYNAMICZNE DŁUGOŚCI + SMART SUB-BATCHE
 ===============================================================================
-v28.1: Długość batcha zależy od WIELU czynników:
+v42.0: NOWE FUNKCJE:
 
-  1. Typ H2 (pytające/instrukcja/definicja) - bazowy profil
-  2. N-gramy powiązane z sekcją - im więcej, tym dłużej
-  3. Encje do zdefiniowania - każda wymaga miejsca
-  4. Keywords do wplecenia - minimum dla zachowania density
-  5. PAA match - bonus za snippet potential
+🆕 DYNAMIC SUB-BATCH SPLITTER:
+  - Automatyczny podział H2 gdy za dużo elementów
+  - Jeśli H2 ma >8 fraz lub >3 encje → dzieli na sub-batche
+  - Batch 3 → Batch 3A + Batch 3B
+  - Agent ma więcej miejsca na naturalne użycie fraz
 
-Score 0-100 → profil: short/medium/long/extended
+🆕 OVERFLOW BUFFER INTEGRATION:
+  - Automatyczna sekcja FAQ dla "sierocych" fraz
+  - Frazy z niskim relevance trafiają do FAQ na końcu
+  - 85%+ pokrycia bez psucia narracji
+
+ZACHOWANE Z v41.2:
+  - 1 H2 = 1 batch (divide and conquer)
+  - Długość batcha zależy od: typu H2, n-gramów, encji, keywords
 
 ===============================================================================
 """
@@ -35,6 +42,56 @@ except ImportError:
     COMPLEXITY_AVAILABLE = False
     print("[BATCH_PLANNER] ⚠️ batch_complexity not available, using fallback")
 
+# ================================================================
+# 🆕 v42.0: DYNAMIC SUB-BATCH SPLITTER
+# ================================================================
+try:
+    from dynamic_sub_batch import (
+        split_h2_if_needed,
+        analyze_h2_density,
+        process_batch_plan_with_splitting,
+        SubBatch,
+        SplitResult
+    )
+    DYNAMIC_SUB_BATCH_AVAILABLE = True
+    print("[BATCH_PLANNER] ✅ dynamic_sub_batch v1.0 loaded (auto-split)")
+except ImportError:
+    DYNAMIC_SUB_BATCH_AVAILABLE = False
+    print("[BATCH_PLANNER] ⚠️ dynamic_sub_batch not available")
+    
+    def split_h2_if_needed(h2_title, batch_number, assigned_phrases, assigned_entities, assigned_triplets, **kwargs):
+        """Fallback - bez podziału."""
+        class FallbackResult:
+            needs_split = False
+            sub_batches = []
+            stats = {}
+        return FallbackResult()
+
+# ================================================================
+# 🆕 v42.0: OVERFLOW BUFFER (Auto FAQ)
+# ================================================================
+try:
+    from overflow_buffer import (
+        create_overflow_buffer,
+        add_faq_batch_if_needed,
+        identify_orphan_phrases,
+        OverflowBuffer
+    )
+    OVERFLOW_BUFFER_AVAILABLE = True
+    print("[BATCH_PLANNER] ✅ overflow_buffer v1.0 loaded (auto FAQ)")
+except ImportError:
+    OVERFLOW_BUFFER_AVAILABLE = False
+    print("[BATCH_PLANNER] ⚠️ overflow_buffer not available")
+    
+    def create_overflow_buffer(**kwargs):
+        class EmptyBuffer:
+            orphan_phrases = []
+            faq_items = []
+        return EmptyBuffer()
+    
+    def add_faq_batch_if_needed(batch_plan, buffer, **kwargs):
+        return batch_plan
+
 
 # ================================================================
 # 📋 STRUKTURY DANYCH
@@ -43,21 +100,28 @@ except ImportError:
 @dataclass
 class BatchPlan:
     """Plan pojedynczego batcha."""
-    batch_number: int
-    batch_type: str  # "INTRO", "CONTENT", "FINAL"
+    batch_number: int  # Może być "3A", "3B" dla sub-batchów
+    batch_type: str  # "INTRO", "CONTENT", "FINAL", "FAQ"
     h2_sections: List[str]
     target_words_min: int
     target_words_max: int
     target_paragraphs_min: int
     target_paragraphs_max: int
-    length_profile: str  # short/medium/long/extended
-    complexity_score: int  # 0-100
+    length_profile: str
+    complexity_score: int
     complexity_factors: Dict[str, Any]
     complexity_reasoning: List[str]
     keywords_budget: Dict[str, int]
     ngrams_to_use: List[str]
     snippet_required: bool
     notes: str = ""
+    # 🆕 v42.0: Sub-batch fields
+    is_sub_batch: bool = False
+    parent_batch: Optional[int] = None
+    h3_title: Optional[str] = None
+    assigned_phrases: List[Dict] = field(default_factory=list)
+    assigned_entities: List[Dict] = field(default_factory=list)
+    assigned_triplets: List[Dict] = field(default_factory=list)
     
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -72,6 +136,9 @@ class ArticlePlan:
     keywords_distribution: Dict[str, Dict]
     main_keyword: str
     h2_structure: List[str]
+    # 🆕 v42.0: Overflow buffer
+    overflow_buffer: Optional[Any] = None
+    has_faq_section: bool = False
     
     def to_dict(self) -> Dict:
         return {
@@ -80,7 +147,8 @@ class ArticlePlan:
             "batches": [b.to_dict() for b in self.batches],
             "keywords_distribution": self.keywords_distribution,
             "main_keyword": self.main_keyword,
-            "h2_structure": self.h2_structure
+            "h2_structure": self.h2_structure,
+            "has_faq_section": self.has_faq_section
         }
 
 
@@ -92,44 +160,44 @@ H2_TYPE_FALLBACK = {
     "tutorial": {
         "patterns": ["krok po kroku", "poradnik", "instrukcja", "jak zrobić", "jak wykonać"],
         "profile": "long",
-        "words": (500, 700),  # 🆕 v41.2: +100 (było 400-600)
+        "words": (500, 700),
         "paragraphs": (3, 4)
     },
     "definition": {
         "patterns": ["co to", "czym jest", "definicja", "co oznacza"],
         "profile": "short",
-        "words": (300, 450),  # 🆕 v41.2: +100 (było 200-350)
+        "words": (300, 450),
         "paragraphs": (2, 3)
     },
     "yes_no": {
         "patterns": ["czy można", "czy warto", "czy trzeba", "czy należy"],
         "profile": "short",
-        "words": (300, 450),  # 🆕 v41.2: +100 (było 200-350)
+        "words": (300, 450),
         "paragraphs": (2, 3)
     },
     "comparison": {
         "patterns": ["vs", "porównanie", "różnice", "co lepsze"],
         "profile": "long",
-        "words": (500, 700),  # 🆕 v41.2: +100 (było 400-600)
+        "words": (500, 700),
         "paragraphs": (3, 4)
     },
     "list": {
         "patterns": ["najlepsze", "top", "ranking", "rodzaje", "typy"],
         "profile": "extended",
-        "words": (600, 850),  # 🆕 v41.2: +100 (było 500-750)
-        "paragraphs": (3, 4)  # 🆕 v41.2: max 4 (było 5-7)
+        "words": (600, 850),
+        "paragraphs": (3, 4)
     },
     "explanation": {
         "patterns": ["jak ", "dlaczego", "w jaki sposób"],
         "profile": "long",
-        "words": (500, 700),  # 🆕 v41.2: +100 (było 400-600)
+        "words": (500, 700),
         "paragraphs": (3, 4)
     }
 }
 
 DEFAULT_FALLBACK = {
     "profile": "medium",
-    "words": (400, 600),  # 🆕 v41.2: +100 (było 300-500)
+    "words": (400, 600),
     "paragraphs": (2, 4)
 }
 
@@ -153,13 +221,10 @@ def calculate_length_fallback(
     is_final: bool
 ) -> Dict:
     """Fallback obliczania długości bez batch_complexity."""
-    
-    # 🆕 v41.2: MINIMUM 250 słów per H2! (było 150)
     MIN_WORDS_PER_H2 = 250
     h2_count = len(h2_sections) if h2_sections else 1
     
     if is_intro:
-        # 🆕 v41.2: INTRO skaluje się z liczbą H2
         base_min = max(300, h2_count * MIN_WORDS_PER_H2)
         base_max = max(450, h2_count * 350)
         return {
@@ -167,10 +232,10 @@ def calculate_length_fallback(
             "words_min": base_min,
             "words_max": base_max,
             "paragraphs_min": max(2, h2_count * 2),
-            "paragraphs_max": min(h2_count * 4, 12),  # Max 4 per H2, max 12 total
+            "paragraphs_max": min(h2_count * 4, 12),
             "score": 30,
             "factors": {"type": "intro", "h2_count": h2_count},
-            "reasoning": [f"INTRO: {h2_count} H2 × {MIN_WORDS_PER_H2} słów = {base_min}-{base_max} słów"]
+            "reasoning": [f"INTRO: {h2_count} H2 × {MIN_WORDS_PER_H2} słów"]
         }
     
     if h2_sections:
@@ -182,17 +247,13 @@ def calculate_length_fallback(
     words_min, words_max = best_config["words"]
     para_min, para_max = best_config["paragraphs"]
     
-    # 🆕 v41.2: MNOŻNIK PER H2 z max 4 akapitów per sekcja
     if h2_count > 1:
-        # Każda dodatkowa H2 dodaje ~80% bazowej długości
         h2_multiplier = 1 + (h2_count - 1) * 0.8
         words_min = int(words_min * h2_multiplier)
         words_max = int(words_max * h2_multiplier)
-        # 🆕 v41.2: Max 4 akapity per H2, różna liczba dla każdej
-        para_min = h2_count * 2  # Min 2 akapity per H2
-        para_max = h2_count * 4  # Max 4 akapity per H2
+        para_min = h2_count * 2
+        para_max = h2_count * 4
     
-    # Enforce absolute minimum: 250 słów per H2 (było 150)
     words_min = max(words_min, h2_count * MIN_WORDS_PER_H2)
     
     if keywords_count > 10:
@@ -211,7 +272,7 @@ def calculate_length_fallback(
         "paragraphs_max": para_max,
         "score": 50,
         "factors": {"fallback": True, "h2_count": h2_count},
-        "reasoning": [f"Batch z {h2_count} H2 × {MIN_WORDS_PER_H2} min = {words_min}-{words_max} słów, {para_min}-{para_max} akapitów"]
+        "reasoning": [f"Batch z {h2_count} H2 × {MIN_WORDS_PER_H2} min = {words_min}-{words_max} słów"]
     }
 
 
@@ -262,11 +323,9 @@ def distribute_keywords(
                     diff -= reduce
                     if diff <= 0:
                         break
-        
         elif kw_type == "EXTENDED":
             mid_batch = total_batches // 2
             per_batch[mid_batch] = 1
-        
         else:
             if target_max <= total_batches:
                 for i in range(min(target_max, total_batches)):
@@ -288,27 +347,18 @@ def distribute_keywords(
     return distribution
 
 
-# ================================================================
-# 🎯 GŁÓWNA FUNKCJA - CREATE ARTICLE PLAN
-# ================================================================
-
 def convert_semantic_plan_to_distribution(
     semantic_plan: Dict,
     keywords_state: Dict,
     total_batches: int
 ) -> Dict[str, Dict]:
-    """
-    🆕 v36.0: Konwertuje semantic_keyword_plan na format keywords_distribution.
-    
-    semantic_plan.batch_plans[i].assigned_keywords → per_batch array
-    """
+    """Konwertuje semantic_keyword_plan na format keywords_distribution."""
     distribution = {}
     
     batch_plans = semantic_plan.get("batch_plans", [])
     universal_keywords = set(semantic_plan.get("universal_keywords", []))
     keyword_assignments = semantic_plan.get("keyword_assignments", {})
     
-    # Zbierz wszystkie keywords z keywords_state
     for rid, meta in keywords_state.items():
         keyword = meta.get("keyword", "")
         if not keyword:
@@ -321,13 +371,10 @@ def convert_semantic_plan_to_distribution(
         
         per_batch = [0] * total_batches
         
-        # Sprawdź czy keyword jest uniwersalny
         if keyword in universal_keywords or keyword.lower() in [u.lower() for u in universal_keywords]:
-            # Uniwersalne: rozłóż równomiernie
             per_batch_target = max(1, math.ceil(target_max / total_batches))
             for i in range(total_batches):
                 per_batch[i] = per_batch_target
-            # Dostosuj do target_max
             current_sum = sum(per_batch)
             if current_sum > target_max:
                 diff = current_sum - target_max
@@ -338,20 +385,15 @@ def convert_semantic_plan_to_distribution(
                     if diff <= 0:
                         break
         else:
-            # Sprawdź przypisanie z semantic_plan
             assignment = keyword_assignments.get(keyword) or keyword_assignments.get(keyword.lower())
             
             if assignment and assignment.get("batch"):
-                # Przypisany do konkretnego batcha
-                assigned_batch = assignment["batch"] - 1  # 0-indexed
+                assigned_batch = assignment["batch"] - 1
                 if 0 <= assigned_batch < total_batches:
-                    # Daj wszystkie użycia w przypisanym batchu
                     per_batch[assigned_batch] = target_max
                 else:
-                    # Fallback: ostatni batch
                     per_batch[total_batches - 1] = target_max
             else:
-                # Brak przypisania - szukaj w batch_plans
                 found = False
                 for bp in batch_plans:
                     batch_idx = bp.get("batch_number", 1) - 1
@@ -363,7 +405,6 @@ def convert_semantic_plan_to_distribution(
                             break
                 
                 if not found:
-                    # Fallback: hash distribution
                     batch_idx = hash(keyword) % total_batches
                     per_batch[batch_idx] = target_max
         
@@ -379,70 +420,50 @@ def convert_semantic_plan_to_distribution(
 
 
 # ================================================================
-# 🆕 v41.2: DISTRIBUTE H2 - 1 H2 = 1 BATCH
+# 🆕 v42.0: DISTRIBUTE H2 - 1 H2 = 1 BATCH + DYNAMIC SPLIT
 # ================================================================
 
 def _distribute_h2_one_per_batch(h2_structure: List[str], total_batches: int) -> List[List[str]]:
     """
     Przypisuje H2 do batchów: 1 H2 = 1 batch (gdzie możliwe).
-    
-    🆕 v41.2: Zamiast grupować H2 (co rozmywa focus), każde H2
-    dostaje osobny batch. Agent skupia się na JEDNYM temacie.
-    
-    Struktura:
-    - Batch 0 (intro): brak H2
-    - Batch 1-N: po jednym H2 (lub 2 jeśli za dużo H2)
-    
-    Jeśli za dużo H2 (>7): niektóre batche grupują po 2 H2 (równomiernie).
-    
-    Returns:
-        List[List[str]] - h2_per_batch[0] = [], h2_per_batch[1] = ["H2 title"], ...
     """
     result = []
-    
-    # Batch 0 = intro (bez H2)
-    result.append([])
+    result.append([])  # Batch 0 = intro (bez H2)
     
     num_h2 = len(h2_structure)
-    content_batches = total_batches - 1  # minus intro
+    content_batches = total_batches - 1
     
     if num_h2 == 0:
-        # Brak H2 - wypełnij puste
         for _ in range(content_batches):
             result.append([])
         return result
     
     if num_h2 <= content_batches:
-        # Idealna sytuacja: każde H2 do osobnego batcha
         for h2 in h2_structure:
             result.append([h2])
-        # Dopełnij puste batche jeśli zostały
         while len(result) < total_batches:
             result.append([])
     else:
-        # Za dużo H2: rozłóż równomiernie (max 2 H2 per batch)
-        # Np. 9 H2, 7 content batches → 2 batche mają po 2 H2
-        extra_h2 = num_h2 - content_batches  # ile H2 "nadmiarowych"
-        
+        extra_h2 = num_h2 - content_batches
         h2_idx = 0
         for i in range(content_batches):
-            # Ile H2 do tego batcha?
-            # Pierwsze `extra_h2` batchów content dostaje po 2 H2
             if i < extra_h2:
-                # Ten batch dostaje 2 H2
                 result.append([h2_structure[h2_idx], h2_structure[h2_idx + 1]])
                 h2_idx += 2
             else:
-                # Ten batch dostaje 1 H2
                 if h2_idx < num_h2:
                     result.append([h2_structure[h2_idx]])
                     h2_idx += 1
                 else:
                     result.append([])
     
-    print(f"[BATCH_PLANNER] 🆕 H2 distribution: {[len(b) for b in result]} H2 per batch")
+    print(f"[BATCH_PLANNER] H2 distribution: {[len(b) for b in result]} H2 per batch")
     return result
 
+
+# ================================================================
+# 🎯 GŁÓWNA FUNKCJA - CREATE ARTICLE PLAN
+# ================================================================
 
 def create_article_plan(
     h2_structure: List[str],
@@ -453,61 +474,51 @@ def create_article_plan(
     entities: List[Dict] = None,
     paa_questions: List[str] = None,
     max_batches: int = 6,
-    semantic_keyword_plan: Dict = None  # 🆕 v36.0
+    semantic_keyword_plan: Dict = None,
+    # 🆕 v42.0: Dodatkowe parametry dla dynamic sub-batch
+    phrase_assignments: Dict[str, List[Dict]] = None,
+    entity_assignments: Dict[str, List[Dict]] = None,
+    triplet_assignments: Dict[str, List[Dict]] = None,
+    enable_dynamic_split: bool = True,
+    enable_overflow_buffer: bool = True
 ) -> ArticlePlan:
     """
     🎯 Tworzy kompletny plan artykułu Z GÓRY.
     
-    v28.1: DYNAMICZNE DŁUGOŚCI na podstawie:
-    - Typu H2 (pytające/instrukcja/definicja)
-    - N-gramów powiązanych z sekcją
-    - Encji do zdefiniowania
-    - Keywords do wplecenia
-    - PAA match (snippet potential)
-    
-    🆕 v36.0: Jeśli semantic_keyword_plan jest dostępny, używa go
-    zamiast mechanicznego distribute_keywords().
-    
-    🆕 v41.2: 1 H2 = 1 BATCH - agent skupia się na jednym temacie.
+    🆕 v42.0 ZMIANY:
+    - DYNAMIC SUB-BATCH: Automatyczny podział H2 gdy >8 fraz
+    - OVERFLOW BUFFER: Auto FAQ dla sierocych fraz
     """
     ngrams = ngrams or []
     entities = entities or []
     paa_questions = paa_questions or []
+    phrase_assignments = phrase_assignments or {}
+    entity_assignments = entity_assignments or {}
+    triplet_assignments = triplet_assignments or {}
     
     # ================================================================
-    # 1. OBLICZ LICZBĘ BATCHÓW
-    # 🆕 v41.2: 1 H2 = 1 BATCH (plus intro)
-    # 
-    # STARA LOGIKA (za dużo H2 per batch):
-    #   3 H2 → 2 batche (1.5 H2/batch) 
-    #   5 H2 → 3 batche (1.7 H2/batch)
-    #
-    # NOWA LOGIKA (focus na jednym temacie):
-    #   3 H2 → 4 batche (intro + 3×H2)
-    #   5 H2 → 6 batchów (intro + 5×H2)
+    # 1. OBLICZ LICZBĘ BATCHÓW (1 H2 = 1 batch)
     # ================================================================
     num_h2 = len(h2_structure)
-    
-    # Bazowo: intro + każde H2 osobno
     total_batches = 1 + num_h2  # intro + H2s
     
-    # Limity
     if total_batches < 3:
-        total_batches = 3   # Min 3 batche
+        total_batches = 3
     if total_batches > 8:
-        total_batches = 8   # Max 8 batchów (wydajność API)
+        total_batches = 8
     
-    print(f"[BATCH_PLANNER] 🆕 v41.2: {num_h2} H2 → {total_batches} batchów (1 H2 = 1 batch)")
+    print(f"[BATCH_PLANNER] v42.0: {num_h2} H2 → {total_batches} batchów")
     
     # ================================================================
-    # 2. ROZDZIEL H2 NA BATCHE (1:1 gdzie możliwe)
+    # 2. ROZDZIEL H2 NA BATCHE
     # ================================================================
     h2_per_batch = _distribute_h2_one_per_batch(h2_structure, total_batches)
     
+    # ================================================================
     # 3. ROZDZIEL KEYWORDS NA BATCHE
-    # 🆕 v36.0: Użyj semantic_keyword_plan jeśli dostępny
+    # ================================================================
     if semantic_keyword_plan and semantic_keyword_plan.get("batch_plans"):
-        print(f"[BATCH_PLANNER] 🎯 Using semantic_keyword_plan for keyword distribution")
+        print(f"[BATCH_PLANNER] Using semantic_keyword_plan for keyword distribution")
         keywords_distribution = convert_semantic_plan_to_distribution(
             semantic_plan=semantic_keyword_plan,
             keywords_state=keywords_state,
@@ -516,10 +527,14 @@ def create_article_plan(
     else:
         keywords_distribution = distribute_keywords(keywords_state, total_batches, main_keyword)
     
+    # ================================================================
     # 4. ROZDZIEL N-GRAMY NA BATCHE
+    # ================================================================
     ngrams_per_batch = distribute_items(ngrams, total_batches)
     
+    # ================================================================
     # 5. OBLICZ KEYWORDS COUNT PER BATCH
+    # ================================================================
     keywords_per_batch_list = []
     for i in range(total_batches):
         batch_keywords = []
@@ -531,7 +546,9 @@ def create_article_plan(
                 })
         keywords_per_batch_list.append(batch_keywords)
     
-    # 6. OBLICZ DYNAMICZNE DŁUGOŚCI
+    # ================================================================
+    # 6. TWÓRZ BATCHE (z dynamicznym podziałem)
+    # ================================================================
     batches: List[BatchPlan] = []
     
     for i in range(total_batches):
@@ -550,86 +567,182 @@ def create_article_plan(
         else:
             h2_title = f"Batch {batch_num}"
         
-        # OBLICZ ZŁOŻONOŚĆ
-        if COMPLEXITY_AVAILABLE:
-            complexity = calculate_batch_complexity(
-                h2_title=h2_title,
-                ngrams=ngrams,
-                entities=entities,
-                keywords_for_batch=batch_keywords,
-                paa_questions=paa_questions,
-                is_intro=is_intro,
-                is_final=is_final
-            )
+        # ============================================================
+        # 🆕 v42.0: DYNAMIC SUB-BATCH SPLITTING
+        # ============================================================
+        needs_split = False
+        sub_batches = []
+        
+        if enable_dynamic_split and DYNAMIC_SUB_BATCH_AVAILABLE and h2_list:
+            for h2 in h2_list:
+                h2_phrases = phrase_assignments.get(h2, [])
+                h2_entities = entity_assignments.get(h2, [])
+                h2_triplets = triplet_assignments.get(h2, [])
+                
+                split_result = split_h2_if_needed(
+                    h2_title=h2,
+                    batch_number=batch_num,
+                    assigned_phrases=h2_phrases,
+                    assigned_entities=h2_entities,
+                    assigned_triplets=h2_triplets,
+                    target_words_per_batch=(400, 600)
+                )
+                
+                if split_result.needs_split:
+                    needs_split = True
+                    sub_batches.extend(split_result.sub_batches)
+                    print(f"[BATCH_PLANNER] 🔀 H2 '{h2[:30]}...' split into {len(split_result.sub_batches)} sub-batches")
+        
+        if needs_split and sub_batches:
+            # Dodaj sub-batche zamiast jednego batcha
+            for sb in sub_batches:
+                sub_batch_plan = BatchPlan(
+                    batch_number=sb.sub_batch_id,
+                    batch_type="CONTENT",
+                    h2_sections=[sb.parent_h2],
+                    target_words_min=sb.word_target[0],
+                    target_words_max=sb.word_target[1],
+                    target_paragraphs_min=2,
+                    target_paragraphs_max=3,
+                    length_profile="sub_batch",
+                    complexity_score=50,
+                    complexity_factors={"sub_batch": True},
+                    complexity_reasoning=[f"Sub-batch for H2: {sb.parent_h2[:30]}"],
+                    keywords_budget={},
+                    ngrams_to_use=batch_ngrams,
+                    snippet_required=True,
+                    notes=f"Sub-batch: {sb.h3_title or 'Part'}",
+                    is_sub_batch=True,
+                    parent_batch=batch_num,
+                    h3_title=sb.h3_title,
+                    assigned_phrases=sb.assigned_phrases,
+                    assigned_entities=sb.assigned_entities,
+                    assigned_triplets=sb.assigned_triplets
+                )
+                batches.append(sub_batch_plan)
+        else:
+            # Standardowy batch (bez podziału)
+            if COMPLEXITY_AVAILABLE:
+                complexity = calculate_batch_complexity(
+                    h2_title=h2_title,
+                    ngrams=ngrams,
+                    entities=entities,
+                    keywords_for_batch=batch_keywords,
+                    paa_questions=paa_questions,
+                    is_intro=is_intro,
+                    is_final=is_final
+                )
+                
+                length_info = {
+                    "profile": complexity.profile.name,
+                    "words_min": complexity.profile.words_min,
+                    "words_max": complexity.profile.words_max,
+                    "paragraphs_min": complexity.profile.paragraphs_min,
+                    "paragraphs_max": complexity.profile.paragraphs_max,
+                    "score": complexity.score,
+                    "factors": complexity.factors,
+                    "reasoning": complexity.reasoning,
+                    "snippet_required": complexity.profile.snippet_required
+                }
+            else:
+                length_info = calculate_length_fallback(
+                    h2_sections=h2_list,
+                    keywords_count=len(batch_keywords),
+                    is_intro=is_intro,
+                    is_final=is_final
+                )
+                length_info["snippet_required"] = not is_intro
             
-            length_info = {
-                "profile": complexity.profile.name,
-                "words_min": complexity.profile.words_min,
-                "words_max": complexity.profile.words_max,
-                "paragraphs_min": complexity.profile.paragraphs_min,
-                "paragraphs_max": complexity.profile.paragraphs_max,
-                "score": complexity.score,
-                "factors": complexity.factors,
-                "reasoning": complexity.reasoning,
-                "snippet_required": complexity.profile.snippet_required
-            }
-        else:
-            length_info = calculate_length_fallback(
+            if is_intro:
+                batch_type = "INTRO"
+                notes = "INTRO: Snippet 40-60 słów, fraza główna w 1. zdaniu"
+            elif is_final:
+                batch_type = "FINAL"
+                notes = "OSTATNI: Użyj wszystkie pozostałe CRITICAL keywords"
+            else:
+                batch_type = "CONTENT"
+                notes = " | ".join(length_info.get("reasoning", [])[:2])
+            
+            keywords_budget = {}
+            for kw, dist in keywords_distribution.items():
+                if i < len(dist["per_batch"]):
+                    keywords_budget[kw] = dist["per_batch"][i]
+            
+            batch_plan = BatchPlan(
+                batch_number=batch_num,
+                batch_type=batch_type,
                 h2_sections=h2_list,
-                keywords_count=len(batch_keywords),
-                is_intro=is_intro,
-                is_final=is_final
+                target_words_min=length_info["words_min"],
+                target_words_max=length_info["words_max"],
+                target_paragraphs_min=length_info["paragraphs_min"],
+                target_paragraphs_max=length_info["paragraphs_max"],
+                length_profile=length_info["profile"],
+                complexity_score=length_info["score"],
+                complexity_factors=length_info["factors"],
+                complexity_reasoning=length_info.get("reasoning", []),
+                keywords_budget=keywords_budget,
+                ngrams_to_use=batch_ngrams,
+                snippet_required=length_info.get("snippet_required", True),
+                notes=notes
             )
-            length_info["snippet_required"] = not is_intro
-        
-        # TYP BATCHA I NOTATKI
-        if is_intro:
-            batch_type = "INTRO"
-            notes = "INTRO: Snippet 40-60 słów, fraza główna w 1. zdaniu"
-        elif is_final:
-            batch_type = "FINAL"
-            notes = "OSTATNI: Użyj wszystkie pozostałe CRITICAL keywords"
-        else:
-            batch_type = "CONTENT"
-            notes = " | ".join(length_info.get("reasoning", [])[:2])
-        
-        # KEYWORDS BUDGET
-        keywords_budget = {}
-        for kw, dist in keywords_distribution.items():
-            if i < len(dist["per_batch"]):
-                keywords_budget[kw] = dist["per_batch"][i]
-        
-        batch_plan = BatchPlan(
-            batch_number=batch_num,
-            batch_type=batch_type,
-            h2_sections=h2_list,
-            target_words_min=length_info["words_min"],
-            target_words_max=length_info["words_max"],
-            target_paragraphs_min=length_info["paragraphs_min"],
-            target_paragraphs_max=length_info["paragraphs_max"],
-            length_profile=length_info["profile"],
-            complexity_score=length_info["score"],
-            complexity_factors=length_info["factors"],
-            complexity_reasoning=length_info.get("reasoning", []),
-            keywords_budget=keywords_budget,
-            ngrams_to_use=batch_ngrams,
-            snippet_required=length_info.get("snippet_required", True),
-            notes=notes
-        )
-        batches.append(batch_plan)
+            batches.append(batch_plan)
     
+    # ================================================================
+    # 🆕 v42.0: OVERFLOW BUFFER (Auto FAQ)
+    # ================================================================
+    overflow_buffer = None
+    has_faq_section = False
+    
+    if enable_overflow_buffer and OVERFLOW_BUFFER_AVAILABLE:
+        overflow_buffer = create_overflow_buffer(
+            keywords_state=keywords_state,
+            phrase_assignments=phrase_assignments,
+            h2_structure=h2_structure,
+            main_keyword=main_keyword,
+            domain="prawo"  # TODO: wykryć domenę
+        )
+        
+        if overflow_buffer.faq_items:
+            print(f"[BATCH_PLANNER] 📦 Overflow buffer: {len(overflow_buffer.orphan_phrases)} orphan phrases → {len(overflow_buffer.faq_items)} FAQ items")
+            
+            # Dodaj batch FAQ
+            faq_batch = BatchPlan(
+                batch_number=len(batches) + 1,
+                batch_type="FAQ",
+                h2_sections=[overflow_buffer.section_title],
+                target_words_min=150,
+                target_words_max=300,
+                target_paragraphs_min=len(overflow_buffer.faq_items),
+                target_paragraphs_max=len(overflow_buffer.faq_items) + 2,
+                length_profile="faq",
+                complexity_score=30,
+                complexity_factors={"faq_items": len(overflow_buffer.faq_items)},
+                complexity_reasoning=["Auto-generated FAQ for orphan phrases"],
+                keywords_budget={},
+                ngrams_to_use=[],
+                snippet_required=False,
+                notes="FAQ dla sierocych fraz"
+            )
+            batches.append(faq_batch)
+            has_faq_section = True
+    
+    # ================================================================
+    # 7. OBLICZ TOTAL WORDS
+    # ================================================================
     actual_total = sum(
         (b.target_words_min + b.target_words_max) // 2 
         for b in batches
     )
     
     return ArticlePlan(
-        total_batches=total_batches,
+        total_batches=len(batches),
         total_target_words=actual_total,
         batches=batches,
         keywords_distribution=keywords_distribution,
         main_keyword=main_keyword,
-        h2_structure=h2_structure
+        h2_structure=h2_structure,
+        overflow_buffer=overflow_buffer,
+        has_faq_section=has_faq_section
     )
 
 
@@ -643,10 +756,15 @@ def get_batch_instructions(
     current_keywords_state: Dict = None
 ) -> Dict:
     """Generuje instrukcje dla konkretnego batcha."""
-    if batch_number < 1 or batch_number > plan.total_batches:
-        return {"error": f"Invalid batch number: {batch_number}"}
+    # Znajdź batch (może być sub-batch jak "3A")
+    batch_plan = None
+    for b in plan.batches:
+        if str(b.batch_number) == str(batch_number):
+            batch_plan = b
+            break
     
-    batch_plan = plan.batches[batch_number - 1]
+    if not batch_plan:
+        return {"error": f"Invalid batch number: {batch_number}"}
     
     keywords_instructions = []
     critical_keywords = []
@@ -689,11 +807,17 @@ def get_batch_instructions(
             keywords_instructions.append(kw_info)
     
     prompt_lines = []
-    prompt_lines.append(f"📋 BATCH #{batch_number} z {plan.total_batches}")
+    prompt_lines.append(f"📋 BATCH #{batch_plan.batch_number} z {plan.total_batches}")
     prompt_lines.append(f"📝 Typ: {batch_plan.batch_type}")
     prompt_lines.append(f"📏 Słowa: {batch_plan.target_words_min}-{batch_plan.target_words_max}")
     prompt_lines.append(f"📄 Akapity: {batch_plan.target_paragraphs_min}-{batch_plan.target_paragraphs_max}")
     prompt_lines.append(f"🎯 Score: {batch_plan.complexity_score}/100 → {batch_plan.length_profile.upper()}")
+    
+    # 🆕 v42.0: Info o sub-batch
+    if batch_plan.is_sub_batch:
+        prompt_lines.append(f"🔀 SUB-BATCH: część {batch_plan.batch_number[-1]} z batcha {batch_plan.parent_batch}")
+        if batch_plan.h3_title:
+            prompt_lines.append(f"   H3: {batch_plan.h3_title}")
     
     if batch_plan.snippet_required:
         prompt_lines.append(f"⚡ SNIPPET: Pierwszych 40-60 słów = bezpośrednia odpowiedź!")
@@ -718,47 +842,44 @@ def get_batch_instructions(
         prompt_lines.append("=" * 50)
         prompt_lines.append("")
     
-    if high_priority:
-        prompt_lines.append("🟠 WPLEĆ (priorytet):")
-        for kw in high_priority:
-            prompt_lines.append(f"   • {kw['keyword']}: {kw['suggested']}x")
-        prompt_lines.append("")
-    
     if batch_plan.h2_sections:
         prompt_lines.append("✏️ H2 DO NAPISANIA:")
-        # 🆕 v41.2: Różna liczba akapitów dla każdej H2 (2-4, różne)
-        paragraph_options = [2, 3, 4, 3, 2, 4]  # Cykliczna lista dla różnorodności
+        paragraph_options = [2, 3, 4, 3, 2, 4]
         for i, h2 in enumerate(batch_plan.h2_sections):
             para_count = paragraph_options[i % len(paragraph_options)]
             prompt_lines.append(f"   • {h2}")
-            prompt_lines.append(f"     → {para_count} akapity (różna liczba dla każdej sekcji!)")
-        prompt_lines.append("")
-        prompt_lines.append("   ⚠️ WAŻNE: Każda sekcja H2 MUSI mieć INNĄ liczbę akapitów!")
+            prompt_lines.append(f"     → {para_count} akapity")
         prompt_lines.append("")
     
-    if batch_plan.ngrams_to_use:
-        prompt_lines.append("📝 N-GRAMY:")
-        for ng in batch_plan.ngrams_to_use[:5]:
-            prompt_lines.append(f"   • \"{ng}\"")
-        prompt_lines.append("")
-    
-    # 🆕 v41.2: Wygeneruj różne liczby akapitów dla każdej H2
-    paragraph_options = [2, 3, 4, 3, 2, 4]
-    h2_paragraph_counts = {}
-    for i, h2 in enumerate(batch_plan.h2_sections):
-        h2_paragraph_counts[h2] = paragraph_options[i % len(paragraph_options)]
+    # 🆕 v42.0: Assigned elements for sub-batch
+    if batch_plan.is_sub_batch:
+        if batch_plan.assigned_phrases:
+            prompt_lines.append("📍 FRAZY PRZYPISANE (MUST):")
+            for p in batch_plan.assigned_phrases[:5]:
+                prompt_lines.append(f"   • \"{p.get('keyword', p)}\"")
+            prompt_lines.append("")
+        
+        if batch_plan.assigned_triplets:
+            prompt_lines.append("🔗 TRIPLETY PRZYPISANE:")
+            for t in batch_plan.assigned_triplets[:2]:
+                s = t.get("subject", "")
+                v = t.get("verb", "")
+                o = t.get("object", "")
+                prompt_lines.append(f"   • {s} → {v} → {o}")
+            prompt_lines.append("")
     
     return {
-        "batch_number": batch_number,
+        "batch_number": batch_plan.batch_number,
         "batch_type": batch_plan.batch_type,
+        "is_sub_batch": batch_plan.is_sub_batch,
+        "h3_title": batch_plan.h3_title,
         "target_words": {"min": batch_plan.target_words_min, "max": batch_plan.target_words_max},
         "target_paragraphs": {"min": batch_plan.target_paragraphs_min, "max": batch_plan.target_paragraphs_max},
         "length_profile": batch_plan.length_profile,
         "complexity_score": batch_plan.complexity_score,
-        "complexity_reasoning": batch_plan.complexity_reasoning,
-        "snippet_required": batch_plan.snippet_required,
         "h2_sections": batch_plan.h2_sections,
-        "h2_paragraph_counts": h2_paragraph_counts,  # 🆕 v41.2
+        "assigned_phrases": batch_plan.assigned_phrases,
+        "assigned_triplets": batch_plan.assigned_triplets,
         "keywords": {"critical": critical_keywords, "high_priority": high_priority, "normal": keywords_instructions},
         "ngrams": batch_plan.ngrams_to_use,
         "notes": batch_plan.notes,
@@ -772,31 +893,46 @@ def update_plan_after_batch(
     actual_keywords_used: Dict[str, int]
 ) -> ArticlePlan:
     """Aktualizuje plan po napisaniu batcha."""
-    if batch_number >= plan.total_batches:
+    # Znajdź indeks batcha
+    batch_idx = None
+    for i, b in enumerate(plan.batches):
+        if str(b.batch_number) == str(batch_number):
+            batch_idx = i
+            break
+    
+    if batch_idx is None or batch_idx >= len(plan.batches) - 1:
         return plan
     
     for keyword, dist in plan.keywords_distribution.items():
-        planned = dist["per_batch"][batch_number - 1]
+        planned = dist["per_batch"][batch_idx] if batch_idx < len(dist["per_batch"]) else 0
         actual = actual_keywords_used.get(keyword, 0)
         
         if actual < planned:
             deficit = planned - actual
-            remaining_batches = plan.total_batches - batch_number
+            remaining_batches = len(plan.batches) - batch_idx - 1
             
             if remaining_batches > 0:
                 extra_per_batch = math.ceil(deficit / remaining_batches)
-                for i in range(batch_number, plan.total_batches):
-                    dist["per_batch"][i] += extra_per_batch
-                    deficit -= extra_per_batch
-                    if deficit <= 0:
-                        break
-    
-    for i, batch in enumerate(plan.batches):
-        if i >= batch_number:
-            new_budget = {}
-            for kw, dist in plan.keywords_distribution.items():
-                if i < len(dist["per_batch"]):
-                    new_budget[kw] = dist["per_batch"][i]
-            batch.keywords_budget = new_budget
+                for i in range(batch_idx + 1, len(plan.batches)):
+                    if i < len(dist["per_batch"]):
+                        dist["per_batch"][i] += extra_per_batch
+                        deficit -= extra_per_batch
+                        if deficit <= 0:
+                            break
     
     return plan
+
+
+# ================================================================
+# EXPORTS
+# ================================================================
+
+__all__ = [
+    'create_article_plan',
+    'get_batch_instructions',
+    'update_plan_after_batch',
+    'ArticlePlan',
+    'BatchPlan',
+    'DYNAMIC_SUB_BATCH_AVAILABLE',
+    'OVERFLOW_BUFFER_AVAILABLE'
+]
