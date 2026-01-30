@@ -92,44 +92,44 @@ H2_TYPE_FALLBACK = {
     "tutorial": {
         "patterns": ["krok po kroku", "poradnik", "instrukcja", "jak zrobić", "jak wykonać"],
         "profile": "long",
-        "words": (350, 500),  # 🆕 v41.3
+        "words": (500, 700),  # 🆕 v41.2: +100 (było 400-600)
         "paragraphs": (3, 4)
     },
     "definition": {
         "patterns": ["co to", "czym jest", "definicja", "co oznacza"],
         "profile": "short",
-        "words": (200, 300),  # 🆕 v41.3
+        "words": (300, 450),  # 🆕 v41.2: +100 (było 200-350)
         "paragraphs": (2, 3)
     },
     "yes_no": {
         "patterns": ["czy można", "czy warto", "czy trzeba", "czy należy"],
         "profile": "short",
-        "words": (200, 300),  # 🆕 v41.3
+        "words": (300, 450),  # 🆕 v41.2: +100 (było 200-350)
         "paragraphs": (2, 3)
     },
     "comparison": {
         "patterns": ["vs", "porównanie", "różnice", "co lepsze"],
         "profile": "long",
-        "words": (350, 500),  # 🆕 v41.3
+        "words": (500, 700),  # 🆕 v41.2: +100 (było 400-600)
         "paragraphs": (3, 4)
     },
     "list": {
         "patterns": ["najlepsze", "top", "ranking", "rodzaje", "typy"],
         "profile": "extended",
-        "words": (400, 600),  # 🆕 v41.3
-        "paragraphs": (3, 4)
+        "words": (600, 850),  # 🆕 v41.2: +100 (było 500-750)
+        "paragraphs": (3, 4)  # 🆕 v41.2: max 4 (było 5-7)
     },
     "explanation": {
         "patterns": ["jak ", "dlaczego", "w jaki sposób"],
         "profile": "long",
-        "words": (350, 500),  # 🆕 v41.3
+        "words": (500, 700),  # 🆕 v41.2: +100 (było 400-600)
         "paragraphs": (3, 4)
     }
 }
 
 DEFAULT_FALLBACK = {
     "profile": "medium",
-    "words": (250, 400),  # 🆕 v41.3
+    "words": (400, 600),  # 🆕 v41.2: +100 (było 300-500)
     "paragraphs": (2, 4)
 }
 
@@ -154,8 +154,8 @@ def calculate_length_fallback(
 ) -> Dict:
     """Fallback obliczania długości bez batch_complexity."""
     
-    # 🆕 v41.3: MINIMUM 150 słów per batch
-    MIN_WORDS_PER_H2 = 150
+    # 🆕 v41.2: MINIMUM 250 słów per H2! (było 150)
+    MIN_WORDS_PER_H2 = 250
     h2_count = len(h2_sections) if h2_sections else 1
     
     if is_intro:
@@ -378,6 +378,72 @@ def convert_semantic_plan_to_distribution(
     return distribution
 
 
+# ================================================================
+# 🆕 v41.2: DISTRIBUTE H2 - 1 H2 = 1 BATCH
+# ================================================================
+
+def _distribute_h2_one_per_batch(h2_structure: List[str], total_batches: int) -> List[List[str]]:
+    """
+    Przypisuje H2 do batchów: 1 H2 = 1 batch (gdzie możliwe).
+    
+    🆕 v41.2: Zamiast grupować H2 (co rozmywa focus), każde H2
+    dostaje osobny batch. Agent skupia się na JEDNYM temacie.
+    
+    Struktura:
+    - Batch 0 (intro): brak H2
+    - Batch 1-N: po jednym H2 (lub 2 jeśli za dużo H2)
+    
+    Jeśli za dużo H2 (>7): niektóre batche grupują po 2 H2 (równomiernie).
+    
+    Returns:
+        List[List[str]] - h2_per_batch[0] = [], h2_per_batch[1] = ["H2 title"], ...
+    """
+    result = []
+    
+    # Batch 0 = intro (bez H2)
+    result.append([])
+    
+    num_h2 = len(h2_structure)
+    content_batches = total_batches - 1  # minus intro
+    
+    if num_h2 == 0:
+        # Brak H2 - wypełnij puste
+        for _ in range(content_batches):
+            result.append([])
+        return result
+    
+    if num_h2 <= content_batches:
+        # Idealna sytuacja: każde H2 do osobnego batcha
+        for h2 in h2_structure:
+            result.append([h2])
+        # Dopełnij puste batche jeśli zostały
+        while len(result) < total_batches:
+            result.append([])
+    else:
+        # Za dużo H2: rozłóż równomiernie (max 2 H2 per batch)
+        # Np. 9 H2, 7 content batches → 2 batche mają po 2 H2
+        extra_h2 = num_h2 - content_batches  # ile H2 "nadmiarowych"
+        
+        h2_idx = 0
+        for i in range(content_batches):
+            # Ile H2 do tego batcha?
+            # Pierwsze `extra_h2` batchów content dostaje po 2 H2
+            if i < extra_h2:
+                # Ten batch dostaje 2 H2
+                result.append([h2_structure[h2_idx], h2_structure[h2_idx + 1]])
+                h2_idx += 2
+            else:
+                # Ten batch dostaje 1 H2
+                if h2_idx < num_h2:
+                    result.append([h2_structure[h2_idx]])
+                    h2_idx += 1
+                else:
+                    result.append([])
+    
+    print(f"[BATCH_PLANNER] 🆕 H2 distribution: {[len(b) for b in result]} H2 per batch")
+    return result
+
+
 def create_article_plan(
     h2_structure: List[str],
     keywords_state: Dict,
@@ -401,25 +467,42 @@ def create_article_plan(
     
     🆕 v36.0: Jeśli semantic_keyword_plan jest dostępny, używa go
     zamiast mechanicznego distribute_keywords().
+    
+    🆕 v41.2: 1 H2 = 1 BATCH - agent skupia się na jednym temacie.
     """
     ngrams = ngrams or []
     entities = entities or []
     paa_questions = paa_questions or []
     
+    # ================================================================
     # 1. OBLICZ LICZBĘ BATCHÓW
+    # 🆕 v41.2: 1 H2 = 1 BATCH (plus intro)
+    # 
+    # STARA LOGIKA (za dużo H2 per batch):
+    #   3 H2 → 2 batche (1.5 H2/batch) 
+    #   5 H2 → 3 batche (1.7 H2/batch)
+    #
+    # NOWA LOGIKA (focus na jednym temacie):
+    #   3 H2 → 4 batche (intro + 3×H2)
+    #   5 H2 → 6 batchów (intro + 5×H2)
+    # ================================================================
     num_h2 = len(h2_structure)
     
-    if num_h2 <= 3:
-        total_batches = 2
-    elif num_h2 <= 5:
-        total_batches = 3
-    elif num_h2 <= 8:
-        total_batches = 4
-    else:
-        total_batches = min(max_batches, math.ceil(num_h2 / 2))
+    # Bazowo: intro + każde H2 osobno
+    total_batches = 1 + num_h2  # intro + H2s
     
-    # 2. ROZDZIEL H2 NA BATCHE
-    h2_per_batch = distribute_items(h2_structure, total_batches)
+    # Limity
+    if total_batches < 3:
+        total_batches = 3   # Min 3 batche
+    if total_batches > 8:
+        total_batches = 8   # Max 8 batchów (wydajność API)
+    
+    print(f"[BATCH_PLANNER] 🆕 v41.2: {num_h2} H2 → {total_batches} batchów (1 H2 = 1 batch)")
+    
+    # ================================================================
+    # 2. ROZDZIEL H2 NA BATCHE (1:1 gdzie możliwe)
+    # ================================================================
+    h2_per_batch = _distribute_h2_one_per_batch(h2_structure, total_batches)
     
     # 3. ROZDZIEL KEYWORDS NA BATCHE
     # 🆕 v36.0: Użyj semantic_keyword_plan jeśli dostępny
