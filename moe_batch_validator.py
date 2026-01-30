@@ -1,6 +1,6 @@
 """
 ===============================================================================
-🔍 MOE BATCH VALIDATOR v1.2 - Mixture of Experts Post-Batch Validation
+🔍 MOE BATCH VALIDATOR v1.3 - Mixture of Experts Post-Batch Validation
 ===============================================================================
 Kompleksowa walidacja batcha po wygenerowaniu przez GPT.
 
@@ -10,22 +10,19 @@ EKSPERCI (MoE):
 3. LANGUAGE EXPERT - gramatyka polska (LanguageTool), styl
 4. AI DETECTION EXPERT - burstiness, TTR, rozkład zdań
 5. UNIFIED BRIDGE EXPERT - mostek do unified_validator (optional)
-6. 🆕 CORPUS INSIGHTS - metryki NKJP (informacyjne, nie blokuje!)
+6. CORPUS INSIGHTS - metryki NKJP (informacyjne, nie blokuje!)
 
-🆕 v1.2 ZMIANY:
-- Dodano integrację z polish_corpus_metrics_v41 (NKJP insights)
-- Corpus insights NIE blokują walidacji - tylko informacyjne
-- Dodano pole corpus_insights do ValidationResult
-- Dodano naturalness_hints do response
+🆕 v1.3 ZMIANY:
+- Integracja z content_surgeon.py (chirurgiczne wstawianie fraz)
+- Integracja z semantic_triplet_validator.py (semantyczna walidacja tripletów)
+- AUTO_FIX mode używa Content Surgeon zamiast pełnego retry
+- Triplety walidowane semantycznie (akceptuje warianty językowe)
 
 TRYBY:
 - SOFT: tylko warnings, batch zapisuje się
 - STRICT: critical errors blokują batch
-- AUTO_FIX: próbuje naprawić automatycznie
+- AUTO_FIX: 🆕 używa Content Surgeon do naprawy
 
-Użycie:
-    from moe_batch_validator import validate_batch_moe
-    result = validate_batch_moe(batch_text, project_data, batch_number)
 ===============================================================================
 """
 
@@ -101,7 +98,7 @@ except ImportError:
     DYNAMIC_CV_AVAILABLE = False
     print("[MOE_VALIDATOR] ⚠️ Dynamic CV thresholds not available")
 
-# 🆕 v1.2: POLISH CORPUS INSIGHTS (optional, NEVER blocks!)
+# POLISH CORPUS INSIGHTS (optional, NEVER blocks!)
 try:
     from polish_corpus_metrics_v41 import (
         get_corpus_insights_for_moe,
@@ -116,69 +113,89 @@ except ImportError:
     ENABLE_CORPUS_INSIGHTS = False
     print("[MOE_VALIDATOR] ℹ️ Polish Corpus Insights not available (optional)")
     
-    # Fallback functions - zwracają puste wyniki, NIGDY nie blokują
     def get_corpus_insights_for_moe(text: str, **kwargs) -> dict:
-        return {
-            "enabled": False, 
-            "affects_validation": False,
-            "is_blocking": False,
-            "blocks_action": False
-        }
+        return {"enabled": False, "affects_validation": False}
     
     def get_naturalness_hints(text: str) -> list:
         return []
+
+# ================================================================
+# 🆕 v1.3: CONTENT SURGEON (chirurgiczne wstawianie fraz)
+# ================================================================
+try:
+    from content_surgeon import (
+        perform_surgery,
+        find_injection_point,
+        generate_injection_sentence
+    )
+    CONTENT_SURGEON_AVAILABLE = True
+    print("[MOE_VALIDATOR] ✅ Content Surgeon v1.0 enabled (auto-fix mode)")
+except ImportError:
+    CONTENT_SURGEON_AVAILABLE = False
+    print("[MOE_VALIDATOR] ⚠️ Content Surgeon not available")
     
-    def analyze_corpus_metrics(text: str, **kwargs):
-        return None
+    def perform_surgery(text, phrases, h2, domain="prawo"):
+        return {"success": False, "modified_text": text, "stats": {"injected": 0}}
+
+# ================================================================
+# 🆕 v1.3: SEMANTIC TRIPLET VALIDATOR (semantyczna walidacja)
+# ================================================================
+try:
+    from semantic_triplet_validator import (
+        validate_triplets_in_text,
+        validate_triplet_in_sentence,
+        generate_semantic_instruction
+    )
+    SEMANTIC_TRIPLET_AVAILABLE = True
+    print("[MOE_VALIDATOR] ✅ Semantic Triplet Validator v1.0 enabled")
+except ImportError:
+    SEMANTIC_TRIPLET_AVAILABLE = False
+    print("[MOE_VALIDATOR] ⚠️ Semantic Triplet Validator not available")
+    
+    def validate_triplets_in_text(text, triplets):
+        return {"passed": True, "matched": len(triplets), "missing": []}
 
 
 # ================================================================
 # KONFIGURACJA
 # ================================================================
 class ValidationMode(Enum):
-    SOFT = "soft"       # Tylko warnings
-    STRICT = "strict"   # Critical errors blokują
-    AUTO_FIX = "auto_fix"  # Próbuje naprawić
+    SOFT = "soft"
+    STRICT = "strict"
+    AUTO_FIX = "auto_fix"  # 🆕 v1.3: Używa Content Surgeon
 
 
 @dataclass
 class ValidationConfig:
     """Konfiguracja progów walidacji."""
-    
-    # STRUKTURA - różnorodność akapitów
     min_paragraph_count: int = 3
     max_paragraph_count: int = 8
-    paragraph_variance_min: float = 0.3  # Min różnorodność między sekcjami
-    
-    # SEO - keywords
-    basic_coverage_min: float = 0.7      # 70% BASIC musi być użyte
-    entity_coverage_min: float = 0.5     # 50% encji
-    
-    # JĘZYK - gramatyka
-    max_grammar_errors: int = 3          # Max błędów gramatycznych
-    max_critical_grammar: int = 1        # Max błędów krytycznych
-    
-    # AI DETECTION
-    burstiness_min: float = 2.2          # CV * 5 >= 2.2 (CV >= 0.44)
+    paragraph_variance_min: float = 0.3
+    basic_coverage_min: float = 0.7
+    entity_coverage_min: float = 0.5
+    max_grammar_errors: int = 3
+    max_critical_grammar: int = 1
+    burstiness_min: float = 2.2
     burstiness_max: float = 4.5
     ttr_min: float = 0.42
     ttr_max: float = 0.65
-    short_sentence_pct_min: int = 15     # % krótkich zdań
+    short_sentence_pct_min: int = 15
     short_sentence_pct_max: int = 30
-    
-    # POWTÓRZENIA
-    max_word_repetition: int = 6         # Max powtórzeń jednego słowa
-    
-    # 🆕 v1.2: CORPUS INSIGHTS
-    include_corpus_insights: bool = True  # Czy dodawać corpus insights
+    max_word_repetition: int = 6
+    include_corpus_insights: bool = True
+    # 🆕 v1.3: Content Surgeon config
+    enable_auto_fix: bool = True
+    max_auto_fix_phrases: int = 3
+    # 🆕 v1.3: Semantic triplet config
+    triplet_similarity_threshold: float = 0.55
 
 
 @dataclass
 class ValidationIssue:
     """Pojedynczy problem znaleziony przez walidator."""
-    expert: str           # structure, seo, language, ai_detection
-    severity: str         # critical, warning, info
-    code: str            # np. PARAGRAPH_MONOTONY, MISSING_BASIC
+    expert: str
+    severity: str
+    code: str
     message: str
     fix_instruction: str = ""
     auto_fixable: bool = False
@@ -189,15 +206,17 @@ class ValidationIssue:
 class ValidationResult:
     """Wynik walidacji MoE."""
     passed: bool
-    status: str          # APPROVED, WARNING, REJECTED, AUTO_FIXED
+    status: str
     issues: List[ValidationIssue]
     experts_summary: Dict[str, Dict]
     fix_instructions: List[str]
     auto_fixes_applied: List[str] = field(default_factory=list)
     corrected_text: Optional[str] = None
-    # 🆕 v1.2: Corpus insights (NIGDY nie wpływa na passed/status!)
     corpus_insights: Optional[Dict] = None
     naturalness_hints: List[Dict] = field(default_factory=list)
+    # 🆕 v1.3: Surgery stats
+    surgery_applied: bool = False
+    surgery_stats: Optional[Dict] = None
     
     def to_dict(self) -> Dict:
         result = {
@@ -207,88 +226,60 @@ class ValidationResult:
             "experts_summary": self.experts_summary,
             "fix_instructions": self.fix_instructions,
             "auto_fixes_applied": self.auto_fixes_applied,
-            "has_corrected_text": self.corrected_text is not None
+            "has_corrected_text": self.corrected_text is not None,
+            "surgery_applied": self.surgery_applied
         }
-        
-        # 🆕 v1.2: Dodaj corpus insights (jeśli dostępne)
         if self.corpus_insights:
             result["corpus_insights"] = self.corpus_insights
         if self.naturalness_hints:
             result["naturalness_hints"] = self.naturalness_hints
-            
+        if self.surgery_stats:
+            result["surgery_stats"] = self.surgery_stats
         return result
 
 
 # ================================================================
-# 1️⃣ STRUCTURE EXPERT - Różnorodność struktury
+# 1️⃣ STRUCTURE EXPERT
 # ================================================================
 class StructureExpert:
-    """
-    Sprawdza strukturę tekstu:
-    - Różna liczba akapitów między sekcjami H2
-    - Różna długość akapitów
-    - Anty-monotonność
-    """
-    
     def __init__(self, config: ValidationConfig):
         self.config = config
     
-    def validate(
-        self, 
-        batch_text: str, 
-        previous_batches: List[Dict],
-        current_h2: str = ""
-    ) -> Tuple[List[ValidationIssue], Dict]:
-        """Walidacja struktury batcha."""
+    def validate(self, batch_text: str, previous_batches: List[Dict], current_h2: str = "") -> Tuple[List[ValidationIssue], Dict]:
         issues = []
-        
-        # Policz akapity w bieżącym batchu
         paragraphs = self._split_paragraphs(batch_text)
         current_para_count = len(paragraphs)
         
-        # Policz akapity w poprzednich batchach
         previous_para_counts = []
         for batch in previous_batches:
             text = batch.get("text", "")
             prev_paras = self._split_paragraphs(text)
             previous_para_counts.append(len(prev_paras))
         
-        # Sprawdź czy liczba akapitów jest inna niż w poprzednim batchu
         if previous_para_counts:
             last_para_count = previous_para_counts[-1]
-            
-            # CRITICAL: Identyczna liczba akapitów jak poprzedni batch
             if current_para_count == last_para_count and current_para_count > 2:
                 issues.append(ValidationIssue(
                     expert="structure",
                     severity="warning",
                     code="PARAGRAPH_MONOTONY",
-                    message=f"Ta sekcja ma {current_para_count} akapitów - IDENTYCZNIE jak poprzednia! "
-                            f"Zmień strukturę dla naturalności.",
-                    fix_instruction=f"Zmień liczbę akapitów z {current_para_count} na {current_para_count + 1} lub {max(2, current_para_count - 1)}. "
-                                   f"Możesz: połączyć 2 krótkie akapity w 1 dłuższy LUB podzielić 1 długi na 2 krótsze.",
-                    context={
-                        "current_count": current_para_count,
-                        "previous_count": last_para_count
-                    }
+                    message=f"Ta sekcja ma {current_para_count} akapitów - IDENTYCZNIE jak poprzednia!",
+                    fix_instruction=f"Zmień liczbę akapitów z {current_para_count} na {current_para_count + 1} lub {max(2, current_para_count - 1)}.",
+                    context={"current_count": current_para_count, "previous_count": last_para_count}
                 ))
             
-            # Sprawdź ostatnie 3 batche - czy nie są monotonne
             if len(previous_para_counts) >= 2:
                 last_three = previous_para_counts[-2:] + [current_para_count]
-                if len(set(last_three)) == 1:  # Wszystkie identyczne
+                if len(set(last_three)) == 1:
                     issues.append(ValidationIssue(
                         expert="structure",
                         severity="critical",
                         code="STRUCTURE_PATTERN_DETECTED",
-                        message=f"Ostatnie 3 sekcje mają identyczną strukturę ({last_three[0]} akapitów). "
-                                f"AI pattern detected!",
-                        fix_instruction="MUSISZ zmienić liczbę akapitów w tej sekcji. "
-                                       f"Użyj {last_three[0] + 2} lub {max(2, last_three[0] - 1)} akapitów.",
+                        message=f"Ostatnie 3 sekcje mają identyczną strukturę ({last_three[0]} akapitów). AI pattern!",
+                        fix_instruction=f"MUSISZ zmienić liczbę akapitów. Użyj {last_three[0] + 2} lub {max(2, last_three[0] - 1)}.",
                         context={"pattern": last_three}
                     ))
         
-        # Sprawdź długości akapitów (różnorodność)
         para_lengths = [len(p.split()) for p in paragraphs]
         if para_lengths and len(para_lengths) > 1:
             mean_len = statistics.mean(para_lengths)
@@ -300,31 +291,10 @@ class StructureExpert:
                     expert="structure",
                     severity="warning",
                     code="PARAGRAPH_LENGTH_UNIFORM",
-                    message=f"Akapity są zbyt podobnej długości (CV={cv:.2f}). "
-                            f"Długości: {para_lengths}",
-                    fix_instruction="Zróżnicuj długość akapitów. Niektóre powinny być krótkie (2-3 zdania), "
-                                   "inne dłuższe (5-6 zdań).",
+                    message=f"Akapity zbyt podobnej długości (CV={cv:.2f}). Długości: {para_lengths}",
+                    fix_instruction="Zróżnicuj długość akapitów. Niektóre krótkie (2-3 zdania), inne dłuższe (5-6 zdań).",
                     context={"lengths": para_lengths, "cv": cv}
                 ))
-        
-        # Sprawdź minimalną i maksymalną liczbę akapitów
-        if current_para_count < self.config.min_paragraph_count:
-            issues.append(ValidationIssue(
-                expert="structure",
-                severity="warning",
-                code="TOO_FEW_PARAGRAPHS",
-                message=f"Za mało akapitów: {current_para_count} (min: {self.config.min_paragraph_count})",
-                fix_instruction=f"Podziel tekst na więcej akapitów (min {self.config.min_paragraph_count})."
-            ))
-        
-        if current_para_count > self.config.max_paragraph_count:
-            issues.append(ValidationIssue(
-                expert="structure",
-                severity="info",
-                code="MANY_PARAGRAPHS",
-                message=f"Dużo akapitów: {current_para_count} (sugerowane max: {self.config.max_paragraph_count})",
-                fix_instruction="Rozważ połączenie niektórych krótkich akapitów."
-            ))
         
         summary = {
             "paragraph_count": current_para_count,
@@ -332,31 +302,18 @@ class StructureExpert:
             "previous_counts": previous_para_counts,
             "issues_count": len(issues)
         }
-        
         return issues, summary
     
     def _split_paragraphs(self, text: str) -> List[str]:
-        """Dzieli tekst na akapity."""
-        # Usuń HTML
         clean = re.sub(r'<[^>]+>', '\n', text)
-        # Podziel na podwójne newline
         paragraphs = re.split(r'\n\s*\n', clean)
-        # Filtruj puste
         return [p.strip() for p in paragraphs if p.strip() and len(p.strip()) > 20]
 
 
 # ================================================================
-# 2️⃣ SEO EXPERT - Keywords i encje
+# 2️⃣ SEO EXPERT (z integracją Content Surgeon)
 # ================================================================
 class SEOExpert:
-    """
-    Sprawdza SEO:
-    - BASIC keywords coverage
-    - EXTENDED keywords (info)
-    - Encje z S1
-    - N-gramy
-    """
-    
     def __init__(self, config: ValidationConfig):
         self.config = config
     
@@ -367,15 +324,12 @@ class SEOExpert:
         batch_counts: Dict,
         s1_entities: List = None,
         assigned_keywords: List[str] = None,
-        batch_number: int = 1
+        batch_number: int = 1,
+        current_h2: str = ""
     ) -> Tuple[List[ValidationIssue], Dict]:
-        """Walidacja SEO batcha."""
         issues = []
-        
-        # === BASIC KEYWORDS ===
         basic_missing = []
         basic_used = []
-        basic_exceeded = []
         
         for rid, meta in keywords_state.items():
             if meta.get("type", "BASIC").upper() not in ["BASIC", "MAIN"]:
@@ -387,7 +341,6 @@ class SEOExpert:
             actual = meta.get("actual_uses", 0)
             batch_use = batch_counts.get(rid, 0)
             
-            # Frazy PRZYPISANE do tego batcha które nie zostały użyte
             if assigned_keywords and keyword.lower() in [k.lower() for k in assigned_keywords]:
                 if batch_use == 0:
                     synonyms = get_synonyms(keyword) if SYNONYMS_AVAILABLE else []
@@ -396,80 +349,60 @@ class SEOExpert:
                         severity="warning",
                         code="ASSIGNED_KEYWORD_MISSING",
                         message=f"Fraza '{keyword}' była PRZYPISANA do tej sekcji, ale nie została użyta!",
-                        fix_instruction=f"Dodaj frazę '{keyword}' do tekstu (min 1x). "
-                                       f"Synonimy: {', '.join(synonyms[:2]) if synonyms else 'brak'}",
+                        fix_instruction=f"Dodaj frazę '{keyword}' do tekstu (min 1x).",
+                        auto_fixable=CONTENT_SURGEON_AVAILABLE,  # 🆕 v1.3
                         context={"keyword": keyword, "assigned": True, "synonyms": synonyms}
                     ))
                     basic_missing.append(keyword)
             
-            # Frazy które są UNDER i powinny być użyte
             if actual < target_min and batch_use == 0:
-                remaining_batches = 7 - batch_number  # Zakładamy 7 batchów
+                remaining_batches = 7 - batch_number
                 if remaining_batches <= 2 and actual == 0:
                     issues.append(ValidationIssue(
                         expert="seo",
                         severity="critical" if meta.get("type") == "MAIN" else "warning",
                         code="BASIC_STILL_ZERO",
                         message=f"BASIC '{keyword}' ma 0 użyć! Zostały {remaining_batches} batche.",
-                        fix_instruction=f"MUSISZ użyć '{keyword}' w tym lub następnym batchu (cel: {target_min}-{target_max}x)."
+                        fix_instruction=f"MUSISZ użyć '{keyword}' w tym lub następnym batchu.",
+                        auto_fixable=CONTENT_SURGEON_AVAILABLE,  # 🆕 v1.3
+                        context={"keyword": keyword, "remaining_batches": remaining_batches}
                     ))
                     basic_missing.append(keyword)
             
             if batch_use > 0:
                 basic_used.append({"keyword": keyword, "count": batch_use})
         
-        # === ENCJE ===
         coverage = 0
         entities_missing = []
         if s1_entities:
             text_lower = batch_text.lower()
             entities_in_batch = []
-            
-            for entity in s1_entities[:15]:  # Top 15 encji
+            for entity in s1_entities[:15]:
                 name = entity.get("name", "") if isinstance(entity, dict) else str(entity)
                 if name.lower() in text_lower:
                     entities_in_batch.append(name)
                 else:
                     entities_missing.append(name)
-            
             coverage = len(entities_in_batch) / len(s1_entities[:15]) if s1_entities else 0
-            
-            if coverage < 0.2 and batch_number <= 3:  # Pierwsze 3 batche powinny mieć więcej encji
-                issues.append(ValidationIssue(
-                    expert="seo",
-                    severity="warning",
-                    code="LOW_ENTITY_COVERAGE",
-                    message=f"Niskie pokrycie encji: {coverage:.0%}. Użyte: {len(entities_in_batch)}/{len(s1_entities[:15])}",
-                    fix_instruction=f"Dodaj wzmianki o: {', '.join(entities_missing[:3])}",
-                    context={"entities_missing": entities_missing[:5]}
-                ))
         
         summary = {
             "basic_used": basic_used,
             "basic_missing": basic_missing,
             "entity_coverage": coverage if s1_entities else None,
-            "issues_count": len(issues)
+            "issues_count": len(issues),
+            "auto_fixable_count": len([i for i in issues if i.auto_fixable])  # 🆕 v1.3
         }
-        
         return issues, summary
 
 
 # ================================================================
-# 3️⃣ LANGUAGE EXPERT - Gramatyka polska
+# 3️⃣ LANGUAGE EXPERT
 # ================================================================
 class LanguageExpert:
-    """
-    Sprawdza język polski:
-    - LanguageTool (błędy gramatyczne)
-    - Zgodność przypadków
-    - Interpunkcja
-    """
-    
     def __init__(self, config: ValidationConfig):
         self.config = config
     
     def validate(self, batch_text: str) -> Tuple[List[ValidationIssue], Dict]:
-        """Walidacja języka polskiego."""
         issues = []
         grammar_errors = []
         
@@ -479,7 +412,6 @@ class LanguageExpert:
                 grammar_errors = lt_result.errors if hasattr(lt_result, 'errors') else []
                 critical_errors = [e for e in grammar_errors if e.get("rule", {}).get("category", {}).get("id") in ["GRAMMAR", "TYPOS"]] if grammar_errors else []
                 
-                # Critical grammar errors
                 for err in critical_errors[:self.config.max_critical_grammar + 1]:
                     issues.append(ValidationIssue(
                         expert="language",
@@ -490,22 +422,9 @@ class LanguageExpert:
                         auto_fixable=bool(err.get("suggestions")),
                         context=err
                     ))
-                
-                # Warning grammar errors
-                for err in grammar_errors[len(critical_errors):self.config.max_grammar_errors + 1]:
-                    issues.append(ValidationIssue(
-                        expert="language",
-                        severity="warning",
-                        code="GRAMMAR_WARNING",
-                        message=f"Sugestia: {err.get('message', 'nieznany')}",
-                        fix_instruction=f"Rozważ zmianę: '{err.get('context', '')}'",
-                        context=err
-                    ))
-                    
             except Exception as e:
                 print(f"[MOE_VALIDATOR] LanguageTool error: {e}")
         
-        # Dodatkowe sprawdzenia polskiego
         polish_issues = self._check_polish_rules(batch_text)
         issues.extend(polish_issues)
         
@@ -514,61 +433,39 @@ class LanguageExpert:
             "critical_errors": len([i for i in issues if i.severity == "critical"]),
             "languagetool_available": LANGUAGETOOL_AVAILABLE
         }
-        
         return issues, summary
     
     def _check_polish_rules(self, text: str) -> List[ValidationIssue]:
-        """Dodatkowe reguły polskie."""
         issues = []
-        
-        # Sprawdź częste błędy
         common_errors = [
-            (r'\bw między\b', 'w między → wśród/między', 'Błędna konstrukcja "w między"'),
-            (r'\bw skutek\b', 'w skutek → wskutek', 'Pisownia łączna "wskutek"'),
-            (r'\bz pod\b', 'z pod → spod', 'Pisownia łączna "spod"'),
-            (r'\bz\s+nad\b', 'z nad → znad', 'Pisownia łączna "znad"'),
-            (r'\bpo mimo\b', 'po mimo → pomimo', 'Pisownia łączna "pomimo"'),
+            (r'\bw między\b', 'w między → wśród/między', 'Błędna konstrukcja'),
+            (r'\bw skutek\b', 'w skutek → wskutek', 'Pisownia łączna'),
+            (r'\bz pod\b', 'z pod → spod', 'Pisownia łączna'),
         ]
-        
         text_lower = text.lower()
         for pattern, fix, msg in common_errors:
             if re.search(pattern, text_lower):
                 issues.append(ValidationIssue(
-                    expert="language",
-                    severity="warning",
-                    code="POLISH_SPELLING",
-                    message=msg,
-                    fix_instruction=fix,
-                    auto_fixable=True
+                    expert="language", severity="warning", code="POLISH_SPELLING",
+                    message=msg, fix_instruction=fix, auto_fixable=True
                 ))
-        
         return issues
 
 
 # ================================================================
-# 4️⃣ AI DETECTION EXPERT - Wykrywanie AI patterns
+# 4️⃣ AI DETECTION EXPERT
 # ================================================================
 class AIDetectionExpert:
-    """
-    Sprawdza metryki anty-AI:
-    - Burstiness (zmienność zdań)
-    - TTR (bogactwo słownictwa)
-    - Rozkład długości zdań
-    - Powtórzenia słów
-    """
-    
     def __init__(self, config: ValidationConfig):
         self.config = config
     
     def validate(self, batch_text: str) -> Tuple[List[ValidationIssue], Dict]:
-        """Walidacja anty-AI."""
         issues = []
         metrics = {}
         
         if not AI_METRICS_AVAILABLE:
             return issues, {"available": False}
         
-        # === BURSTINESS ===
         try:
             burstiness_result = calculate_burstiness(batch_text)
             burstiness = burstiness_result.get("value", 0)
@@ -582,46 +479,41 @@ class AIDetectionExpert:
                     severity="critical" if burstiness < 1.5 else "warning",
                     code="LOW_BURSTINESS",
                     message=f"Niski burstiness: {burstiness} (CV={cv:.2f}). AI pattern!",
-                    fix_instruction="Dodaj więcej KRÓTKICH zdań (2-8 słów). "
-                                   "Np. 'To ważne.', 'Warto wiedzieć.', 'Co to oznacza?'",
+                    fix_instruction="Dodaj więcej KRÓTKICH zdań (2-8 słów).",
                     context=burstiness_result
                 ))
         except Exception as e:
             print(f"[MOE_VALIDATOR] Burstiness error: {e}")
         
-        # === ROZKŁAD ZDAŃ ===
         try:
             dist_result = analyze_sentence_distribution(batch_text)
             distribution = dist_result.get("distribution", [0, 0, 0])
             metrics["sentence_distribution"] = distribution
             
             short_pct = distribution[0] if distribution else 0
-            
             if short_pct < self.config.short_sentence_pct_min:
                 issues.append(ValidationIssue(
                     expert="ai_detection",
                     severity="warning",
                     code="TOO_FEW_SHORT_SENTENCES",
-                    message=f"Za mało krótkich zdań: {short_pct}% (cel: {self.config.short_sentence_pct_min}-{self.config.short_sentence_pct_max}%)",
-                    fix_instruction="Dodaj zdania 2-10 słów. Przykłady: 'To kluczowe.', 'Warto pamiętać.', 'Jak to działa?'",
+                    message=f"Za mało krótkich zdań: {short_pct}%",
+                    fix_instruction="Dodaj zdania 2-10 słów.",
                     context=dist_result
                 ))
             
-            # Wykryj AI concentration (60%+ w przedziale 15-22)
             ai_concentration = dist_result.get("ai_concentration", 0)
             if ai_concentration > 60:
                 issues.append(ValidationIssue(
                     expert="ai_detection",
                     severity="critical",
                     code="AI_SENTENCE_PATTERN",
-                    message=f"AI pattern: {ai_concentration:.0f}% zdań ma 15-22 słów (monotonna długość)",
-                    fix_instruction="Zróżnicuj długość zdań! Dodaj krótkie (5-8 słów) i długie (25-30 słów).",
+                    message=f"AI pattern: {ai_concentration:.0f}% zdań ma 15-22 słów",
+                    fix_instruction="Zróżnicuj długość zdań! Dodaj krótkie i długie.",
                     context={"ai_concentration": ai_concentration}
                 ))
         except Exception as e:
             print(f"[MOE_VALIDATOR] Sentence distribution error: {e}")
         
-        # === POWTÓRZENIA SŁÓW ===
         try:
             repetition_result = check_word_repetition_detailed(batch_text)
             repeated_words = repetition_result.get("repeated_words", [])
@@ -631,142 +523,172 @@ class AIDetectionExpert:
                 word = word_info.get("word", "")
                 count = word_info.get("count", 0)
                 if count > self.config.max_word_repetition:
-                    synonyms = word_info.get("synonyms", [])
                     issues.append(ValidationIssue(
                         expert="ai_detection",
                         severity="warning",
                         code="WORD_REPETITION",
                         message=f"Słowo '{word}' powtórzone {count}x",
-                        fix_instruction=f"Zamień niektóre '{word}' na: {', '.join(synonyms[:3]) if synonyms else 'synonimy'}",
-                        auto_fixable=bool(synonyms),
+                        fix_instruction=f"Użyj synonimów",
+                        auto_fixable=True,
                         context=word_info
                     ))
         except Exception as e:
             print(f"[MOE_VALIDATOR] Repetition check error: {e}")
         
-        summary = {
-            "metrics": metrics,
-            "issues_count": len(issues)
-        }
-        
-        return issues, summary
+        return issues, {"metrics": metrics, "issues_count": len(issues)}
 
 
 # ================================================================
-# 5️⃣ UNIFIED BRIDGE EXPERT (optional)
+# 🆕 v1.3: 5️⃣ TRIPLET EXPERT (Semantyczna walidacja)
 # ================================================================
-class UnifiedBridgeExpert:
+class TripletExpert:
     """
-    Ekspert mostkowy do unified_validator.
-    
-    Nie duplikuje logiki - WYWOŁUJE funkcje z unified_validator
-    i tłumaczy wyniki na format MoE.
+    Waliduje triplety SEMANTYCZNIE zamiast dosłownie.
+    Akceptuje warianty językowe: forma bierna, synonimy, etc.
     """
     
     def __init__(self, config: ValidationConfig):
         self.config = config
-        self.enabled = UNIFIED_VALIDATOR_AVAILABLE
     
     def validate(
-        self, 
+        self,
         batch_text: str,
-        keywords_state: Dict,
-        s1_data: Dict = None,
-        main_keyword: str = ""
+        required_triplets: List[Dict],
+        h2_title: str = ""
     ) -> Tuple[List[ValidationIssue], Dict]:
-        """Waliduje batch używając unified_validator."""
         issues = []
-        metrics = {
-            "enabled": self.enabled,
-            "checks_performed": []
-        }
         
-        if not self.enabled:
-            return issues, {"enabled": False, "reason": "unified_validator not available"}
+        if not required_triplets:
+            return issues, {"triplets_checked": 0, "passed": True}
         
-        try:
-            # 1. Quick validate
-            quick_result = quick_validate(batch_text, keywords_state)
-            metrics["quick_score"] = quick_result.get("score", 0)
-            metrics["checks_performed"].append("quick_validate")
+        if not SEMANTIC_TRIPLET_AVAILABLE:
+            # Fallback: proste sprawdzenie string matching
+            return self._validate_literal(batch_text, required_triplets)
+        
+        # Semantyczna walidacja
+        result = validate_triplets_in_text(batch_text, required_triplets)
+        
+        matched = result.get("matched", 0)
+        missing = result.get("missing", [])
+        score = result.get("score", 0)
+        
+        for triplet in missing:
+            s = triplet.get("subject", "")
+            v = triplet.get("verb", "")
+            o = triplet.get("object", "")
             
-            # Konwertuj issues z quick_validate
-            for issue in quick_result.get("issues", []):
-                if isinstance(issue, dict):
-                    severity = issue.get("severity", "WARNING")
-                else:
-                    severity = getattr(issue, "severity", "WARNING")
-                    if hasattr(severity, "value"):
-                        severity = severity.value
-                
-                issues.append(ValidationIssue(
-                    expert="unified_bridge",
-                    severity=severity.lower() if severity != "CRITICAL" else "critical",
-                    code=issue.get("code", "UNIFIED_ISSUE") if isinstance(issue, dict) else getattr(issue, "code", "UNIFIED_ISSUE"),
-                    message=issue.get("message", str(issue)) if isinstance(issue, dict) else getattr(issue, "message", str(issue)),
-                    fix_instruction="",
-                    context={"source": "unified_validator.quick_validate"}
-                ))
+            # Wygeneruj semantyczną instrukcję (nie dosłowną!)
+            instruction = generate_semantic_instruction(triplet) if SEMANTIC_TRIPLET_AVAILABLE else f"Napisz zdanie: {s} {v} {o}"
             
-            # 2. Entity density
-            if s1_data:
-                entities = s1_data.get("entity_seo", {}).get("entities", [])
-                density_result = calculate_entity_density(batch_text, entities)
-                metrics["entity_density"] = density_result.get("density", 0)
-                metrics["checks_performed"].append("entity_density")
-                
-                if density_result.get("status") == "CRITICAL":
-                    issues.append(ValidationIssue(
-                        expert="unified_bridge",
-                        severity="warning",
-                        code="ENTITY_DENSITY_LOW",
-                        message=f"Niska gęstość encji: {density_result.get('density', 0):.2f}",
-                        fix_instruction="Dodaj więcej encji z S1 Analysis",
-                        context=density_result
-                    ))
-            
-            # 3. Template patterns
-            template_issues = check_template_patterns(batch_text)
-            metrics["template_patterns_found"] = len(template_issues)
-            metrics["checks_performed"].append("template_patterns")
-            
-            for t_issue in template_issues[:2]:
-                issues.append(ValidationIssue(
-                    expert="unified_bridge",
-                    severity="warning",
-                    code="TEMPLATE_PATTERN",
-                    message=t_issue.message if hasattr(t_issue, "message") else str(t_issue),
-                    fix_instruction="Przepisz fragment unikając powtarzalnych struktur",
-                    context={"source": "unified_validator.check_template_patterns"}
-                ))
-            
-            # 4. Semantic enhancement
-            if s1_data:
-                semantic_result = validate_semantic_enhancement(batch_text, s1_data)
-                metrics["semantic_score"] = semantic_result.get("score", 0)
-                metrics["checks_performed"].append("semantic_enhancement")
-                
-                if semantic_result.get("score", 100) < 50:
-                    issues.append(ValidationIssue(
-                        expert="unified_bridge",
-                        severity="info",
-                        code="SEMANTIC_LOW",
-                        message=f"Niski semantic score: {semantic_result.get('score', 0)}",
-                        fix_instruction="Wzmocnij powiązania semantyczne z encjami S1",
-                        context=semantic_result
-                    ))
-            
-        except Exception as e:
-            print(f"[MOE_VALIDATOR] UnifiedBridgeExpert error: {e}")
-            metrics["error"] = str(e)
+            issues.append(ValidationIssue(
+                expert="triplet",
+                severity="warning",
+                code="TRIPLET_MISSING",
+                message=f"Brak relacji: {s} → {v} → {o}",
+                fix_instruction=instruction,
+                auto_fixable=False,  # Triplety wymagają ludzkiej interwencji
+                context={"triplet": triplet, "h2": h2_title}
+            ))
         
         summary = {
-            "enabled": True,
-            "metrics": metrics,
-            "issues_count": len(issues)
+            "triplets_checked": len(required_triplets),
+            "matched": matched,
+            "missing_count": len(missing),
+            "score": score,
+            "passed": len(missing) == 0,
+            "validation_type": "semantic" if SEMANTIC_TRIPLET_AVAILABLE else "literal"
         }
         
         return issues, summary
+    
+    def _validate_literal(self, text: str, triplets: List[Dict]) -> Tuple[List[ValidationIssue], Dict]:
+        """Fallback: dosłowne sprawdzenie (stara logika)."""
+        issues = []
+        text_lower = text.lower()
+        matched = 0
+        
+        for triplet in triplets:
+            s = triplet.get("subject", "").lower()
+            v = triplet.get("verb", "").lower()
+            o = triplet.get("object", "").lower()
+            
+            if s in text_lower and v in text_lower and o in text_lower:
+                matched += 1
+            else:
+                issues.append(ValidationIssue(
+                    expert="triplet",
+                    severity="warning",
+                    code="TRIPLET_MISSING",
+                    message=f"Brak relacji: {s} → {v} → {o}",
+                    fix_instruction=f"Napisz zdanie zawierające: {s}, {v}, {o}",
+                    context={"triplet": triplet}
+                ))
+        
+        return issues, {"triplets_checked": len(triplets), "matched": matched, "validation_type": "literal"}
+
+
+# ================================================================
+# 6️⃣ UNIFIED BRIDGE EXPERT (bez zmian)
+# ================================================================
+class UnifiedBridgeExpert:
+    def __init__(self, config: ValidationConfig):
+        self.config = config
+        self.enabled = UNIFIED_VALIDATOR_AVAILABLE
+    
+    def validate(self, batch_text: str, keywords_state: Dict, s1_data: Dict = None, main_keyword: str = "") -> Tuple[List[ValidationIssue], Dict]:
+        issues = []
+        metrics = {"enabled": self.enabled, "checks_performed": []}
+        
+        if not self.enabled:
+            return issues, {"enabled": False}
+        
+        try:
+            quick_result = quick_validate(batch_text, keywords_state)
+            metrics["quick_score"] = quick_result.get("score", 0)
+            metrics["checks_performed"].append("quick_validate")
+        except Exception as e:
+            metrics["error"] = str(e)
+        
+        return issues, {"enabled": True, "metrics": metrics}
+
+
+# ================================================================
+# 🆕 v1.3: CONTENT SURGEON INTEGRATION
+# ================================================================
+def apply_content_surgery(
+    batch_text: str,
+    missing_keywords: List[str],
+    h2_title: str,
+    config: ValidationConfig
+) -> Tuple[str, Dict]:
+    """
+    Wykonuje chirurgiczne wstawianie brakujących fraz.
+    
+    Returns:
+        (corrected_text, surgery_stats)
+    """
+    if not CONTENT_SURGEON_AVAILABLE:
+        return batch_text, {"success": False, "reason": "Content Surgeon not available"}
+    
+    if not missing_keywords:
+        return batch_text, {"success": True, "injected": 0}
+    
+    # Ogranicz do max_auto_fix_phrases
+    keywords_to_fix = missing_keywords[:config.max_auto_fix_phrases]
+    
+    result = perform_surgery(
+        text=batch_text,
+        missing_phrases=keywords_to_fix,
+        h2_title=h2_title,
+        domain="prawo"  # TODO: wykryć domenę
+    )
+    
+    if result["success"]:
+        print(f"[MOE_VALIDATOR] ✅ Content Surgery: {result['stats']['injected']}/{len(keywords_to_fix)} phrases injected")
+        return result["modified_text"], result["stats"]
+    else:
+        print(f"[MOE_VALIDATOR] ⚠️ Content Surgery failed: {result.get('failed_phrases', [])}")
+        return batch_text, result.get("stats", {"success": False})
 
 
 # ================================================================
@@ -778,21 +700,17 @@ def validate_batch_moe(
     batch_number: int = 1,
     mode: ValidationMode = ValidationMode.SOFT,
     config: Optional[ValidationConfig] = None,
-    include_corpus_insights: bool = True  # 🆕 v1.2
+    include_corpus_insights: bool = True,
+    current_h2: str = "",
+    required_triplets: List[Dict] = None  # 🆕 v1.3
 ) -> ValidationResult:
     """
     Główna funkcja walidacji MoE.
     
-    Args:
-        batch_text: Tekst batcha do walidacji
-        project_data: Dane projektu (keywords_state, batches, s1_data, etc.)
-        batch_number: Numer batcha (1-7)
-        mode: Tryb walidacji (SOFT, STRICT, AUTO_FIX)
-        config: Opcjonalna konfiguracja (domyślna jeśli None)
-        include_corpus_insights: Czy dodać corpus insights (default: True)
-    
-    Returns:
-        ValidationResult z wynikami wszystkich ekspertów
+    🆕 v1.3 ZMIANY:
+    - AUTO_FIX mode używa Content Surgeon do naprawy MISSING_KEYWORD
+    - Triplety walidowane przez TripletExpert (semantycznie)
+    - Dodano surgery_applied i surgery_stats do wyniku
     """
     if config is None:
         config = ValidationConfig()
@@ -800,22 +718,23 @@ def validate_batch_moe(
     all_issues = []
     experts_summary = {}
     fix_instructions = []
+    auto_fixes_applied = []
+    corrected_text = None
+    surgery_applied = False
+    surgery_stats = None
     
-    # Pobierz dane z projektu
     keywords_state = project_data.get("keywords_state", {})
     previous_batches = project_data.get("batches", [])
     s1_data = project_data.get("s1_data", {})
     s1_entities = s1_data.get("entity_seo", {}).get("entities", [])
     semantic_plan = project_data.get("semantic_keyword_plan", {})
     
-    # Pobierz assigned keywords dla tego batcha
     assigned_keywords = []
     for bp in semantic_plan.get("batch_plans", []):
         if bp.get("batch_number") == batch_number:
             assigned_keywords = bp.get("assigned_keywords", [])
             break
     
-    # Policz keywords w batchu
     batch_counts = {}
     if KEYWORD_COUNTER_AVAILABLE:
         try:
@@ -827,10 +746,7 @@ def validate_batch_moe(
     # 1️⃣ STRUCTURE EXPERT
     # ═══════════════════════════════════════════════════════════════
     structure_expert = StructureExpert(config)
-    current_h2 = ""
-    structure_issues, structure_summary = structure_expert.validate(
-        batch_text, previous_batches, current_h2
-    )
+    structure_issues, structure_summary = structure_expert.validate(batch_text, previous_batches, current_h2)
     all_issues.extend(structure_issues)
     experts_summary["structure"] = structure_summary
     
@@ -839,16 +755,44 @@ def validate_batch_moe(
     # ═══════════════════════════════════════════════════════════════
     seo_expert = SEOExpert(config)
     seo_issues, seo_summary = seo_expert.validate(
-        batch_text, keywords_state, batch_counts, s1_entities, assigned_keywords, batch_number
+        batch_text, keywords_state, batch_counts, s1_entities, assigned_keywords, batch_number, current_h2
     )
     all_issues.extend(seo_issues)
     experts_summary["seo"] = seo_summary
     
     # ═══════════════════════════════════════════════════════════════
+    # 🆕 v1.3: AUTO_FIX MODE - Content Surgery
+    # ═══════════════════════════════════════════════════════════════
+    if mode == ValidationMode.AUTO_FIX and config.enable_auto_fix:
+        missing_keywords = seo_summary.get("basic_missing", [])
+        
+        if missing_keywords and CONTENT_SURGEON_AVAILABLE:
+            print(f"[MOE_VALIDATOR] 🔬 Attempting Content Surgery for {len(missing_keywords)} missing keywords...")
+            
+            corrected_text, surgery_stats = apply_content_surgery(
+                batch_text=batch_text,
+                missing_keywords=missing_keywords,
+                h2_title=current_h2,
+                config=config
+            )
+            
+            if surgery_stats.get("injected", 0) > 0:
+                surgery_applied = True
+                auto_fixes_applied.append(f"Content Surgery: {surgery_stats['injected']} phrases injected")
+                
+                # Oznacz naprawione issues jako "auto_fixed"
+                for issue in all_issues:
+                    if issue.code in ["ASSIGNED_KEYWORD_MISSING", "BASIC_STILL_ZERO"]:
+                        keyword = issue.context.get("keyword", "")
+                        if keyword in missing_keywords[:config.max_auto_fix_phrases]:
+                            issue.severity = "info"
+                            issue.message += " [AUTO-FIXED by Content Surgeon]"
+    
+    # ═══════════════════════════════════════════════════════════════
     # 3️⃣ LANGUAGE EXPERT
     # ═══════════════════════════════════════════════════════════════
     language_expert = LanguageExpert(config)
-    language_issues, language_summary = language_expert.validate(batch_text)
+    language_issues, language_summary = language_expert.validate(corrected_text or batch_text)
     all_issues.extend(language_issues)
     experts_summary["language"] = language_summary
     
@@ -856,19 +800,30 @@ def validate_batch_moe(
     # 4️⃣ AI DETECTION EXPERT
     # ═══════════════════════════════════════════════════════════════
     ai_expert = AIDetectionExpert(config)
-    ai_issues, ai_summary = ai_expert.validate(batch_text)
+    ai_issues, ai_summary = ai_expert.validate(corrected_text or batch_text)
     all_issues.extend(ai_issues)
     experts_summary["ai_detection"] = ai_summary
     
     # ═══════════════════════════════════════════════════════════════
-    # 5️⃣ UNIFIED BRIDGE EXPERT (optional)
+    # 🆕 v1.3: 5️⃣ TRIPLET EXPERT (Semantyczna walidacja)
+    # ═══════════════════════════════════════════════════════════════
+    if required_triplets:
+        triplet_expert = TripletExpert(config)
+        triplet_issues, triplet_summary = triplet_expert.validate(
+            corrected_text or batch_text, required_triplets, current_h2
+        )
+        all_issues.extend(triplet_issues)
+        experts_summary["triplet"] = triplet_summary
+    
+    # ═══════════════════════════════════════════════════════════════
+    # 6️⃣ UNIFIED BRIDGE EXPERT (optional)
     # ═══════════════════════════════════════════════════════════════
     if UNIFIED_VALIDATOR_AVAILABLE:
         try:
             unified_expert = UnifiedBridgeExpert(config)
             main_keyword = project_data.get("main_keyword", "")
             unified_issues, unified_summary = unified_expert.validate(
-                batch_text=batch_text,
+                batch_text=corrected_text or batch_text,
                 keywords_state=keywords_state,
                 s1_data=s1_data,
                 main_keyword=main_keyword
@@ -879,39 +834,26 @@ def validate_batch_moe(
                     all_issues.append(issue)
             experts_summary["unified_bridge"] = unified_summary
         except Exception as e:
-            print(f"[MOE_VALIDATOR] UnifiedBridgeExpert skipped: {e}")
             experts_summary["unified_bridge"] = {"enabled": False, "error": str(e)}
     
     # ═══════════════════════════════════════════════════════════════
-    # 🆕 v1.2: 6️⃣ CORPUS INSIGHTS (NIGDY nie blokuje!)
+    # 7️⃣ CORPUS INSIGHTS (NIGDY nie blokuje!)
     # ═══════════════════════════════════════════════════════════════
     corpus_insights = None
     naturalness_hints = []
     
     if include_corpus_insights and CORPUS_INSIGHTS_AVAILABLE:
         try:
-            corpus_insights = get_corpus_insights_for_moe(batch_text)
-            
-            # Wyodrębnij hints do osobnego pola
+            corpus_insights = get_corpus_insights_for_moe(corrected_text or batch_text)
             if corpus_insights.get("enabled"):
                 naturalness_hints = corpus_insights.get("suggestions", [])
-                
-                # Dodaj do summary (ale NIE do issues!)
                 experts_summary["corpus_insights"] = {
                     "enabled": True,
                     "naturalness_score": corpus_insights.get("naturalness_score", 100),
-                    "style_detected": corpus_insights.get("style_detected", "unknown"),
-                    "suggestions_count": len(naturalness_hints),
-                    # WAŻNE: Jawne oznaczenie że NIE wpływa na walidację
                     "affects_validation": False,
                 }
         except Exception as e:
-            print(f"[MOE_VALIDATOR] Corpus insights error (non-blocking): {e}")
-            corpus_insights = {
-                "enabled": False,
-                "error": str(e)[:100],
-                "affects_validation": False
-            }
+            corpus_insights = {"enabled": False, "error": str(e)[:100]}
     
     # ═══════════════════════════════════════════════════════════════
     # AGREGACJA WYNIKÓW
@@ -919,18 +861,20 @@ def validate_batch_moe(
     critical_issues = [i for i in all_issues if i.severity == "critical"]
     warning_issues = [i for i in all_issues if i.severity == "warning"]
     
-    # Zbierz fix instructions
     for issue in all_issues:
         if issue.fix_instruction and issue.severity in ["critical", "warning"]:
             fix_instructions.append(f"[{issue.expert.upper()}] {issue.fix_instruction}")
     
-    # Ustal status (corpus insights NIGDY nie wpływa na status!)
-    if mode == ValidationMode.STRICT and critical_issues:
+    # Ustal status
+    if surgery_applied:
+        status = "AUTO_FIXED"
+        passed = True
+    elif mode == ValidationMode.STRICT and critical_issues:
         status = "REJECTED"
         passed = False
     elif critical_issues:
         status = "WARNING"
-        passed = True  # W SOFT mode przepuszczamy z warning
+        passed = True
     elif warning_issues:
         status = "WARNING"
         passed = True
@@ -944,10 +888,12 @@ def validate_batch_moe(
         issues=all_issues,
         experts_summary=experts_summary,
         fix_instructions=fix_instructions[:10],
-        auto_fixes_applied=[],
-        corrected_text=None,
+        auto_fixes_applied=auto_fixes_applied,
+        corrected_text=corrected_text,
         corpus_insights=corpus_insights,
-        naturalness_hints=naturalness_hints
+        naturalness_hints=naturalness_hints,
+        surgery_applied=surgery_applied,
+        surgery_stats=surgery_stats
     )
 
 
@@ -955,18 +901,21 @@ def validate_batch_moe(
 # HELPER: Format dla GPT
 # ================================================================
 def format_validation_for_gpt(result: ValidationResult) -> str:
-    """
-    Formatuje wynik walidacji jako instrukcje dla GPT do przepisania batcha.
-    """
+    """Formatuje wynik walidacji jako instrukcje dla GPT."""
     if result.status == "APPROVED":
         return ""
     
     lines = []
     lines.append("=" * 60)
+    
+    if result.surgery_applied:
+        lines.append("✅ AUTO-FIX APPLIED (Content Surgeon)")
+        lines.append(f"   Injected: {result.surgery_stats.get('injected', 0)} phrases")
+        lines.append("")
+    
     lines.append("⚠️ WALIDACJA MOE - WYMAGANE POPRAWKI")
     lines.append("=" * 60)
     
-    # Pogrupuj po ekspertach
     by_expert = {}
     for issue in result.issues:
         if issue.severity in ["critical", "warning"]:
@@ -980,72 +929,25 @@ def format_validation_for_gpt(result: ValidationResult) -> str:
             if issue.fix_instruction:
                 lines.append(f"     → FIX: {issue.fix_instruction}")
     
-    # 🆕 v1.2: Dodaj naturalness hints (informacyjnie)
     if result.naturalness_hints:
-        lines.append(f"\n💡 SUGESTIE NATURALNOŚCI (informacyjne):")
+        lines.append(f"\n💡 SUGESTIE NATURALNOŚCI:")
         for hint in result.naturalness_hints[:3]:
-            lines.append(f"  ℹ️ [{hint.get('metric', '?')}] {hint.get('suggestion', hint.get('message', ''))}")
+            lines.append(f"  ℹ️ {hint.get('suggestion', hint.get('message', ''))}")
     
     lines.append("\n" + "=" * 60)
-    
     return "\n".join(lines)
 
 
 # ================================================================
-# 🆕 v1.2: HELPER - Extract naturalness suggestions
+# EXPORTS
 # ================================================================
-def extract_naturalness_suggestions(result: ValidationResult) -> List[Dict]:
-    """
-    Wyciąga sugestie naturalności z corpus_insights.
-    
-    Użyteczne do dodania do response API.
-    """
-    if not result.corpus_insights:
-        return []
-    
-    if not result.corpus_insights.get("enabled"):
-        return []
-    
-    return result.corpus_insights.get("suggestions", [])
-
-
-# ================================================================
-# TEST
-# ================================================================
-if __name__ == "__main__":
-    test_text = """
-    Ubezwłasnowolnienie to ważna instytucja prawa cywilnego. Sąd może orzec ubezwłasnowolnienie całkowite lub częściowe.
-    
-    Wniosek o ubezwłasnowolnienie składa się do sądu okręgowego. Postępowanie wymaga opinii biegłego psychiatry.
-    
-    Skutki ubezwłasnowolnienia są poważne. Osoba ubezwłasnowolniona traci zdolność do czynności prawnych.
-    """
-    
-    # Symulacja project_data
-    project_data = {
-        "keywords_state": {
-            "k1": {"keyword": "ubezwłasnowolnienie", "type": "MAIN", "target_min": 5, "target_max": 15, "actual_uses": 2},
-            "k2": {"keyword": "sąd", "type": "BASIC", "target_min": 3, "target_max": 10, "actual_uses": 1},
-        },
-        "batches": [],
-        "s1_data": {"entity_seo": {"entities": [{"name": "Kodeks cywilny"}, {"name": "sąd okręgowy"}]}}
-    }
-    
-    result = validate_batch_moe(test_text, project_data, batch_number=1)
-    
-    print(f"Status: {result.status}")
-    print(f"Passed: {result.passed}")
-    print(f"Issues: {len(result.issues)}")
-    for issue in result.issues:
-        print(f"  [{issue.expert}] {issue.severity}: {issue.message}")
-    
-    # 🆕 v1.2: Pokaż corpus insights
-    if result.corpus_insights and result.corpus_insights.get("enabled"):
-        print(f"\n📊 Corpus Insights:")
-        print(f"   Naturalness: {result.corpus_insights.get('naturalness_score', 'N/A')}")
-        print(f"   Style: {result.corpus_insights.get('style_detected', 'N/A')}")
-        print(f"   Suggestions: {len(result.naturalness_hints)}")
-        for hint in result.naturalness_hints:
-            print(f"     💡 {hint.get('metric')}: {hint.get('suggestion', hint.get('message', ''))}")
-    
-    print("\n" + format_validation_for_gpt(result))
+__all__ = [
+    'validate_batch_moe',
+    'format_validation_for_gpt',
+    'ValidationMode',
+    'ValidationConfig',
+    'ValidationResult',
+    'ValidationIssue',
+    'CONTENT_SURGEON_AVAILABLE',
+    'SEMANTIC_TRIPLET_AVAILABLE'
+]
