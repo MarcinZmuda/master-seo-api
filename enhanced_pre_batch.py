@@ -49,6 +49,18 @@ except ImportError as e:
     DYNAMIC_STRUCTURE_AVAILABLE = False
     print(f"[ENHANCED_PRE_BATCH] ⚠️ dynamic_structure_analyzer not available: {e}")
 
+# 🆕 v41.1: IMPORT SMART BATCH INSTRUCTIONS
+try:
+    from smart_batch_instructions import (
+        generate_smart_batch_instructions,
+        format_instructions_for_gpt
+    )
+    SMART_INSTRUCTIONS_AVAILABLE = True
+    print("[ENHANCED_PRE_BATCH] ✅ smart_batch_instructions v41.1 loaded")
+except ImportError as e:
+    SMART_INSTRUCTIONS_AVAILABLE = False
+    print(f"[ENHANCED_PRE_BATCH] ⚠️ smart_batch_instructions not available: {e}")
+
 
 # ============================================================================
 # 🆕 v40.2: IMPORT CONCEPT MAP EXTRACTOR (Semantic Entity SEO)
@@ -299,14 +311,10 @@ def get_entities_to_define(
 ) -> List[Dict]:
     """
     Zwraca listę encji do zdefiniowania w tym batchu z konkretnymi instrukcjami.
-    
-    🆕 v41.4: Szuka entities w entity_seo LUB na top level (propagated)
     """
     entity_seo = s1_data.get("entity_seo", {})
-    
-    # 🆕 v41.4: Szukaj entities w obu miejscach
-    entities = entity_seo.get("entities", []) or s1_data.get("entities", [])
-    topical_coverage = entity_seo.get("topical_coverage", []) or s1_data.get("topical_coverage", [])
+    entities = entity_seo.get("entities", [])
+    topical_coverage = entity_seo.get("topical_coverage", [])
     
     already_defined = set(entity_state.get("defined", []))
     
@@ -325,17 +333,15 @@ def get_entities_to_define(
                 instruction["priority"] = "MUST"
                 result.append(instruction)
     
-    # 2. Encje HIGH importance (>= 0.7) lub wszystkie jeśli mało
-    importance_threshold = 0.7 if len(entities) > 10 else 0.3
+    # 2. Encje HIGH importance
     for ent in entities:
-        importance = ent.get("importance", ent.get("score", ent.get("weight", 0)))
-        if importance >= importance_threshold:
-            entity = ent.get("text", ent.get("entity", ent.get("name", "")))
+        if ent.get("importance", 0) >= 0.7:
+            entity = ent.get("text", ent.get("entity", ""))
             if entity and entity.lower() not in {e.lower() for e in already_defined}:
                 if entity.lower() not in {r["entity"].lower() for r in result}:
                     instruction = generate_definition_instruction(
                         entity=entity,
-                        context=ent.get("context", ent.get("description", "")),
+                        context=ent.get("context", ""),
                         h2=current_h2
                     )
                     instruction["priority"] = "SHOULD"
@@ -418,14 +424,9 @@ def get_relations_to_establish(
     entity_state: Dict,
     total_batches: int
 ) -> List[Dict]:
-    """Zwraca relacje do ustanowienia w tym batchu.
-    
-    🆕 v41.4: Szuka relationships w entity_seo LUB na top level
-    """
+    """Zwraca relacje do ustanowienia w tym batchu."""
     entity_seo = s1_data.get("entity_seo", {})
-    
-    # 🆕 v41.4: Szukaj relationships w obu miejscach
-    relationships = entity_seo.get("entity_relationships", []) or s1_data.get("entity_relationships", [])
+    relationships = entity_seo.get("entity_relationships", [])
     
     established = set(entity_state.get("relations_established", []))
     
@@ -785,7 +786,7 @@ def get_structure_instructions(
     longest_section_index = num_h2 // 2
     
     # ================================================================
-    # PARAGRAPHS TARGET - 🆕 v41.3: 2-4 akapity per batch
+    # PARAGRAPHS TARGET (bez zmian - ta logika jest OK)
     # ================================================================
     if batch_type == "INTRO":
         paragraphs_target = 2
@@ -794,13 +795,13 @@ def get_structure_instructions(
         paragraphs_target = 3
         length_profile = "MEDIUM"
     elif h2_index == longest_section_index:
-        paragraphs_target = 4  # najdłuższa sekcja
+        paragraphs_target = 5
         length_profile = "LONG"
     elif h2_index < longest_section_index:
-        paragraphs_target = 2 + (h2_index % 2)  # 2 lub 3
+        paragraphs_target = 2 + h2_index
         length_profile = "MEDIUM" if paragraphs_target >= 3 else "SHORT"
     else:
-        paragraphs_target = 3 - (h2_index - longest_section_index) % 2  # 2 lub 3
+        paragraphs_target = 4 - (h2_index - longest_section_index)
         paragraphs_target = max(2, paragraphs_target)
         length_profile = "MEDIUM" if paragraphs_target >= 3 else "SHORT"
     
@@ -946,17 +947,11 @@ def get_keyword_tracking_info(
     total_batches: int,
     remaining_batches: int
 ) -> Dict[str, Any]:
-    """Generuje informacje o keywords w trybie TRACKING (nie blokującym).
-    
-    🆕 v41.3: Wyraźne rozdzielenie BASIC i EXTENDED z priorytetem użycia.
-    """
+    """Generuje informacje o keywords w trybie TRACKING (nie blokującym)."""
     tracking = {
         "mode": "TRACKING",
         "explanation": "Frazy są ŚLEDZONE w tle. Per-batch nie blokuje. Weryfikacja globalna w final_review.",
         
-        # 🆕 v41.3: Wyraźne sekcje dla BASIC i EXTENDED
-        "basic_keywords": [],      # BASIC - główne frazy
-        "extended_keywords": [],   # EXTENDED - dodatkowe frazy (priorytetowe!)
         "use_naturally": [],
         "available": [],
         "near_limit": [],
@@ -999,27 +994,6 @@ def get_keyword_tracking_info(
         if is_structural:
             kw_info["note"] = "🔵 STRUCTURAL - użyj naturalnie, limit globalny"
             tracking["structural"].append(kw_info)
-        elif kw_type == "EXTENDED":
-            # 🆕 v41.3: EXTENDED - wyraźna kategoria z instrukcją
-            if remaining_needed > 0:
-                kw_info["note"] = f"⭐ EXTENDED - UŻYJ min 1× w tym batchu!"
-                kw_info["priority"] = "HIGH"
-            elif remaining_allowed > 0:
-                kw_info["note"] = "⭐ EXTENDED - opcjonalnie 1×"
-                kw_info["priority"] = "MEDIUM"
-            else:
-                kw_info["note"] = "⭐ EXTENDED - limit osiągnięty"
-                kw_info["priority"] = "LOW"
-            tracking["extended_keywords"].append(kw_info)
-        elif kw_type == "BASIC":
-            # BASIC keywords
-            if remaining_needed > 0:
-                kw_info["note"] = f"🔴 BASIC - użyj ~{suggested}× w tym batchu"
-                kw_info["priority"] = "CRITICAL"
-            else:
-                kw_info["note"] = "🔴 BASIC - w normie"
-                kw_info["priority"] = "OK"
-            tracking["basic_keywords"].append(kw_info)
         elif remaining_allowed <= 2:
             kw_info["note"] = "⚠️ Blisko limitu - max 1× tu"
             tracking["near_limit"].append(kw_info)
@@ -1030,25 +1004,12 @@ def get_keyword_tracking_info(
             kw_info["note"] = "✓ W normie, opcjonalnie 1×"
             tracking["available"].append(kw_info)
     
-    # 🆕 v41.3: Sortuj EXTENDED po priorytecie (najpierw te które MUSZĄ być użyte)
-    tracking["extended_keywords"].sort(
-        key=lambda x: (0 if x.get("priority") == "HIGH" else 1 if x.get("priority") == "MEDIUM" else 2)
-    )
-    
-    # 🆕 v41.3: Policz ile EXTENDED wymaga użycia
-    extended_needing_use = len([k for k in tracking["extended_keywords"] if k.get("priority") == "HIGH"])
-    
     tracking["summary"] = {
         "total_keywords": len(keywords_state),
-        "basic_count": len(tracking["basic_keywords"]),
-        "extended_count": len(tracking["extended_keywords"]),
-        "extended_needing_use": extended_needing_use,  # 🆕 v41.3
         "need_usage": len(tracking["use_naturally"]),
         "near_limit": len(tracking["near_limit"]),
         "structural": len(tracking["structural"]),
-        "instruction": "Użyj fraz NATURALNIE. System śledzi ilości automatycznie. Nie rób stuffingu!",
-        # 🆕 v41.3: Wyraźna instrukcja o EXTENDED
-        "extended_instruction": f"⭐ WAŻNE: Użyj {min(3, extended_needing_use)} fraz EXTENDED w tym batchu!" if extended_needing_use > 0 else "EXTENDED w normie"
+        "instruction": "Użyj fraz NATURALNIE. System śledzi ilości automatycznie. Nie rób stuffingu!"
     }
     
     return tracking
@@ -1138,9 +1099,7 @@ def generate_enhanced_pre_batch_info(
     style_fingerprint: Dict = None,
     is_ymyl: bool = False,
     is_legal: bool = False,
-    batch_plan: Dict = None,  # 🆕 v40.1: Plan batcha z h2_sections
-    detected_articles: List[str] = None,  # 🆕 v41.4: Artykuły prawne do opisania
-    legal_judgments: List[Dict] = None  # 🆕 v41.4: Orzeczenia z URL do cytowania
+    batch_plan: Dict = None  # 🆕 v40.1: Plan batcha z h2_sections
 ) -> Dict[str, Any]:
     """Generuje KOMPLETNE enhanced pre_batch_info z konkretnymi instrukcjami."""
     if entity_state is None:
@@ -1149,10 +1108,6 @@ def generate_enhanced_pre_batch_info(
         style_fingerprint = {}
     if batch_plan is None:
         batch_plan = {}
-    if detected_articles is None:
-        detected_articles = []
-    if legal_judgments is None:
-        legal_judgments = []
     
     remaining_batches = max(1, total_batches - len(batches))
     
@@ -1336,43 +1291,8 @@ def generate_enhanced_pre_batch_info(
             print(f"[ENHANCED_PRE_BATCH] ⚠️ Advanced semantic error: {e}")
             enhanced["advanced_semantic"] = {"error": str(e)}
     
-    # ================================================================
-    # 🆕 v41.4: LEGAL ARTICLE REQUIREMENT
-    # Dla projektów LEGAL - WYMUŚ opisanie artykułu prawnego
-    # ================================================================
-    legal_article_requirement = None
-    if is_legal and detected_articles:
-        # Strategia: batch 2 = główny artykuł, batch 3 = dodatkowy
-        article_to_describe = None
-        
-        if current_batch_num == 2 and len(detected_articles) >= 1:
-            # Batch 2: GŁÓWNY artykuł (pierwszy na liście)
-            article_to_describe = detected_articles[0]
-            requirement_level = "MUST"  # Obowiązkowe
-        elif current_batch_num == 3 and len(detected_articles) >= 2:
-            # Batch 3: Dodatkowy artykuł (jeśli jest)
-            article_to_describe = detected_articles[1]
-            requirement_level = "SHOULD"  # Zalecane
-        elif current_batch_num >= 4 and len(detected_articles) >= 1:
-            # Późniejsze batche: opcjonalnie dowolny artykuł
-            article_to_describe = None
-            requirement_level = "OPTIONAL"
-        
-        if article_to_describe:
-            legal_article_requirement = {
-                "article": article_to_describe,
-                "level": requirement_level,
-                "all_articles": detected_articles,
-                "instruction": _generate_legal_article_instruction(article_to_describe, requirement_level, main_keyword)
-            }
-    
-    enhanced["legal_article_requirement"] = legal_article_requirement
-    
-    # 🆕 v41.4: Orzeczenia do cytowania (z URL!)
-    enhanced["legal_judgments"] = legal_judgments if is_legal and legal_judgments else []
-    
     # GPT PROMPT SECTION
-    enhanced["gpt_instructions"] = _generate_gpt_prompt_section(enhanced, is_legal, detected_articles, legal_judgments)
+    enhanced["gpt_instructions"] = _generate_gpt_prompt_section(enhanced, is_legal)
     
     # 🆕 v40.2: CONCEPT MAP (Semantic Entity SEO)
     if CONCEPT_MAP_AVAILABLE and current_batch_num == 1:
@@ -1459,303 +1379,95 @@ def generate_enhanced_pre_batch_info(
     
     # ================================================================
     # 🆕 v41.0: TRIPLET PRIORITY INSTRUCTIONS
-    # 🆕 v41.4: FIX - relations_to_establish to LISTA, nie dict!
     # ================================================================
     if "relations_to_establish" in enhanced:
         try:
-            relations = enhanced.get("relations_to_establish", [])
-            # relations to LISTA relacji, nie dict!
-            if isinstance(relations, list) and len(relations) > 0:
-                # Wyciągnij najważniejszą relację do instrukcji
-                priority_rel = relations[0] if relations else None
-                if priority_rel and isinstance(priority_rel, dict):
-                    prebatch_instruction = priority_rel.get("prebatch_instruction") or priority_rel.get("instruction", "")
-                    if prebatch_instruction:
-                        # Dodaj instrukcję tripletów do encji
-                        if "entities_to_define" not in enhanced:
-                            enhanced["entities_to_define"] = []
-                        # Upewnij się że entities_to_define obsługuje instrukcje
-                        if isinstance(enhanced.get("entities_to_define"), dict):
-                            ent_def = enhanced.get("entities_to_define", {})
-                            instructions = ent_def.get("instructions", [])
-                            instructions.append(prebatch_instruction)
-                            enhanced["entities_to_define"]["instructions"] = instructions
+            relations = enhanced.get("relations_to_establish", {})
+            if relations.get("prebatch_instruction"):
+                # Dodaj instrukcję tripletów do encji
+                if "entities_to_define" not in enhanced:
+                    enhanced["entities_to_define"] = {}
+                ent_def = enhanced.get("entities_to_define", {})
+                instructions = ent_def.get("instructions", [])
+                instructions.append(relations["prebatch_instruction"])
+                enhanced["entities_to_define"]["instructions"] = instructions
         except Exception as e:
             print(f"[ENHANCED_PRE_BATCH] ⚠️ Triplet priority error: {e}")
+    
+    # ================================================================
+    # 🆕 v41.1: SMART BATCH INSTRUCTIONS (PREWENCJA!)
+    # ================================================================
+    # Generuje KONKRETNE instrukcje z przykładami zamiast listy fraz
+    if SMART_INSTRUCTIONS_AVAILABLE:
+        try:
+            # Zbierz już użyte frazy
+            already_covered = []
+            for rid, meta in keywords_state.items():
+                if meta.get("actual_uses", 0) >= meta.get("target_min", 1):
+                    already_covered.append(meta.get("keyword", ""))
+            
+            # Zbierz już użyte triplety (z poprzednich batchów)
+            already_used_triplets = []
+            # TODO: śledzić użyte triplety w entity_state
+            
+            # Wykryj domenę
+            domain = "prawo" if is_legal else "general"
+            
+            smart = generate_smart_batch_instructions(
+                keywords_state=keywords_state,
+                s1_data=s1_data,
+                current_batch_num=current_batch_num,
+                total_batches=total_batches,
+                current_h2=enhanced.get("current_h2_list", []),
+                batch_type=batch_type,
+                already_well_covered=already_covered,
+                already_used_triplets=already_used_triplets,
+                domain=domain
+            )
+            
+            enhanced["smart_instructions"] = smart
+            enhanced["smart_instructions_formatted"] = format_instructions_for_gpt(smart)
+            
+            # Log stats
+            stats = smart.get("stats", {})
+            print(f"[ENHANCED_PRE_BATCH] ✅ Smart instructions: {stats.get('must_phrases_count', 0)} MUST phrases, {stats.get('must_triplets_count', 0)} MUST triplets")
+            
+        except Exception as e:
+            print(f"[ENHANCED_PRE_BATCH] ⚠️ Smart instructions error: {e}")
+            import traceback
+            traceback.print_exc()
     
     return enhanced
 
 
-def _generate_legal_article_instruction(article: str, level: str, topic: str) -> str:
-    """
-    🆕 v41.4: Generuje konkretną instrukcję opisania artykułu prawnego.
-    
-    Zamiast ogólnego "cytuj przepisy", daje KONKRETNY przepis do opisania.
-    """
-    # Mapowanie popularnych artykułów na kontekst
-    ARTICLE_CONTEXT = {
-        "art. 211 k.k.": {
-            "name": "Uprowadzenie lub zatrzymanie małoletniego",
-            "context": "penalizuje bezprawne zabranie lub zatrzymanie małoletniego wbrew woli osoby sprawującej opiekę",
-            "elements": ["podmiot (osoba nieuprawniona)", "zachowanie (uprowadza/zatrzymuje)", "przedmiot (małoletni)", "wbrew woli opiekuna"]
-        },
-        "art. 13 k.c.": {
-            "name": "Ubezwłasnowolnienie całkowite",
-            "context": "określa przesłanki ubezwłasnowolnienia całkowitego osoby dorosłej",
-            "elements": ["choroba psychiczna", "niedorozwój umysłowy", "zaburzenia psychiczne", "niemożność kierowania swoim postępowaniem"]
-        },
-        "art. 56 k.r.o.": {
-            "name": "Przesłanki rozwodu",
-            "context": "określa warunki orzeczenia rozwodu przez sąd",
-            "elements": ["zupełny rozkład pożycia", "trwały rozkład pożycia", "dobro małoletnich dzieci"]
-        },
-        "art. 991 k.c.": {
-            "name": "Zachowek",
-            "context": "określa prawo do zachowku i jego wysokość",
-            "elements": ["uprawnieni do zachowku", "wysokość zachowku", "obliczanie substratu"]
-        },
-        "art. 415 k.c.": {
-            "name": "Odpowiedzialność deliktowa",
-            "context": "ustanawia zasadę odpowiedzialności za szkodę wyrządzoną z winy",
-            "elements": ["wina", "szkoda", "związek przyczynowy"]
-        },
-        "art. 133 k.r.o.": {
-            "name": "Obowiązek alimentacyjny rodziców",
-            "context": "określa zakres obowiązku alimentacyjnego rodziców wobec dzieci",
-            "elements": ["obowiązek utrzymania", "możliwości zarobkowe", "usprawiedliwione potrzeby"]
-        }
-    }
-    
-    # Normalizuj artykuł
-    article_normalized = article.strip().lower()
-    context_info = None
-    for key, val in ARTICLE_CONTEXT.items():
-        if key.lower() in article_normalized or article_normalized in key.lower():
-            context_info = val
-            break
-    
-    if level == "MUST":
-        level_text = "⚖️ OBOWIĄZKOWE"
-        action = "MUSISZ opisać"
-    elif level == "SHOULD":
-        level_text = "⚖️ ZALECANE"
-        action = "Powinieneś opisać"
-    else:
-        level_text = "⚖️ OPCJONALNE"
-        action = "Możesz opisać"
-    
-    instruction = f"""
-{level_text}: OPISZ {article} w tym batchu!
-
-{action} ten przepis w kontekście tematu "{topic}".
-"""
-    
-    if context_info:
-        instruction += f"""
-📋 {article} - {context_info['name']}:
-   {context_info['context']}
-   
-   Elementy do uwzględnienia:
-   • {chr(10) + '   • '.join(context_info['elements'])}
-"""
-    
-    instruction += """
-✅ JAK OPISAĆ POPRAWNIE:
-   • Wspomnij numer artykułu i ustawę (np. "Zgodnie z art. 211 k.k.")
-   • Opisz CO reguluje ten przepis (1-2 zdania)
-   • Połącz z tematem artykułu (dlaczego to ważne)
-   • NIE cytuj pełnej treści przepisu - opisz własnymi słowami
-
-❌ UNIKAJ:
-   • Pełnego cytowania tekstu ustawy
-   • Interpretacji prawnej (to nie porada!)
-   • Dawania instrukcji "co robić"
-"""
-    
-    return instruction.strip()
-
-
-def _generate_gpt_prompt_section(enhanced: Dict, is_legal: bool = False, detected_articles: List[str] = None, legal_judgments: List[Dict] = None) -> str:
-    """Generuje gotową sekcję promptu dla GPT.
-    
-    🆕 v41.3: Logika akapitów PER SEKCJA H2, nie per batch.
-    Każda kolejna sekcja H2 ma INNĄ liczbę akapitów (2-4).
-    """
+def _generate_gpt_prompt_section(enhanced: Dict, is_legal: bool = False) -> str:
+    """Generuje gotową sekcję promptu dla GPT."""
     lines = []
     lines.append("=" * 60)
     lines.append(f"📋 BATCH #{enhanced['batch_number']} - {enhanced['batch_type']}")
     lines.append("=" * 60)
     lines.append("")
     
-    # Pokaż H2 dla tego batcha
+    # 🆕 v40.1: Pokaż WSZYSTKIE H2 dla tego batcha
     h2_list = enhanced.get("current_h2_list", [])
     h2_count = enhanced.get("h2_count_in_batch", 0)
-    batch_num = enhanced.get("batch_number", 1)
-    batch_type = enhanced.get("batch_type", "CONTENT")
     
-    # 🆕 v41.3: Wzorzec akapitów per sekcja H2 (rotacja 2-3-4-3-2-4...)
-    # Każda KOLEJNA sekcja H2 ma INNĄ liczbę akapitów
-    paragraph_rotation = [2, 3, 4, 3, 2, 4, 3, 2]
+    # 🆕 v41.2: Różna liczba akapitów dla każdej H2 (2-4)
+    paragraph_options = [2, 3, 4, 3, 2, 4]
     
     if h2_count > 1:
-        # Batch z wieloma sekcjami H2
-        lines.append(f"📌 SEKCJE H2 W TYM BATCHU ({h2_count}):")
+        lines.append(f"📌 H2 W TYM BATCHU ({h2_count} sekcje):")
+        for i, h2 in enumerate(h2_list, 1):
+            para_count = paragraph_options[(i - 1) % len(paragraph_options)]
+            lines.append(f"   {i}. \"{h2}\" → {para_count} akapity")
         lines.append("")
-        
-        for i, h2 in enumerate(h2_list):
-            # Każda sekcja H2 dostaje INNĄ liczbę akapitów
-            para_count = paragraph_rotation[i % len(paragraph_rotation)]
-            lines.append(f"   ═══ SEKCJA {i+1}: \"{h2}\" ═══")
-            lines.append(f"   📐 Liczba akapitów: {para_count}")
-            lines.append(f"   📏 Długość sekcji: {para_count * 50}-{para_count * 80} słów")
-            lines.append("")
-        
-        lines.append("⚠️ WAŻNE:")
-        lines.append("   • Napisz WSZYSTKIE powyższe sekcje H2")
-        lines.append("   • Każda sekcja MUSI mieć INNĄ liczbę akapitów!")
-        lines.append("   • Akapity: 2-4 zdania każdy")
-        
+        lines.append("⚠️ WYMAGANE: Napisz WSZYSTKIE powyższe sekcje H2 w tym batchu!")
+        lines.append("⚠️ WAŻNE: Każda sekcja H2 MUSI mieć INNĄ liczbę akapitów (2-4)!")
     elif h2_count == 1:
-        # Batch z jedną sekcją H2
-        para_count = paragraph_rotation[batch_num % len(paragraph_rotation)]
-        lines.append(f"📌 SEKCJA H2: \"{enhanced['current_h2']}\"")
-        lines.append(f"   📐 Liczba akapitów: {para_count}")
-        lines.append(f"   📏 Długość: {para_count * 50}-{para_count * 80} słów")
-        
+        lines.append(f"📌 H2: \"{enhanced['current_h2']}\" → 3 akapity")
     else:
-        # INTRO lub sekcja bez H2
-        if batch_type == "INTRO":
-            para_count = 2
-            lines.append("📌 INTRO (bez H2)")
-            lines.append(f"   📐 Liczba akapitów: {para_count}")
-            lines.append("   📏 Długość: 150-250 słów")
-            lines.append("   💡 Angażujące wprowadzenie do tematu")
-        else:
-            para_count = 3
-            lines.append(f"📌 SEKCJA: {batch_type}")
-            lines.append(f"   📐 Liczba akapitów: {para_count}")
-    
+        lines.append(f"📌 SEKCJA: {enhanced.get('batch_type', 'CONTENT')}")
     lines.append("")
-    
-    # ================================================================
-    # 🆕 v41.4: LEGAL ARTICLE REQUIREMENT
-    # ================================================================
-    legal_req = enhanced.get("legal_article_requirement")
-    if legal_req and legal_req.get("article"):
-        lines.append("=" * 60)
-        lines.append(legal_req["instruction"])
-        lines.append("=" * 60)
-        lines.append("")
-    
-    # ================================================================
-    # 🆕 v41.4: ORZECZENIA DO CYTOWANIA (standard prawniczy)
-    # ================================================================
-    judgments = enhanced.get("legal_judgments", []) or legal_judgments or []
-    if judgments and is_legal:
-        lines.append("🏛️ ORZECZENIA DO CYTOWANIA (użyj min. 1 w artykule):")
-        lines.append("=" * 50)
-        lines.append("")
-        lines.append("   📋 STANDARD PRAWNICZY:")
-        lines.append("   • Sygnatura + data + sąd = OBOWIĄZKOWE")
-        lines.append("   • Portal (domena) = na końcu cytatu")
-        lines.append("   • Pełny URL = NIE WKLEJAJ!")
-        lines.append("")
-        
-        for i, j in enumerate(judgments[:2], 1):
-            sig = j.get("signature", "")
-            court = j.get("court", "")
-            date = j.get("date", j.get("formatted_date", ""))
-            
-            # Portal - tylko domena
-            official_portal = j.get("official_portal", "")
-            if official_portal:
-                portal_domain = official_portal.replace("https://", "").replace("http://", "").rstrip("/")
-            else:
-                portal_domain = "orzeczenia.ms.gov.pl"
-            
-            excerpt = j.get("excerpt", "")[:150] if j.get("excerpt") else ""
-            
-            lines.append(f"   ═══ ORZECZENIE #{i} ═══")
-            lines.append(f"   📌 {sig} z dnia {date}")
-            lines.append(f"   🏛️ {court}")
-            lines.append(f"   🌐 Portal: {portal_domain}")
-            if excerpt:
-                lines.append(f"   📝 \"{excerpt}...\"")
-            lines.append("")
-        
-        lines.append("   ✅ PRZYKŁAD CYTOWANIA:")
-        lines.append("   \"Jak wskazał Sąd Okręgowy w Łodzi w wyroku")
-        lines.append("   z dnia 2 października 2019 r. (sygn. II C 895/18),")
-        lines.append("   [TREŚĆ ORZECZENIA] (orzeczenie dostępne na:")
-        lines.append("   orzeczenia.lodz.so.gov.pl).\"")
-        lines.append("=" * 50)
-        lines.append("")
-    
-    # ================================================================
-    # 🆕 v41.4: NIEUŻYTE FRAZY - KRYTYCZNA SEKCJA
-    # Pokazuje WSZYSTKIE frazy które jeszcze nie zostały użyte
-    # ================================================================
-    tracking = enhanced.get("keyword_tracking", {})
-    
-    # Zbierz WSZYSTKIE nieużyte frazy (actual = 0)
-    basic_kws = tracking.get("basic_keywords", [])
-    extended_kws = tracking.get("extended_keywords", [])
-    
-    unused_basic = [k for k in basic_kws if k.get("actual_total", 0) == 0]
-    unused_extended = [k for k in extended_kws if k.get("actual_total", 0) == 0]
-    
-    if unused_basic or unused_extended:
-        lines.append("🚨 NIEUŻYTE FRAZY - UŻYJ W TYM LUB NASTĘPNYCH BATCHACH!")
-        lines.append("=" * 50)
-        
-        if unused_basic:
-            lines.append(f"   🔴 BASIC nieużyte ({len(unused_basic)}):")
-            # Pokaż do 10 nieużytych BASIC
-            for kw in unused_basic[:10]:
-                target = kw.get("target", "1-2")
-                lines.append(f"      • \"{kw['keyword']}\" (cel: {target})")
-            if len(unused_basic) > 10:
-                lines.append(f"      ... i {len(unused_basic) - 10} więcej")
-        
-        if unused_extended:
-            lines.append(f"   ⭐ EXTENDED nieużyte ({len(unused_extended)}):")
-            # Pokaż do 10 nieużytych EXTENDED
-            for kw in unused_extended[:10]:
-                lines.append(f"      • \"{kw['keyword']}\"")
-            if len(unused_extended) > 10:
-                lines.append(f"      ... i {len(unused_extended) - 10} więcej")
-        
-        lines.append("")
-        lines.append("   💡 Wpleć 3-5 z powyższych fraz NATURALNIE w treść!")
-        lines.append("=" * 50)
-        lines.append("")
-    
-    # 🆕 v41.3: EXTENDED KEYWORDS - wyraźna sekcja
-    extended_needing = [k for k in extended_kws if k.get("priority") == "HIGH"]
-    
-    if extended_needing:
-        lines.append("⭐ FRAZY EXTENDED DO UŻYCIA:")
-        for kw in extended_needing[:5]:
-            lines.append(f"   • \"{kw['keyword']}\" → min 1×")
-        lines.append("")
-    elif extended_kws:
-        available_extended = [k for k in extended_kws if k.get("remaining_allowed", 0) > 0][:3]
-        if available_extended:
-            lines.append("⭐ FRAZY EXTENDED (zalecane):")
-            for kw in available_extended:
-                lines.append(f"   • \"{kw['keyword']}\"")
-            lines.append("")
-    
-    # BASIC keywords
-    basic_kws = tracking.get("basic_keywords", [])
-    basic_needing = [k for k in basic_kws if k.get("remaining_needed", 0) > 0]
-    
-    if basic_needing:
-        lines.append("🔴 FRAZY BASIC (wymagane):")
-        for kw in basic_needing[:3]:
-            suggested = kw.get("suggested_this_batch", 1)
-            lines.append(f"   • \"{kw['keyword']}\" → ~{suggested}×")
-        lines.append("")
     
     # Encje do zdefiniowania
     entities = enhanced.get("entities_to_define", [])
@@ -1764,8 +1476,7 @@ def _generate_gpt_prompt_section(enhanced: Dict, is_legal: bool = False, detecte
         for ent in entities[:4]:
             priority_icon = "🔴" if ent.get("priority") == "MUST" else "🟡"
             lines.append(f"   {priority_icon} {ent['entity']}")
-            if ent.get('how'):
-                lines.append(f"      → {ent['how']}")
+            lines.append(f"      → {ent['how']}")
         lines.append("")
     
     # Relacje
@@ -1774,38 +1485,55 @@ def _generate_gpt_prompt_section(enhanced: Dict, is_legal: bool = False, detecte
         lines.append("🔗 RELACJE DO USTANOWIENIA:")
         for rel in relations[:3]:
             lines.append(f"   • {rel['from']} → {rel['relation']} → {rel['to']}")
+            if rel.get("example_sentences"):
+                lines.append(f"     Przykład: \"{rel['example_sentences'][0]}\"")
         lines.append("")
     
     # Kontekst semantyczny
     semantic = enhanced.get("semantic_context", {})
     context_terms = semantic.get("context_terms", [])
     if context_terms:
-        lines.append("📚 TERMINY KONTEKSTOWE:")
-        lines.append(f"   {', '.join(context_terms[:6])}")
+        lines.append("📚 TERMINY KONTEKSTOWE (użyj naturalnie):")
+        lines.append(f"   {', '.join(context_terms[:5])}")
         lines.append("")
     
-    # Styl - krótkie zdania
+    # 🆕 v40.1: Krótkie zdania (dynamiczne)
     style = enhanced.get("style_instructions", {})
     short_sentences = style.get("short_sentences_dynamic", {})
     if short_sentences.get("examples"):
-        lines.append("✂️ KRÓTKIE ZDANIA:")
-        lines.append(f"   {' | '.join(short_sentences['examples'][:4])}")
+        domain = short_sentences.get("domain", "universal")
+        lines.append(f"✂️ KRÓTKIE ZDANIA ({domain.upper()}):")
+        lines.append(f"   {' | '.join(short_sentences['examples'][:5])}")
         lines.append("")
     
     # AI patterns do unikania
     if style.get("avoid_ai_patterns"):
-        patterns = style["avoid_ai_patterns"].get("patterns", [])[:4]
-        if patterns:
-            lines.append("🚫 UNIKAJ:")
-            lines.append(f"   {', '.join(patterns)}")
-            lines.append("")
+        patterns = style["avoid_ai_patterns"].get("patterns", [])[:5]
+        lines.append("🚫 UNIKAJ (typowe dla AI):")
+        lines.append(f"   {', '.join(patterns)}")
+        lines.append("")
     
     # Kontynuacja
     continuation = enhanced.get("continuation", {})
-    if not continuation.get("is_first_batch") and continuation.get("last_paragraph"):
+    if not continuation.get("is_first_batch"):
         lines.append("🔄 KONTYNUACJA:")
-        last_p = continuation["last_paragraph"][:150]
-        lines.append(f"   \"{last_p}...\"")
+        if continuation.get("last_paragraph"):
+            last_p = continuation["last_paragraph"][:200]
+            lines.append(f"   Ostatni akapit: \"{last_p}...\"")
+        
+        established = continuation.get("established_entities", {})
+        if established:
+            defined = [k for k, v in established.items() if v.get("status") == "zdefiniowane"][:5]
+            if defined:
+                lines.append(f"   ✓ Już zdefiniowane: {', '.join(defined)}")
+        lines.append("")
+    
+    # Keywords summary
+    tracking = enhanced.get("keyword_tracking", {})
+    summary = tracking.get("summary", {})
+    if summary:
+        lines.append(f"📊 KEYWORDS: {summary.get('need_usage', 0)} do użycia | {summary.get('near_limit', 0)} blisko limitu")
+        lines.append("   💡 Użyj NATURALNIE - system śledzi automatycznie")
         lines.append("")
     
     lines.append("=" * 60)
