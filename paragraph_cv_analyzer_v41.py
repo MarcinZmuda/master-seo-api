@@ -42,12 +42,16 @@ class Severity(Enum):
 class ParagraphCVConfig:
     """Konfiguracja analizy CV akapitów."""
     
-    # Progi CV (oparte na empirycznych obserwacjach)
-    CV_CRITICAL_LOW: float = 0.25    # Poniżej = silny sygnał AI
-    CV_WARNING_LOW: float = 0.35     # Poniżej = strefa podejrzana
-    CV_OK_MIN: float = 0.35          # Powyżej = naturalna zmienność
-    CV_WARNING_HIGH: float = 0.80    # Powyżej = zbyt chaotyczne
-    CV_CRITICAL_HIGH: float = 1.00   # Powyżej = prawdopodobnie błąd formatowania
+    # 🆕 v42.1: PODNIESIONE PROGI CV dla większej naturalności
+    # Naturalne teksty mają WYŻSZY CV (większe rozchwianie)
+    # Poprzednie progi były zbyt łagodne i przepuszczały monotonne teksty
+    
+    # Progi CV (podniesione +0.05 każdy dla większej amplitudy)
+    CV_CRITICAL_LOW: float = 0.30    # Poniżej = silny sygnał AI (było 0.25)
+    CV_WARNING_LOW: float = 0.40     # Poniżej = strefa podejrzana (było 0.35)
+    CV_OK_MIN: float = 0.40          # Powyżej = naturalna zmienność (było 0.35)
+    CV_WARNING_HIGH: float = 0.85    # Powyżej = zbyt chaotyczne (było 0.80)
+    CV_CRITICAL_HIGH: float = 1.05   # Powyżej = prawdopodobnie błąd formatowania (było 1.00)
     
     # Minimalna liczba akapitów do analizy
     MIN_PARAGRAPHS: int = 3
@@ -55,13 +59,13 @@ class ParagraphCVConfig:
     # Minimalna liczba słów w akapicie (żeby liczyć)
     MIN_WORDS_IN_PARAGRAPH: int = 10
     
-    # Target dla optymalizacji
-    OPTIMAL_CV_MIN: float = 0.40
-    OPTIMAL_CV_MAX: float = 0.60
+    # Target dla optymalizacji (podniesione dla większego "rozchwiania")
+    OPTIMAL_CV_MIN: float = 0.45     # było 0.40
+    OPTIMAL_CV_MAX: float = 0.65     # było 0.60
     
-    # Optymalne długości akapitów (w słowach)
-    PARAGRAPH_LENGTH_MIN: int = 30
-    PARAGRAPH_LENGTH_MAX: int = 150
+    # Optymalne długości akapitów (w słowach) - szerszy zakres
+    PARAGRAPH_LENGTH_MIN: int = 25   # było 30 - pozwalamy na krótsze
+    PARAGRAPH_LENGTH_MAX: int = 160  # było 150 - pozwalamy na dłuższe
     PARAGRAPH_LENGTH_OPTIMAL: int = 70
 
 
