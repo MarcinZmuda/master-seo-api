@@ -1,6 +1,6 @@
 """
 ===============================================================================
-🔍 MOE BATCH VALIDATOR v1.3 - Mixture of Experts Post-Batch Validation
+🔍 MOE BATCH VALIDATOR v1.4 - Mixture of Experts Post-Batch Validation
 ===============================================================================
 Kompleksowa walidacja batcha po wygenerowaniu przez GPT.
 
@@ -9,19 +9,23 @@ EKSPERCI (MoE):
 2. SEO EXPERT - BASIC/EXTENDED keywords, encje, n-gramy
 3. LANGUAGE EXPERT - gramatyka polska (LanguageTool), styl
 4. AI DETECTION EXPERT - burstiness, TTR, rozkład zdań
-5. UNIFIED BRIDGE EXPERT - mostek do unified_validator (optional)
-6. CORPUS INSIGHTS - metryki NKJP (informacyjne, nie blokuje!)
+5. TRIPLET EXPERT - semantyczna walidacja tripletów
+6. UNIFIED BRIDGE EXPERT - mostek do unified_validator (optional)
+7. CORPUS INSIGHTS - metryki NKJP (informacyjne, nie blokuje!)
+8. 🆕 FAKE HUMANIZATION EXPERT - wykrywa sztuczną humanizację (fillery na końcach)
 
-🆕 v1.3 ZMIANY:
-- Integracja z content_surgeon.py (chirurgiczne wstawianie fraz)
-- Integracja z semantic_triplet_validator.py (semantyczna walidacja tripletów)
-- AUTO_FIX mode używa Content Surgeon zamiast pełnego retry
-- Triplety walidowane semantycznie (akceptuje warianty językowe)
+🆕 v1.4 ZMIANY:
+- Dodano FakeHumanizationExpert (8. Expert)
+- Wykrywa fillery na końcach akapitów ("To ważne.", "Sprawdź to.")
+- Wykrywa brak krótkich zdań w środku tekstu
+- Wykrywa dominację zdań 18-26 słów (AI zone)
+- CRITICAL severity → action = FIX_AND_RETRY (nie REWRITE - dajemy szansę)
+- WARNING severity → tylko info, nie zmienia action
 
 TRYBY:
 - SOFT: tylko warnings, batch zapisuje się
 - STRICT: critical errors blokują batch
-- AUTO_FIX: 🆕 używa Content Surgeon do naprawy
+- AUTO_FIX: używa Content Surgeon do naprawy
 
 ===============================================================================
 """
@@ -120,7 +124,7 @@ except ImportError:
         return []
 
 # ================================================================
-# 🆕 v1.3: CONTENT SURGEON (chirurgiczne wstawianie fraz)
+# CONTENT SURGEON (chirurgiczne wstawianie fraz)
 # ================================================================
 try:
     from content_surgeon import (
@@ -138,7 +142,7 @@ except ImportError:
         return {"success": False, "modified_text": text, "stats": {"injected": 0}}
 
 # ================================================================
-# 🆕 v1.3: SEMANTIC TRIPLET VALIDATOR (semantyczna walidacja)
+# SEMANTIC TRIPLET VALIDATOR (semantyczna walidacja)
 # ================================================================
 try:
     from semantic_triplet_validator import (
@@ -154,6 +158,33 @@ except ImportError:
     
     def validate_triplets_in_text(text, triplets):
         return {"passed": True, "matched": len(triplets), "missing": []}
+    
+    def generate_semantic_instruction(triplet):
+        return f"Napisz zdanie zawierające: {triplet.get('subject', '')}, {triplet.get('verb', '')}, {triplet.get('object', '')}"
+
+# ================================================================
+# 🆕 v1.4: FAKE HUMANIZATION DETECTOR
+# ================================================================
+try:
+    from fake_humanization_detector import (
+        detect_fake_humanization,
+        validate_humanization_quality,
+        generate_natural_humanization_tips
+    )
+    FAKE_HUMANIZATION_AVAILABLE = True
+    print("[MOE_VALIDATOR] ✅ Fake Humanization Detector v41.1 enabled")
+except ImportError:
+    FAKE_HUMANIZATION_AVAILABLE = False
+    print("[MOE_VALIDATOR] ⚠️ Fake Humanization Detector not available")
+    
+    def detect_fake_humanization(text):
+        return {"is_fake": False, "severity": "OK", "score": 100, "issues": [], "recommendations": []}
+    
+    def validate_humanization_quality(text):
+        return {"passed": True, "severity": "OK", "score": 100, "issues": [], "action": "CONTINUE", "metrics": {}, "tips": [], "recommendations": []}
+    
+    def generate_natural_humanization_tips(analysis):
+        return []
 
 
 # ================================================================
@@ -162,7 +193,7 @@ except ImportError:
 class ValidationMode(Enum):
     SOFT = "soft"
     STRICT = "strict"
-    AUTO_FIX = "auto_fix"  # 🆕 v1.3: Używa Content Surgeon
+    AUTO_FIX = "auto_fix"
 
 
 @dataclass
@@ -183,11 +214,15 @@ class ValidationConfig:
     short_sentence_pct_max: int = 30
     max_word_repetition: int = 6
     include_corpus_insights: bool = True
-    # 🆕 v1.3: Content Surgeon config
+    # Content Surgeon config
     enable_auto_fix: bool = True
     max_auto_fix_phrases: int = 3
-    # 🆕 v1.3: Semantic triplet config
+    # Semantic triplet config
     triplet_similarity_threshold: float = 0.55
+    # 🆕 v1.4: Fake Humanization config
+    fake_humanization_enabled: bool = True
+    fake_humanization_critical_threshold: int = 50  # score < 50 = CRITICAL
+    fake_humanization_warning_threshold: int = 70   # score < 70 = WARNING
 
 
 @dataclass
@@ -214,9 +249,11 @@ class ValidationResult:
     corrected_text: Optional[str] = None
     corpus_insights: Optional[Dict] = None
     naturalness_hints: List[Dict] = field(default_factory=list)
-    # 🆕 v1.3: Surgery stats
     surgery_applied: bool = False
     surgery_stats: Optional[Dict] = None
+    # 🆕 v1.4
+    fake_humanization_detected: bool = False
+    fake_humanization_action: Optional[str] = None
     
     def to_dict(self) -> Dict:
         result = {
@@ -227,7 +264,9 @@ class ValidationResult:
             "fix_instructions": self.fix_instructions,
             "auto_fixes_applied": self.auto_fixes_applied,
             "has_corrected_text": self.corrected_text is not None,
-            "surgery_applied": self.surgery_applied
+            "surgery_applied": self.surgery_applied,
+            "fake_humanization_detected": self.fake_humanization_detected,
+            "fake_humanization_action": self.fake_humanization_action
         }
         if self.corpus_insights:
             result["corpus_insights"] = self.corpus_insights
@@ -350,7 +389,7 @@ class SEOExpert:
                         code="ASSIGNED_KEYWORD_MISSING",
                         message=f"Fraza '{keyword}' była PRZYPISANA do tej sekcji, ale nie została użyta!",
                         fix_instruction=f"Dodaj frazę '{keyword}' do tekstu (min 1x).",
-                        auto_fixable=CONTENT_SURGEON_AVAILABLE,  # 🆕 v1.3
+                        auto_fixable=CONTENT_SURGEON_AVAILABLE,
                         context={"keyword": keyword, "assigned": True, "synonyms": synonyms}
                     ))
                     basic_missing.append(keyword)
@@ -364,7 +403,7 @@ class SEOExpert:
                         code="BASIC_STILL_ZERO",
                         message=f"BASIC '{keyword}' ma 0 użyć! Zostały {remaining_batches} batche.",
                         fix_instruction=f"MUSISZ użyć '{keyword}' w tym lub następnym batchu.",
-                        auto_fixable=CONTENT_SURGEON_AVAILABLE,  # 🆕 v1.3
+                        auto_fixable=CONTENT_SURGEON_AVAILABLE,
                         context={"keyword": keyword, "remaining_batches": remaining_batches}
                     ))
                     basic_missing.append(keyword)
@@ -390,7 +429,7 @@ class SEOExpert:
             "basic_missing": basic_missing,
             "entity_coverage": coverage if s1_entities else None,
             "issues_count": len(issues),
-            "auto_fixable_count": len([i for i in issues if i.auto_fixable])  # 🆕 v1.3
+            "auto_fixable_count": len([i for i in issues if i.auto_fixable])
         }
         return issues, summary
 
@@ -539,7 +578,7 @@ class AIDetectionExpert:
 
 
 # ================================================================
-# 🆕 v1.3: 5️⃣ TRIPLET EXPERT (Semantyczna walidacja)
+# 5️⃣ TRIPLET EXPERT (Semantyczna walidacja)
 # ================================================================
 class TripletExpert:
     """
@@ -562,10 +601,8 @@ class TripletExpert:
             return issues, {"triplets_checked": 0, "passed": True}
         
         if not SEMANTIC_TRIPLET_AVAILABLE:
-            # Fallback: proste sprawdzenie string matching
             return self._validate_literal(batch_text, required_triplets)
         
-        # Semantyczna walidacja
         result = validate_triplets_in_text(batch_text, required_triplets)
         
         matched = result.get("matched", 0)
@@ -577,7 +614,6 @@ class TripletExpert:
             v = triplet.get("verb", "")
             o = triplet.get("object", "")
             
-            # Wygeneruj semantyczną instrukcję (nie dosłowną!)
             instruction = generate_semantic_instruction(triplet) if SEMANTIC_TRIPLET_AVAILABLE else f"Napisz zdanie: {s} {v} {o}"
             
             issues.append(ValidationIssue(
@@ -586,7 +622,7 @@ class TripletExpert:
                 code="TRIPLET_MISSING",
                 message=f"Brak relacji: {s} → {v} → {o}",
                 fix_instruction=instruction,
-                auto_fixable=False,  # Triplety wymagają ludzkiej interwencji
+                auto_fixable=False,
                 context={"triplet": triplet, "h2": h2_title}
             ))
         
@@ -602,7 +638,7 @@ class TripletExpert:
         return issues, summary
     
     def _validate_literal(self, text: str, triplets: List[Dict]) -> Tuple[List[ValidationIssue], Dict]:
-        """Fallback: dosłowne sprawdzenie (stara logika)."""
+        """Fallback: dosłowne sprawdzenie."""
         issues = []
         text_lower = text.lower()
         matched = 0
@@ -628,7 +664,7 @@ class TripletExpert:
 
 
 # ================================================================
-# 6️⃣ UNIFIED BRIDGE EXPERT (bez zmian)
+# 6️⃣ UNIFIED BRIDGE EXPERT
 # ================================================================
 class UnifiedBridgeExpert:
     def __init__(self, config: ValidationConfig):
@@ -653,7 +689,113 @@ class UnifiedBridgeExpert:
 
 
 # ================================================================
-# 🆕 v1.3: CONTENT SURGEON INTEGRATION
+# 🆕 v1.4: 8️⃣ FAKE HUMANIZATION EXPERT
+# ================================================================
+class FakeHumanizationExpert:
+    """
+    Wykrywa sztuczną humanizację tekstu:
+    - Fillery na końcach akapitów ("To ważne.", "Sprawdź to.")
+    - Brak krótkich zdań w środku tekstu (tylko na końcach)
+    - Dominacja zdań w "AI zone" (18-26 słów)
+    - Powtarzające się fillery
+    
+    🆕 v1.4 OPTYMALIZACJA:
+    - CRITICAL severity → action = FIX_AND_RETRY (nie REWRITE - dajemy szansę)
+    - WARNING severity → tylko info, nie zmienia action
+    - Burstiness już blokuje za wzorce AI - fake humanization to dodatkowy sygnał
+    """
+    
+    def __init__(self, config: ValidationConfig):
+        self.config = config
+    
+    def validate(self, batch_text: str) -> Tuple[List[ValidationIssue], Dict]:
+        issues = []
+        
+        if not FAKE_HUMANIZATION_AVAILABLE:
+            return issues, {
+                "enabled": False,
+                "reason": "fake_humanization_detector not available"
+            }
+        
+        if not self.config.fake_humanization_enabled:
+            return issues, {"enabled": False, "reason": "disabled in config"}
+        
+        # Wywołaj walidator
+        result = validate_humanization_quality(batch_text)
+        
+        severity = result.get("severity", "OK")
+        score = result.get("score", 100)
+        result_issues = result.get("issues", [])
+        recommendations = result.get("recommendations", [])
+        tips = result.get("tips", [])
+        metrics = result.get("metrics", {})
+        
+        # 🆕 v1.4: OPTYMALIZACJA - zmiana akcji
+        # CRITICAL → FIX_AND_RETRY (nie REWRITE!)
+        # WARNING → CONTINUE (tylko info)
+        if severity == "CRITICAL":
+            # Dajemy szansę na poprawkę zamiast pełnego rewrite
+            action = "FIX_AND_RETRY"
+            issue_severity = "critical"
+        elif severity == "WARNING":
+            # Tylko info - nie zmieniamy głównej akcji
+            action = "CONTINUE"
+            issue_severity = "warning"
+        else:
+            action = "CONTINUE"
+            issue_severity = "info"
+        
+        # Dodaj główny issue jeśli wykryto fake humanization
+        if result.get("is_fake", False):
+            main_message = f"Wykryto sztuczną humanizację (score: {score}/100)"
+            if result_issues:
+                main_message += f": {result_issues[0]}"
+            
+            main_fix = recommendations[0] if recommendations else "Przenieś krótkie zdania do ŚRODKA akapitów, nie na końce"
+            
+            issues.append(ValidationIssue(
+                expert="fake_humanization",
+                severity=issue_severity,
+                code="FAKE_HUMANIZATION_DETECTED",
+                message=main_message,
+                fix_instruction=main_fix,
+                auto_fixable=False,
+                context={
+                    "score": score,
+                    "metrics": metrics,
+                    "action": action
+                }
+            ))
+            
+            # Dodaj szczegółowe issues (max 2 - żeby nie zaśmiecać)
+            for i, issue_text in enumerate(result_issues[1:3], 1):
+                fix = recommendations[i] if i < len(recommendations) else ""
+                issues.append(ValidationIssue(
+                    expert="fake_humanization",
+                    severity="info",  # Szczegóły tylko jako info
+                    code=f"FAKE_HUMANIZATION_DETAIL_{i}",
+                    message=issue_text,
+                    fix_instruction=fix,
+                    auto_fixable=False,
+                    context={}
+                ))
+        
+        summary = {
+            "enabled": True,
+            "is_fake": result.get("is_fake", False),
+            "score": score,
+            "severity": severity,
+            "action": action,
+            "metrics": metrics,
+            "tips": tips[:3],
+            "issues_count": len(issues)
+        }
+        
+        return issues, summary
+
+
+# ================================================================
+# CONTENT SURGERY HELPER
 # ================================================================
 def apply_content_surgery(
     batch_text: str,
@@ -663,9 +805,6 @@ def apply_content_surgery(
 ) -> Tuple[str, Dict]:
     """
     Wykonuje chirurgiczne wstawianie brakujących fraz.
-    
-    Returns:
-        (corrected_text, surgery_stats)
     """
     if not CONTENT_SURGEON_AVAILABLE:
         return batch_text, {"success": False, "reason": "Content Surgeon not available"}
@@ -673,14 +812,13 @@ def apply_content_surgery(
     if not missing_keywords:
         return batch_text, {"success": True, "injected": 0}
     
-    # Ogranicz do max_auto_fix_phrases
     keywords_to_fix = missing_keywords[:config.max_auto_fix_phrases]
     
     result = perform_surgery(
         text=batch_text,
         missing_phrases=keywords_to_fix,
         h2_title=h2_title,
-        domain="prawo"  # TODO: wykryć domenę
+        domain="prawo"
     )
     
     if result["success"]:
@@ -702,15 +840,12 @@ def validate_batch_moe(
     config: Optional[ValidationConfig] = None,
     include_corpus_insights: bool = True,
     current_h2: str = "",
-    required_triplets: List[Dict] = None  # 🆕 v1.3
+    required_triplets: List[Dict] = None
 ) -> ValidationResult:
     """
     Główna funkcja walidacji MoE.
     
-    🆕 v1.3 ZMIANY:
-    - AUTO_FIX mode używa Content Surgeon do naprawy MISSING_KEYWORD
-    - Triplety walidowane przez TripletExpert (semantycznie)
-    - Dodano surgery_applied i surgery_stats do wyniku
+    🆕 v1.4: Dodano FakeHumanizationExpert jako 8. Expert
     """
     if config is None:
         config = ValidationConfig()
@@ -722,6 +857,8 @@ def validate_batch_moe(
     corrected_text = None
     surgery_applied = False
     surgery_stats = None
+    fake_humanization_detected = False
+    fake_humanization_action = None
     
     keywords_state = project_data.get("keywords_state", {})
     previous_batches = project_data.get("batches", [])
@@ -761,7 +898,7 @@ def validate_batch_moe(
     experts_summary["seo"] = seo_summary
     
     # ═══════════════════════════════════════════════════════════════
-    # 🆕 v1.3: AUTO_FIX MODE - Content Surgery
+    # AUTO_FIX MODE - Content Surgery
     # ═══════════════════════════════════════════════════════════════
     if mode == ValidationMode.AUTO_FIX and config.enable_auto_fix:
         missing_keywords = seo_summary.get("basic_missing", [])
@@ -780,7 +917,6 @@ def validate_batch_moe(
                 surgery_applied = True
                 auto_fixes_applied.append(f"Content Surgery: {surgery_stats['injected']} phrases injected")
                 
-                # Oznacz naprawione issues jako "auto_fixed"
                 for issue in all_issues:
                     if issue.code in ["ASSIGNED_KEYWORD_MISSING", "BASIC_STILL_ZERO"]:
                         keyword = issue.context.get("keyword", "")
@@ -805,7 +941,7 @@ def validate_batch_moe(
     experts_summary["ai_detection"] = ai_summary
     
     # ═══════════════════════════════════════════════════════════════
-    # 🆕 v1.3: 5️⃣ TRIPLET EXPERT (Semantyczna walidacja)
+    # 5️⃣ TRIPLET EXPERT
     # ═══════════════════════════════════════════════════════════════
     if required_triplets:
         triplet_expert = TripletExpert(config)
@@ -856,6 +992,26 @@ def validate_batch_moe(
             corpus_insights = {"enabled": False, "error": str(e)[:100]}
     
     # ═══════════════════════════════════════════════════════════════
+    # 🆕 8️⃣ FAKE HUMANIZATION EXPERT
+    # ═══════════════════════════════════════════════════════════════
+    if FAKE_HUMANIZATION_AVAILABLE and config.fake_humanization_enabled:
+        try:
+            fake_expert = FakeHumanizationExpert(config)
+            fake_issues, fake_summary = fake_expert.validate(corrected_text or batch_text)
+            all_issues.extend(fake_issues)
+            experts_summary["fake_humanization"] = fake_summary
+            
+            # Ustaw flagi jeśli wykryto
+            if fake_summary.get("is_fake", False):
+                fake_humanization_detected = True
+                fake_humanization_action = fake_summary.get("action", "CONTINUE")
+                print(f"[MOE_VALIDATOR] 🎭 Fake humanization detected! Score: {fake_summary.get('score', 0)}/100, Action: {fake_humanization_action}")
+                
+        except Exception as e:
+            print(f"[MOE_VALIDATOR] ⚠️ Fake Humanization Expert error: {e}")
+            experts_summary["fake_humanization"] = {"enabled": False, "error": str(e)[:100]}
+    
+    # ═══════════════════════════════════════════════════════════════
     # AGREGACJA WYNIKÓW
     # ═══════════════════════════════════════════════════════════════
     critical_issues = [i for i in all_issues if i.severity == "critical"]
@@ -893,7 +1049,9 @@ def validate_batch_moe(
         corpus_insights=corpus_insights,
         naturalness_hints=naturalness_hints,
         surgery_applied=surgery_applied,
-        surgery_stats=surgery_stats
+        surgery_stats=surgery_stats,
+        fake_humanization_detected=fake_humanization_detected,
+        fake_humanization_action=fake_humanization_action
     )
 
 
@@ -911,6 +1069,13 @@ def format_validation_for_gpt(result: ValidationResult) -> str:
     if result.surgery_applied:
         lines.append("✅ AUTO-FIX APPLIED (Content Surgeon)")
         lines.append(f"   Injected: {result.surgery_stats.get('injected', 0)} phrases")
+        lines.append("")
+    
+    if result.fake_humanization_detected:
+        lines.append("🎭 FAKE HUMANIZATION DETECTED!")
+        fake_summary = result.experts_summary.get("fake_humanization", {})
+        lines.append(f"   Score: {fake_summary.get('score', 0)}/100")
+        lines.append(f"   Action: {result.fake_humanization_action or 'CONTINUE'}")
         lines.append("")
     
     lines.append("⚠️ WALIDACJA MOE - WYMAGANE POPRAWKI")
@@ -934,6 +1099,13 @@ def format_validation_for_gpt(result: ValidationResult) -> str:
         for hint in result.naturalness_hints[:3]:
             lines.append(f"  ℹ️ {hint.get('suggestion', hint.get('message', ''))}")
     
+    # Tipy dla fake humanization
+    fake_summary = result.experts_summary.get("fake_humanization", {})
+    if fake_summary.get("tips"):
+        lines.append(f"\n🎯 TIPY DLA NATURALNEJ HUMANIZACJI:")
+        for tip in fake_summary["tips"][:3]:
+            lines.append(f"  {tip}")
+    
     lines.append("\n" + "=" * 60)
     return "\n".join(lines)
 
@@ -949,5 +1121,7 @@ __all__ = [
     'ValidationResult',
     'ValidationIssue',
     'CONTENT_SURGEON_AVAILABLE',
-    'SEMANTIC_TRIPLET_AVAILABLE'
+    'SEMANTIC_TRIPLET_AVAILABLE',
+    'FAKE_HUMANIZATION_AVAILABLE',
+    'FakeHumanizationExpert'
 ]
