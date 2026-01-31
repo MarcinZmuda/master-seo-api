@@ -1,5 +1,14 @@
 """
-SEO Content Tracker Routes - v38.4 BRAJEN SEO Engine
+SEO Content Tracker Routes - v42.1 BRAJEN SEO Engine
+
+ZMIANY v42.1:
+- 🆕 STRUGGLING KEYWORDS CONVERSION: BASIC → EXTENDED po 2 batchach bez użycia
+- 🆕 Content Surgeon ma pierwszeństwo (wstrzykuje frazę przed konwersją)
+- 🆕 Konwertowane keywords oznaczone: do_not_use=True, converted_from="BASIC"
+- 🆕 keyword_conversions w response i final_review
+- 🆕 Różne tolerancje w final_review: BASIC 30%, EXTENDED 50%
+- 🆕 EXTENDED nigdy nie blokuje w final_review (tylko WARNING)
+- 🆕 AUTO_FIX mode w MoE Validator (Content Surgeon aktywny)
 
 ZMIANY v38.4:
 - 🆕 STRUCTURAL KEYWORDS: frazy w MAIN/H2 NIE blokują batcha
@@ -393,6 +402,172 @@ def calculate_delta_s2(
         "status": "OK" if on_track else "BEHIND",
         "message": f"Pokryto {len(covered_after)}/{total_entities} encji ({coverage_percent:.0f}%)" + 
                    ("" if on_track else f" - poniżej oczekiwań ({expected_by_now:.0f})")
+    }
+
+
+# ============================================================================
+# 🆕 v42.1: STRUGGLING KEYWORDS CONVERSION (BASIC → EXTENDED)
+# ============================================================================
+
+def check_struggling_basic_keywords(keywords_state: dict, batch_number: int) -> list:
+    """
+    Sprawdza które BASIC frazy są 'struggling' (0 użyć przez 2+ batchy).
+    
+    Args:
+        keywords_state: Stan wszystkich keywords
+        batch_number: Aktualny numer batcha (po zapisie)
+    
+    Returns:
+        Lista fraz do konwersji na EXTENDED
+    """
+    struggling = []
+    
+    for rid, meta in keywords_state.items():
+        kw_type = meta.get("type", "BASIC").upper()
+        
+        # Tylko BASIC (nie MAIN, nie EXTENDED, nie H2)
+        if kw_type != "BASIC":
+            continue
+        
+        # Już skonwertowane - pomiń
+        if meta.get("converted_from"):
+            continue
+            
+        actual = meta.get("actual_uses", 0)
+        keyword = meta.get("keyword", "")
+        
+        # Fraza BASIC z 0 użyć po 2+ batchach
+        if actual == 0 and batch_number >= 2:
+            struggling.append({
+                "rid": rid,
+                "keyword": keyword,
+                "batches_without_use": batch_number,
+                "target_min": meta.get("target_min", 1),
+                "target_max": meta.get("target_max", 5)
+            })
+    
+    return struggling
+
+
+def convert_basic_to_extended(
+    keywords_state: dict, 
+    rid: str, 
+    batch_number: int,
+    reason: str = "Nieużyta przez 2 batche"
+) -> dict:
+    """
+    Konwertuje BASIC na EXTENDED z pełnym logowaniem.
+    
+    Args:
+        keywords_state: Stan keywords (modyfikowany in-place)
+        rid: ID frazy do konwersji
+        batch_number: Numer batcha przy konwersji
+        reason: Powód konwersji
+    
+    Returns:
+        Dict z informacją o konwersji
+    """
+    if rid not in keywords_state:
+        return {"error": f"Keyword {rid} not found"}
+    
+    meta = keywords_state[rid]
+    keyword = meta.get("keyword", rid)
+    old_type = meta.get("type", "BASIC")
+    old_min = meta.get("target_min", 1)
+    old_max = meta.get("target_max", 5)
+    
+    # Konwertuj
+    meta["type"] = "EXTENDED"
+    meta["converted_from"] = old_type
+    meta["conversion_reason"] = reason
+    meta["conversion_batch"] = batch_number
+    meta["do_not_use"] = True  # Flaga dla GPT - nie używaj więcej
+    meta["original_target_min"] = old_min
+    meta["original_target_max"] = old_max
+    meta["target_min"] = 0     # EXTENDED może być 0
+    # target_max zostaje bez zmian
+    
+    print(f"[TRACKER] 🔄 CONVERTED: '{keyword}' BASIC → EXTENDED (reason: {reason})")
+    
+    return {
+        "keyword": keyword,
+        "rid": rid,
+        "old_type": old_type,
+        "new_type": "EXTENDED",
+        "reason": reason,
+        "batch_number": batch_number,
+        "instruction": f"❌ NIE UŻYWAJ frazy '{keyword}' - została odpuszczona po {batch_number} batchach"
+    }
+
+
+def process_struggling_keywords(
+    keywords_state: dict,
+    batch_number: int,
+    surgery_applied: bool = False,
+    surgery_stats: dict = None
+) -> dict:
+    """
+    Przetwarza struggling BASIC keywords:
+    1. Sprawdza które są struggling
+    2. Jeśli Content Surgeon ich nie naprawił → konwertuje na EXTENDED
+    
+    Args:
+        keywords_state: Stan keywords (modyfikowany in-place)
+        batch_number: Aktualny numer batcha
+        surgery_applied: Czy Content Surgeon działał
+        surgery_stats: Statystyki z Content Surgeon
+    
+    Returns:
+        Dict z listą konwersji i instrukcjami
+    """
+    # Znajdź struggling keywords
+    struggling = check_struggling_basic_keywords(keywords_state, batch_number)
+    
+    if not struggling:
+        return {
+            "checked": True,
+            "struggling_count": 0,
+            "converted": [],
+            "message": "Wszystkie BASIC keywords są używane"
+        }
+    
+    # Sprawdź które zostały naprawione przez Content Surgeon
+    surgery_phrases = []
+    if surgery_applied and surgery_stats:
+        surgery_phrases = [p.lower() for p in surgery_stats.get("phrases", [])]
+    
+    converted = []
+    skipped = []
+    
+    for item in struggling:
+        rid = item["rid"]
+        keyword = item["keyword"]
+        
+        # Jeśli Content Surgeon właśnie wstrzyknął tę frazę - pomiń
+        if keyword.lower() in surgery_phrases:
+            skipped.append({
+                "keyword": keyword,
+                "reason": "Wstrzyknięta przez Content Surgeon"
+            })
+            continue
+        
+        # Konwertuj na EXTENDED
+        conversion_result = convert_basic_to_extended(
+            keywords_state=keywords_state,
+            rid=rid,
+            batch_number=batch_number,
+            reason=f"Nieużyta przez {batch_number} batchy, Content Surgeon nie mógł wstrzyknąć"
+        )
+        converted.append(conversion_result)
+    
+    return {
+        "checked": True,
+        "struggling_count": len(struggling),
+        "converted": converted,
+        "converted_count": len(converted),
+        "skipped": skipped,
+        "skipped_count": len(skipped),
+        "message": f"Skonwertowano {len(converted)} fraz BASIC → EXTENDED" if converted else "Brak konwersji"
     }
 
 
@@ -1097,6 +1272,52 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
             print(f"[TRACKER] ⚠️ MoE Validation error: {e}")
 
     # ================================================================
+    # 🆕 v42.1: STRUGGLING KEYWORDS CONVERSION (BASIC → EXTENDED)
+    # Po 2 batchach bez użycia, jeśli Content Surgeon nie pomógł
+    # ================================================================
+    struggling_conversion_result = None
+    batches_done = len(project_data.get("batches", []))
+    current_batch_number = batches_done + 1  # Bo batch jeszcze nie zapisany
+    
+    if current_batch_number >= 2:
+        try:
+            # Pobierz surgery stats z MoE
+            surgery_applied_flag = False
+            surgery_stats_data = {}
+            if moe_validation_result:
+                surgery_applied_flag = getattr(moe_validation_result, 'surgery_applied', False)
+                surgery_stats_data = getattr(moe_validation_result, 'surgery_stats', {})
+            
+            struggling_conversion_result = process_struggling_keywords(
+                keywords_state=keywords_state,
+                batch_number=current_batch_number,
+                surgery_applied=surgery_applied_flag,
+                surgery_stats=surgery_stats_data
+            )
+            
+            if struggling_conversion_result.get("converted"):
+                converted_count = len(struggling_conversion_result["converted"])
+                print(f"[TRACKER] 🔄 Converted {converted_count} struggling BASIC → EXTENDED")
+                
+                # Dodaj warning do response
+                for conv in struggling_conversion_result["converted"]:
+                    warnings.append(
+                        f"🔄 CONVERTED: '{conv['keyword']}' BASIC → EXTENDED ({conv['reason']})"
+                    )
+                
+                # Zapisz zaktualizowany keywords_state do project_data
+                # (zostanie zapisany do Firestore razem z batchem)
+                project_data["keywords_state"] = keywords_state
+                
+                # Dodaj info o konwersjach do project_data dla final_review
+                if "keyword_conversions" not in project_data:
+                    project_data["keyword_conversions"] = []
+                project_data["keyword_conversions"].extend(struggling_conversion_result["converted"])
+                
+        except Exception as e:
+            print(f"[TRACKER] ⚠️ Struggling keywords conversion error: {e}")
+
+    # ================================================================
     # 🆕 v38: ENTITY COVERAGE VALIDATION
     # ================================================================
     entity_validation_result = None
@@ -1518,12 +1739,14 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         print(f"[TRACKER] 🏁 Last batch detected! Running final review...")
         
         # ================================================================
-        # 🆕 v38.4: FINAL REVIEW - weryfikacja globalna z tolerancją 30%
+        # 🆕 v38.4: FINAL REVIEW - weryfikacja globalna z tolerancją
+        # 🆕 v42.1: Różne tolerancje: BASIC 30%, EXTENDED 50%
         # ================================================================
         final_review_warnings = []
         final_review_exceeded = []
         
-        TOLERANCE_PERCENT = 30  # 30% tolerancji powyżej max
+        BASIC_TOLERANCE_PERCENT = 30   # 30% tolerancji dla BASIC
+        EXTENDED_TOLERANCE_PERCENT = 50  # 50% tolerancji dla EXTENDED
         
         for rid, meta in keywords_state.items():
             keyword = meta.get("keyword", "")
@@ -1535,26 +1758,47 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
             target_max = meta.get("target_max", 999)
             target_min = meta.get("target_min", 1)
             
-            # Oblicz tolerancję (30% powyżej max)
-            tolerance_max = int(target_max * (1 + TOLERANCE_PERCENT / 100))
+            # 🆕 v42.1: Skonwertowane keywords - pomiń jeśli do_not_use
+            if meta.get("do_not_use") and actual == 0:
+                print(f"[FINAL REVIEW] ⏭️ '{keyword}': skipped (converted, do_not_use, 0 uses)")
+                continue
+            
+            # 🆕 v42.1: Różne tolerancje dla BASIC vs EXTENDED
+            if kw_type == "EXTENDED":
+                tolerance_percent = EXTENDED_TOLERANCE_PERCENT
+            else:
+                tolerance_percent = BASIC_TOLERANCE_PERCENT
+            
+            # Oblicz tolerancję
+            tolerance_max = int(target_max * (1 + tolerance_percent / 100))
             
             # Sprawdź przekroczenie
             if actual > tolerance_max:
-                # Przekroczono nawet z tolerancją 30% → ERROR
+                # 🆕 v42.1: EXTENDED NIGDY nie blokuje - tylko WARNING
+                severity = "WARNING" if kw_type == "EXTENDED" else "ERROR"
+                
                 exceeded_by = actual - target_max
                 over_tolerance_by = actual - tolerance_max
-                final_review_exceeded.append({
+                
+                exceeded_info = {
                     "keyword": keyword,
                     "type": kw_type,
                     "actual": actual,
                     "target_max": target_max,
                     "tolerance_max": tolerance_max,
+                    "tolerance_percent": tolerance_percent,
                     "exceeded_by": exceeded_by,
                     "over_tolerance_by": over_tolerance_by,
-                    "severity": "ERROR",
-                    "message": f"'{keyword}' przekroczyła limit nawet z tolerancją 30%: {actual}/{target_max} (max z tolerancją: {tolerance_max})"
-                })
-                print(f"[FINAL REVIEW] ❌ '{keyword}': {actual}/{target_max} (tolerance {tolerance_max}) - EXCEEDED!")
+                    "severity": severity,
+                    "message": f"'{keyword}' przekroczyła limit z tolerancją {tolerance_percent}%: {actual}/{target_max} (max: {tolerance_max})"
+                }
+                
+                if severity == "ERROR":
+                    final_review_exceeded.append(exceeded_info)
+                    print(f"[FINAL REVIEW] ❌ '{keyword}': {actual}/{target_max} (tolerance {tolerance_max}) - EXCEEDED!")
+                else:
+                    final_review_warnings.append(exceeded_info)
+                    print(f"[FINAL REVIEW] ⚠️ '{keyword}' (EXTENDED): {actual}/{target_max} - over but not blocking")
             
             elif actual > target_max:
                 # Przekroczono max ale w granicach tolerancji → WARNING (OK)
@@ -1564,11 +1808,12 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
                     "actual": actual,
                     "target_max": target_max,
                     "tolerance_max": tolerance_max,
+                    "tolerance_percent": tolerance_percent,
                     "exceeded_by": actual - target_max,
                     "severity": "WARNING",
-                    "message": f"'{keyword}' lekko przekroczona ale w tolerancji 30%: {actual}/{target_max} (OK)"
+                    "message": f"'{keyword}' lekko przekroczona ale w tolerancji {tolerance_percent}%: {actual}/{target_max} (OK)"
                 })
-                print(f"[FINAL REVIEW] ⚠️ '{keyword}': {actual}/{target_max} (within tolerance) - OK")
+                print(f"[FINAL REVIEW] ⚠️ '{keyword}': {actual}/{target_max} (within tolerance {tolerance_percent}%) - OK")
             
             elif actual < target_min:
                 # Poniżej minimum → WARNING
@@ -1583,15 +1828,32 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
                 })
                 print(f"[FINAL REVIEW] ⚠️ '{keyword}': {actual} < {target_min} (under min)")
         
+        # 🆕 v42.1: Pobierz info o skonwertowanych keywords
+        keyword_conversions = project_data.get("keyword_conversions", [])
+        converted_keywords_info = []
+        for rid, meta in keywords_state.items():
+            if meta.get("converted_from"):
+                converted_keywords_info.append({
+                    "keyword": meta.get("keyword"),
+                    "converted_from": meta.get("converted_from"),
+                    "converted_to": meta.get("type"),
+                    "reason": meta.get("conversion_reason"),
+                    "batch": meta.get("conversion_batch")
+                })
+        
         final_review_result = {
             "status": "PASS" if not final_review_exceeded else "NEEDS_CORRECTION",
-            "tolerance_percent": TOLERANCE_PERCENT,
+            "tolerance_percent": {"BASIC": BASIC_TOLERANCE_PERCENT, "EXTENDED": EXTENDED_TOLERANCE_PERCENT},
             "warnings": final_review_warnings,
             "exceeded": final_review_exceeded,
             "warnings_count": len(final_review_warnings),
             "exceeded_count": len(final_review_exceeded),
+            # 🆕 v42.1: Info o konwersjach BASIC → EXTENDED
+            "converted_keywords": converted_keywords_info,
+            "converted_count": len(converted_keywords_info),
             "message": (
                 f"✅ Final review PASS: {len(final_review_warnings)} warnings (within tolerance)"
+                + (f", {len(converted_keywords_info)} keywords converted to EXTENDED" if converted_keywords_info else "")
                 if not final_review_exceeded
                 else f"❌ Final review NEEDS_CORRECTION: {len(final_review_exceeded)} keywords exceeded tolerance"
             )
@@ -1839,6 +2101,16 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         # 🆕 v42.1: Content Surgery info
         "surgery_applied": moe_validation_result.surgery_applied if moe_validation_result and hasattr(moe_validation_result, 'surgery_applied') else False,
         "surgery_stats": getattr(moe_validation_result, 'surgery_stats', {}) if moe_validation_result else {},
+        # 🆕 v42.1: Struggling keywords conversion (BASIC → EXTENDED)
+        "keyword_conversions": struggling_conversion_result if 'struggling_conversion_result' in dir() and struggling_conversion_result else None,
+        "converted_keywords": [
+            {
+                "keyword": c["keyword"],
+                "reason": c["reason"],
+                "instruction": c["instruction"]
+            }
+            for c in (struggling_conversion_result.get("converted", []) if struggling_conversion_result else [])
+        ],
         # 🆕 v37.1: Batch Review + Auto-Fix - używamy safe_to_dict
         "batch_review": safe_to_dict(batch_review_result) if 'safe_to_dict' in dir() else (batch_review_result.to_dict() if batch_review_result and hasattr(batch_review_result, 'to_dict') else None),
         "auto_fixed": auto_fixed_text is not None,
