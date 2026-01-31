@@ -67,7 +67,11 @@ else:
 GEMINI_MODEL = "gemini-2.5-flash"
 
 # 🆕 v40.1: Tolerancja dla przekroczenia limitu
-TOLERANCE_PERCENT = 30
+# 🆕 v42.1: Różne tolerancje dla BASIC i EXTENDED
+BASIC_TOLERANCE_PERCENT = 30    # 30% tolerancji dla BASIC/MAIN
+EXTENDED_TOLERANCE_PERCENT = 50  # 50% tolerancji dla EXTENDED
+# Backwards compatibility - używane w niektórych miejscach jako default
+TOLERANCE_PERCENT = BASIC_TOLERANCE_PERCENT
 
 
 # ================================================================
@@ -123,8 +127,10 @@ def detect_missing_keywords(text, keywords_state):
             # Jeśli nie ma → użyj target_max (fraza nie była zredukowana)
             target_max = original_max if original_max else target_max_current
             
-            # Oblicz tolerancję (30% powyżej ORYGINALNEGO max)
-            tolerance_max = int(target_max * (1 + TOLERANCE_PERCENT / 100))
+            # Oblicz tolerancję (30% dla BASIC/MAIN, 50% dla EXTENDED)
+            # 🆕 v42.1: Różne tolerancje!
+            tolerance_percent = EXTENDED_TOLERANCE_PERCENT if kw_type == "EXTENDED" else BASIC_TOLERANCE_PERCENT
+            tolerance_max = int(target_max * (1 + tolerance_percent / 100))
             
             # Debug log dla zredukowanych fraz
             if original_max and original_max != target_max_current:
@@ -148,24 +154,38 @@ def detect_missing_keywords(text, keywords_state):
                 "target_max_current": target_max_current,  # Zredukowany (dla info)
                 "original_max": original_max,  # Oryginalny (jeśli był)
                 "tolerance_max": tolerance_max,
+                "tolerance_percent": tolerance_percent,  # 🆕 v42.1
                 "missing": max(0, target_min - actual),
                 "was_reduced": original_max is not None and original_max != target_max_current
             }
             
-            # v40.1: NOWA LOGIKA - używa original_max!
+            # 🆕 v42.1: Skonwertowane keywords - pomiń jeśli do_not_use
+            if meta.get("do_not_use") and actual == 0:
+                print(f"[FINAL_REVIEW] ⏭️ '{keyword}': skipped (converted, do_not_use)")
+                continue
+            
+            # v40.1 + v42.1: NOWA LOGIKA
+            # EXTENDED NIGDY nie blokuje - tylko WARNING!
             if actual > tolerance_max:
-                # CRITICAL: stuffing POZA tolerancją - JEDYNY BLOKER!
-                info["severity"] = "stuffing_critical"
-                info["exceeded_by"] = actual - target_max
-                info["exceeded_tolerance_by"] = actual - tolerance_max
-                stuffing.append(info)
-                print(f"[FINAL_REVIEW] ❌ '{keyword}': {actual}/{target_max} (tolerance {tolerance_max}) - EXCEEDED!")
+                if kw_type == "EXTENDED":
+                    # 🆕 v42.1: EXTENDED poza tolerancją = tylko WARNING
+                    info["severity"] = "stuffing_warning"
+                    info["exceeded_by"] = actual - target_max
+                    within_tolerance.append(info)  # Traktuj jako warning
+                    print(f"[FINAL_REVIEW] ⚠️ '{keyword}' (EXTENDED): {actual}/{target_max} - over tolerance but not blocking")
+                else:
+                    # BASIC/MAIN poza tolerancją = CRITICAL (blokuje)
+                    info["severity"] = "stuffing_critical"
+                    info["exceeded_by"] = actual - target_max
+                    info["exceeded_tolerance_by"] = actual - tolerance_max
+                    stuffing.append(info)
+                    print(f"[FINAL_REVIEW] ❌ '{keyword}': {actual}/{target_max} (tolerance {tolerance_max}) - EXCEEDED!")
             elif actual > target_max:
-                # WARNING: przekroczone ale W tolerancji 30%
+                # WARNING: przekroczone ale W tolerancji
                 info["severity"] = "stuffing_warning"
                 info["exceeded_by"] = actual - target_max
                 within_tolerance.append(info)
-                print(f"[FINAL_REVIEW] ⚠️ '{keyword}': {actual}/{target_max} (tolerance {tolerance_max}) - within tolerance")
+                print(f"[FINAL_REVIEW] ⚠️ '{keyword}': {actual}/{target_max} (tolerance {tolerance_percent}%) - within tolerance")
             elif actual == 0:
                 # WARNING: fraza brakuje - Claude uzupełni
                 if kw_type in ["BASIC", "MAIN"]:
@@ -202,7 +222,7 @@ def detect_missing_keywords(text, keywords_state):
                 "underused_count": len(underused_basic) + len(underused_extended),
                 "stuffing_critical_count": len(stuffing),
                 "stuffing_warning_count": len(within_tolerance),
-                "tolerance_percent": TOLERANCE_PERCENT
+                "tolerance_percent": {"BASIC": BASIC_TOLERANCE_PERCENT, "EXTENDED": EXTENDED_TOLERANCE_PERCENT}
             },
             "version": "v40.1"
         }
