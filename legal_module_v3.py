@@ -1,12 +1,19 @@
 """
 ===============================================================================
-⚖️ LEGAL MODULE v3.0 - BRAJEN SEO Engine
+⚖️ LEGAL MODULE v3.1 - BRAJEN SEO Engine
 ===============================================================================
 
-Moduł wykrywania i integracji treści prawnych (YMYL) z 3 źródłami orzeczeń:
+Moduł wykrywania i integracji treści prawnych (YMYL) z 4 źródłami orzeczeń:
 1. SAOS API (System Analizy Orzeczeń Sądowych)
 2. Google Fallback (orzeczenia.*.gov.pl, sn.pl, nsa.gov.pl)
-3. Claude Scoring (weryfikacja relevantności)
+3. 🆕 Local Court Scraper (10 lokalnych portali sądów)
+4. Claude Scoring (weryfikacja relevantności)
+
+🆕 Zmiany w v3.1:
+- Dodano local_court_scraper jako 3. źródło (fallback gdy SAOS < 2 wyniki)
+- Deduplikacja po sygnaturze
+- Graceful degradation (błąd scrapera = kontynuuj bez)
+- source field w każdym orzeczeniu ("saos", "google", "local")
 
 Funkcje eksportowane:
 - detect_category: Wykrywa kategorię treści (prawo, finanse, zdrowie)
@@ -17,7 +24,7 @@ Funkcje eksportowane:
 - LEGAL_DISCLAIMER: Tekst disclaimera
 - CONFIG: Konfiguracja modułu
 
-Autor: BRAJEN SEO Engine v36.4
+Autor: BRAJEN SEO Engine v42.2
 ===============================================================================
 """
 
@@ -35,8 +42,8 @@ class LegalConfig:
     """Konfiguracja modułu prawnego."""
     
     # Limity
-    MAX_CITATIONS_PER_ARTICLE: int = 2  # Max orzeczeń do cytowania
-    MIN_SCORE_TO_USE: int = 40  # Minimalny score żeby użyć orzeczenia
+    MAX_CITATIONS_PER_ARTICLE: int = 2
+    MIN_SCORE_TO_USE: int = 40
     
     # SAOS
     SAOS_ENABLED: bool = True
@@ -44,6 +51,11 @@ class LegalConfig:
     
     # Google Fallback
     GOOGLE_FALLBACK_ENABLED: bool = True
+    
+    # 🆕 v3.1: Local Court Scraper
+    LOCAL_SCRAPER_ENABLED: bool = True
+    LOCAL_SCRAPER_TIMEOUT: int = 10  # Krótszy timeout dla fallbacku
+    LOCAL_SCRAPER_MIN_SAOS_RESULTS: int = 2  # Użyj local tylko gdy SAOS < 2
     
     # Scoring
     SCORING_ENABLED: bool = True
@@ -83,7 +95,20 @@ try:
 except ImportError as e:
     print(f"[LEGAL_MODULE] ⚠️ Google Fallback not available: {e}")
 
-# Źródło 3: Claude Scoring
+# 🆕 Źródło 3: Local Court Scraper (v3.1)
+LOCAL_SCRAPER_AVAILABLE = False
+try:
+    from local_court_scraper import (
+        search_local_courts,
+        get_local_scraper,
+        LocalCourtScraper
+    )
+    LOCAL_SCRAPER_AVAILABLE = True
+    print("[LEGAL_MODULE] ✅ Local Court Scraper loaded (10 portals)")
+except ImportError as e:
+    print(f"[LEGAL_MODULE] ⚠️ Local Court Scraper not available: {e}")
+
+# Źródło 4: Claude Scoring
 SCORING_AVAILABLE = False
 try:
     from claude_judgment_verifier import (
@@ -165,25 +190,11 @@ def detect_category(
 ) -> Dict[str, Any]:
     """
     Wykrywa kategorię treści na podstawie słów kluczowych.
-    
-    Args:
-        main_keyword: Główna fraza kluczowa
-        additional_keywords: Dodatkowe frazy
-        
-    Returns:
-        {
-            "category": "prawo" | "finanse" | "zdrowie" | "general",
-            "confidence": float (0.0-1.0),
-            "is_ymyl": bool,
-            "detected_keywords": List[str],
-            "legal_enabled": bool
-        }
     """
     additional_keywords = additional_keywords or []
     all_keywords = [main_keyword] + additional_keywords
     combined_text = " ".join(all_keywords).lower()
     
-    # Zlicz dopasowania
     legal_matches = [kw for kw in LEGAL_KEYWORDS if kw.lower() in combined_text]
     finance_matches = [kw for kw in FINANCE_KEYWORDS if kw.lower() in combined_text]
     health_matches = [kw for kw in HEALTH_KEYWORDS if kw.lower() in combined_text]
@@ -207,12 +218,13 @@ def detect_category(
             "sources_available": {
                 "saos": SAOS_AVAILABLE,
                 "google": GOOGLE_FALLBACK_AVAILABLE,
+                "local": LOCAL_SCRAPER_AVAILABLE,
                 "scoring": SCORING_AVAILABLE
             }
         }
     
-    confidence = min(1.0, max_score / 3)  # 3+ dopasowań = 100%
-    category = max_category if max_score >= 1 else "general"  # 1+ wystarcza
+    confidence = min(1.0, max_score / 3)
+    category = max_category if max_score >= 1 else "general"
     detected = {
         "prawo": legal_matches,
         "finanse": finance_matches,
@@ -231,9 +243,48 @@ def detect_category(
         "sources_available": {
             "saos": SAOS_AVAILABLE,
             "google": GOOGLE_FALLBACK_AVAILABLE,
+            "local": LOCAL_SCRAPER_AVAILABLE,
             "scoring": SCORING_AVAILABLE
         }
     }
+
+
+# ================================================================
+# 🆕 v3.1: DEDUPLIKACJA ORZECZEŃ
+# ================================================================
+
+def deduplicate_judgments(judgments: List[Dict]) -> List[Dict]:
+    """
+    Deduplikuje orzeczenia po sygnaturze.
+    Preferuje SAOS > Google > Local.
+    """
+    seen_signatures = set()
+    unique = []
+    
+    # Sortuj by preferować SAOS
+    source_priority = {"saos": 0, "google": 1, "local": 2}
+    sorted_judgments = sorted(
+        judgments, 
+        key=lambda j: source_priority.get(j.get("source", "local"), 99)
+    )
+    
+    for j in sorted_judgments:
+        sig = j.get("signature", "").strip()
+        if not sig:
+            # Bez sygnatury - dodaj (ale może być duplikat)
+            unique.append(j)
+            continue
+        
+        # Normalizuj sygnaturę (usuń spacje, małe litery)
+        sig_normalized = re.sub(r'\s+', '', sig.upper())
+        
+        if sig_normalized not in seen_signatures:
+            seen_signatures.add(sig_normalized)
+            unique.append(j)
+        else:
+            print(f"[LEGAL_MODULE] ⏭️ Deduplicated: {sig} (already have from better source)")
+    
+    return unique
 
 
 # ================================================================
@@ -247,24 +298,15 @@ def get_legal_context_for_article(
     max_results: int = 5
 ) -> Dict[str, Any]:
     """
-    Główna funkcja - pobiera kontekst prawny z 3 źródeł.
+    Główna funkcja - pobiera kontekst prawny z 4 źródeł.
     
-    Args:
-        main_keyword: Główna fraza kluczowa
-        additional_keywords: Dodatkowe frazy
-        force_enable: Wymuś włączenie nawet dla nie-prawnych tematów
-        max_results: Maksymalna liczba orzeczeń
-        
-    Returns:
-        {
-            "status": "OK" | "NOT_LEGAL" | "NO_RESULTS",
-            "category": "prawo",
-            "judgments": [...],
-            "total_found": int,
-            "sources_used": ["saos", "google"],
-            "disclaimer": str,
-            "instruction": str
-        }
+    🆕 v3.1: Dodano local_court_scraper jako 3. źródło (fallback)
+    
+    Kolejność:
+    1. SAOS API (główne źródło)
+    2. Google Fallback (gdy SAOS brak)
+    3. Local Court Scraper (gdy SAOS < 2 wyniki)
+    4. Scoring i filtrowanie
     """
     additional_keywords = additional_keywords or []
     
@@ -288,41 +330,95 @@ def get_legal_context_for_article(
     judgments = []
     sources_used = []
     
+    # ═══════════════════════════════════════════════════════════════
     # 2. Źródło 1: SAOS API
-    if SAOS_AVAILABLE:
+    # ═══════════════════════════════════════════════════════════════
+    saos_count = 0
+    if SAOS_AVAILABLE and CONFIG.SAOS_ENABLED:
         try:
             print(f"[LEGAL_MODULE] 📡 Zapytanie do SAOS...")
             saos_result = saos_search(
                 query=main_keyword,
-                max_results=max_results * 2  # Pobierz więcej do scoringu
+                max_results=max_results * 2
             )
             
             if saos_result and saos_result.get("judgments"):
+                for j in saos_result["judgments"]:
+                    j["source"] = "saos"
                 judgments.extend(saos_result["judgments"])
                 sources_used.append("saos")
-                print(f"[LEGAL_MODULE] ✅ SAOS: {len(saos_result['judgments'])} wyników")
+                saos_count = len(saos_result["judgments"])
+                print(f"[LEGAL_MODULE] ✅ SAOS: {saos_count} wyników")
         except Exception as e:
             print(f"[LEGAL_MODULE] ⚠️ SAOS error: {e}")
     
-    # 3. Źródło 2: Google Fallback (jeśli SAOS nie zwrócił wyników)
-    if not judgments and GOOGLE_FALLBACK_AVAILABLE:
+    # ═══════════════════════════════════════════════════════════════
+    # 3. Źródło 2: Google Fallback (gdy SAOS brak)
+    # ═══════════════════════════════════════════════════════════════
+    if not judgments and GOOGLE_FALLBACK_AVAILABLE and CONFIG.GOOGLE_FALLBACK_ENABLED:
         try:
             print(f"[LEGAL_MODULE] 📡 Fallback do Google...")
             google_result = search_google_fallback(
-                articles=[],  # Szukaj po słowie kluczowym
+                articles=[],
                 keyword=main_keyword,
                 max_results=max_results
             )
             
             if google_result and google_result.get("judgments"):
+                for j in google_result["judgments"]:
+                    j["source"] = "google"
                 judgments.extend(google_result["judgments"])
                 sources_used.append("google")
                 print(f"[LEGAL_MODULE] ✅ Google: {len(google_result['judgments'])} wyników")
         except Exception as e:
             print(f"[LEGAL_MODULE] ⚠️ Google error: {e}")
     
-    # 4. Scoring i filtrowanie
-    if judgments and SCORING_AVAILABLE:
+    # ═══════════════════════════════════════════════════════════════
+    # 🆕 4. Źródło 3: Local Court Scraper (gdy SAOS < 2)
+    # ═══════════════════════════════════════════════════════════════
+    if (LOCAL_SCRAPER_AVAILABLE and 
+        CONFIG.LOCAL_SCRAPER_ENABLED and 
+        saos_count < CONFIG.LOCAL_SCRAPER_MIN_SAOS_RESULTS):
+        
+        try:
+            print(f"[LEGAL_MODULE] 📡 Fallback do Local Courts (SAOS={saos_count} < {CONFIG.LOCAL_SCRAPER_MIN_SAOS_RESULTS})...")
+            local_result = search_local_courts(
+                keyword=main_keyword,
+                max_results=max_results
+            )
+            
+            if local_result and local_result.get("judgments"):
+                for j in local_result["judgments"]:
+                    j["source"] = "local"
+                    # Dodaj official_portal jeśli brak
+                    if "official_portal" not in j:
+                        j["official_portal"] = j.get("source_url", "").replace("https://", "").replace("http://", "")
+                
+                judgments.extend(local_result["judgments"])
+                sources_used.append("local")
+                print(f"[LEGAL_MODULE] ✅ Local Courts: {len(local_result['judgments'])} wyników")
+                
+                # Log errors jeśli były
+                if local_result.get("errors"):
+                    for err in local_result["errors"][:3]:
+                        print(f"[LEGAL_MODULE] ⚠️ Local error: {err}")
+                        
+        except Exception as e:
+            # Graceful degradation - nie przerywaj
+            print(f"[LEGAL_MODULE] ⚠️ Local Courts error (continuing): {e}")
+    
+    # ═══════════════════════════════════════════════════════════════
+    # 5. Deduplikacja
+    # ═══════════════════════════════════════════════════════════════
+    if len(sources_used) > 1:
+        before_dedup = len(judgments)
+        judgments = deduplicate_judgments(judgments)
+        print(f"[LEGAL_MODULE] 🔄 Deduplicated: {before_dedup} → {len(judgments)}")
+    
+    # ═══════════════════════════════════════════════════════════════
+    # 6. Scoring i filtrowanie
+    # ═══════════════════════════════════════════════════════════════
+    if judgments and SCORING_AVAILABLE and CONFIG.SCORING_ENABLED:
         try:
             scored_judgments = []
             for j in judgments:
@@ -333,7 +429,6 @@ def get_legal_context_for_article(
                 j["relevance_score"] = score_result.get("score", 50)
                 scored_judgments.append(j)
             
-            # Sortuj po score i filtruj
             scored_judgments.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
             judgments = [j for j in scored_judgments if j.get("relevance_score", 0) >= CONFIG.MIN_SCORE_TO_USE]
             sources_used.append("scoring")
@@ -341,10 +436,10 @@ def get_legal_context_for_article(
         except Exception as e:
             print(f"[LEGAL_MODULE] ⚠️ Scoring error: {e}")
     
-    # 5. Ogranicz do max_results
+    # 7. Ogranicz do max_results
     judgments = judgments[:max_results]
     
-    # 6. Brak wyników
+    # 8. Brak wyników
     if not judgments:
         return {
             "status": "NO_RESULTS",
@@ -357,7 +452,7 @@ def get_legal_context_for_article(
             "instruction": "Brak orzeczeń do cytowania. Artykuł może być bez sygnatur."
         }
     
-    # 7. Buduj instrukcję
+    # 9. Buduj instrukcję
     instruction = _build_citation_instruction(main_keyword, judgments)
     
     return {
@@ -372,11 +467,7 @@ def get_legal_context_for_article(
 
 
 def _build_citation_instruction(keyword: str, judgments: List[Dict]) -> str:
-    """Buduje instrukcję cytowania dla GPT.
-    
-    🆕 v41.4: Profesjonalne cytowanie prawnicze - portal + sygnatura.
-    Standard: czytelnik sam wyszukuje orzeczenie po sygnaturze.
-    """
+    """Buduje instrukcję cytowania dla GPT."""
     
     lines = [
         f"⚖️ ORZECZENIA DLA TEMATU: {keyword}",
@@ -403,17 +494,17 @@ def _build_citation_instruction(keyword: str, judgments: List[Dict]) -> str:
         date = j.get("formatted_date", j.get("date", ""))
         court = j.get("court", "")
         score = j.get("relevance_score", "?")
+        source = j.get("source", "unknown")
         
         # Portal (tylko domena)
         official_portal = j.get("official_portal", "")
         if official_portal:
-            # Wyczyść do samej domeny
             portal_domain = official_portal.replace("https://", "").replace("http://", "").rstrip("/")
         else:
             portal_domain = "orzeczenia.ms.gov.pl"
         
         lines.append(f"")
-        lines.append(f"═══ ORZECZENIE #{i} ═══")
+        lines.append(f"═══ ORZECZENIE #{i} ({source.upper()}) ═══")
         lines.append(f"   📌 Sygnatura: {sig}")
         lines.append(f"   📅 Data: {date}")
         lines.append(f"   🏛️ Sąd: {court}")
@@ -448,22 +539,10 @@ def _build_citation_instruction(keyword: str, judgments: List[Dict]) -> str:
 def score_judgment(text: str, keyword: str) -> Dict[str, Any]:
     """
     Ocenia relevantność orzeczenia dla danego słowa kluczowego.
-    
-    Args:
-        text: Treść orzeczenia (fragment)
-        keyword: Słowo kluczowe tematu
-        
-    Returns:
-        {
-            "score": int (0-100),
-            "factors": {...},
-            "recommendation": str
-        }
     """
     if not text:
         return {"score": 0, "factors": {}, "recommendation": "Brak tekstu"}
     
-    # Użyj Claude jeśli dostępny
     if SCORING_AVAILABLE:
         try:
             return score_judgment_relevance(text, keyword)
@@ -477,32 +556,26 @@ def score_judgment(text: str, keyword: str) -> Dict[str, Any]:
     score = 0
     factors = {}
     
-    # Czy keyword występuje?
     keyword_count = text_lower.count(keyword_lower)
     if keyword_count > 0:
         score += min(30, keyword_count * 10)
         factors["keyword_mentions"] = keyword_count
     
-    # Czy są artykuły prawne?
     articles = re.findall(r'art\.\s*\d+', text_lower)
     if articles:
         score += min(20, len(articles) * 5)
         factors["legal_articles"] = len(articles)
     
-    # Czy są sygnatury?
     signatures = re.findall(r'[IVX]+\s+[A-Za-z]+\s+\d+/\d+', text)
     if signatures:
         score += 20
         factors["signatures"] = len(signatures)
     
-    # Długość tekstu
     if len(text) > 500:
         score += 10
         factors["sufficient_length"] = True
     
-    # Normalizuj do 0-100
     score = min(100, max(0, score))
-    
     recommendation = "OK" if score >= CONFIG.MIN_SCORE_TO_USE else "Za niska relevantność"
     
     return {
@@ -519,29 +592,14 @@ def score_judgment(text: str, keyword: str) -> Dict[str, Any]:
 def validate_article_citations(full_text: str) -> Dict[str, Any]:
     """
     Waliduje cytaty prawne w tekście artykułu.
-    
-    Args:
-        full_text: Pełny tekst artykułu
-        
-    Returns:
-        {
-            "valid": bool,
-            "signatures_found": List[str],
-            "signatures_count": int,
-            "has_disclaimer": bool,
-            "warnings": List[str],
-            "suggestions": List[str]
-        }
     """
     warnings = []
     suggestions = []
     
-    # Znajdź sygnatury
     signature_pattern = r'([IVX]+)\s+([A-Za-z]{1,4})\s+(\d+)/(\d{2,4})'
     signatures = re.findall(signature_pattern, full_text)
     signatures_formatted = [f"{m[0]} {m[1]} {m[2]}/{m[3]}" for m in signatures]
     
-    # Sprawdź liczbę sygnatur
     if len(signatures) > CONFIG.MAX_CITATIONS_PER_ARTICLE:
         warnings.append(f"Za dużo sygnatur ({len(signatures)} > {CONFIG.MAX_CITATIONS_PER_ARTICLE})")
         suggestions.append(f"Ogranicz cytaty do {CONFIG.MAX_CITATIONS_PER_ARTICLE} najważniejszych")
@@ -549,7 +607,6 @@ def validate_article_citations(full_text: str) -> Dict[str, Any]:
     if len(signatures) == 0:
         suggestions.append("Rozważ dodanie 1-2 orzeczeń sądowych")
     
-    # Sprawdź disclaimer
     disclaimer_keywords = ["zastrzeżenie", "porada prawna", "konsultacja z prawnikiem"]
     has_disclaimer = any(kw in full_text.lower() for kw in disclaimer_keywords)
     
@@ -557,7 +614,6 @@ def validate_article_citations(full_text: str) -> Dict[str, Any]:
         warnings.append("Brak zastrzeżenia prawnego")
         suggestions.append("Dodaj disclaimer na końcu artykułu")
     
-    # Sprawdź artykuły prawne
     articles = re.findall(r'art\.\s*\d+', full_text.lower())
     
     valid = len(warnings) == 0
@@ -621,8 +677,10 @@ __all__ = [
     "validate_article_citations",
     "score_judgment",
     "get_legal_context_for_prompt",
+    "deduplicate_judgments",
     "SAOS_AVAILABLE",
     "GOOGLE_FALLBACK_AVAILABLE",
+    "LOCAL_SCRAPER_AVAILABLE",
     "SCORING_AVAILABLE",
     "LEGAL_DISCLAIMER",
     "CONFIG"
@@ -635,12 +693,13 @@ __all__ = [
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("⚖️ LEGAL MODULE v3.0 TEST")
+    print("⚖️ LEGAL MODULE v3.1 TEST")
     print("=" * 60)
     
     print(f"\nŹródła:")
     print(f"  SAOS:    {'✅' if SAOS_AVAILABLE else '❌'}")
     print(f"  Google:  {'✅' if GOOGLE_FALLBACK_AVAILABLE else '❌'}")
+    print(f"  Local:   {'✅' if LOCAL_SCRAPER_AVAILABLE else '❌'} (10 portals)")
     print(f"  Scoring: {'✅' if SCORING_AVAILABLE else '❌'}")
     
     # Test detekcji
@@ -660,3 +719,7 @@ if __name__ == "__main__":
     print(f"  Status: {result['status']}")
     print(f"  Znaleziono: {result['total_found']} orzeczeń")
     print(f"  Źródła: {result['sources_used']}")
+    
+    if result.get("judgments"):
+        for j in result["judgments"][:2]:
+            print(f"    📄 {j.get('signature', 'N/A')} [{j.get('source', 'N/A')}] - {j.get('official_portal', 'N/A')}")
