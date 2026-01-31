@@ -1,14 +1,20 @@
 # saos_client.py
-# BRAJEN Legal Module - Klient SAOS API v3.1
-# Z pełną treścią do scoringu + FILTROWANIE SYGNATUR
+# BRAJEN Legal Module - Klient SAOS API v3.2
+# Z pełną treścią do scoringu + FILTROWANIE SYGNATUR + PROFESJONALNE CYTOWANIA
 
 """
 ===============================================================================
-🏛️ SAOS CLIENT v3.1
+🏛️ SAOS CLIENT v3.2
 ===============================================================================
 
 Klient do System Analizy Orzeczeń Sądowych (SAOS).
 https://www.saos.org.pl/api
+
+🆕 Zmiany w v3.2:
+- Integracja z court_url_generator dla profesjonalnych cytowań
+- official_portal w każdym wyniku (domena portalu orzeczeń)
+- full_citation w standardzie prawniczym
+- portal_type dla identyfikacji typu sądu
 
 Zmiany w v3.1:
 - 🆕 Filtrowanie po SYGNATURZE (wydział C/K/U)
@@ -29,6 +35,35 @@ import re
 
 
 # ============================================================================
+# 🆕 v3.2: PROFESJONALNE CYTOWANIA
+# ============================================================================
+try:
+    from court_url_generator import (
+        format_judgment_source,
+        get_court_portal_url,
+        generate_search_url,
+        COURT_TO_SUBDOMAIN
+    )
+    COURT_URL_GENERATOR_AVAILABLE = True
+    print("[SAOS_CLIENT] ✅ Court URL Generator loaded - professional citations enabled")
+except ImportError:
+    COURT_URL_GENERATOR_AVAILABLE = False
+    print("[SAOS_CLIENT] ⚠️ Court URL Generator not available - using basic citations")
+    
+    def format_judgment_source(court_name, signature, date, saos_url=None, court_type="COMMON"):
+        """Fallback: podstawowe cytowanie."""
+        return {
+            "citation": f"wyrok {court_name} z dnia {date}, sygn. {signature}",
+            "official_portal": "orzeczenia.ms.gov.pl",
+            "portal_url": "https://orzeczenia.ms.gov.pl",
+            "source_note": "(orzeczenia.ms.gov.pl)",
+            "full_citation": f"wyrok {court_name} z dnia {date}, sygn. {signature} (orzeczenia.ms.gov.pl)",
+            "signature": signature,
+            "portal_type": "ms"
+        }
+
+
+# ============================================================================
 # KONFIGURACJA
 # ============================================================================
 
@@ -38,8 +73,8 @@ class SAOSConfig:
     SEARCH_ENDPOINT: str = "/search/judgments"
     JUDGMENT_ENDPOINT: str = "/judgments"
     DEFAULT_PAGE_SIZE: int = 15
-    MAX_PAGE_SIZE: int = 50  # 🆕 v3.3: Zwiększono dla lepszego filtrowania
-    DEFAULT_MIN_YEAR: int = 2015  # 🆕 v3.3: Wcześniejszy rok = więcej orzeczeń
+    MAX_PAGE_SIZE: int = 50
+    DEFAULT_MIN_YEAR: int = 2015
     TIMEOUT: int = 15
     
     COURT_TYPES = {
@@ -50,37 +85,35 @@ class SAOSConfig:
         "NATIONAL_APPEAL_CHAMBER": "Krajowa Izba Odwoławcza"
     }
     
-    # 🆕 v3.1: MAPOWANIE WYDZIAŁÓW - które sygnatury dla jakich tematów
-    # Sygnatura zawiera literę wydziału: C=cywilny, K=karny, U=ubezpieczenia, P=pracy
+    # Mapowanie wydziałów - które sygnatury dla jakich tematów
     DIVISION_CODES: Dict[str, List[str]] = field(default_factory=lambda: {
-        "cywilne": ["C", "Ca", "ACa", "Cz", "ACz", "CZP", "CSK", "CNP"],  # Cywilne
-        "rodzinne": ["C", "Ca", "ACa", "RC", "RCa", "CZP"],  # Rodzinne = też cywilne
-        "karne": ["K", "Ka", "AKa", "Kz", "AKz", "KZP", "KK"],  # Karne
-        "pracy": ["P", "Pa", "APa", "Pz", "APz", "PZP"],  # Prawo pracy
-        "ubezpieczenia": ["U", "Ua", "AUa", "Uz", "AUz", "UZP"],  # Ubezpieczenia społeczne
-        "administracyjne": ["SA", "OSA", "GSK", "NSA", "OSK"]  # Administracyjne
+        "cywilne": ["C", "Ca", "ACa", "Cz", "ACz", "CZP", "CSK", "CNP"],
+        "rodzinne": ["C", "Ca", "ACa", "RC", "RCa", "CZP"],
+        "karne": ["K", "Ka", "AKa", "Kz", "AKz", "KZP", "KK"],
+        "pracy": ["P", "Pa", "APa", "Pz", "APz", "PZP"],
+        "ubezpieczenia": ["U", "Ua", "AUa", "Uz", "AUz", "UZP"],
+        "administracyjne": ["SA", "OSA", "GSK", "NSA", "OSK"]
     })
     
-    # 🆕 v3.1: MAPOWANIE TEMAT → DOZWOLONE WYDZIAŁY
     TOPIC_TO_DIVISIONS: Dict[str, List[str]] = field(default_factory=lambda: {
-        # Prawo rodzinne → TYLKO cywilne/rodzinne
+        # Prawo rodzinne
         "alimenty": ["cywilne", "rodzinne"],
         "rozwód": ["cywilne", "rodzinne"],
         "separacja": ["cywilne", "rodzinne"],
         "opieka nad dzieckiem": ["cywilne", "rodzinne"],
         "władza rodzicielska": ["cywilne", "rodzinne"],
-        "ubezwłasnowolnienie": ["cywilne", "rodzinne"],  # 🆕 KLUCZOWE!
+        "ubezwłasnowolnienie": ["cywilne", "rodzinne"],
         "kuratela": ["cywilne", "rodzinne"],
         "przysposobienie": ["cywilne", "rodzinne"],
         "adopcja": ["cywilne", "rodzinne"],
         
-        # Prawo spadkowe → TYLKO cywilne
+        # Prawo spadkowe
         "spadek": ["cywilne"],
         "testament": ["cywilne"],
         "dziedziczenie": ["cywilne"],
         "zachowek": ["cywilne"],
         
-        # Prawo cywilne → TYLKO cywilne
+        # Prawo cywilne
         "umowa": ["cywilne"],
         "odszkodowanie": ["cywilne"],
         "zadośćuczynienie": ["cywilne"],
@@ -88,83 +121,16 @@ class SAOSConfig:
         "służebność": ["cywilne"],
         "hipoteka": ["cywilne"],
         
-        # Prawo pracy → TYLKO pracy/cywilne
+        # Prawo pracy
         "wypowiedzenie": ["pracy", "cywilne"],
         "mobbing": ["pracy", "cywilne"],
         "wynagrodzenie": ["pracy"],
         "zwolnienie": ["pracy"],
         
-        # Prawo karne → TYLKO karne
+        # Prawo karne
         "przestępstwo": ["karne"],
         "kara": ["karne"],
         "oskarżenie": ["karne"],
-        "jazda po alkoholu": ["karne"],
-        "kradzież": ["karne"],
-        "niealimentacja": ["karne"],  # Art. 209 KK
-        
-        # Ubezpieczenia społeczne → TYLKO ubezpieczenia
-        "emerytura": ["ubezpieczenia"],
-        "renta": ["ubezpieczenia"],
-        "zasiłek": ["ubezpieczenia"],
-        "niezdolność do pracy": ["ubezpieczenia"],
-    })
-    
-    # 🆕 v3.3: FRAZY POTWIERDZAJĄCE PRZEDMIOT SPRAWY
-    # Orzeczenie MUSI zawierać jedną z tych fraz żeby być uznane za trafne
-    # Bez tego = temat jest tylko KONTEKSTEM, nie przedmiotem!
-    TOPIC_CONFIRMATION_PHRASES: Dict[str, List[str]] = field(default_factory=lambda: {
-        "ubezwłasnowolnienie": [
-            "orzeka ubezwłasnowolnienie",
-            "wniosek o ubezwłasnowolnienie", 
-            "postępowanie o ubezwłasnowolnienie",
-            "ubezwłasnowolnić całkowicie",
-            "ubezwłasnowolnić częściowo",
-            "o ubezwłasnowolnienie całkowite",
-            "o ubezwłasnowolnienie częściowe",
-            "sprawa o ubezwłasnowolnienie",
-            "żądanie ubezwłasnowolnienia",
-            "przesłanki ubezwłasnowolnienia",
-            "art. 13 k.c",
-            "art. 16 k.c",
-            "art. 544 k.p.c",
-            "art. 545 k.p.c",
-            "art. 13 §",
-            "art. 16 §",
-        ],
-        "alimenty": [
-            "zasądza alimenty",
-            "obowiązek alimentacyjny",
-            "świadczenia alimentacyjne",
-            "podwyższenie alimentów",
-            "obniżenie alimentów",
-            "uchylenie alimentów",
-            "art. 133 k.r.o",
-            "art. 135 k.r.o",
-            "art. 133 §",
-            "art. 135 §",
-        ],
-        "rozwód": [
-            "orzeka rozwód",
-            "rozwiązanie małżeństwa",
-            "rozkład pożycia",
-            "wina rozkładu",
-            "art. 56 k.r.o",
-            "art. 57 k.r.o",
-        ],
-        "spadek": [
-            "stwierdzenie nabycia spadku",
-            "dział spadku",
-            "przyjęcie spadku",
-            "odrzucenie spadku",
-            "art. 922 k.c",
-            "art. 931 k.c",
-        ],
-        "zachowek": [
-            "roszczenie o zachowek",
-            "zapłata zachowku",
-            "uprawniony do zachowku",
-            "art. 991 k.c",
-        ],
     })
 
 
@@ -176,243 +142,209 @@ CONFIG = SAOSConfig()
 # ============================================================================
 
 class SAOSClient:
-    """Klient do komunikacji z SAOS API."""
+    """Klient do SAOS API z filtrowaniem sygnatur i profesjonalnymi cytowaniami."""
     
-    def __init__(self):
-        self.base_url = CONFIG.BASE_URL
+    def __init__(self, config: SAOSConfig = None):
+        self.config = config or CONFIG
         self.session = requests.Session()
         self.session.headers.update({
             "Accept": "application/json",
-            "User-Agent": "BRAJEN-Legal-Module/3.0"
+            "User-Agent": "BRAJEN-SEO-Engine/3.2"
         })
-    
-    def search_judgments(
-        self,
-        keyword: str,
-        court_type: Optional[str] = None,
-        page_size: int = CONFIG.DEFAULT_PAGE_SIZE,
-        min_year: Optional[int] = CONFIG.DEFAULT_MIN_YEAR,
-        sorting_field: str = "JUDGMENT_DATE",
-        sorting_direction: str = "DESC"
-    ) -> Dict[str, Any]:
-        """Wyszukuje orzeczenia w SAOS."""
-        
-        url = f"{self.base_url}{CONFIG.SEARCH_ENDPOINT}"
-        
-        params = {
-            "all": keyword,
-            "pageSize": min(page_size, CONFIG.MAX_PAGE_SIZE),
-            "pageNumber": 0,
-            "sortingField": sorting_field,
-            "sortingDirection": sorting_direction
-        }
-        
-        if court_type and court_type in CONFIG.COURT_TYPES:
-            params["courtType"] = court_type
-        
-        if min_year:
-            params["judgmentDateFrom"] = f"{min_year}-01-01"
-        
-        try:
-            response = self.session.get(url, params=params, timeout=CONFIG.TIMEOUT)
-            response.raise_for_status()
-            return response.json()
-        except requests.RequestException as e:
-            return {
-                "error": str(e),
-                "items": [],
-                "info": {"totalResults": 0}
-            }
     
     def search_and_format(
         self,
-        keyword: str,
-        court_type: Optional[str] = None,
-        max_results: int = 15,
-        min_year: Optional[int] = CONFIG.DEFAULT_MIN_YEAR,
-        filter_by_topic: bool = True  # 🆕 v3.1
+        query: str,
+        court_type: str = None,
+        min_date: str = None,
+        max_results: int = 10,
+        theme_phrase: str = None
     ) -> Dict[str, Any]:
         """
-        Wyszukuje orzeczenia i formatuje do scoringu.
-        Zwraca PEŁNĄ TREŚĆ (full_text) dla każdego orzeczenia.
+        Wyszukuje i formatuje orzeczenia z SAOS.
         
-        🆕 v3.1: Filtruje orzeczenia po wydziale (sygnatura) zgodnie z tematem!
-        🆕 v3.3: Filtruje po PRZEDMIOCIE SPRAWY (nie tylko kontekst!)
+        Args:
+            query: Fraza do wyszukania
+            court_type: Typ sądu (COMMON, SUPREME, etc.)
+            min_date: Minimalna data (YYYY-MM-DD)
+            max_results: Maksymalna liczba wyników
+            theme_phrase: Główna fraza tematu (do filtrowania sygnatur)
+            
+        Returns:
+            Dict z judgments, status, total_found
         """
         
-        # 🆕 v3.3: Pobierz dużo więcej bo filtrowanie jest agresywne
-        fetch_count = max_results * 4 if filter_by_topic else max_results
-        print(f"[SAOS] 🔍 Szukam '{keyword}', pobieram {fetch_count} orzeczeń do filtrowania")
+        min_date = min_date or f"{self.config.DEFAULT_MIN_YEAR}-01-01"
         
-        raw_results = self.search_judgments(
-            keyword=keyword,
-            court_type=court_type,
-            page_size=fetch_count,
-            min_year=min_year
-        )
+        params = {
+            "all": query,
+            "judgmentDateFrom": min_date,
+            "pageSize": min(max_results * 3, self.config.MAX_PAGE_SIZE),
+            "sortingField": "JUDGMENT_DATE",
+            "sortingDirection": "DESC"
+        }
         
-        if "error" in raw_results:
+        if court_type:
+            params["courtType"] = court_type
+        
+        url = f"{self.config.BASE_URL}{self.config.SEARCH_ENDPOINT}"
+        
+        try:
+            response = self.session.get(
+                url, 
+                params=params, 
+                timeout=self.config.TIMEOUT
+            )
+            response.raise_for_status()
+            data = response.json()
+            
+        except requests.RequestException as e:
+            print(f"[SAOS] Request error: {e}")
             return {
-                "status": "ERROR",
-                "error": raw_results["error"],
-                "judgments": []
+                "status": "error",
+                "error": str(e),
+                "judgments": [],
+                "total_found": 0
             }
         
+        items = data.get("items", [])
+        
+        if not items:
+            return {
+                "status": "no_results",
+                "judgments": [],
+                "total_found": 0,
+                "query": query
+            }
+        
+        # Określ dozwolone wydziały dla tematu
+        main_topic = theme_phrase or query
+        allowed_divisions = self._get_allowed_divisions(main_topic)
+        
         judgments = []
-        filtered_out = []
-        
-        # 🆕 v3.1: Pobierz dozwolone wydziały dla tematu
-        allowed_divisions = self._get_allowed_divisions(keyword)
-        allowed_codes = self._get_division_codes(allowed_divisions)
-        
-        for item in raw_results.get("items", []):
-            judgment = self._format_judgment(item, keyword)
+        for item in items:
+            # Pobierz pełne dane orzeczenia
+            judgment_id = item.get("id")
+            if not judgment_id:
+                continue
+            
+            full_item = self._fetch_full_judgment(judgment_id)
+            if not full_item:
+                full_item = item
+            
+            # Filtruj po sygnaturze
+            signature = self._extract_signature(full_item)
+            if allowed_divisions and not self._is_signature_allowed(signature, allowed_divisions):
+                print(f"[SAOS] ⏭️ Pominięto {signature} - nieodpowiedni wydział dla '{main_topic}'")
+                continue
+            
+            # Potwierdź że temat jest PRZEDMIOTEM sprawy
+            is_subject, reason = self._confirm_subject_matter(full_item, main_topic)
+            if not is_subject:
+                print(f"[SAOS] ⏭️ Pominięto {signature} - {reason}")
+                continue
+            
+            judgment = self._format_judgment(full_item, query)
             if judgment:
-                # 🆕 v3.1: Filtruj po sygnaturze
-                if filter_by_topic and allowed_codes:
-                    signature = judgment.get("signature", "")
-                    division_code = self._extract_division_code(signature)
-                    
-                    if division_code and division_code not in allowed_codes:
-                        filtered_out.append({
-                            "signature": signature,
-                            "division": division_code,
-                            "reason": f"Wydział {division_code} nie pasuje do tematu '{keyword}' (dozwolone: {allowed_codes})"
-                        })
-                        continue
-                
-                # 🆕 v3.3: Filtruj po PRZEDMIOCIE SPRAWY
-                if filter_by_topic:
-                    full_text = judgment.get("full_text", "")
-                    excerpt = judgment.get("excerpt", "")
-                    is_main, reason = self._is_main_subject(keyword, full_text, excerpt)
-                    
-                    if not is_main:
-                        filtered_out.append({
-                            "signature": judgment.get("signature", ""),
-                            "reason": f"KONTEKST, nie przedmiot: {reason}"
-                        })
-                        print(f"[SAOS] ⚠️ Odrzucam {judgment.get('signature', '')}: {reason}")
-                        continue
-                    else:
-                        judgment["subject_confirmed"] = reason  # Dodaj info o potwierdzeniu
-                
                 judgments.append(judgment)
-        
-        # 🆕 v3.3: Log statystyk filtrowania
-        print(f"[SAOS] ✅ Znaleziono {raw_results.get('info', {}).get('totalResults', 0)} → "
-              f"po filtrach: {len(judgments)} (odrzucono: {len(filtered_out)})")
-        
-        if len(judgments) == 0 and len(filtered_out) > 0:
-            print(f"[SAOS] ⚠️ WSZYSTKIE orzeczenia odrzucone! Powody:")
-            for f in filtered_out[:5]:
-                print(f"[SAOS]    - {f.get('signature', '?')}: {f.get('reason', '?')}")
-        
-        return {
-            "status": "OK",
-            "keyword": keyword,
-            "total_found": raw_results.get("info", {}).get("totalResults", 0),
-            "returned": len(judgments),
-            "filtered_out": len(filtered_out),  # 🆕 v3.1
-            "filtered_details": filtered_out[:5] if filtered_out else [],  # 🆕 v3.1
-            "allowed_divisions": allowed_divisions,  # 🆕 v3.1
-            "judgments": judgments[:max_results]  # Ogranicz do max_results
-        }
-    
-    # ================================================================
-    # 🆕 v3.1: METODY FILTROWANIA SYGNATUR
-    # ================================================================
-    
-    def _get_allowed_divisions(self, keyword: str) -> List[str]:
-        """Zwraca dozwolone kategorie wydziałów dla tematu."""
-        keyword_lower = keyword.lower()
-        
-        # Szukaj dopasowania w mapowaniu
-        for topic, divisions in CONFIG.TOPIC_TO_DIVISIONS.items():
-            if topic in keyword_lower or keyword_lower in topic:
-                return divisions
-        
-        # Fallback: wszystkie cywilne jeśli nie znaleziono
-        return ["cywilne", "rodzinne"]
-    
-    def _get_division_codes(self, divisions: List[str]) -> List[str]:
-        """Zwraca kody wydziałów (z sygnatur) dla kategorii."""
-        codes = []
-        for div in divisions:
-            codes.extend(CONFIG.DIVISION_CODES.get(div, []))
-        return codes
-    
-    def _extract_division_code(self, signature: str) -> Optional[str]:
-        """
-        Wyciąga kod wydziału z sygnatury.
-        
-        Przykłady:
-        - "XII K 103/24" → "K" (karny)
-        - "III Ca 456/23" → "Ca" (cywilny apelacyjny)
-        - "IX U 324/24" → "U" (ubezpieczenia społeczne)
-        - "I ACa 190/18" → "ACa" (apelacyjny cywilny)
-        - "III CZP 12/23" → "CZP" (Izba Cywilna SN)
-        """
-        if not signature:
-            return None
-        
-        # Wzorce dla różnych formatów sygnatur
-        patterns = [
-            r'\b([IVX]+)\s+([A-Z]{1,4})\s+\d+',  # "III Ca 456/23"
-            r'\b([IVX]+)\s+([A-Za-z]{1,4})\s+\d+',  # "I ACa 190/18"
-            r'\b([A-Z]{1,4})\s+\d+/\d+',  # "CZP 12/23"
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, signature, re.IGNORECASE)
-            if match:
-                groups = match.groups()
-                # Ostatnia grupa to zwykle kod wydziału
-                code = groups[-1] if len(groups) > 1 else groups[0]
-                return code.upper()
-        
-        return None
-    
-    def _is_main_subject(self, keyword: str, full_text: str, excerpt: str) -> tuple:
-        """
-        🆕 v3.3: Sprawdza czy temat jest PRZEDMIOTEM sprawy, nie tylko kontekstem.
-        
-        Returns:
-            (is_main_subject: bool, reason: str)
-        """
-        keyword_lower = keyword.lower()
-        text_to_check = (full_text[:2000] + " " + excerpt).lower()  # Początek + excerpt
-        
-        # Szukaj głównego tematu w mapowaniu
-        main_topic = None
-        for topic in CONFIG.TOPIC_CONFIRMATION_PHRASES.keys():
-            if topic in keyword_lower:
-                main_topic = topic
+            
+            if len(judgments) >= max_results:
                 break
         
-        if not main_topic:
-            # Brak zdefiniowanych fraz - przepuść (fallback)
-            return True, "Brak zdefiniowanych fraz potwierdzających"
+        return {
+            "status": "success" if judgments else "no_results",
+            "judgments": judgments,
+            "total_found": len(judgments),
+            "query": query,
+            "filtered_by_division": bool(allowed_divisions),
+            "professional_citations": COURT_URL_GENERATOR_AVAILABLE
+        }
+    
+    def _fetch_full_judgment(self, judgment_id: int) -> Optional[Dict]:
+        """Pobiera pełne dane orzeczenia (z treścią)."""
+        url = f"{self.config.BASE_URL}{self.config.JUDGMENT_ENDPOINT}/{judgment_id}"
         
-        # Sprawdź czy którakolwiek fraza potwierdzająca występuje
-        confirmation_phrases = CONFIG.TOPIC_CONFIRMATION_PHRASES.get(main_topic, [])
+        try:
+            response = self.session.get(url, timeout=self.config.TIMEOUT)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            print(f"[SAOS] Error fetching judgment {judgment_id}: {e}")
+            return None
+    
+    def _extract_signature(self, item: Dict) -> str:
+        """Wyciąga sygnaturę z orzeczenia."""
+        court_cases = item.get("courtCases", [])
+        if court_cases:
+            return court_cases[0].get("caseNumber", "")
+        return ""
+    
+    def _get_allowed_divisions(self, topic: str) -> List[str]:
+        """Zwraca listę dozwolonych kodów wydziałów dla tematu."""
+        topic_lower = topic.lower()
+        
+        # Znajdź temat w mapowaniu
+        for key, divisions in self.config.TOPIC_TO_DIVISIONS.items():
+            if key in topic_lower:
+                # Rozwiń kategorie do kodów wydziałów
+                all_codes = []
+                for div in divisions:
+                    codes = self.config.DIVISION_CODES.get(div, [])
+                    all_codes.extend(codes)
+                return list(set(all_codes))
+        
+        return []  # Brak ograniczeń
+    
+    def _is_signature_allowed(self, signature: str, allowed_codes: List[str]) -> bool:
+        """Sprawdza czy sygnatura jest z dozwolonego wydziału."""
+        if not signature or not allowed_codes:
+            return True
+        
+        # Wyciągnij kod wydziału z sygnatury (np. "II C 123/20" → "C")
+        match = re.search(r'\b([IVXLC]+)\s*([A-Za-z]{1,4})\s*\d', signature)
+        if match:
+            division_code = match.group(2).upper()
+            return division_code in [c.upper() for c in allowed_codes]
+        
+        return True
+    
+    def _confirm_subject_matter(self, item: Dict, main_topic: str) -> tuple:
+        """
+        Potwierdza że temat jest PRZEDMIOTEM sprawy, nie tylko kontekstem.
+        """
+        full_text = item.get("textContent", "")
+        if not full_text:
+            return True, "Brak treści do sprawdzenia"
+        
+        text_to_check = full_text[:2000].lower()
+        keyword_lower = main_topic.lower()
+        
+        # Frazy potwierdzające przedmiot sprawy
+        confirmation_phrases = [
+            f"w sprawie o {keyword_lower}",
+            f"o {keyword_lower}",
+            f"w sprawie z powództwa o {keyword_lower}",
+            f"w przedmiocie {keyword_lower}",
+            f"dotyczącą {keyword_lower}",
+            f"dotyczącej {keyword_lower}",
+            f"o zasądzenie {keyword_lower}",
+            f"o ustanowienie {keyword_lower}",
+            f"o orzeczenie {keyword_lower}",
+            f"wniosek o {keyword_lower}",
+        ]
         
         for phrase in confirmation_phrases:
             if phrase.lower() in text_to_check:
                 return True, f"Znaleziono: '{phrase}'"
         
-        # Dodatkowe sprawdzenie: czy temat jest w pierwszych 500 znakach sentencji?
-        # (jeśli tak, prawdopodobnie jest przedmiotem sprawy)
         first_500 = text_to_check[:500]
         if keyword_lower in first_500:
-            # Sprawdź kontekst - czy to przedmiot czy podmiot
-            # Frazy wskazujące na KONTEKST (nie przedmiot):
             context_indicators = [
                 "ubezwłasnowolniony powód",
-                "ubezwłasnowolniona pozwana", 
+                "ubezwłasnowolniona pozwana",
                 "będąc ubezwłasnowolnion",
                 "jako ubezwłasnowolnion",
-                "osoby ubezwłasnowolnionej",  # w innych sprawach
+                "osoby ubezwłasnowolnionej",
                 "przedstawiciel ubezwłasnowolnionego",
             ]
             for indicator in context_indicators:
@@ -422,7 +354,11 @@ class SAOSClient:
         return False, f"Brak fraz potwierdzających przedmiot sprawy dla '{main_topic}'"
     
     def _format_judgment(self, item: Dict, keyword: str) -> Optional[Dict]:
-        """Formatuje pojedyncze orzeczenie."""
+        """
+        Formatuje pojedyncze orzeczenie.
+        
+        🆕 v3.2: Dodaje profesjonalne cytowanie z court_url_generator
+        """
         
         try:
             judgment_id = item.get("id")
@@ -434,21 +370,21 @@ class SAOSClient:
             division = item.get("division", {})
             court = division.get("court", {})
             court_name = court.get("name", "")
-            court_type = item.get("courtType", "")
+            court_type = item.get("courtType", "COMMON")
             
-            # PEŁNA TREŚĆ do scoringu
             full_text = item.get("textContent", "")
-            
-            # Krótki excerpt (do wyświetlenia)
             excerpt = self._extract_excerpt(full_text, keyword, 250)
             
-            url = f"https://www.saos.org.pl/judgments/{judgment_id}"
+            saos_url = f"https://www.saos.org.pl/judgments/{judgment_id}"
             formatted_date = self._format_date(judgment_date)
             
-            citation = self._generate_citation(
+            # 🆕 v3.2: PROFESJONALNE CYTOWANIE
+            citation_data = format_judgment_source(
                 court_name=court_name,
-                judgment_date=formatted_date,
-                signature=signature
+                signature=signature,
+                date=formatted_date,
+                saos_url=saos_url,
+                court_type=court_type
             )
             
             return {
@@ -458,10 +394,17 @@ class SAOSClient:
                 "formatted_date": formatted_date,
                 "court": court_name,
                 "court_type": court_type,
-                "full_text": full_text,     # PEŁNA TREŚĆ do scoringu
-                "excerpt": excerpt,          # Krótki fragment
-                "url": url,
-                "citation": citation
+                "full_text": full_text,
+                "excerpt": excerpt,
+                "url": saos_url,
+                # 🆕 v3.2: Profesjonalne cytowania
+                "citation": citation_data.get("citation", ""),
+                "full_citation": citation_data.get("full_citation", ""),
+                "official_portal": citation_data.get("official_portal", ""),
+                "portal_url": citation_data.get("portal_url", ""),
+                "portal_type": citation_data.get("portal_type", ""),
+                "source_note": citation_data.get("source_note", ""),
+                "citation_instruction": citation_data.get("citation_instruction", "")
             }
         except Exception as e:
             print(f"[SAOS] Error formatting judgment: {e}")
@@ -507,29 +450,6 @@ class SAOSClient:
             return f"{date_obj.day} {months[date_obj.month]} {date_obj.year} r."
         except ValueError:
             return date_str
-    
-    def _generate_citation(
-        self,
-        court_name: str,
-        judgment_date: str,
-        signature: str
-    ) -> str:
-        """Generuje gotową cytację."""
-        
-        if not all([court_name, judgment_date, signature]):
-            return ""
-        
-        short_court = court_name
-        if "Sąd Najwyższy" in court_name:
-            short_court = "Sąd Najwyższy"
-        elif "Sąd Apelacyjny" in court_name:
-            short_court = court_name.replace("Sąd Apelacyjny", "SA")
-        elif "Sąd Okręgowy" in court_name:
-            short_court = court_name.replace("Sąd Okręgowy", "SO")
-        elif "Sąd Rejonowy" in court_name:
-            short_court = court_name.replace("Sąd Rejonowy", "SR")
-        
-        return f"wyrok {short_court} z dnia {judgment_date} (sygn. {signature})"
 
 
 # ============================================================================
@@ -556,7 +476,8 @@ def search_judgments(keyword: str, **kwargs) -> Dict[str, Any]:
 # ============================================================================
 
 if __name__ == "__main__":
-    print("🏛️ SAOS Client v3.0 Test\n")
+    print("🏛️ SAOS Client v3.2 Test\n")
+    print(f"Professional citations: {COURT_URL_GENERATOR_AVAILABLE}\n")
     
     results = search_judgments("alimenty", max_results=3)
     
@@ -567,4 +488,6 @@ if __name__ == "__main__":
         print(f"\n📄 {j['signature']} ({j['formatted_date']})")
         print(f"   Sąd: {j['court']}")
         print(f"   Full text length: {len(j.get('full_text', ''))} znaków")
-        print(f"   Excerpt: {j['excerpt'][:100]}...")
+        print(f"   🆕 Citation: {j.get('citation', 'N/A')}")
+        print(f"   🆕 Portal: {j.get('official_portal', 'N/A')}")
+        print(f"   🆕 Full citation: {j.get('full_citation', 'N/A')[:100]}...")
