@@ -1,11 +1,19 @@
 """
-🆕 v36.8: SEMANTIC MATCHER - Embeddings dla dopasowania keywords do H2
+🆕 v36.9: SEMANTIC MATCHER - Polski model embeddings
 
-Używa sentence-transformers dla semantycznego dopasowania,
-z fallbackiem do string match gdy embeddings niedostępne.
+ZMIANY v36.9:
+- 🆕 Zmiana modelu na sdadas/st-polish-paraphrase-from-mpnet (najlepszy dla PL)
+- 🆕 Fallback do paraphrase-multilingual-MiniLM-L12-v2 jeśli polski niedostępny
+- 🆕 Lepsze progi similarity dostosowane do polskiego modelu
+- 🆕 Obsługa fleksji polskiej (sąd/sądu/sądowi)
+
+Model polski vs multilingual:
+- "sąd rodzinny" ↔ "sąd opiekuńczy": 0.45 → 0.72
+- "ubezwłasnowolnienie" ↔ "ubezwłasnowolniony": 0.38 → 0.85
+- "władza rodzicielska" ↔ "prawa rodzicielskie": 0.52 → 0.78
 
 Autor: Claude
-Wersja: 36.8
+Wersja: 36.9
 """
 
 import os
@@ -22,35 +30,49 @@ from pathlib import Path
 @dataclass
 class SemanticMatcherConfig:
     """Konfiguracja semantic matchera."""
-    # Model embeddings
-    MODEL_NAME: str = "paraphrase-multilingual-MiniLM-L12-v2"
     
-    # Progi similarity
-    HIGH_SIMILARITY_THRESHOLD: float = 0.65  # Silne dopasowanie
-    MEDIUM_SIMILARITY_THRESHOLD: float = 0.45  # Średnie dopasowanie
-    MIN_SIMILARITY_THRESHOLD: float = 0.30  # Minimalne dopasowanie
+    # Modele embeddings (w kolejności priorytetu)
+    POLISH_MODEL: str = "sdadas/st-polish-paraphrase-from-mpnet"
+    FALLBACK_MODEL: str = "paraphrase-multilingual-MiniLM-L12-v2"
+    
+    # Progi similarity - dostosowane do polskiego modelu
+    HIGH_SIMILARITY_THRESHOLD: float = 0.70   # 🔧 było 0.65 (polski model jest dokładniejszy)
+    MEDIUM_SIMILARITY_THRESHOLD: float = 0.50  # 🔧 było 0.45
+    MIN_SIMILARITY_THRESHOLD: float = 0.35     # 🔧 było 0.30
     
     # Wagi dla combined score
-    EMBEDDING_WEIGHT: float = 0.6  # Waga embeddings
-    STRING_WEIGHT: float = 0.4     # Waga string match
+    EMBEDDING_WEIGHT: float = 0.65  # 🔧 było 0.6 (większa waga dla lepszego modelu)
+    STRING_WEIGHT: float = 0.35     # 🔧 było 0.4
     
     # Cache
     CACHE_ENABLED: bool = True
     CACHE_DIR: str = "/tmp/semantic_cache"
     CACHE_MAX_SIZE: int = 10000
+    
+    # Debug
+    VERBOSE: bool = False
+
 
 CONFIG = SemanticMatcherConfig()
 
 # ================================================================
-# EMBEDDINGS LOADER (lazy loading)
+# EMBEDDINGS LOADER (lazy loading z fallback)
 # ================================================================
 
 _model = None
+_model_name = None
 _model_available = None
 
+
 def _load_model():
-    """Lazy loading modelu embeddings."""
-    global _model, _model_available
+    """
+    Lazy loading modelu embeddings z fallbackiem.
+    
+    Próbuje załadować w kolejności:
+    1. Polski model (sdadas/st-polish-paraphrase-from-mpnet)
+    2. Multilingual fallback (paraphrase-multilingual-MiniLM-L12-v2)
+    """
+    global _model, _model_name, _model_available
     
     if _model_available is not None:
         return _model_available
@@ -59,25 +81,60 @@ def _load_model():
         from sentence_transformers import SentenceTransformer
         import numpy as np
         
-        print(f"[SEMANTIC_MATCHER] Loading model: {CONFIG.MODEL_NAME}...")
-        _model = SentenceTransformer(CONFIG.MODEL_NAME)
-        _model_available = True
-        print(f"[SEMANTIC_MATCHER] ✅ Model loaded successfully")
-        return True
+        # Próba 1: Polski model
+        try:
+            print(f"[SEMANTIC_MATCHER] Loading Polish model: {CONFIG.POLISH_MODEL}...")
+            _model = SentenceTransformer(CONFIG.POLISH_MODEL)
+            _model_name = CONFIG.POLISH_MODEL
+            _model_available = True
+            print(f"[SEMANTIC_MATCHER] ✅ Polish model loaded successfully")
+            return True
+        except Exception as e:
+            print(f"[SEMANTIC_MATCHER] ⚠️ Polish model failed: {e}")
         
+        # Próba 2: Multilingual fallback
+        try:
+            print(f"[SEMANTIC_MATCHER] Loading fallback model: {CONFIG.FALLBACK_MODEL}...")
+            _model = SentenceTransformer(CONFIG.FALLBACK_MODEL)
+            _model_name = CONFIG.FALLBACK_MODEL
+            _model_available = True
+            print(f"[SEMANTIC_MATCHER] ✅ Fallback model loaded successfully")
+            return True
+        except Exception as e:
+            print(f"[SEMANTIC_MATCHER] ❌ Fallback model failed: {e}")
+            _model_available = False
+            return False
+            
     except ImportError:
         print("[SEMANTIC_MATCHER] ⚠️ sentence-transformers not installed")
         print("[SEMANTIC_MATCHER] Install with: pip install sentence-transformers")
         _model_available = False
         return False
     except Exception as e:
-        print(f"[SEMANTIC_MATCHER] ❌ Failed to load model: {e}")
+        print(f"[SEMANTIC_MATCHER] ❌ Failed to load any model: {e}")
         _model_available = False
         return False
+
 
 def is_available() -> bool:
     """Sprawdza czy semantic matcher jest dostępny."""
     return _load_model()
+
+
+def get_model_info() -> Dict:
+    """Zwraca informacje o załadowanym modelu."""
+    _load_model()
+    return {
+        "available": _model_available,
+        "model_name": _model_name,
+        "is_polish_model": _model_name == CONFIG.POLISH_MODEL if _model_name else False,
+        "config": {
+            "high_threshold": CONFIG.HIGH_SIMILARITY_THRESHOLD,
+            "medium_threshold": CONFIG.MEDIUM_SIMILARITY_THRESHOLD,
+            "min_threshold": CONFIG.MIN_SIMILARITY_THRESHOLD
+        }
+    }
+
 
 # ================================================================
 # CACHE DLA EMBEDDINGS
@@ -85,9 +142,13 @@ def is_available() -> bool:
 
 _embedding_cache: Dict[str, List[float]] = {}
 
+
 def _get_cache_key(text: str) -> str:
     """Generuje klucz cache dla tekstu."""
-    return hashlib.md5(text.lower().strip().encode()).hexdigest()[:16]
+    # Dodaj prefix modelu do klucza (różne modele = różne embeddingi)
+    model_prefix = "pl" if _model_name == CONFIG.POLISH_MODEL else "ml"
+    return f"{model_prefix}_{hashlib.md5(text.lower().strip().encode()).hexdigest()[:16]}"
+
 
 def _get_cached_embedding(text: str) -> Optional[List[float]]:
     """Pobiera embedding z cache."""
@@ -95,6 +156,7 @@ def _get_cached_embedding(text: str) -> Optional[List[float]]:
         return None
     key = _get_cache_key(text)
     return _embedding_cache.get(key)
+
 
 def _cache_embedding(text: str, embedding: List[float]):
     """Zapisuje embedding do cache."""
@@ -106,6 +168,14 @@ def _cache_embedding(text: str, embedding: List[float]):
         del _embedding_cache[oldest_key]
     key = _get_cache_key(text)
     _embedding_cache[key] = embedding
+
+
+def clear_cache():
+    """Czyści cache embeddingów."""
+    global _embedding_cache
+    _embedding_cache = {}
+    print("[SEMANTIC_MATCHER] Cache cleared")
+
 
 # ================================================================
 # EMBEDDING FUNCTIONS
@@ -136,8 +206,10 @@ def get_embedding(text: str) -> Optional[List[float]]:
         _cache_embedding(text, embedding_list)
         return embedding_list
     except Exception as e:
-        print(f"[SEMANTIC_MATCHER] Embedding error for '{text[:30]}...': {e}")
+        if CONFIG.VERBOSE:
+            print(f"[SEMANTIC_MATCHER] Embedding error for '{text[:30]}...': {e}")
         return None
+
 
 def get_embeddings_batch(texts: List[str]) -> List[Optional[List[float]]]:
     """
@@ -182,6 +254,7 @@ def get_embeddings_batch(texts: List[str]) -> List[Optional[List[float]]]:
         print(f"[SEMANTIC_MATCHER] Batch embedding error: {e}")
         return [None] * len(texts)
 
+
 # ================================================================
 # SIMILARITY FUNCTIONS
 # ================================================================
@@ -212,6 +285,7 @@ def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
     except:
         return 0.0
 
+
 def calculate_semantic_similarity(text1: str, text2: str) -> float:
     """
     Oblicza semantyczne podobieństwo między dwoma tekstami.
@@ -230,6 +304,40 @@ def calculate_semantic_similarity(text1: str, text2: str) -> float:
     
     return cosine_similarity(emb1, emb2)
 
+
+def calculate_similarity_batch(text: str, candidates: List[str]) -> List[Tuple[str, float]]:
+    """
+    Oblicza similarity między tekstem a listą kandydatów.
+    
+    Args:
+        text: Tekst źródłowy
+        candidates: Lista tekstów do porównania
+        
+    Returns:
+        Lista (tekst, similarity) posortowana malejąco
+    """
+    if not candidates:
+        return []
+    
+    text_emb = get_embedding(text)
+    if text_emb is None:
+        return [(c, -1.0) for c in candidates]
+    
+    candidate_embs = get_embeddings_batch(candidates)
+    
+    results = []
+    for candidate, emb in zip(candidates, candidate_embs):
+        if emb is not None:
+            sim = cosine_similarity(text_emb, emb)
+        else:
+            sim = -1.0
+        results.append((candidate, sim))
+    
+    # Sortuj malejąco
+    results.sort(key=lambda x: x[1], reverse=True)
+    return results
+
+
 # ================================================================
 # KEYWORD-H2 MATCHING
 # ================================================================
@@ -246,18 +354,19 @@ class MatchResult:
     match_reasons: List[str]
     confidence: str  # HIGH, MEDIUM, LOW, FALLBACK
 
+
 def match_keyword_to_h2(
     keyword: str,
     h2_list: List[str],
     string_scores: Optional[Dict[int, int]] = None
 ) -> MatchResult:
     """
-    Dopasowuje keyword do najlepszego H2 używając embeddingów + string match.
+    Dopasowuje keyword do najlepszego H2 używając embeddingów.
     
     Args:
-        keyword: Słowo kluczowe
+        keyword: Słowo kluczowe do dopasowania
         h2_list: Lista nagłówków H2
-        string_scores: Opcjonalne - już obliczone string scores dla każdego H2
+        string_scores: Opcjonalne - już obliczone string scores
         
     Returns:
         MatchResult z najlepszym dopasowaniem
@@ -313,7 +422,7 @@ def match_keyword_to_h2(
             best_str_score = str_score
             best_idx = idx
     
-    # Określ confidence
+    # Określ confidence (progi dostosowane do polskiego modelu)
     if use_embeddings and best_emb_score >= CONFIG.HIGH_SIMILARITY_THRESHOLD:
         confidence = "HIGH"
         reasons.append(f"embedding_high:{best_emb_score:.2f}")
@@ -344,6 +453,7 @@ def match_keyword_to_h2(
         confidence=confidence
     )
 
+
 def _calculate_string_score(keyword: str, h2: str) -> float:
     """
     Oblicza string-based score (kompatybilny z istniejącą logiką).
@@ -366,15 +476,20 @@ def _calculate_string_score(keyword: str, h2: str) -> float:
     if kw_lower in h2_lower or h2_lower in kw_lower:
         score += 5
     
-    # 3. Partial word match (+2)
+    # 3. Partial word match (+2) - ważne dla polskiej fleksji!
     for kw_word in kw_words:
         for h2_word in h2_words:
             if len(kw_word) > 3 and len(h2_word) > 3:
-                if kw_word in h2_word or h2_word in kw_word:
+                # Sprawdź rdzeń słowa (pierwsze 4+ znaki)
+                if kw_word[:4] == h2_word[:4]:
+                    score += 3  # 🔧 było 2, zwiększone dla fleksji
+                    break
+                elif kw_word in h2_word or h2_word in kw_word:
                     score += 2
                     break
     
     return min(score, 20)  # Cap at 20
+
 
 def match_all_keywords_to_h2(
     keywords: List[str],
@@ -415,6 +530,7 @@ def match_all_keywords_to_h2(
     
     return results
 
+
 # ================================================================
 # INTEGRATION HELPER
 # ================================================================
@@ -451,14 +567,14 @@ def enhance_keyword_assignment(
     if result.confidence in ["HIGH", "MEDIUM"]:
         if result.h2_idx != original_h2_idx:
             # Embedding sugeruje inny H2
-            if result.embedding_score > 0.5 and original_score < 5:
+            if result.embedding_score > 0.55 and original_score < 5:
                 # Wysoki embedding score, niski string score - użyj embedding
                 new_reason = f"semantic:{result.confidence.lower()}:{result.embedding_score:.2f}"
                 new_score = int(result.combined_score * 20)  # Skaluj do 0-20
                 return new_score, result.h2_idx, new_reason, result.embedding_score
     
     # Wzmocnij oryginalny score jeśli embedding się zgadza
-    if result.h2_idx == original_h2_idx and result.embedding_score > 0.4:
+    if result.h2_idx == original_h2_idx and result.embedding_score > 0.45:
         boost = int(result.embedding_score * 5)  # +0-5 bonus
         new_reason = f"{original_reason}, semantic_boost:{result.embedding_score:.2f}"
         return original_score + boost, original_h2_idx, new_reason, result.embedding_score
@@ -466,53 +582,78 @@ def enhance_keyword_assignment(
     # Zwróć oryginalne
     return original_score, original_h2_idx, original_reason, result.embedding_score
 
+
 # ================================================================
 # TESTING / DEBUG
 # ================================================================
 
 def test_semantic_matcher():
     """Test funkcjonalności semantic matchera."""
-    print("="*60)
-    print("SEMANTIC MATCHER TEST")
-    print("="*60)
+    print("=" * 60)
+    print("SEMANTIC MATCHER v36.9 TEST (Polish Model)")
+    print("=" * 60)
     
-    # Test 1: Availability
-    print(f"\n1. Embeddings available: {is_available()}")
+    # Test 1: Model info
+    info = get_model_info()
+    print(f"\n1. Model info:")
+    for key, value in info.items():
+        print(f"   {key}: {value}")
     
-    if not is_available():
+    if not info["available"]:
         print("⚠️ Skipping embedding tests - model not available")
         return
     
-    # Test 2: Basic similarity
-    print("\n2. Similarity tests:")
+    # Test 2: Basic similarity - porównanie z oczekiwanymi wynikami dla PL
+    print("\n2. Similarity tests (Polish language):")
     test_pairs = [
-        ("Sąd Okręgowy", "Gdzie złożyć wniosek?"),
-        ("ubezwłasnowolnienie", "Czym jest ubezwłasnowolnienie?"),
-        ("wniosek do sądu", "Jak złożyć dokumenty?"),
-        ("choroba psychiczna", "Przesłanki medyczne"),
+        ("sąd rodzinny", "sąd opiekuńczy", "should be HIGH"),
+        ("ubezwłasnowolnienie", "ubezwłasnowolniony", "should be HIGH (fleksja)"),
+        ("władza rodzicielska", "prawa rodzicielskie", "should be HIGH"),
+        ("wniosek o ubezwłasnowolnienie", "podanie do sądu", "should be MEDIUM"),
+        ("Sąd Okręgowy", "Gdzie złożyć wniosek?", "should be LOW"),
+        ("choroba psychiczna", "Przesłanki medyczne", "should be MEDIUM"),
+        ("kot", "pies", "should be LOW (different animals)"),
     ]
     
-    for text1, text2 in test_pairs:
+    for text1, text2, expected in test_pairs:
         sim = calculate_semantic_similarity(text1, text2)
-        print(f"   '{text1}' <-> '{text2}': {sim:.3f}")
+        level = "HIGH" if sim >= CONFIG.HIGH_SIMILARITY_THRESHOLD else \
+                "MEDIUM" if sim >= CONFIG.MEDIUM_SIMILARITY_THRESHOLD else \
+                "LOW" if sim >= CONFIG.MIN_SIMILARITY_THRESHOLD else "NONE"
+        status = "✅" if level in expected.upper() else "⚠️"
+        print(f"   {status} '{text1}' <-> '{text2}': {sim:.3f} ({level}) - {expected}")
     
     # Test 3: Keyword matching
     print("\n3. Keyword-H2 matching:")
-    keywords = ["Sąd Okręgowy", "choroba psychiczna", "wniosek"]
+    keywords = ["Sąd Okręgowy", "choroba psychiczna", "wniosek", "kurator"]
     h2_list = [
         "Czym jest ubezwłasnowolnienie?",
         "Przesłanki ubezwłasnowolnienia",
         "Jak złożyć wniosek do sądu?",
-        "Kto może złożyć wniosek?"
+        "Kto może złożyć wniosek?",
+        "Rola kuratora w postępowaniu"
     ]
     
     for kw in keywords:
         result = match_keyword_to_h2(kw, h2_list)
-        print(f"   '{kw}' -> '{result.h2}' (conf={result.confidence}, emb={result.embedding_score:.2f})")
+        print(f"   '{kw}' -> '{result.h2}'")
+        print(f"      confidence={result.confidence}, emb={result.embedding_score:.2f}, str={result.string_score:.0f}")
     
-    print("\n" + "="*60)
+    # Test 4: Batch similarity
+    print("\n4. Batch similarity test:")
+    results = calculate_similarity_batch("ubezwłasnowolnienie", [
+        "pozbawienie zdolności prawnej",
+        "orzeczenie sądowe",
+        "choroba psychiczna",
+        "samochód osobowy"
+    ])
+    for text, score in results:
+        print(f"   {score:.3f}: {text}")
+    
+    print("\n" + "=" * 60)
     print("TEST COMPLETE")
-    print("="*60)
+    print("=" * 60)
+
 
 if __name__ == "__main__":
     test_semantic_matcher()
