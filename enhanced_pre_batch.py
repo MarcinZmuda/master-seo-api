@@ -9,6 +9,8 @@ Moduł generujący KONKRETNE instrukcje dla GPT zamiast surowych danych.
 - Instrukcje o różnej liczbie akapitów między sekcjami
 - Rozkład długości zdań (20-25% krótkich, 50-60% średnich, 15-25% długich)
 - Instrukcje o różnej długości akapitów (40-150 słów)
+- 📋 LISTY I WYPUNKTOWANIA - dynamiczne instrukcje kiedy używać list
+- 📑 H3 SUBHEADINGI - instrukcje o dzieleniu długich sekcji
 
 🆕 v43.0 ZMIANY:
 - Integracja z phrase_hierarchy.py (hierarchia fraz - zapobiega stuffing)
@@ -1159,6 +1161,47 @@ def _generate_gpt_prompt_section(enhanced: Dict, is_legal: bool = False) -> str:
     lines.append("   • Średni: 70-100 słów")
     lines.append("   • Długi: 110-150 słów")
     lines.append("")
+    
+    # 🆕 v43.1: LISTY I WYPUNKTOWANIA
+    structure = enhanced.get("structure_instructions", {})
+    has_list = structure.get("has_list", False)
+    has_h3 = structure.get("has_h3", False)
+    batch_type = enhanced.get("batch_type", "CONTENT")
+    
+    if batch_type not in ["INTRO", "FAQ"]:
+        lines.append("📋 LISTY I WYPUNKTOWANIA:")
+        if has_list:
+            lines.append("   ✅ W TEJ SEKCJI UŻYJ LISTY WYPUNKTOWANEJ!")
+            lines.append("   • Lista 3-7 punktów")
+            lines.append("   • Każdy punkt 1-2 zdania")
+            lines.append("   • Poprzedź listę zdaniem wprowadzającym")
+            lines.append("")
+            lines.append("   📝 Przykład:")
+            lines.append("   \"Główne objawy to:\"")
+            lines.append("   • punkt pierwszy,")
+            lines.append("   • punkt drugi,")
+            lines.append("   • punkt trzeci.")
+        else:
+            lines.append("   ℹ️ Ta sekcja BEZ listy (użyj w innych sekcjach)")
+            lines.append("   💡 W artykule powinno być 1-2 listy wypunktowane")
+            lines.append("   💡 Najlepiej w sekcjach: objawy, przyczyny, zalecenia")
+        lines.append("")
+    
+    # H3 subheadingi - TYLKO gdy has_h3=true!
+    if has_h3:
+        lines.append("📑 H3 SUBHEADINGI:")
+        lines.append("   ✅ W TEJ sekcji DODAJ 1-2 nagłówki H3!")
+        lines.append("   • H3 dzieli długą sekcję na części")
+        lines.append("   • H3 powinien zawierać słowo kluczowe")
+        lines.append("   • Format: h3: Tytuł podsekcji")
+        lines.append("")
+    else:
+        # WYRAŹNY ZAKAZ H3 gdy nie jest wymagany
+        lines.append("📑 H3 SUBHEADINGI:")
+        lines.append("   ❌ W TEJ sekcji NIE UŻYWAJ H3!")
+        lines.append("   ℹ️ H3 tylko w najdłuższej sekcji artykułu")
+        lines.append("   ℹ️ Ta sekcja: same akapity, bez subheadingów")
+        lines.append("")
     
     # KRÓTKIE ZDANIA - z przykładami
     short_sentences = style.get("short_sentences_dynamic", {})
