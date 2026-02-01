@@ -1,8 +1,14 @@
 """
 ===============================================================================
-🎯 ENHANCED PRE-BATCH INSTRUCTIONS v42.0
+🎯 ENHANCED PRE-BATCH INSTRUCTIONS v43.0
 ===============================================================================
 Moduł generujący KONKRETNE instrukcje dla GPT zamiast surowych danych.
+
+🆕 v43.0 ZMIANY:
+- Integracja z phrase_hierarchy.py (hierarchia fraz - zapobiega stuffing)
+- Nowy parametr phrase_hierarchy_data w generate_enhanced_pre_batch_info()
+- Sekcja 🌳 HIERARCHIA FRAZ w gpt_instructions
+- Informacje o rdzeniach, rozszerzeniach i strategiach
 
 🆕 v42.0 ZMIANY:
 - Integracja z overflow_buffer.py (FAQ dla sierocych fraz)
@@ -171,6 +177,31 @@ try:
     ADVANCED_SEMANTIC_ENABLED = True
 except ImportError:
     ADVANCED_SEMANTIC_ENABLED = False
+
+# ================================================================
+# 🆕 v43.0: PHRASE HIERARCHY INTEGRATION
+# Dodaje kontekst hierarchii fraz do pre_batch_info
+# ================================================================
+try:
+    from phrase_hierarchy import (
+        dict_to_hierarchy,
+        get_batch_hierarchy_context,
+        format_hierarchy_summary_short,
+        PhraseHierarchy
+    )
+    PHRASE_HIERARCHY_AVAILABLE = True
+    print("[ENHANCED_PRE_BATCH] ✅ phrase_hierarchy v1.0 loaded")
+except ImportError:
+    PHRASE_HIERARCHY_AVAILABLE = False
+    print("[ENHANCED_PRE_BATCH] ⚠️ phrase_hierarchy not available")
+    
+    # Fallback functions
+    def dict_to_hierarchy(data):
+        return None
+    def get_batch_hierarchy_context(hierarchy, batch_phrases, current_counts=None):
+        return {}
+    def format_hierarchy_summary_short(hierarchy):
+        return ""
 
 
 # ============================================================================
@@ -705,7 +736,9 @@ def generate_enhanced_pre_batch_info(
     is_sub_batch: bool = False,
     h3_title: str = None,
     assigned_phrases: List[Dict] = None,
-    assigned_entities: List[Dict] = None
+    assigned_entities: List[Dict] = None,
+    # 🆕 v43.0: Phrase Hierarchy
+    phrase_hierarchy_data: Dict = None
 ) -> Dict[str, Any]:
     """
     Generuje KOMPLETNE enhanced pre_batch_info z konkretnymi instrukcjami.
@@ -893,6 +926,59 @@ def generate_enhanced_pre_batch_info(
             "assigned_entities_count": len(assigned_entities or [])
         }
     
+    # ================================================================
+    # 🆕 v43.0: PHRASE HIERARCHY CONTEXT
+    # Dodaje informacje o hierarchii fraz do kontekstu batcha
+    # ================================================================
+    hierarchy_context = None
+    
+    if phrase_hierarchy_data and PHRASE_HIERARCHY_AVAILABLE:
+        try:
+            hierarchy = dict_to_hierarchy(phrase_hierarchy_data)
+            
+            if hierarchy:
+                # Zbierz frazy przypisane do tego batcha
+                batch_phrases = []
+                
+                # Z assigned_phrases (jeśli sub-batch)
+                if assigned_phrases:
+                    batch_phrases = [p.get("keyword", "") for p in assigned_phrases if p.get("keyword")]
+                
+                # Z keywords_state - frazy które jeszcze nie osiągnęły limitu
+                if not batch_phrases:
+                    for rid, meta in keywords_state.items():
+                        actual = meta.get("actual_uses", 0)
+                        target_max = meta.get("target_max", 999)
+                        if actual < target_max:
+                            kw = meta.get("keyword", "")
+                            if kw:
+                                batch_phrases.append(kw)
+                
+                # Pobierz aktualne zliczenia
+                current_counts = {
+                    meta.get("keyword", ""): meta.get("actual_uses", 0)
+                    for rid, meta in keywords_state.items()
+                    if meta.get("keyword")
+                }
+                
+                # Pobierz kontekst hierarchii dla tego batcha
+                hierarchy_context = get_batch_hierarchy_context(
+                    hierarchy=hierarchy,
+                    batch_phrases=batch_phrases[:30],  # Max 30 fraz
+                    current_counts=current_counts
+                )
+                
+                print(f"[ENHANCED_PRE_BATCH] ✅ Hierarchy context: "
+                      f"{len(hierarchy_context.get('roots_covered', []))} roots, "
+                      f"{len(hierarchy_context.get('entity_phrases', []))} entity phrases")
+                
+        except Exception as e:
+            print(f"[ENHANCED_PRE_BATCH] ⚠️ Hierarchy context error: {e}")
+            hierarchy_context = None
+    
+    # Dodaj do enhanced
+    enhanced["phrase_hierarchy"] = hierarchy_context
+    
     # GPT PROMPT SECTION
     enhanced["gpt_instructions"] = _generate_gpt_prompt_section(enhanced, is_legal)
     
@@ -948,6 +1034,59 @@ def _generate_gpt_prompt_section(enhanced: Dict, is_legal: bool = False) -> str:
         lines.append("")
     elif h2_count == 1:
         lines.append(f"📌 H2: \"{enhanced['current_h2']}\"")
+    
+    # ================================================================
+    # 🆕 v43.0: PHRASE HIERARCHY TIPS
+    # ================================================================
+    hierarchy = enhanced.get("phrase_hierarchy")
+    if hierarchy:
+        lines.append("")
+        lines.append("🌳 HIERARCHIA FRAZ - KLUCZOWE!")
+        lines.append("=" * 40)
+        
+        # Writing tips
+        tips = hierarchy.get("writing_tips", [])
+        for tip in tips[:5]:
+            lines.append(f"   {tip}")
+        
+        # Roots covered info
+        roots_covered = hierarchy.get("roots_covered", [])
+        if roots_covered:
+            lines.append("")
+            lines.append("   📊 RDZENIE W TYM BATCHU:")
+            for root_info in roots_covered[:4]:
+                root = root_info.get("root", "")
+                strategy = root_info.get("strategy", "")
+                eff_target = root_info.get("effective_target", "")
+                extensions_in_batch = root_info.get("extensions_in_batch", 0)
+                
+                if strategy == "extensions_sufficient":
+                    lines.append(f"   ✅ \"{root}\" → NIE POWTARZAJ osobno!")
+                    lines.append(f"      (masz {extensions_in_batch} rozszerzeń w tym batchu)")
+                elif strategy == "mixed":
+                    lines.append(f"   ⚖️ \"{root}\" → użyj {eff_target} samodzielnie")
+                    lines.append(f"      + {extensions_in_batch} rozszerzeń")
+                else:
+                    lines.append(f"   📌 \"{root}\" → użyj {eff_target}")
+        
+        # Entity phrases
+        entity_phrases = hierarchy.get("entity_phrases", [])
+        if entity_phrases:
+            lines.append("")
+            lines.append("   🔵 FRAZY = ENCJE (PRIORYTET!):")
+            for ep in entity_phrases[:5]:
+                lines.append(f"   • \"{ep}\" ← buduje topical authority")
+        
+        # Triplet phrases
+        triplet_phrases = hierarchy.get("triplet_phrases", [])
+        if triplet_phrases:
+            lines.append("")
+            lines.append("   🔺 FRAZY Z TRIPLETÓW (bonus SEO):")
+            for tp in triplet_phrases[:4]:
+                lines.append(f"   • \"{tp}\"")
+        
+        lines.append("")
+        lines.append("=" * 40)
     
     # 🆕 v42.0: FAQ instructions
     if enhanced.get("batch_type") == "FAQ" and enhanced.get("faq_instructions"):
@@ -1006,5 +1145,6 @@ __all__ = [
     'get_faq_instructions',
     'CONFIG',
     'OVERFLOW_BUFFER_AVAILABLE',
-    'SEMANTIC_TRIPLET_AVAILABLE'
+    'SEMANTIC_TRIPLET_AVAILABLE',
+    'PHRASE_HIERARCHY_AVAILABLE'
 ]
