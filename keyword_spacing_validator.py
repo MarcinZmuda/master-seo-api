@@ -1,123 +1,65 @@
 """
 ===============================================================================
-🔄 KEYWORD SPACING VALIDATOR v1.0
+🎯 WIDE COVERAGE STRATEGY v1.0
 ===============================================================================
-Rozwiązuje problem keyword stuffingu przez:
+NOWA STRATEGIA: Szeroki coverage > głęboki coverage
 
-1. SPACING CHECK - minimalna odległość między powtórzeniami
-2. SYNONYM SUGGESTIONS - gdy za blisko, sugeruj alternatywy  
-3. DISTRIBUTION SCORE - czy frazy są równomiernie rozłożone
-4. PRE-BATCH CONTEXT - info gdzie była ostatnio użyta fraza
+STARA STRATEGIA (Deep):
+  "zespół turnera" 8-15x, ale "choroba genetyczna" 0x
+  → Kilka fraz dużo razy, reszta pominięta
 
-INTEGRACJA:
-- pre_batch_info: dodaj last_usage_info dla każdej frazy
-- batch_simple: waliduj spacing przed zatwierdzeniem
-- instrukcje agenta: "NIE UŻYWAJ X, użyj synonimu Y"
+NOWA STRATEGIA (Wide):
+  "zespół turnera" 2-4x, "choroba genetyczna" 2x, "aberracja" 2x, itd.
+  → WSZYSTKIE frazy min 2x, żadna nie pominięta
+
+ZASADY:
+1. KAŻDA fraza BASIC/EXTENDED musi mieć min 2 użycia
+2. Target max jest OBNIŻONY aby agent nie skupiał się na jednej frazie
+3. Priorytet w batchu: frazy z 0 użyć > frazy z 1 użyciem > reszta
+4. "Szerokość" jest ważniejsza niż "głębokość"
 
 ===============================================================================
 """
 
-import re
-from typing import Dict, List, Tuple, Optional, Set
+from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass
 import math
 
 
 # ============================================================================
-# KONFIGURACJA
+# KONFIGURACJA - WIDE COVERAGE
 # ============================================================================
 
-# Minimalna odległość (w słowach) między powtórzeniami tej samej frazy
-MINIMUM_SPACING = {
-    "MAIN": 60,       # Fraza główna - co ~60 słów OK
-    "BASIC": 80,      # BASIC - co ~80 słów  
-    "EXTENDED": 120,  # EXTENDED - co ~120 słów
-    "H2": 150,        # H2 header terms - co ~150 słów
+# Minimalne użycia - HARD REQUIREMENT
+MINIMUM_USES = {
+    "MAIN": 3,       # Main keyword min 3x
+    "BASIC": 2,      # BASIC min 2x - HARD REQUIREMENT!
+    "EXTENDED": 2,   # EXTENDED min 2x - priorytet niższy ale też wymagane
+    "H2": 1,         # H2 headers min 1x
 }
 
-# Maksymalny % exact match (reszta musi być odmianami/synonimami)
-MAX_EXACT_MATCH_RATIO = 0.50  # Max 50% może być identyczne
-
-# Próg stuffingu w akapicie
-PARAGRAPH_STUFFING_THRESHOLD = 2  # Max 2x ta sama fraza w akapicie
-
-# Próg stuffingu w zdaniu
-SENTENCE_STUFFING_THRESHOLD = 1  # Max 1x ta sama fraza w zdaniu
-
-# Ilość słów na końcu poprzedniego batcha do sprawdzenia
-PREVIOUS_BATCH_CONTEXT_WORDS = 80
-
-
-# ============================================================================
-# SYNONIMY DLA FRAZ SEO (rozszerzenie contextual_synonyms)
-# ============================================================================
-
-# Synonimy dla całych fraz (nie pojedynczych słów)
-PHRASE_SYNONYMS = {
-    # Medyczne
-    "zespół turnera": [
-        "ta aberracja chromosomalna", 
-        "to schorzenie genetyczne",
-        "omawiany zespół",
-        "ta jednostka kliniczna",
-        "turner syndrome"  # dla kontekstu międzynarodowego
-    ],
-    "choroba genetyczna": [
-        "schorzenie genetyczne",
-        "zaburzenie genetyczne", 
-        "wada wrodzona",
-        "ta choroba"
-    ],
-    "aberracja chromosomalna": [
-        "zaburzenie chromosomowe",
-        "anomalia genetyczna",
-        "ta aberracja"
-    ],
-    
-    # Prawne
-    "sąd rodzinny": [
-        "sąd opiekuńczy",
-        "ten sąd",
-        "właściwy sąd",
-        "organ orzekający"
-    ],
-    "władza rodzicielska": [
-        "prawa rodzicielskie",
-        "opieka rodzicielska",
-        "ta władza"
-    ],
-    "miejsce pobytu dziecka": [
-        "miejsce zamieszkania dziecka",
-        "adres dziecka",
-        "to miejsce"
-    ],
-    "porwanie rodzicielskie": [
-        "uprowadzenie przez rodzica",
-        "samowolne zabranie dziecka",
-        "to porwanie"
-    ],
-    
-    # Ogólne
-    "niski wzrost": [
-        "niskorosłość",
-        "niedobór wzrostu",
-        "mniejszy wzrost"
-    ],
+# Maksymalne użycia - OBNIŻONE aby wymuszać szerokość
+MAX_USES_MULTIPLIER = {
+    "MAIN": 2.5,     # Main: min * 2.5 (np. 3 * 2.5 = 7-8 max)
+    "BASIC": 2.0,    # BASIC: min * 2 (np. 2 * 2 = 4 max)
+    "EXTENDED": 2.0, # EXTENDED: min * 2
+    "H2": 3.0,       # H2 headers: min * 3
 }
 
-# Zaimki/określenia zastępcze uniwersalne
-UNIVERSAL_SUBSTITUTES = {
-    "MEDICAL": [
-        "ta choroba", "to schorzenie", "ta jednostka", 
-        "omawiany zespół", "opisywane zaburzenie"
-    ],
-    "LEGAL": [
-        "ten sąd", "ta instytucja", "właściwy organ",
-        "omawiana sprawa", "przedmiotowa kwestia"
-    ],
-    "GENERIC": [
-        "ta kwestia", "omawiany temat", "przedmiotowe zagadnienie"
-    ]
+# Absolutne maksimum (niezależnie od obliczeń)
+ABSOLUTE_MAX = {
+    "MAIN": 15,
+    "BASIC": 6,      # Max 6 użyć BASIC - wymusza dystrybucję
+    "EXTENDED": 4,   # Max 4 użycia EXTENDED
+    "H2": 5,
+}
+
+# Progi coverage
+COVERAGE_THRESHOLDS = {
+    "EXCELLENT": 0.95,  # 95%+ fraz ma min 2 użycia
+    "GOOD": 0.80,       # 80%+ fraz
+    "ACCEPTABLE": 0.60, # 60%+ fraz
+    "POOR": 0.40,       # Poniżej = CRITICAL
 }
 
 
@@ -126,583 +68,427 @@ UNIVERSAL_SUBSTITUTES = {
 # ============================================================================
 
 @dataclass
-class PhrasePosition:
-    """Pozycja frazy w tekście."""
-    phrase: str
-    word_position: int  # Pozycja w słowach od początku
-    char_position: int  # Pozycja w znakach
-    context: str  # Kilka słów przed i po
-
-
-@dataclass  
-class SpacingViolation:
-    """Naruszenie minimalnej odległości."""
+class WideCoverageTarget:
+    """Nowy target dla frazy w strategii wide coverage."""
     phrase: str
     phrase_type: str
-    position1: int
-    position2: int
-    actual_distance: int
-    min_required: int
-    severity: str  # CRITICAL, WARNING
-    suggestion: str
+    min_uses: int
+    max_uses: int
+    current_uses: int
+    priority: str  # CRITICAL, HIGH, MEDIUM, LOW, DONE
+    priority_reason: str
 
 
 @dataclass
-class LastUsageInfo:
-    """Info o ostatnim użyciu frazy - dla pre_batch_info."""
-    phrase: str
-    words_ago: int  # Ile słów temu (od końca poprzedniego batcha)
-    can_use_now: bool  # Czy można użyć na początku nowego batcha
-    suggested_wait: int  # Ile słów poczekać
-    alternatives: List[str]  # Synonimy do użycia zamiast
+class CoverageReport:
+    """Raport pokrycia fraz."""
+    total_phrases: int
+    covered_phrases: int  # >= min_uses
+    partially_covered: int  # > 0 ale < min_uses
+    not_covered: int  # = 0
+    coverage_ratio: float
+    status: str  # EXCELLENT, GOOD, ACCEPTABLE, POOR
+    critical_phrases: List[str]  # Frazy z 0 użyć
+    needs_attention: List[str]  # Frazy z 1 użyciem (BASIC/EXTENDED)
 
 
 # ============================================================================
 # CORE FUNCTIONS
 # ============================================================================
 
-def tokenize_to_words(text: str) -> List[str]:
-    """Tokenizuje tekst na słowa."""
-    if not text:
-        return []
-    return re.findall(r'\b\w+\b', text.lower())
-
-
-def find_phrase_positions(
-    text: str, 
-    phrase: str,
-    use_lemmatization: bool = False
-) -> List[PhrasePosition]:
-    """
-    Znajduje wszystkie pozycje frazy w tekście.
-    
-    Args:
-        text: Tekst do przeszukania
-        phrase: Fraza do znalezienia
-        use_lemmatization: Czy używać lemmatyzacji (wymaga polish_lemmatizer)
-    
-    Returns:
-        Lista pozycji frazy
-    """
-    if not text or not phrase:
-        return []
-    
-    positions = []
-    text_lower = text.lower()
-    phrase_lower = phrase.lower().strip()
-    words = tokenize_to_words(text)
-    phrase_words = phrase_lower.split()
-    phrase_len = len(phrase_words)
-    
-    if phrase_len == 0:
-        return []
-    
-    # Szukaj frazy w tekście
-    for i in range(len(words) - phrase_len + 1):
-        window = words[i:i + phrase_len]
-        
-        # Sprawdź dopasowanie (z tolerancją na końcówki fleksyjne)
-        match = True
-        for pw, tw in zip(phrase_words, window):
-            # Heurystyka: pierwsze 4 litery muszą się zgadzać (dla fleksji)
-            min_len = min(len(pw), len(tw), 4)
-            if len(pw) >= 4 and len(tw) >= 4:
-                if pw[:min_len] != tw[:min_len]:
-                    match = False
-                    break
-            elif pw != tw:
-                match = False
-                break
-        
-        if match:
-            # Znajdź pozycję znakową
-            char_pos = 0
-            word_count = 0
-            for m in re.finditer(r'\b\w+\b', text_lower):
-                if word_count == i:
-                    char_pos = m.start()
-                    break
-                word_count += 1
-            
-            # Kontekst (3 słowa przed i po)
-            context_start = max(0, i - 3)
-            context_end = min(len(words), i + phrase_len + 3)
-            context = " ".join(words[context_start:context_end])
-            
-            positions.append(PhrasePosition(
-                phrase=phrase,
-                word_position=i,
-                char_position=char_pos,
-                context=context
-            ))
-    
-    return positions
-
-
-def check_spacing_violations(
-    text: str,
-    phrase: str,
-    phrase_type: str = "BASIC"
-) -> List[SpacingViolation]:
-    """
-    Sprawdza czy fraza nie występuje zbyt blisko poprzedniego użycia.
-    
-    Returns:
-        Lista naruszeń (pusta = wszystko OK)
-    """
-    min_spacing = MINIMUM_SPACING.get(phrase_type.upper(), 80)
-    positions = find_phrase_positions(text, phrase)
-    
-    if len(positions) < 2:
-        return []
-    
-    violations = []
-    
-    for i in range(1, len(positions)):
-        distance = positions[i].word_position - positions[i-1].word_position
-        
-        if distance < min_spacing:
-            severity = "CRITICAL" if distance < min_spacing // 2 else "WARNING"
-            
-            # Pobierz synonimy
-            alternatives = get_phrase_alternatives(phrase, phrase_type)
-            alt_str = ", ".join(alternatives[:3]) if alternatives else "użyj zaimka"
-            
-            violations.append(SpacingViolation(
-                phrase=phrase,
-                phrase_type=phrase_type,
-                position1=positions[i-1].word_position,
-                position2=positions[i].word_position,
-                actual_distance=distance,
-                min_required=min_spacing,
-                severity=severity,
-                suggestion=f"Zamień jedno użycie na: {alt_str}"
-            ))
-    
-    return violations
-
-
-def get_phrase_alternatives(phrase: str, phrase_type: str = "BASIC") -> List[str]:
-    """
-    Zwraca alternatywy dla frazy (synonimy + zaimki).
-    
-    Args:
-        phrase: Fraza oryginalna
-        phrase_type: Typ frazy (MAIN, BASIC, EXTENDED)
-    
-    Returns:
-        Lista alternatyw
-    """
-    phrase_lower = phrase.lower().strip()
-    alternatives = []
-    
-    # 1. Sprawdź dokładne synonimy frazy
-    if phrase_lower in PHRASE_SYNONYMS:
-        alternatives.extend(PHRASE_SYNONYMS[phrase_lower])
-    
-    # 2. Dodaj uniwersalne zamienniki
-    # Wykryj domenę na podstawie frazy
-    domain = detect_domain(phrase)
-    if domain in UNIVERSAL_SUBSTITUTES:
-        alternatives.extend(UNIVERSAL_SUBSTITUTES[domain])
-    
-    # 3. Dodaj formy fleksyjne jako "alternatywy"
-    # (w sensie: "użyj dopełniacza zamiast mianownika")
-    if " " in phrase:
-        # Wielowyrazowa - sugeruj odmianę
-        alternatives.append(f"odmiana: '{phrase}' w innym przypadku")
-    
-    # Usuń duplikaty, zachowaj kolejność
-    seen = set()
-    unique = []
-    for alt in alternatives:
-        if alt.lower() not in seen:
-            seen.add(alt.lower())
-            unique.append(alt)
-    
-    return unique[:6]  # Max 6 alternatyw
-
-
-def detect_domain(phrase: str) -> str:
-    """Wykrywa domenę frazy (MEDICAL, LEGAL, GENERIC)."""
-    phrase_lower = phrase.lower()
-    
-    medical_markers = ["zespół", "choroba", "schorzenie", "objaw", "leczenie", 
-                       "pacjent", "diagnoza", "genetycz", "chromosom"]
-    legal_markers = ["sąd", "prawo", "ustawa", "wyrok", "rodzic", "dziecko",
-                     "porwanie", "władza", "opiek"]
-    
-    for marker in medical_markers:
-        if marker in phrase_lower:
-            return "MEDICAL"
-    
-    for marker in legal_markers:
-        if marker in phrase_lower:
-            return "LEGAL"
-    
-    return "GENERIC"
-
-
-# ============================================================================
-# PRE-BATCH CONTEXT - info dla agenta
-# ============================================================================
-
-def get_last_usage_info(
-    previous_batch_text: str,
-    phrase: str,
-    phrase_type: str = "BASIC"
-) -> LastUsageInfo:
-    """
-    Zwraca info o ostatnim użyciu frazy w poprzednim batchu.
-    Do użycia w pre_batch_info.
-    
-    Args:
-        previous_batch_text: Tekst poprzedniego batcha
-        phrase: Fraza do sprawdzenia
-        phrase_type: Typ frazy
-    
-    Returns:
-        LastUsageInfo z info czy można użyć i alternatywami
-    """
-    min_spacing = MINIMUM_SPACING.get(phrase_type.upper(), 80)
-    
-    if not previous_batch_text:
-        return LastUsageInfo(
-            phrase=phrase,
-            words_ago=999,
-            can_use_now=True,
-            suggested_wait=0,
-            alternatives=[]
-        )
-    
-    # Weź ostatnie N słów
-    words = tokenize_to_words(previous_batch_text)
-    last_words = words[-PREVIOUS_BATCH_CONTEXT_WORDS:] if len(words) > PREVIOUS_BATCH_CONTEXT_WORDS else words
-    last_text = " ".join(last_words)
-    
-    # Znajdź pozycje frazy
-    positions = find_phrase_positions(last_text, phrase)
-    
-    if not positions:
-        return LastUsageInfo(
-            phrase=phrase,
-            words_ago=999,
-            can_use_now=True,
-            suggested_wait=0,
-            alternatives=[]
-        )
-    
-    # Ostatnia pozycja
-    last_pos = positions[-1].word_position
-    words_ago = len(last_words) - last_pos
-    
-    # Czy można użyć na początku nowego batcha?
-    can_use = words_ago >= min_spacing
-    suggested_wait = max(0, min_spacing - words_ago) if not can_use else 0
-    
-    # Alternatywy jeśli nie można
-    alternatives = get_phrase_alternatives(phrase, phrase_type) if not can_use else []
-    
-    return LastUsageInfo(
-        phrase=phrase,
-        words_ago=words_ago,
-        can_use_now=can_use,
-        suggested_wait=suggested_wait,
-        alternatives=alternatives
-    )
-
-
-def generate_spacing_instructions(
+def calculate_wide_coverage_targets(
     keywords_state: Dict[str, dict],
-    previous_batch_text: str = ""
-) -> Dict:
+    article_length: int = 2000
+) -> Dict[str, WideCoverageTarget]:
     """
-    Generuje instrukcje spacing dla agenta.
-    Dodaj wynik do pre_batch_info.
+    Oblicza nowe targety w strategii wide coverage.
+    
+    Args:
+        keywords_state: Obecny stan fraz {rid: {keyword, type, actual_uses, ...}}
+        article_length: Długość artykułu (słowa)
     
     Returns:
-        {
-            "spacing_rules": [...],
-            "avoid_at_start": [...],
-            "can_use_freely": [...],
-            "fleksja_reminder": str
-        }
+        Dict {rid: WideCoverageTarget}
     """
-    result = {
-        "spacing_rules": [],
-        "avoid_at_start": [],
-        "can_use_freely": [],
-        "fleksja_reminder": "🔄 FORMY FLEKSYJNE: 'zespołu turnera' = 'zespół turnera' = 'zespołem turnera'"
-    }
+    targets = {}
     
     for rid, meta in keywords_state.items():
         phrase = meta.get("keyword", "").strip()
         phrase_type = meta.get("type", "BASIC").upper()
+        current_uses = meta.get("actual_uses", 0)
         
         if not phrase:
             continue
         
-        min_spacing = MINIMUM_SPACING.get(phrase_type, 80)
+        # Oblicz min/max
+        min_uses = MINIMUM_USES.get(phrase_type, 2)
         
-        # Dodaj regułę spacing
-        result["spacing_rules"].append({
-            "phrase": phrase,
-            "type": phrase_type,
-            "min_spacing": min_spacing,
-            "rule": f"'{phrase}' → min {min_spacing} słów między użyciami"
-        })
+        # Max = min * multiplier, ale nie więcej niż ABSOLUTE_MAX
+        multiplier = MAX_USES_MULTIPLIER.get(phrase_type, 2.0)
+        calculated_max = int(min_uses * multiplier)
+        absolute_max = ABSOLUTE_MAX.get(phrase_type, 6)
+        max_uses = min(calculated_max, absolute_max)
         
-        # Sprawdź poprzedni batch
-        if previous_batch_text:
-            last_usage = get_last_usage_info(previous_batch_text, phrase, phrase_type)
-            
-            if not last_usage.can_use_now:
-                result["avoid_at_start"].append({
-                    "phrase": phrase,
-                    "words_ago": last_usage.words_ago,
-                    "wait": last_usage.suggested_wait,
-                    "alternatives": last_usage.alternatives,
-                    "instruction": f"⚠️ '{phrase}' była {last_usage.words_ago} słów temu - poczekaj ~{last_usage.suggested_wait} słów lub użyj: {', '.join(last_usage.alternatives[:2])}"
-                })
-            else:
-                result["can_use_freely"].append(phrase)
+        # Dostosuj do długości artykułu (dla bardzo krótkich)
+        if article_length < 1000:
+            max_uses = max(min_uses, max_uses - 1)
+        
+        # Określ priorytet
+        if current_uses == 0:
+            priority = "CRITICAL"
+            priority_reason = f"0/{min_uses} użyć - WYMAGANE!"
+        elif current_uses < min_uses:
+            priority = "HIGH"
+            priority_reason = f"{current_uses}/{min_uses} użyć - potrzeba jeszcze {min_uses - current_uses}x"
+        elif current_uses == min_uses:
+            priority = "MEDIUM"
+            priority_reason = f"Minimum osiągnięte ({min_uses}x) - opcjonalnie więcej"
+        elif current_uses < max_uses:
+            priority = "LOW"
+            priority_reason = f"OK ({current_uses}x) - można dodać do {max_uses}x"
+        else:
+            priority = "DONE"
+            priority_reason = f"Max osiągnięty ({current_uses}/{max_uses}x) - STOP"
+        
+        targets[rid] = WideCoverageTarget(
+            phrase=phrase,
+            phrase_type=phrase_type,
+            min_uses=min_uses,
+            max_uses=max_uses,
+            current_uses=current_uses,
+            priority=priority,
+            priority_reason=priority_reason
+        )
     
-    return result
+    return targets
 
 
-# ============================================================================
-# BATCH VALIDATION
-# ============================================================================
-
-def validate_batch_spacing(
-    batch_text: str,
-    keywords_state: Dict[str, dict],
-    previous_batch_text: str = ""
+def get_batch_priorities(
+    targets: Dict[str, WideCoverageTarget],
+    batch_number: int,
+    total_batches: int,
+    max_phrases_per_batch: int = 5
 ) -> Dict:
     """
-    Waliduje spacing w batchu.
-    Używaj w batch_simple przed zatwierdzeniem.
+    Zwraca frazy do użycia w tym batchu, posortowane priorytetem.
+    
+    ZASADA: Szerokość > Głębokość
+    - Najpierw frazy z 0 użyć (CRITICAL)
+    - Potem frazy z 1 użyciem (HIGH)  
+    - Potem reszta
     
     Returns:
         {
-            "is_valid": bool,
-            "score": float (0-100),
-            "violations": [...],
-            "paragraph_stuffing": [...],
-            "sentence_stuffing": [...],
-            "suggestions": [...]
+            "must_use": [...],      # CRITICAL - muszą być w tym batchu
+            "should_use": [...],    # HIGH - powinny być
+            "can_use": [...],       # MEDIUM/LOW - opcjonalne
+            "stop": [...],          # DONE - NIE używać
+            "coverage_pressure": str # Jak pilne jest pokrycie
         }
     """
-    result = {
-        "is_valid": True,
-        "score": 100.0,
-        "violations": [],
-        "paragraph_stuffing": [],
-        "sentence_stuffing": [],
-        "suggestions": []
-    }
+    critical = []
+    high = []
+    medium = []
+    low = []
+    done = []
     
-    # Połącz z poprzednim batchem dla sprawdzenia ciągłości
-    full_text = (previous_batch_text + "\n\n" + batch_text) if previous_batch_text else batch_text
-    
-    for rid, meta in keywords_state.items():
-        phrase = meta.get("keyword", "").strip()
-        phrase_type = meta.get("type", "BASIC").upper()
-        
-        if not phrase:
-            continue
-        
-        # 1. Spacing violations (w połączonym tekście)
-        violations = check_spacing_violations(full_text, phrase, phrase_type)
-        for v in violations:
-            result["violations"].append({
-                "phrase": v.phrase,
-                "type": v.phrase_type,
-                "distance": v.actual_distance,
-                "min_required": v.min_required,
-                "severity": v.severity,
-                "suggestion": v.suggestion
-            })
-            
-            if v.severity == "CRITICAL":
-                result["score"] -= 15
-            else:
-                result["score"] -= 8
-        
-        # 2. Paragraph stuffing (tylko w nowym batchu)
-        para_stuff = check_paragraph_stuffing(batch_text, phrase)
-        result["paragraph_stuffing"].extend(para_stuff)
-        result["score"] -= len(para_stuff) * 5
-        
-        # 3. Sentence stuffing (tylko w nowym batchu)
-        sent_stuff = check_sentence_stuffing(batch_text, phrase)
-        result["sentence_stuffing"].extend(sent_stuff)
-        result["score"] -= len(sent_stuff) * 20  # Bardzo poważne
-    
-    # Clamp score
-    result["score"] = max(0, min(100, result["score"]))
-    
-    # Determine validity
-    result["is_valid"] = (
-        result["score"] >= 60 and
-        len(result["sentence_stuffing"]) == 0
-    )
-    
-    # Generate suggestions
-    if result["violations"]:
-        result["suggestions"].append(
-            "Rozłóż frazy bardziej równomiernie - użyj synonimów lub form fleksyjnych"
-        )
-    
-    if result["paragraph_stuffing"]:
-        result["suggestions"].append(
-            "Niektóre akapity mają za dużo tej samej frazy - rozdziel na więcej akapitów"
-        )
-    
-    if result["sentence_stuffing"]:
-        result["suggestions"].append(
-            "❌ KRYTYCZNE: Ta sama fraza 2x w jednym zdaniu - przepisz!"
-        )
-    
-    return result
-
-
-def check_paragraph_stuffing(text: str, phrase: str) -> List[str]:
-    """Sprawdza czy fraza nie jest za często w jednym akapicie."""
-    warnings = []
-    paragraphs = re.split(r'\n\s*\n|\n', text)
-    
-    for i, para in enumerate(paragraphs):
-        if not para.strip():
-            continue
-        
-        positions = find_phrase_positions(para, phrase)
-        if len(positions) > PARAGRAPH_STUFFING_THRESHOLD:
-            warnings.append(
-                f"Akapit {i+1}: '{phrase}' występuje {len(positions)}x (max {PARAGRAPH_STUFFING_THRESHOLD})"
-            )
-    
-    return warnings
-
-
-def check_sentence_stuffing(text: str, phrase: str) -> List[str]:
-    """Sprawdza czy fraza nie jest 2x w tym samym zdaniu."""
-    warnings = []
-    sentences = re.split(r'[.!?]+', text)
-    
-    for i, sent in enumerate(sentences):
-        if not sent.strip():
-            continue
-        
-        positions = find_phrase_positions(sent, phrase)
-        if len(positions) > SENTENCE_STUFFING_THRESHOLD:
-            warnings.append(
-                f"Zdanie {i+1}: '{phrase}' występuje {len(positions)}x w jednym zdaniu!"
-            )
-    
-    return warnings
-
-
-# ============================================================================
-# DISTRIBUTION SCORE
-# ============================================================================
-
-def calculate_distribution_score(text: str, phrase: str) -> Dict:
-    """
-    Oblicza jak równomiernie rozłożona jest fraza w tekście.
-    
-    Returns:
-        {
-            "score": float (0-100),
-            "is_even": bool,
-            "gaps": [...],  # Lista odstępów między użyciami
-            "cv": float,    # Coefficient of variation
-            "suggestion": str
+    for rid, target in targets.items():
+        entry = {
+            "rid": rid,
+            "phrase": target.phrase,
+            "type": target.phrase_type,
+            "current": target.current_uses,
+            "min": target.min_uses,
+            "max": target.max_uses,
+            "reason": target.priority_reason
         }
-    """
-    positions = find_phrase_positions(text, phrase)
+        
+        if target.priority == "CRITICAL":
+            critical.append(entry)
+        elif target.priority == "HIGH":
+            high.append(entry)
+        elif target.priority == "MEDIUM":
+            medium.append(entry)
+        elif target.priority == "LOW":
+            low.append(entry)
+        else:
+            done.append(entry)
     
-    if len(positions) < 2:
-        return {
-            "score": 100.0,
-            "is_even": True,
-            "gaps": [],
-            "cv": 0.0,
-            "suggestion": ""
-        }
+    # Sortuj CRITICAL i HIGH według typu (BASIC przed EXTENDED)
+    type_order = {"MAIN": 0, "BASIC": 1, "EXTENDED": 2, "H2": 3}
+    critical.sort(key=lambda x: type_order.get(x["type"], 4))
+    high.sort(key=lambda x: type_order.get(x["type"], 4))
     
-    # Oblicz odstępy
-    gaps = []
-    for i in range(1, len(positions)):
-        gap = positions[i].word_position - positions[i-1].word_position
-        gaps.append(gap)
+    # Oblicz pressure
+    remaining_batches = total_batches - batch_number + 1
+    critical_count = len(critical)
+    high_count = len(high)
     
-    # Oblicz CV (coefficient of variation)
-    mean_gap = sum(gaps) / len(gaps)
-    variance = sum((g - mean_gap) ** 2 for g in gaps) / len(gaps)
-    std_dev = math.sqrt(variance)
-    cv = std_dev / mean_gap if mean_gap > 0 else 0
-    
-    # Score: niższe CV = lepszy rozkład
-    # CV < 0.3 = świetny, CV > 0.7 = słaby
-    if cv < 0.3:
-        score = 100.0
-    elif cv < 0.5:
-        score = 80.0
-    elif cv < 0.7:
-        score = 60.0
+    if critical_count > remaining_batches * 2:
+        pressure = "CRITICAL"
+    elif critical_count > 0 and remaining_batches <= 2:
+        pressure = "HIGH"
+    elif high_count > remaining_batches * 3:
+        pressure = "MEDIUM"
     else:
-        score = 40.0
+        pressure = "LOW"
     
-    is_even = cv < 0.5
+    # Wybierz frazy do batcha
+    must_use = critical[:max_phrases_per_batch]
+    remaining_slots = max_phrases_per_batch - len(must_use)
     
-    suggestion = ""
-    if not is_even:
-        min_gap = min(gaps)
-        max_gap = max(gaps)
-        suggestion = f"Fraza jest nierównomiernie rozłożona (odstępy: {min_gap}-{max_gap} słów). Wyrównaj rozkład."
+    should_use = high[:remaining_slots] if remaining_slots > 0 else []
+    remaining_slots -= len(should_use)
+    
+    can_use = (medium + low)[:remaining_slots] if remaining_slots > 0 else []
     
     return {
-        "score": score,
-        "is_even": is_even,
-        "gaps": gaps,
-        "cv": round(cv, 2),
-        "suggestion": suggestion
+        "must_use": must_use,
+        "should_use": should_use,
+        "can_use": can_use,
+        "stop": done,
+        "coverage_pressure": pressure,
+        "stats": {
+            "critical_total": len(critical),
+            "high_total": len(high),
+            "remaining_batches": remaining_batches
+        }
     }
+
+
+def calculate_coverage_report(targets: Dict[str, WideCoverageTarget]) -> CoverageReport:
+    """
+    Oblicza raport pokrycia fraz.
+    
+    Returns:
+        CoverageReport z info o coverage
+    """
+    total = 0
+    covered = 0
+    partial = 0
+    not_covered = 0
+    critical_phrases = []
+    needs_attention = []
+    
+    for rid, target in targets.items():
+        # Pomiń MAIN (ma inne zasady)
+        if target.phrase_type == "MAIN":
+            continue
+        
+        total += 1
+        
+        if target.current_uses >= target.min_uses:
+            covered += 1
+        elif target.current_uses > 0:
+            partial += 1
+            needs_attention.append(target.phrase)
+        else:
+            not_covered += 1
+            critical_phrases.append(target.phrase)
+    
+    coverage_ratio = covered / total if total > 0 else 0
+    
+    # Określ status
+    if coverage_ratio >= COVERAGE_THRESHOLDS["EXCELLENT"]:
+        status = "EXCELLENT"
+    elif coverage_ratio >= COVERAGE_THRESHOLDS["GOOD"]:
+        status = "GOOD"
+    elif coverage_ratio >= COVERAGE_THRESHOLDS["ACCEPTABLE"]:
+        status = "ACCEPTABLE"
+    else:
+        status = "POOR"
+    
+    return CoverageReport(
+        total_phrases=total,
+        covered_phrases=covered,
+        partially_covered=partial,
+        not_covered=not_covered,
+        coverage_ratio=coverage_ratio,
+        status=status,
+        critical_phrases=critical_phrases,
+        needs_attention=needs_attention
+    )
+
+
+# ============================================================================
+# RECALCULATE EXISTING TARGETS
+# ============================================================================
+
+def recalculate_targets_for_wide_coverage(
+    keywords_state: Dict[str, dict],
+    article_length: int = 2000
+) -> Dict[str, dict]:
+    """
+    Przelicza istniejące targety na strategię wide coverage.
+    
+    Użyj tej funkcji w project_routes.py przy tworzeniu projektu
+    lub w pre_batch_info aby nadpisać targety.
+    
+    Returns:
+        Zaktualizowany keywords_state z nowymi target_min/max
+    """
+    updated = {}
+    
+    for rid, meta in keywords_state.items():
+        phrase = meta.get("keyword", "").strip()
+        phrase_type = meta.get("type", "BASIC").upper()
+        
+        if not phrase:
+            updated[rid] = meta
+            continue
+        
+        # Oblicz nowe targety
+        min_uses = MINIMUM_USES.get(phrase_type, 2)
+        multiplier = MAX_USES_MULTIPLIER.get(phrase_type, 2.0)
+        calculated_max = int(min_uses * multiplier)
+        absolute_max = ABSOLUTE_MAX.get(phrase_type, 6)
+        max_uses = min(calculated_max, absolute_max)
+        
+        # Dostosuj do długości artykułu
+        if article_length < 1000:
+            max_uses = max(min_uses, max_uses - 1)
+        elif article_length > 3000:
+            # Dłuższe artykuły mogą mieć więcej, ale nie za dużo
+            max_uses = min(max_uses + 2, absolute_max)
+        
+        # Zaktualizuj meta
+        new_meta = meta.copy()
+        new_meta["target_min"] = min_uses
+        new_meta["target_max"] = max_uses
+        new_meta["wide_coverage"] = True  # Flag że używamy nowej strategii
+        
+        updated[rid] = new_meta
+    
+    return updated
 
 
 # ============================================================================
 # FORMAT FOR PROMPT
 # ============================================================================
 
-def format_spacing_instructions_for_prompt(instructions: Dict) -> str:
-    """Formatuje instrukcje spacing do promptu agenta."""
+def format_wide_coverage_instructions(
+    priorities: Dict,
+    coverage_report: CoverageReport
+) -> str:
+    """
+    Formatuje instrukcje wide coverage dla agenta.
+    """
     lines = []
     
     lines.append("\n" + "=" * 60)
-    lines.append("📏 SPACING RULES - Odstępy między frazami")
+    lines.append("🎯 WIDE COVERAGE - Szerokość > Głębokość")
     lines.append("=" * 60)
     
-    # Fleksja reminder
-    lines.append(f"\n{instructions['fleksja_reminder']}")
+    # Coverage status
+    status_emoji = {
+        "EXCELLENT": "🟢",
+        "GOOD": "🟡",
+        "ACCEPTABLE": "🟠",
+        "POOR": "🔴"
+    }
     
-    # Avoid at start (najważniejsze!)
-    if instructions["avoid_at_start"]:
-        lines.append("\n⚠️ NA POCZĄTKU BATCHA - UNIKAJ:")
-        for item in instructions["avoid_at_start"]:
-            lines.append(f"   • {item['instruction']}")
+    lines.append(f"\n📊 COVERAGE: {status_emoji.get(coverage_report.status, '⚪')} {coverage_report.status}")
+    lines.append(f"   {coverage_report.covered_phrases}/{coverage_report.total_phrases} fraz pokrytych ({round(coverage_report.coverage_ratio * 100)}%)")
     
-    # Spacing rules
-    if instructions["spacing_rules"]:
-        lines.append("\n📐 MINIMALNE ODSTĘPY:")
-        for rule in instructions["spacing_rules"][:5]:
-            lines.append(f"   • {rule['rule']}")
+    if coverage_report.not_covered > 0:
+        lines.append(f"   ⚠️ {coverage_report.not_covered} fraz z 0 użyć!")
     
-    # Can use freely
-    if instructions["can_use_freely"]:
-        lines.append(f"\n✅ MOŻNA UŻYĆ OD RAZU: {', '.join(instructions['can_use_freely'][:5])}")
+    # Pressure
+    pressure = priorities.get("coverage_pressure", "LOW")
+    if pressure == "CRITICAL":
+        lines.append(f"\n🚨 PRESSURE: CRITICAL - dużo fraz bez pokrycia!")
+    elif pressure == "HIGH":
+        lines.append(f"\n⚠️ PRESSURE: HIGH - ostatnie batche, użyj brakujących fraz!")
+    
+    # Must use (CRITICAL)
+    if priorities["must_use"]:
+        lines.append("\n" + "─" * 40)
+        lines.append("🔴 MUST USE (0 użyć - WYMAGANE):")
+        for p in priorities["must_use"]:
+            lines.append(f"   • \"{p['phrase']}\" ({p['type']}) - {p['reason']}")
+    
+    # Should use (HIGH)
+    if priorities["should_use"]:
+        lines.append("\n" + "─" * 40)
+        lines.append("🟠 SHOULD USE (potrzeba więcej):")
+        for p in priorities["should_use"]:
+            lines.append(f"   • \"{p['phrase']}\" - {p['current']}/{p['min']} użyć")
+    
+    # Stop
+    if priorities["stop"]:
+        lines.append("\n" + "─" * 40)
+        lines.append("⛔ STOP (max osiągnięty):")
+        stop_phrases = [p['phrase'] for p in priorities["stop"][:5]]
+        lines.append(f"   {', '.join(stop_phrases)}")
+    
+    # Reminder
+    lines.append("\n" + "─" * 40)
+    lines.append("💡 ZASADA: Lepiej użyć WSZYSTKIE frazy po 2x niż kilka po 8x!")
+    lines.append("   → Najpierw frazy z 0 użyć, potem z 1 użyciem")
     
     return "\n".join(lines)
+
+
+# ============================================================================
+# VALIDATION
+# ============================================================================
+
+def validate_wide_coverage_final(
+    targets: Dict[str, WideCoverageTarget]
+) -> Dict:
+    """
+    Walidacja końcowa - czy osiągnięto wide coverage.
+    Użyj w final_review.
+    
+    Returns:
+        {
+            "passed": bool,
+            "coverage_report": CoverageReport,
+            "issues": [...],
+            "suggestions": [...]
+        }
+    """
+    report = calculate_coverage_report(targets)
+    
+    issues = []
+    suggestions = []
+    
+    # Check critical
+    if report.not_covered > 0:
+        issues.append({
+            "type": "UNCOVERED_PHRASES",
+            "severity": "CRITICAL",
+            "count": report.not_covered,
+            "phrases": report.critical_phrases
+        })
+        suggestions.append(
+            f"Dodaj {report.not_covered} brakujących fraz: {', '.join(report.critical_phrases[:3])}"
+        )
+    
+    # Check partial
+    if report.partially_covered > 0:
+        issues.append({
+            "type": "PARTIAL_COVERAGE",
+            "severity": "WARNING",
+            "count": report.partially_covered,
+            "phrases": report.needs_attention
+        })
+        suggestions.append(
+            f"{report.partially_covered} fraz ma tylko 1 użycie - dodaj drugie"
+        )
+    
+    # Passed if coverage >= 80% AND no critical phrases
+    passed = (
+        report.coverage_ratio >= COVERAGE_THRESHOLDS["GOOD"] and
+        report.not_covered == 0
+    )
+    
+    return {
+        "passed": passed,
+        "coverage_report": report,
+        "issues": issues,
+        "suggestions": suggestions
+    }
 
 
 # ============================================================================
@@ -710,80 +496,57 @@ def format_spacing_instructions_for_prompt(instructions: Dict) -> str:
 # ============================================================================
 
 if __name__ == "__main__":
-    # Test na tekście z keyword stuffingiem
-    test_text = """
-Zespół Turnera jest jedną z rzadkich jednostek klinicznych. Zespół Turnera 
-to choroba genetyczna, jednak jednocześnie podkreśla się, że zespół Turnera 
-nie jest chorobą w rozumieniu stanu całkowicie wykluczającego funkcjonowanie.
-
-W praktyce klinicznej zespół Turnera jest chorobą o bardzo zróżnicowanym przebiegu.
-Przypadki zespołu Turnera różnią się nasileniem objawów.
-
-Do najczęstszych objawów zespołu Turnera należy niski wzrost. Niski wzrost 
-występuje u większości pacjentek z tym zespołem.
-"""
-    
-    previous_batch = """
-Ostatni akapit poprzedniego batcha wspomina o zespole Turnera i jego objawach.
-Zespół Turnera jest często diagnozowany w dzieciństwie.
-"""
-    
+    # Test
     keywords_state = {
-        "k1": {"keyword": "zespół turnera", "type": "MAIN"},
-        "k2": {"keyword": "choroba genetyczna", "type": "BASIC"},
-        "k3": {"keyword": "niski wzrost", "type": "BASIC"},
+        "k1": {"keyword": "zespół turnera", "type": "MAIN", "actual_uses": 4},
+        "k2": {"keyword": "choroba genetyczna", "type": "BASIC", "actual_uses": 0},
+        "k3": {"keyword": "aberracja chromosomalna", "type": "BASIC", "actual_uses": 1},
+        "k4": {"keyword": "niski wzrost", "type": "BASIC", "actual_uses": 2},
+        "k5": {"keyword": "zaburzenia hormonalne", "type": "EXTENDED", "actual_uses": 0},
+        "k6": {"keyword": "wady serca", "type": "EXTENDED", "actual_uses": 0},
+        "k7": {"keyword": "diagnostyka", "type": "EXTENDED", "actual_uses": 3},
     }
     
     print("=" * 70)
-    print("TEST KEYWORD SPACING VALIDATOR")
+    print("TEST WIDE COVERAGE STRATEGY")
     print("=" * 70)
     
-    # 1. Test spacing instructions
-    print("\n📋 SPACING INSTRUCTIONS:")
-    instructions = generate_spacing_instructions(keywords_state, previous_batch)
-    print(format_spacing_instructions_for_prompt(instructions))
+    # 1. Calculate targets
+    targets = calculate_wide_coverage_targets(keywords_state, article_length=2000)
     
-    # 2. Test batch validation
+    print("\n📋 TARGETS:")
+    for rid, target in targets.items():
+        print(f"  {target.phrase}: {target.current_uses}/{target.min_uses}-{target.max_uses} [{target.priority}]")
+    
+    # 2. Get batch priorities
+    priorities = get_batch_priorities(targets, batch_number=3, total_batches=5)
+    
+    # 3. Coverage report
+    report = calculate_coverage_report(targets)
+    
+    print(f"\n📊 COVERAGE REPORT:")
+    print(f"  Status: {report.status}")
+    print(f"  Covered: {report.covered_phrases}/{report.total_phrases} ({round(report.coverage_ratio * 100)}%)")
+    print(f"  Not covered: {report.not_covered}")
+    print(f"  Critical phrases: {report.critical_phrases}")
+    
+    # 4. Format instructions
+    print(format_wide_coverage_instructions(priorities, report))
+    
+    # 5. Final validation
     print("\n" + "=" * 70)
-    print("📊 BATCH VALIDATION:")
+    print("📝 FINAL VALIDATION:")
     print("=" * 70)
     
-    validation = validate_batch_spacing(test_text, keywords_state, previous_batch)
+    validation = validate_wide_coverage_final(targets)
+    print(f"\nPassed: {'✅ TAK' if validation['passed'] else '❌ NIE'}")
     
-    print(f"\nValid: {'✅ TAK' if validation['is_valid'] else '❌ NIE'}")
-    print(f"Score: {validation['score']}/100")
-    
-    if validation["violations"]:
-        print("\n⚠️ SPACING VIOLATIONS:")
-        for v in validation["violations"]:
-            print(f"  - '{v['phrase']}': {v['distance']} słów (min {v['min_required']}) [{v['severity']}]")
-    
-    if validation["paragraph_stuffing"]:
-        print("\n⚠️ PARAGRAPH STUFFING:")
-        for p in validation["paragraph_stuffing"]:
-            print(f"  - {p}")
-    
-    if validation["sentence_stuffing"]:
-        print("\n❌ SENTENCE STUFFING:")
-        for s in validation["sentence_stuffing"]:
-            print(f"  - {s}")
+    if validation["issues"]:
+        print("\nIssues:")
+        for issue in validation["issues"]:
+            print(f"  - [{issue['severity']}] {issue['type']}: {issue['count']} fraz")
     
     if validation["suggestions"]:
-        print("\n💡 SUGGESTIONS:")
+        print("\nSuggestions:")
         for s in validation["suggestions"]:
             print(f"  - {s}")
-    
-    # 3. Test distribution
-    print("\n" + "=" * 70)
-    print("📈 DISTRIBUTION ANALYSIS:")
-    print("=" * 70)
-    
-    for rid, meta in keywords_state.items():
-        phrase = meta.get("keyword", "")
-        dist = calculate_distribution_score(test_text, phrase)
-        print(f"\n'{phrase}':")
-        print(f"  Score: {dist['score']}/100 | CV: {dist['cv']} | Even: {dist['is_even']}")
-        if dist["gaps"]:
-            print(f"  Gaps: {dist['gaps']}")
-        if dist["suggestion"]:
-            print(f"  → {dist['suggestion']}")
