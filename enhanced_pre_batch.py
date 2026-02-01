@@ -1,8 +1,14 @@
 """
 ===============================================================================
-🎯 ENHANCED PRE-BATCH INSTRUCTIONS v43.0
+🎯 ENHANCED PRE-BATCH INSTRUCTIONS v43.1
 ===============================================================================
 Moduł generujący KONKRETNE instrukcje dla GPT zamiast surowych danych.
+
+🆕 v43.1 ZMIANY:
+- PEŁNE instrukcje humanizacji w GPT prompt (burstiness, struktura, AI patterns)
+- Instrukcje o różnej liczbie akapitów między sekcjami
+- Rozkład długości zdań (20-25% krótkich, 50-60% średnich, 15-25% długich)
+- Instrukcje o różnej długości akapitów (40-150 słów)
 
 🆕 v43.0 ZMIANY:
 - Integracja z phrase_hierarchy.py (hierarchia fraz - zapobiega stuffing)
@@ -1116,13 +1122,76 @@ def _generate_gpt_prompt_section(enhanced: Dict, is_legal: bool = False) -> str:
             lines.append(f"   {priority_icon} {ent['entity']}: {ent['how'][:50]}...")
         lines.append("")
     
-    # Style
+    # ================================================================
+    # 🆕 v43.1: PEŁNE INSTRUKCJE HUMANIZACJI
+    # ================================================================
     style = enhanced.get("style_instructions", {})
+    
+    # BURSTINESS - KLUCZOWE!
+    burstiness = style.get("burstiness_critical", {})
+    if burstiness:
+        lines.append("⚡ BURSTINESS (KLUCZOWE!):")
+        lines.append("=" * 40)
+        lines.append("   ❌ MONOTONNE ZDANIA = WYKRYCIE AI!")
+        lines.append("   ✅ ZRÓŻNICUJ długości zdań!")
+        lines.append("")
+        lines.append("   📊 WYMAGANY ROZKŁAD:")
+        target_dist = burstiness.get("target_distribution", {})
+        lines.append(f"   • Krótkie (3-8 słów):  20-25%")
+        lines.append(f"   • Średnie (10-18 słów): 50-60%")
+        lines.append(f"   • Długie (22-35 słów):  15-25%")
+        lines.append("")
+        example = burstiness.get("example_lengths", "5, 18, 8, 25, 12, 6, 30, 14 słów")
+        lines.append(f"   📝 Przykład sekwencji: {example}")
+        lines.append("")
+    
+    # STRUKTURA AKAPITÓW - RÓŻNA LICZBA!
+    lines.append("📐 STRUKTURA (UNIKAJ MONOTONII!):")
+    lines.append("   ❌ NIE PISZ wszystkich sekcji z 3 akapitami!")
+    lines.append("   ✅ Zmieniaj liczbę akapitów między sekcjami:")
+    lines.append("   • Sekcja 1: 2 akapity")
+    lines.append("   • Sekcja 2: 4 akapity") 
+    lines.append("   • Sekcja 3: 3 akapity")
+    lines.append("   • Sekcja 4: 2 akapity")
+    lines.append("")
+    lines.append("   📏 Długość akapitów też różna:")
+    lines.append("   • Krótki: 40-60 słów")
+    lines.append("   • Średni: 70-100 słów")
+    lines.append("   • Długi: 110-150 słów")
+    lines.append("")
+    
+    # KRÓTKIE ZDANIA - z przykładami
     short_sentences = style.get("short_sentences_dynamic", {})
     if short_sentences.get("examples"):
         domain = short_sentences.get("domain", "universal")
-        lines.append(f"✂️ KRÓTKIE ZDANIA ({domain}):")
-        lines.append(f"   {' | '.join(short_sentences['examples'][:4])}")
+        lines.append(f"✂️ KRÓTKIE ZDANIA ({domain}) - wstaw 2-4 na batch:")
+        examples = short_sentences.get("examples", [])[:6]
+        lines.append(f"   {' | '.join(examples)}")
+        lines.append("")
+    
+    # AI PATTERNS DO UNIKANIA
+    avoid_patterns = style.get("avoid_ai_patterns", {})
+    patterns = avoid_patterns.get("patterns", [])
+    if patterns:
+        lines.append("🚫 UNIKAJ FRAZ AI:")
+        if isinstance(patterns, dict):
+            for pattern, replacement in list(patterns.items())[:5]:
+                lines.append(f"   ❌ \"{pattern}\" {replacement}")
+        elif isinstance(patterns, list):
+            for pattern in patterns[:5]:
+                lines.append(f"   ❌ \"{pattern}\"")
+        lines.append("")
+    
+    # SŁOWA ŁĄCZĄCE
+    transitions = style.get("transition_words_pl", {})
+    if transitions:
+        lines.append("🔗 SŁOWA ŁĄCZĄCE (używaj!):")
+        if transitions.get("kontrast"):
+            lines.append(f"   Kontrast: {', '.join(transitions['kontrast'][:4])}")
+        if transitions.get("przyczyna"):
+            lines.append(f"   Przyczyna: {', '.join(transitions['przyczyna'][:4])}")
+        if transitions.get("skutek"):
+            lines.append(f"   Skutek: {', '.join(transitions['skutek'][:4])}")
         lines.append("")
     
     lines.append("=" * 60)
