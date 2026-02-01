@@ -1147,26 +1147,54 @@ def _generate_gpt_prompt_section(enhanced: Dict, is_legal: bool = False) -> str:
         lines.append(f"   📝 Przykład sekwencji: {example}")
         lines.append("")
     
-    # STRUKTURA AKAPITÓW - RÓŻNA LICZBA!
-    lines.append("📐 STRUKTURA (UNIKAJ MONOTONII!):")
-    lines.append("   ❌ NIE PISZ wszystkich sekcji z 3 akapitami!")
-    lines.append("   ✅ Zmieniaj liczbę akapitów między sekcjami:")
-    lines.append("   • Sekcja 1: 2 akapity")
-    lines.append("   • Sekcja 2: 4 akapity") 
-    lines.append("   • Sekcja 3: 3 akapity")
-    lines.append("   • Sekcja 4: 2 akapity")
-    lines.append("")
-    lines.append("   📏 Długość akapitów też różna:")
-    lines.append("   • Krótki: 40-60 słów")
-    lines.append("   • Średni: 70-100 słów")
-    lines.append("   • Długi: 110-150 słów")
-    lines.append("")
+    # ================================================================
+    # 🆕 v43.1: STRUKTURA - DYNAMICZNA LICZBA AKAPITÓW
+    # ================================================================
+    structure = enhanced.get("structure_instructions", {})
+    batch_num = enhanced.get("batch_number", 1)
+    batch_type = enhanced.get("batch_type", "CONTENT")
+    
+    # Różna liczba akapitów dla różnych batchy (cyklicznie)
+    paragraph_patterns = [2, 4, 3, 5, 2, 4, 3, 2, 4]
+    target_paragraphs = paragraph_patterns[(batch_num - 1) % len(paragraph_patterns)]
+    
+    # Dla INTRO zawsze 2-3, dla FINAL 2-3
+    if batch_type == "INTRO":
+        target_paragraphs = 2
+    elif batch_type == "FINAL":
+        target_paragraphs = 3
+    elif batch_type == "FAQ":
+        target_paragraphs = 0  # FAQ ma inną strukturę
+    
+    # Różna długość akapitów (pattern dla tego batcha)
+    length_patterns = [
+        ["krótki (50 słów)", "długi (120 słów)"],  # 2 akapity
+        ["średni (80 słów)", "krótki (50 słów)", "długi (130 słów)"],  # 3 akapity
+        ["krótki (50 słów)", "średni (90 słów)", "długi (120 słów)", "krótki (60 słów)"],  # 4 akapity
+        ["średni (70 słów)", "krótki (40 słów)", "długi (140 słów)", "średni (80 słów)", "krótki (50 słów)"],  # 5 akapitów
+    ]
+    
+    if batch_type not in ["FAQ"]:
+        lines.append("📐 STRUKTURA TEJ SEKCJI (KONKRETNE!):")
+        lines.append("=" * 40)
+        lines.append(f"   🎯 LICZBA AKAPITÓW: **{target_paragraphs}**")
+        lines.append("")
+        
+        if target_paragraphs >= 2 and target_paragraphs <= 5:
+            pattern_idx = target_paragraphs - 2
+            if pattern_idx < len(length_patterns):
+                lengths = length_patterns[pattern_idx]
+                lines.append("   📏 DŁUGOŚĆ KAŻDEGO AKAPITU:")
+                for i, length in enumerate(lengths, 1):
+                    lines.append(f"      Akapit {i}: {length}")
+        lines.append("")
+        lines.append("   ⚠️ NIE PISZ wszystkich akapitów tej samej długości!")
+        lines.append("   ⚠️ NIE PISZ zawsze 2 lub 3 akapitów w każdej sekcji!")
+        lines.append("")
     
     # 🆕 v43.1: LISTY I WYPUNKTOWANIA
-    structure = enhanced.get("structure_instructions", {})
     has_list = structure.get("has_list", False)
     has_h3 = structure.get("has_h3", False)
-    batch_type = enhanced.get("batch_type", "CONTENT")
     
     if batch_type not in ["INTRO", "FAQ"]:
         lines.append("📋 LISTY I WYPUNKTOWANIA:")
