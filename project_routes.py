@@ -1,5 +1,12 @@
 """
-PROJECT ROUTES - v40.1 BRAJEN SEO Engine - FIRESTORE FIX
+PROJECT ROUTES - v43.0 BRAJEN SEO Engine - PHRASE HIERARCHY
+
+🆕 v43.0 ZMIANY:
+- PHRASE HIERARCHY: Analiza hierarchii fraz (rdzenie vs rozszerzenia)
+- Nowy endpoint GET /api/project/{id}/phrase_hierarchy
+- Nowy endpoint POST /api/project/{id}/analyze_hierarchy
+- Integracja z enhanced_pre_batch.py (phrase_hierarchy_data)
+- Zapobieganie stuffing przez świadomość rozszerzeń
 
 ZMIANY v40.1:
 - 🆕 FIRESTORE FIX: sanitize_for_firestore() dla kluczy ze znakami . / [ ]
@@ -68,6 +75,25 @@ try:
 except ImportError as e:
     KEYWORD_CONFLICT_VALIDATOR_ENABLED = False
     print(f"[PROJECT_ROUTES] ⚠️ keyword_conflict_validator not available: {e}")
+
+# ================================================================
+# 🆕 v43.0: PHRASE HIERARCHY MODULE
+# Analiza hierarchii fraz - zapobiega stuffing, rozpoznaje rdzenie/rozszerzenia
+# ================================================================
+try:
+    from phrase_hierarchy import (
+        analyze_phrase_hierarchy,
+        hierarchy_to_dict,
+        dict_to_hierarchy,
+        format_hierarchy_for_agent,
+        format_hierarchy_summary_short,
+        get_batch_hierarchy_context
+    )
+    PHRASE_HIERARCHY_ENABLED = True
+    print("[PROJECT_ROUTES] ✅ phrase_hierarchy v1.0 loaded")
+except ImportError as e:
+    PHRASE_HIERARCHY_ENABLED = False
+    print(f"[PROJECT_ROUTES] ⚠️ phrase_hierarchy not available: {e}")
 
 # ================================================================
 # 🆕 v40.1: FIRESTORE KEY SANITIZATION
@@ -2256,6 +2282,74 @@ def create_project():
         except Exception as e:
             print(f"[PROJECT] ⚠️ Anti-Frankenstein error: {e}")
     
+    # ================================================================
+    # 🆕 v43.0: PHRASE HIERARCHY ANALYSIS
+    # Analizuje hierarchię fraz PRZED zapisem do Firestore
+    # ================================================================
+    phrase_hierarchy_data = None
+    
+    if PHRASE_HIERARCHY_ENABLED:
+        try:
+            # Przygotuj encje z S1
+            s1_entities = []
+            entity_seo = s1_data.get("entity_seo", {})
+            
+            # Encje z entity_seo.entities
+            for ent in entity_seo.get("entities", []):
+                s1_entities.append({
+                    "name": ent.get("text", ent.get("entity", ent.get("name", ""))),
+                    "priority": ent.get("priority", "SHOULD"),
+                    "importance": ent.get("importance", 0.5)
+                })
+            
+            # MUST topics z topical_coverage
+            for topic_item in entity_seo.get("topical_coverage", []):
+                if topic_item.get("priority") == "MUST":
+                    s1_entities.append({
+                        "name": topic_item.get("topic", ""),
+                        "priority": "MUST",
+                        "importance": 0.9
+                    })
+            
+            # Triplety z entity_relationships
+            s1_triplets = entity_seo.get("entity_relationships", [])
+            
+            # Konwertuj keywords_state do listy
+            keywords_list_for_hierarchy = []
+            for rid, meta in firestore_keywords.items():
+                keywords_list_for_hierarchy.append({
+                    "keyword": meta.get("keyword", ""),
+                    "type": meta.get("type", "BASIC"),
+                    "target_min": meta.get("target_min", 1),
+                    "target_max": meta.get("target_max", 5)
+                })
+            
+            # Analizuj hierarchię
+            hierarchy = analyze_phrase_hierarchy(
+                keywords=keywords_list_for_hierarchy,
+                entities=s1_entities,
+                triplets=s1_triplets,
+                h2_terms=h2_structure
+            )
+            
+            # Konwertuj do dict
+            phrase_hierarchy_data = hierarchy_to_dict(hierarchy)
+            
+            print(f"[PROJECT] 🌳 Phrase hierarchy: "
+                  f"{hierarchy.stats.get('roots_count', 0)} roots, "
+                  f"{hierarchy.stats.get('entity_phrases', 0)} entity phrases, "
+                  f"{hierarchy.stats.get('triplet_phrases', 0)} triplet phrases")
+            
+        except Exception as e:
+            print(f"[PROJECT] ⚠️ Phrase hierarchy error: {e}")
+            import traceback
+            traceback.print_exc()
+            phrase_hierarchy_data = None
+    
+    # Dodaj do project_data przed sanityzacją
+    if phrase_hierarchy_data:
+        project_data["phrase_hierarchy"] = phrase_hierarchy_data
+    
     # 🆕 v40.1: Sanitize keys before Firestore save
     try:
         project_data = sanitize_for_firestore(project_data)
@@ -2357,7 +2451,10 @@ def create_project():
         "legal_module_active": project_data.get("legal_context", {}).get("legal_module_active", False),
         "legal_instruction": project_data.get("legal_instruction"),
         "legal_judgments": project_data.get("legal_judgments", []),
-        "version": "v40.2"
+        # 🆕 v43.0: Phrase Hierarchy
+        "phrase_hierarchy_enabled": phrase_hierarchy_data is not None,
+        "phrase_hierarchy_stats": phrase_hierarchy_data.get("stats", {}) if phrase_hierarchy_data else None,
+        "version": "v43.0"
     }), 201
 
 
@@ -3756,6 +3853,9 @@ def get_pre_batch_info(project_id):
     enhanced_info = None
     if ENHANCED_PRE_BATCH_ENABLED:
         try:
+            # 🆕 v43.0: Pobierz phrase_hierarchy z projektu
+            phrase_hierarchy_data = data.get("phrase_hierarchy")
+            
             enhanced_info = generate_enhanced_pre_batch_info(
                 s1_data=s1_data,
                 keywords_state=keywords_state,
@@ -3768,11 +3868,13 @@ def get_pre_batch_info(project_id):
                 style_fingerprint=data.get("style_fingerprint", {}),
                 is_ymyl=data.get("is_ymyl", False),
                 is_legal=data.get("is_legal", False) or data.get("detected_category") == "prawo",
-                batch_plan=batch_plan  # 🆕 v40.1: Przekaż batch_plan z h2_sections
+                batch_plan=batch_plan,  # 🆕 v40.1: Przekaż batch_plan z h2_sections
+                phrase_hierarchy_data=phrase_hierarchy_data  # 🆕 v43.0: Phrase Hierarchy
             )
             # 🆕 v40.1: Log ile H2 w batchu
             h2_in_batch = enhanced_info.get("h2_count_in_batch", 0)
-            print(f"[PRE_BATCH] 🎯 Enhanced: {len(enhanced_info.get('entities_to_define', []))} entities, {len(enhanced_info.get('relations_to_establish', []))} relations, {h2_in_batch} H2 in batch")
+            hierarchy_roots = len(enhanced_info.get("phrase_hierarchy", {}).get("roots_covered", [])) if enhanced_info.get("phrase_hierarchy") else 0
+            print(f"[PRE_BATCH] 🎯 Enhanced: {len(enhanced_info.get('entities_to_define', []))} entities, {len(enhanced_info.get('relations_to_establish', []))} relations, {h2_in_batch} H2, {hierarchy_roots} roots")
         except Exception as e:
             print(f"[PRE_BATCH] ⚠️ Enhanced pre-batch error: {e}")
             import traceback
@@ -5545,3 +5647,194 @@ def analyze_phrases(project_id):
             "count_firestore": "Wartość zapisana w Firestore (może być nieaktualna)"
         }
     })
+
+
+# ================================================================
+# 🆕 v43.0: PHRASE HIERARCHY ENDPOINTS
+# ================================================================
+
+@project_routes.get("/api/project/<project_id>/phrase_hierarchy")
+def get_phrase_hierarchy(project_id):
+    """
+    🆕 v43.0: Zwraca globalną hierarchię fraz dla projektu.
+    
+    Zawiera:
+    - roots: Rdzenie fraz i ich rozszerzenia
+    - effective_targets: Efektywne targety z uwzględnieniem rozszerzeń
+    - entity_phrases: Frazy będące encjami
+    - triplet_phrases: Frazy z tripletów
+    - strategies: extensions_sufficient / mixed / need_standalone
+    """
+    try:
+        db = firestore.client()
+        doc_ref = db.collection('seo_projects').document(project_id)
+        doc = doc_ref.get()
+        
+        if not doc.exists:
+            return jsonify({"error": "Project not found"}), 404
+        
+        project = doc.to_dict()
+        hierarchy_data = project.get("phrase_hierarchy")
+        
+        if not hierarchy_data:
+            return jsonify({
+                "error": "Phrase hierarchy not available",
+                "message": "This project was created before v43.0. Use /analyze_hierarchy to generate.",
+                "project_id": project_id
+            }), 404
+        
+        # Format dla agenta
+        formatted = ""
+        summary = ""
+        if PHRASE_HIERARCHY_ENABLED:
+            try:
+                hierarchy = dict_to_hierarchy(hierarchy_data)
+                formatted = format_hierarchy_for_agent(hierarchy, include_full_list=True)
+                summary = format_hierarchy_summary_short(hierarchy)
+            except Exception as e:
+                print(f"[PHRASE_HIERARCHY] Format error: {e}")
+        
+        # Podsumowanie strategii
+        roots = hierarchy_data.get("roots", {})
+        effective_targets = hierarchy_data.get("effective_targets", {})
+        stats = hierarchy_data.get("stats", {})
+        
+        strategies_summary = {
+            "extensions_sufficient": [],
+            "mixed": [],
+            "need_standalone": []
+        }
+        
+        for root, target_info in effective_targets.items():
+            strategy = target_info.get("strategy", "unknown")
+            if strategy in strategies_summary:
+                strategies_summary[strategy].append({
+                    "root": root,
+                    "original": f"{target_info.get('original_min', 0)}-{target_info.get('original_max', 0)}x",
+                    "effective": f"{target_info.get('effective_min', 0)}-{target_info.get('effective_max', 0)}x",
+                    "extensions": target_info.get("extensions_count", 0)
+                })
+        
+        return jsonify({
+            "status": "OK",
+            "project_id": project_id,
+            "phrase_hierarchy": hierarchy_data,
+            "stats": stats,
+            "strategies": {
+                "extensions_sufficient": {
+                    "description": "Rozszerzenia wystarczą - NIE powtarzaj rdzenia osobno!",
+                    "roots": strategies_summary["extensions_sufficient"]
+                },
+                "mixed": {
+                    "description": "Częściowo pokryte - użyj kilka samodzielnie + rozszerzenia",
+                    "roots": strategies_summary["mixed"]
+                },
+                "need_standalone": {
+                    "description": "Mało rozszerzeń - użyj samodzielnie",
+                    "roots": strategies_summary["need_standalone"]
+                }
+            },
+            "formatted_for_agent": formatted,
+            "summary": summary,
+            "version": "v43.0"
+        }), 200
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@project_routes.post("/api/project/<project_id>/analyze_hierarchy")
+def analyze_hierarchy_for_project(project_id):
+    """
+    🆕 v43.0: Analizuje hierarchię fraz dla istniejącego projektu.
+    
+    Używaj dla projektów utworzonych przed v43.0.
+    Generuje phrase_hierarchy i zapisuje w Firestore.
+    """
+    if not PHRASE_HIERARCHY_ENABLED:
+        return jsonify({
+            "error": "Phrase hierarchy module not available",
+            "message": "Install phrase_hierarchy.py in API directory"
+        }), 500
+    
+    try:
+        db = firestore.client()
+        doc_ref = db.collection('seo_projects').document(project_id)
+        doc = doc_ref.get()
+        
+        if not doc.exists:
+            return jsonify({"error": "Project not found"}), 404
+        
+        project = doc.to_dict()
+        keywords_state = project.get("keywords_state", {})
+        s1_data = project.get("s1_data", {})
+        h2_structure = project.get("h2_structure", [])
+        
+        # Przygotuj encje z S1
+        s1_entities = []
+        entity_seo = s1_data.get("entity_seo", {})
+        
+        for ent in entity_seo.get("entities", []):
+            s1_entities.append({
+                "name": ent.get("text", ent.get("entity", ent.get("name", ""))),
+                "priority": ent.get("priority", "SHOULD"),
+                "importance": ent.get("importance", 0.5)
+            })
+        
+        for topic_item in entity_seo.get("topical_coverage", []):
+            if topic_item.get("priority") == "MUST":
+                s1_entities.append({
+                    "name": topic_item.get("topic", ""),
+                    "priority": "MUST",
+                    "importance": 0.9
+                })
+        
+        s1_triplets = entity_seo.get("entity_relationships", [])
+        
+        # Konwertuj keywords_state do listy
+        keywords_list = []
+        for rid, meta in keywords_state.items():
+            keywords_list.append({
+                "keyword": meta.get("keyword", ""),
+                "type": meta.get("type", "BASIC"),
+                "target_min": meta.get("target_min", 1),
+                "target_max": meta.get("target_max", 5)
+            })
+        
+        # Analizuj hierarchię
+        hierarchy = analyze_phrase_hierarchy(
+            keywords=keywords_list,
+            entities=s1_entities,
+            triplets=s1_triplets,
+            h2_terms=h2_structure
+        )
+        
+        # Konwertuj do dict i zapisz
+        phrase_hierarchy_data = hierarchy_to_dict(hierarchy)
+        
+        doc_ref.update({
+            "phrase_hierarchy": sanitize_for_firestore(phrase_hierarchy_data),
+            "phrase_hierarchy_analyzed_at": firestore.SERVER_TIMESTAMP
+        })
+        
+        # Format dla agenta
+        formatted = format_hierarchy_for_agent(hierarchy, include_full_list=True)
+        
+        return jsonify({
+            "status": "OK",
+            "message": "Phrase hierarchy analyzed and saved",
+            "project_id": project_id,
+            "stats": hierarchy.stats,
+            "roots_count": hierarchy.stats.get("roots_count", 0),
+            "entity_phrases": hierarchy.stats.get("entity_phrases", 0),
+            "triplet_phrases": hierarchy.stats.get("triplet_phrases", 0),
+            "formatted_for_agent": formatted,
+            "version": "v43.0"
+        }), 200
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
