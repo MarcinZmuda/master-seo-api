@@ -21,6 +21,12 @@ RUN python -m spacy download pl_core_news_md
 COPY *.py .
 COPY *.json .
 
+# 🆕 v44.2: Kopiuj folder project_helpers/
+COPY project_helpers/ ./project_helpers/
+
+# 🆕 v44.2: Kopiuj folder tests/ (opcjonalne - dla CI/CD)
+# COPY tests/ ./tests/
+
 # Port
 EXPOSE 8080
 
