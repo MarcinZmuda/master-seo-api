@@ -172,6 +172,12 @@ if BATCH_PLANNER_ENABLED:
     bp = get_module('batch_planner')
     if bp:
         create_article_plan = bp.create_article_plan
+        # 🆕 v44.2: FAST MODE
+        create_article_plan_fast = getattr(bp, 'create_article_plan_fast', None)
+        if create_article_plan_fast:
+            print("[PROJECT_ROUTES] ✅ FAST MODE available (create_article_plan_fast)")
+        else:
+            create_article_plan_fast = None
 
 if LEGAL_MODULE_ENABLED:
     lr = get_module('legal_routes_v3')
@@ -1824,6 +1830,13 @@ def create_project():
     source = data.get("source", "unknown")
     s1_data = data.get("s1_data", {})  # v39.0: Dane z S1 do generowania H2
     
+    # 🆕 v44.2: FAST MODE - artykuł w 3 batchach
+    article_mode = data.get("mode", "standard").lower()
+    if article_mode not in ["standard", "fast"]:
+        article_mode = "standard"
+    
+    print(f"[PROJECT] 📋 Mode: {article_mode.upper()}")
+    
     # ================================================================
     # v39.0: AUTO-GENEROWANIE H2 z h2_terms + S1
     # Jeśli user podał h2_terms (hasła) zamiast gotowych h2_structure,
@@ -2083,7 +2096,8 @@ def create_project():
         "version": "v25.0",
         "manual_mode": False if source == "n8n-brajen-workflow" else True,
         "output_format": "clean_text_with_headers",
-        "s1_data": s1_data
+        "s1_data": s1_data,
+        "article_mode": article_mode  # 🆕 v44.2: "standard" lub "fast"
     }
     
     # ================================================================
@@ -2172,18 +2186,32 @@ def create_project():
             # v28.1: PAA z S1
             paa_questions = [p.get("question", "") for p in s1_data.get("paa", [])]
             
-            # 🆕 v36.0: Przekaż semantic_plan do create_article_plan
-            article_plan = create_article_plan(
-                h2_structure=h2_structure,
-                keywords_state=firestore_keywords,
-                main_keyword=topic,
-                target_length=target_length,
-                ngrams=ngrams[:20],
-                entities=entities[:15],  # v28.1
-                paa_questions=paa_questions[:10],  # v28.1
-                max_batches=6,
-                semantic_keyword_plan=semantic_plan  # 🆕 v36.0
-            )
+            # 🆕 v44.2: FAST MODE vs STANDARD MODE
+            if article_mode == "fast" and create_article_plan_fast:
+                print(f"[PROJECT] 🚀 Using FAST MODE (3 batches)")
+                article_plan = create_article_plan_fast(
+                    h2_structure=h2_structure,
+                    keywords_state=firestore_keywords,
+                    main_keyword=topic,
+                    target_length=target_length,
+                    ngrams=ngrams[:15],
+                    entities=entities[:10],
+                    paa_questions=paa_questions[:5],
+                    semantic_keyword_plan=semantic_plan
+                )
+            else:
+                # STANDARD MODE (6-9 batches)
+                article_plan = create_article_plan(
+                    h2_structure=h2_structure,
+                    keywords_state=firestore_keywords,
+                    main_keyword=topic,
+                    target_length=target_length,
+                    ngrams=ngrams[:20],
+                    entities=entities[:15],
+                    paa_questions=paa_questions[:10],
+                    max_batches=6,
+                    semantic_keyword_plan=semantic_plan
+                )
             batch_plan_dict = article_plan.to_dict()
             project_data["batch_plan"] = batch_plan_dict
             project_data["total_planned_batches"] = article_plan.total_batches
