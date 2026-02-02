@@ -16,6 +16,14 @@ from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 
+# 🆕 v44.1: Import TRANSITION_WORDS z core_metrics (Single Source of Truth)
+try:
+    from core_metrics import TRANSITION_WORDS_PL as TRANSITION_WORDS_CORE
+    _CORE_METRICS_AVAILABLE = True
+except ImportError:
+    TRANSITION_WORDS_CORE = None
+    _CORE_METRICS_AVAILABLE = False
+
 
 class FormalityLevel(Enum):
     """Poziom formalności tekstu"""
@@ -201,13 +209,9 @@ class StyleAnalyzer:
         "szczerze", "właściwie", "chyba"
     }
     
-    # Słowa przejściowe
-    TRANSITION_WORDS = [
-        "jednak", "natomiast", "ponadto", "dodatkowo", "również",
-        "w związku z tym", "dlatego", "zatem", "tym samym",
-        "przede wszystkim", "po pierwsze", "po drugie",
-        "z kolei", "następnie", "wreszcie", "podsumowując",
-        "innymi słowy", "to znaczy", "mianowicie"
+    # 🆕 v44.1: Słowa przejściowe z core_metrics (Single Source of Truth)
+    TRANSITION_WORDS = list(TRANSITION_WORDS_CORE) if TRANSITION_WORDS_CORE else [
+        "jednak", "natomiast", "ponadto", "dlatego", "zatem", "również", "następnie"
     ]
     
     # Wzorce strony biernej (polskiej)
