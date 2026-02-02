@@ -7,11 +7,13 @@ from functools import lru_cache
 try:
     from core_metrics import (
         calculate_burstiness_simple as _calculate_burstiness_core,
-        split_into_sentences as _split_sentences_core
+        split_into_sentences as _split_sentences_core,
+        TRANSITION_WORDS_PL as TRANSITION_WORDS_CORE
     )
     CORE_METRICS_AVAILABLE = True
 except ImportError:
     CORE_METRICS_AVAILABLE = False
+    TRANSITION_WORDS_CORE = None
 
 _semantic_model = None
 _cosine_similarity = None
@@ -128,16 +130,9 @@ else:
 
 
 def calculate_transition_ratio(text: str) -> Dict:
-    TRANSITION_WORDS = {
-        'jednakże', 'jednak', 'natomiast', 'niemniej', 'aczkolwiek',
-        'ponadto', 'dodatkowo', 'ponadto', 'również', 'także', 'też',
-        'dlatego', 'zatem', 'więc', 'wobec tego', 'w związku z tym',
-        'przede wszystkim', 'po pierwsze', 'po drugie', 'wreszcie', 'następnie',
-        'przykładowo', 'na przykład', 'między innymi', 'w szczególności',
-        'innymi słowy', 'to znaczy', 'mianowicie', 'czyli',
-        'podsumowując', 'reasumując', 'ostatecznie', 'w rezultacie',
-        'w przeciwieństwie', 'z drugiej strony', 'mimo to', 'pomimo',
-        'co więcej', 'co ważne', 'warto zauważyć', 'należy podkreślić'
+    # 🆕 v44.1: TRANSITION_WORDS z core_metrics (Single Source of Truth)
+    TRANSITION_WORDS = set(TRANSITION_WORDS_CORE) if TRANSITION_WORDS_CORE else {
+        'jednak', 'natomiast', 'ponadto', 'dlatego', 'zatem', 'również', 'następnie'
     }
     
     text_lower = text.lower()
