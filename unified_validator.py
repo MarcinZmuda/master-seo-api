@@ -24,11 +24,13 @@ from collections import defaultdict
 try:
     from core_metrics import (
         calculate_burstiness_simple as _calculate_burstiness_core,
-        split_into_sentences as _split_sentences_core
+        split_into_sentences as _split_sentences_core,
+        TRANSITION_WORDS_PL as TRANSITION_WORDS_CORE
     )
     CORE_METRICS_AVAILABLE = True
 except ImportError:
     CORE_METRICS_AVAILABLE = False
+    TRANSITION_WORDS_CORE = None
     print("[VALIDATOR] ⚠️ core_metrics not available, using local functions")
 
 # ================================================================
@@ -108,13 +110,9 @@ class ValidationConfig:
     PENALTY_WARNING = 3              # 🔧 było 5
     PENALTY_INFO = 0                 # 🔧 było 1
     
-    TRANSITION_WORDS = [
-        "również", "także", "ponadto", "dodatkowo", "co więcej",
-        "oprócz tego", "poza tym", "jednak", "jednakże", "natomiast",
-        "ale", "z drugiej strony", "mimo to", "niemniej", "dlatego",
-        "w związku z tym", "w rezultacie", "ponieważ", "zatem", "więc",
-        "na przykład", "przykładowo", "między innymi", "m.in.", "np.",
-        "po pierwsze", "po drugie", "następnie", "potem", "na koniec"
+    # 🆕 v44.1: TRANSITION_WORDS z core_metrics (Single Source of Truth)
+    TRANSITION_WORDS = list(TRANSITION_WORDS_CORE) if TRANSITION_WORDS_CORE else [
+        "również", "także", "ponadto", "jednak", "natomiast", "dlatego", "ponieważ"
     ]
     
     BANNED_SECTION_OPENERS = [
