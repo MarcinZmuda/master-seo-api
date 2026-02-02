@@ -204,6 +204,15 @@ from final_review_routes import final_review_routes
 from paa_routes import paa_routes
 from export_routes import export_routes  # v23.9: Eksport DOCX/HTML/TXT + Editorial Review
 
+# 🆕 v44.2: H2 routes (wydzielone z project_routes)
+try:
+    from project_helpers import h2_routes, H2_ROUTES_AVAILABLE
+    print("[MASTER_API] ✅ H2 routes loaded from project_helpers")
+except ImportError as e:
+    H2_ROUTES_AVAILABLE = False
+    h2_routes = None
+    print(f"[MASTER_API] ⚠️ H2 routes not available: {e}")
+
 # v29.3: Entity SEO routes
 try:
     from entity_routes import entity_routes
@@ -222,6 +231,11 @@ app.register_blueprint(tracker_routes)
 app.register_blueprint(final_review_routes)
 app.register_blueprint(paa_routes)
 app.register_blueprint(export_routes)  # v23.9: Eksport + Editorial Review
+
+# 🆕 v44.2: H2 routes (wydzielone z project_routes)
+if H2_ROUTES_AVAILABLE and h2_routes:
+    app.register_blueprint(h2_routes)
+    print("[MASTER_API] ✅ H2 routes registered")
 
 # v29.3: Entity routes (jeśli dostępne)
 if ENTITY_ROUTES_ENABLED and entity_routes:
