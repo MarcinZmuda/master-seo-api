@@ -924,11 +924,277 @@ def update_plan_after_batch(
 
 
 # ================================================================
+# 🆕 v44.2: FAST MODE - 3 BATCHE, PEŁNA JAKOŚĆ
+# ================================================================
+
+def create_article_plan_fast(
+    h2_structure: List[str],
+    keywords_state: Dict,
+    main_keyword: str,
+    target_length: int = 2500,
+    ngrams: List[str] = None,
+    entities: List[Dict] = None,
+    paa_questions: List[str] = None,
+    semantic_keyword_plan: Dict = None
+) -> ArticlePlan:
+    """
+    🚀 FAST MODE: Tworzy plan artykułu w DOKŁADNIE 3 batchach.
+    
+    Struktura FAST:
+    - Batch 1: Intro + H2#1 + H2#2 (700-900 słów)
+    - Batch 2: H2#3 + H2#4 + H2#5 (700-900 słów)
+    - Batch 3: H2#6 + H2#7 + FAQ/Outro (700-900 słów)
+    
+    ZACHOWANE (krytyczne dla jakości):
+    ✅ Keyword counting & density validation
+    ✅ Burstiness check (AI detection)
+    ✅ Triplet validation
+    ✅ H2 structure validation
+    
+    UPROSZCZONE:
+    - Brak dynamic sub-batch splitting
+    - Brak overflow buffer (FAQ w batch 3)
+    - Uproszczona dystrybucja keywords
+    
+    Args:
+        h2_structure: Lista nagłówków H2 (5-7 sztuk)
+        keywords_state: Stan słów kluczowych
+        main_keyword: Główna fraza
+        target_length: Docelowa długość (domyślnie 2500 słów)
+        ngrams: N-gramy z S1
+        entities: Encje z S1
+        paa_questions: Pytania PAA
+        semantic_keyword_plan: Plan semantyczny (opcjonalny)
+    
+    Returns:
+        ArticlePlan z dokładnie 3 batchami
+    """
+    ngrams = ngrams or []
+    entities = entities or []
+    paa_questions = paa_questions or []
+    
+    TOTAL_BATCHES = 3  # ZAWSZE 3 batche w trybie FAST
+    
+    num_h2 = len(h2_structure)
+    print(f"[BATCH_PLANNER] 🚀 FAST MODE: {num_h2} H2 → {TOTAL_BATCHES} batchy")
+    
+    # ================================================================
+    # 1. ROZDZIEL H2 NA 3 BATCHE (równomiernie)
+    # ================================================================
+    # Batch 1: Intro + pierwsze H2 (1-2 H2)
+    # Batch 2: Środkowe H2 (2-3 H2)
+    # Batch 3: Ostatnie H2 + FAQ/Outro (2-3 H2)
+    
+    h2_per_batch = [[], [], []]
+    
+    if num_h2 <= 3:
+        # Mało H2 - po 1 na batch
+        for i, h2 in enumerate(h2_structure):
+            h2_per_batch[min(i, 2)].append(h2)
+    elif num_h2 <= 5:
+        # 4-5 H2: [1-2, 2, 1-2]
+        h2_per_batch[0] = h2_structure[:2]
+        h2_per_batch[1] = h2_structure[2:4]
+        h2_per_batch[2] = h2_structure[4:]
+    elif num_h2 <= 7:
+        # 6-7 H2: [2, 2-3, 2-3]
+        h2_per_batch[0] = h2_structure[:2]
+        mid = (num_h2 - 2) // 2 + 2
+        h2_per_batch[1] = h2_structure[2:mid]
+        h2_per_batch[2] = h2_structure[mid:]
+    else:
+        # 8+ H2: [3, 3, reszta]
+        h2_per_batch[0] = h2_structure[:3]
+        h2_per_batch[1] = h2_structure[3:6]
+        h2_per_batch[2] = h2_structure[6:]
+    
+    print(f"[BATCH_PLANNER] H2 distribution (FAST): {[len(h) for h in h2_per_batch]} H2 per batch")
+    
+    # ================================================================
+    # 2. ROZDZIEL KEYWORDS NA 3 BATCHE
+    # ================================================================
+    if semantic_keyword_plan and semantic_keyword_plan.get("batch_plans"):
+        # Skonsoliduj semantic plan do 3 batchy
+        keywords_distribution = _consolidate_keywords_for_fast(
+            semantic_plan=semantic_keyword_plan,
+            keywords_state=keywords_state,
+            total_batches=TOTAL_BATCHES
+        )
+    else:
+        keywords_distribution = distribute_keywords(keywords_state, TOTAL_BATCHES, main_keyword)
+    
+    # ================================================================
+    # 3. OBLICZ SŁOWA NA BATCH
+    # ================================================================
+    words_per_batch = target_length // TOTAL_BATCHES
+    
+    # Batch 1 (intro) nieco krótszy, batch 2-3 dłuższe
+    batch_words = [
+        (int(words_per_batch * 0.9), int(words_per_batch * 1.0)),   # Batch 1: 90-100%
+        (int(words_per_batch * 1.0), int(words_per_batch * 1.15)),  # Batch 2: 100-115%
+        (int(words_per_batch * 0.95), int(words_per_batch * 1.1))   # Batch 3: 95-110%
+    ]
+    
+    # ================================================================
+    # 4. TWÓRZ 3 BATCHE
+    # ================================================================
+    batches: List[BatchPlan] = []
+    
+    batch_types = ["intro_content", "content", "content_final"]
+    batch_profiles = ["medium", "long", "medium"]
+    
+    for i in range(TOTAL_BATCHES):
+        batch_num = i + 1
+        h2_list = h2_per_batch[i]
+        
+        # Keywords dla tego batcha
+        batch_keywords = {}
+        for kw, dist in keywords_distribution.items():
+            if i < len(dist.get("per_batch", [])):
+                uses = dist["per_batch"][i]
+                if uses > 0:
+                    batch_keywords[kw] = uses
+        
+        # N-gramy dla tego batcha (równomierne)
+        ngrams_start = i * (len(ngrams) // TOTAL_BATCHES)
+        ngrams_end = (i + 1) * (len(ngrams) // TOTAL_BATCHES) if i < 2 else len(ngrams)
+        batch_ngrams = ngrams[ngrams_start:ngrams_end]
+        
+        # Zlicz BASIC i EXTENDED
+        basic_count = sum(1 for kw, meta in keywords_state.items() 
+                        if meta.get("type", "BASIC").upper() in ["BASIC", "MAIN"] 
+                        and kw in batch_keywords)
+        extended_count = sum(1 for kw, meta in keywords_state.items() 
+                           if meta.get("type", "BASIC").upper() == "EXTENDED" 
+                           and kw in batch_keywords)
+        
+        # Complexity score (uproszczony)
+        complexity_score = 40 + len(h2_list) * 10 + basic_count * 2 + extended_count
+        
+        words_min, words_max = batch_words[i]
+        
+        # Paragraphs (2-3 per H2 + intro paragraphs)
+        paragraphs_min = max(3, len(h2_list) * 2)
+        paragraphs_max = max(5, len(h2_list) * 3 + 2)
+        
+        batch_plan = BatchPlan(
+            batch_number=batch_num,
+            batch_type=batch_types[i],
+            h2_sections=h2_list,
+            target_words_min=words_min,
+            target_words_max=words_max,
+            target_paragraphs_min=paragraphs_min,
+            target_paragraphs_max=paragraphs_max,
+            length_profile=batch_profiles[i],
+            complexity_score=complexity_score,
+            complexity_factors={
+                "h2_count": len(h2_list),
+                "keywords_in_batch": len(batch_keywords),
+                "basic_keywords": basic_count,
+                "extended_keywords": extended_count,
+                "mode": "FAST"
+            },
+            complexity_reasoning=[
+                f"FAST MODE: {len(h2_list)} H2 sections",
+                f"{basic_count} BASIC + {extended_count} EXTENDED keywords",
+                f"Target: {words_min}-{words_max} words"
+            ],
+            keywords_budget={
+                "BASIC": basic_count,
+                "EXTENDED": extended_count
+            },
+            ngrams_to_use=batch_ngrams[:5],
+            snippet_required=(batch_num == 1),  # Tylko batch 1 wymaga snippet
+            notes=f"FAST MODE batch {batch_num}/3: {', '.join(h2_list[:2])}{'...' if len(h2_list) > 2 else ''}"
+        )
+        
+        batches.append(batch_plan)
+    
+    # ================================================================
+    # 5. PODSUMOWANIE
+    # ================================================================
+    total_words = sum(b.target_words_max for b in batches)
+    
+    print(f"[BATCH_PLANNER] ✅ FAST plan: {TOTAL_BATCHES} batches, ~{total_words} words")
+    print(f"[BATCH_PLANNER]    Batch 1: {len(h2_per_batch[0])} H2, {batches[0].target_words_min}-{batches[0].target_words_max} words")
+    print(f"[BATCH_PLANNER]    Batch 2: {len(h2_per_batch[1])} H2, {batches[1].target_words_min}-{batches[1].target_words_max} words")
+    print(f"[BATCH_PLANNER]    Batch 3: {len(h2_per_batch[2])} H2, {batches[2].target_words_min}-{batches[2].target_words_max} words")
+    
+    return ArticlePlan(
+        total_batches=TOTAL_BATCHES,
+        total_target_words=total_words,
+        batches=batches,
+        keywords_distribution=keywords_distribution,
+        main_keyword=main_keyword,
+        h2_structure=h2_structure,
+        overflow_buffer=None,
+        has_faq_section=False
+    )
+
+
+def _consolidate_keywords_for_fast(
+    semantic_plan: Dict,
+    keywords_state: Dict,
+    total_batches: int = 3
+) -> Dict[str, Dict]:
+    """
+    Konsoliduje semantic_plan z wielu batchy do 3 batchy FAST.
+    """
+    keywords_distribution = {}
+    
+    original_batches = semantic_plan.get("batch_plans", [])
+    num_original = len(original_batches)
+    
+    # Mapowanie: które oryginalne batche → które FAST batche
+    # np. 9 batchy → [1,2,3] → [4,5,6] → [7,8,9]
+    batch_mapping = []
+    per_fast_batch = max(1, num_original // total_batches)
+    
+    for i in range(total_batches):
+        start = i * per_fast_batch
+        end = (i + 1) * per_fast_batch if i < total_batches - 1 else num_original
+        batch_mapping.append(list(range(start, end)))
+    
+    # Zbierz wszystkie keywords
+    for kw, meta in keywords_state.items():
+        keyword = meta.get("keyword", kw)
+        kw_type = meta.get("type", "BASIC").upper()
+        target_min = meta.get("target_min", 1)
+        target_max = meta.get("target_max", 5)
+        
+        # Rozdziel uses równomiernie
+        per_batch = [0, 0, 0]
+        
+        if kw_type == "MAIN":
+            # Main keyword: 2 w każdym batchu
+            per_batch = [2, 2, 2]
+        elif kw_type == "BASIC":
+            # BASIC: rozłóż target_min
+            uses_per = max(1, target_min // total_batches)
+            per_batch = [uses_per, uses_per, uses_per]
+        else:
+            # EXTENDED: 1 w losowym batchu
+            batch_idx = hash(keyword) % total_batches
+            per_batch[batch_idx] = 1
+        
+        keywords_distribution[keyword] = {
+            "type": kw_type,
+            "target_min": target_min,
+            "target_max": target_max,
+            "per_batch": per_batch,
+            "total_planned": sum(per_batch)
+        }
+    
+    return keywords_distribution
+
+
+# ================================================================
 # EXPORTS
 # ================================================================
 
 __all__ = [
     'create_article_plan',
+    'create_article_plan_fast',  # 🆕 v44.2
     'get_batch_instructions',
     'update_plan_after_batch',
     'ArticlePlan',
