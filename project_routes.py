@@ -1,5 +1,14 @@
 """
-PROJECT ROUTES - v43.0 BRAJEN SEO Engine - PHRASE HIERARCHY
+PROJECT ROUTES - v44.0 BRAJEN SEO Engine - DYNAMIC BATCH CALCULATION
+
+🆕 v44.0 ZMIANY:
+- DYNAMIC BATCH CALCULATION: Zamiast sztywnych progów (100+ fraz → 9 batchy),
+  teraz obliczamy dynamicznie na podstawie 3 constraintów:
+  1. Słowa per batch (target 500) → czytelność
+  2. Frazy per batch (max 12) → bez stuffingu
+  3. H2 per batch (1-2) → struktura
+- Wybieramy MAX z constraintów (najostrzejszy limit)
+- Response zawiera breakdown i limiting_factor dla przejrzystości
 
 🆕 v43.0 ZMIANY:
 - PHRASE HIERARCHY: Analiza hierarchii fraz (rdzenie vs rozszerzenia)
@@ -2364,56 +2373,119 @@ def create_project():
     extended_count = sum(1 for k in firestore_keywords.values() if k.get("type", "").upper() == "EXTENDED")
     total_keywords = basic_count + extended_count
     
-    # 🆕 v35.7: AUTO-SCALING batchy na podstawie liczby fraz
-    # Więcej fraz = więcej batchy = dłuższy artykuł
+    # ================================================================
+    # 🆕 v44.0: DYNAMIC BATCH CALCULATION
+    # Zamiast sztywnych progów (100+ → 9 batchy), obliczamy dynamicznie
+    # na podstawie 3 constraintów:
+    # 1. Słowa per batch (min 400, max 600) → czytelność
+    # 2. Frazy per batch (max 12-15) → bez stuffingu
+    # 3. H2 per batch (1-2) → struktura
+    # ================================================================
+    
     auto_scaled = False
     original_batches = total_planned_batches
     original_length = target_length
+    h2_count = len(h2_structure)
     
-    if total_keywords > 100:
-        # Bardzo dużo fraz (100+) → 9-10 batchy, 4500+ słów
-        min_batches = 9
-        min_length = 4500
-        auto_scaled = True
-    elif total_keywords > 80:
-        # Dużo fraz (80-100) → 8 batchy, 4000 słów
-        min_batches = 8
-        min_length = 4000
-        auto_scaled = True
-    elif total_keywords > 60:
-        # Sporo fraz (60-80) → 7 batchy, 3500 słów
-        min_batches = 7
-        min_length = 3500
-        auto_scaled = True
-    elif total_keywords > 40:
-        # Średnio fraz (40-60) → 6 batchy, 3000 słów
-        min_batches = 6
-        min_length = 3000
-        auto_scaled = True
-    else:
-        min_batches = total_planned_batches
-        min_length = target_length
+    def calculate_optimal_batches(keywords: int, words: int, h2s: int) -> dict:
+        """
+        Dynamiczne obliczanie optymalnej liczby batchy.
+        
+        Constrainty:
+        - Min ~400-600 słów per batch (czytelność)
+        - Max ~12-15 fraz per batch (bez stuffingu)  
+        - Min 1 H2 per batch, max 2 H2 per batch
+        
+        Wybieramy MAX z constraintów (najostrzejszy limit).
+        """
+        # Constraint 1: Słowa per batch
+        # Target: 450-550 słów/batch dla dobrej czytelności
+        WORDS_PER_BATCH_TARGET = 500
+        batches_by_words = math.ceil(words / WORDS_PER_BATCH_TARGET)
+        
+        # Constraint 2: Frazy per batch
+        # Max 12 fraz/batch żeby uniknąć stuffingu
+        MAX_KEYWORDS_PER_BATCH = 12
+        batches_by_keywords = math.ceil(keywords / MAX_KEYWORDS_PER_BATCH)
+        
+        # Constraint 3: H2 per batch
+        # Optymalnie 1-2 H2 na batch (1.5 średnio)
+        H2_PER_BATCH_TARGET = 1.5
+        batches_by_h2 = math.ceil(h2s / H2_PER_BATCH_TARGET) if h2s > 0 else 1
+        
+        # Wybierz MAX (najostrzejszy constraint)
+        optimal = max(batches_by_words, batches_by_keywords, batches_by_h2)
+        
+        # Clamp do sensownego zakresu (3-12)
+        optimal = max(3, min(12, optimal))
+        
+        # Określ limiting factor
+        if batches_by_keywords >= batches_by_words and batches_by_keywords >= batches_by_h2:
+            limiting_factor = "keywords"
+            explanation = f"ceil({keywords} fraz / {MAX_KEYWORDS_PER_BATCH} per batch)"
+        elif batches_by_words >= batches_by_h2:
+            limiting_factor = "word_target"
+            explanation = f"ceil({words} słów / {WORDS_PER_BATCH_TARGET} per batch)"
+        else:
+            limiting_factor = "h2_structure"
+            explanation = f"ceil({h2s} H2 / {H2_PER_BATCH_TARGET} per batch)"
+        
+        # Oblicz odpowiedni target_length
+        # Jeśli mamy dużo fraz, potrzebujemy więcej słów żeby je pomieścić
+        # Formuła: min 30 słów na frazę (żeby density była ok)
+        MIN_WORDS_PER_KEYWORD = 30
+        min_words_for_keywords = keywords * MIN_WORDS_PER_KEYWORD
+        
+        # Nie mniej niż optimal_batches * 400 słów
+        min_words_for_batches = optimal * 400
+        
+        suggested_length = max(words, min_words_for_keywords, min_words_for_batches)
+        
+        return {
+            "optimal_batches": optimal,
+            "suggested_length": suggested_length,
+            "limiting_factor": limiting_factor,
+            "explanation": explanation,
+            "breakdown": {
+                "by_words": batches_by_words,
+                "by_keywords": batches_by_keywords,
+                "by_h2": batches_by_h2
+            }
+        }
     
-    if auto_scaled:
-        total_planned_batches = max(total_planned_batches, min_batches)
-        target_length = max(target_length, min_length)
+    # Oblicz optymalną liczbę batchy
+    batch_calc = calculate_optimal_batches(total_keywords, target_length, h2_count)
+    calculated_batches = batch_calc["optimal_batches"]
+    calculated_length = batch_calc["suggested_length"]
+    
+    # Sprawdź czy trzeba skalować
+    if calculated_batches > original_batches or calculated_length > original_length:
+        auto_scaled = True
+        total_planned_batches = max(original_batches, calculated_batches)
+        target_length = max(original_length, calculated_length)
         
         # Zaktualizuj w Firestore
         project_data["total_planned_batches"] = total_planned_batches
         project_data["target_length"] = target_length
         project_data["auto_scaled"] = {
-            "reason": f"{total_keywords} fraz wymaga więcej miejsca",
+            "reason": f"{total_keywords} fraz, {h2_count} H2 → dynamicznie obliczono",
             "original_batches": original_batches,
             "scaled_batches": total_planned_batches,
             "original_length": original_length,
-            "scaled_length": target_length
+            "scaled_length": target_length,
+            "limiting_factor": batch_calc["limiting_factor"],
+            "explanation": batch_calc["explanation"],
+            "breakdown": batch_calc["breakdown"]
         }
         doc_ref.update({
             "total_planned_batches": total_planned_batches,
             "target_length": target_length,
             "auto_scaled": project_data["auto_scaled"]
         })
-        print(f"[PROJECT] 🔄 AUTO-SCALED: {total_keywords} fraz → {total_planned_batches} batchy, {target_length} słów (było: {original_batches} batchy, {original_length} słów)")
+        print(f"[PROJECT] 🔄 DYNAMIC SCALING: {total_keywords} fraz + {h2_count} H2 → {total_planned_batches} batchy "
+              f"(limit: {batch_calc['limiting_factor']}, było: {original_batches})")
+    else:
+        print(f"[PROJECT] ✅ No scaling needed: {total_keywords} fraz → {original_batches} batchy OK")
     
     print(f"[PROJECT] Created project {doc_ref.id}: {topic} ({len(firestore_keywords)} keywords: {basic_count} BASIC, {extended_count} EXTENDED, {total_planned_batches} planned batches)")
     
@@ -2441,7 +2513,18 @@ def create_project():
         "keyword_conflict_info": keyword_conflict_info,  # 🆕 v40.1: Info o konfliktach fraz
         "total_planned_batches": total_planned_batches,
         "target_length": target_length,
-        # 🆕 v35.7: Auto-scaling info
+        # 🆕 v44.0: Dynamic batch calculation info
+        "batch_calculation": batch_calc if auto_scaled else {
+            "optimal_batches": total_planned_batches,
+            "limiting_factor": "user_specified",
+            "explanation": "Użyto wartości podanej przez użytkownika",
+            "breakdown": {
+                "by_words": math.ceil(target_length / 500),
+                "by_keywords": math.ceil(total_keywords / 12),
+                "by_h2": math.ceil(h2_count / 1.5) if h2_count > 0 else 1
+            }
+        },
+        # 🆕 v35.7: Auto-scaling info (legacy, zachowane dla kompatybilności)
         "auto_scaled": project_data.get("auto_scaled") if auto_scaled else None,
         "source": source,
         "batch_plan": batch_plan_dict,
@@ -2454,7 +2537,7 @@ def create_project():
         # 🆕 v43.0: Phrase Hierarchy
         "phrase_hierarchy_enabled": phrase_hierarchy_data is not None,
         "phrase_hierarchy_stats": phrase_hierarchy_data.get("stats", {}) if phrase_hierarchy_data else None,
-        "version": "v43.0"
+        "version": "v44.0"
     }), 201
 
 
@@ -5736,7 +5819,7 @@ def get_phrase_hierarchy(project_id):
             },
             "formatted_for_agent": formatted,
             "summary": summary,
-            "version": "v43.0"
+            "version": "v44.0"
         }), 200
         
     except Exception as e:
@@ -5831,7 +5914,7 @@ def analyze_hierarchy_for_project(project_id):
             "entity_phrases": hierarchy.stats.get("entity_phrases", 0),
             "triplet_phrases": hierarchy.stats.get("triplet_phrases", 0),
             "formatted_for_agent": formatted,
-            "version": "v43.0"
+            "version": "v44.0"
         }), 200
         
     except Exception as e:
