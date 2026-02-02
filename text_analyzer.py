@@ -104,29 +104,9 @@ def calculate_density(text: str, keyword: str) -> float:
     return round(count / len(words), 4)
 
 
-# v40.2: Use core_metrics if available
-if CORE_METRICS_AVAILABLE:
-    def calculate_burstiness(text: str) -> float:
-        """Deleguje do core_metrics.calculate_burstiness_simple"""
-        return _calculate_burstiness_core(text)
-else:
-    def calculate_burstiness(text: str) -> float:
-        """FALLBACK - use core_metrics instead"""
-        sentences = split_sentences(text)
-        if len(sentences) < 3:
-            return 3.5
-        
-        lengths = [len(s.split()) for s in sentences]
-        mean_len = sum(lengths) / len(lengths)
-        
-        if mean_len == 0:
-            return 3.5
-        
-        variance = sum((l - mean_len) ** 2 for l in lengths) / len(lengths)
-        std_dev = math.sqrt(variance)
-        
-        burstiness = std_dev / mean_len
-        return round(min(max(burstiness * 5, 1.0), 5.0), 2)
+# 🆕 v44.1: calculate_burstiness z core_metrics (Single Source of Truth)
+# Poprzednio: warunkowy fallback - USUNIĘTY (core_metrics zawsze dostępny)
+from core_metrics import calculate_burstiness_simple as calculate_burstiness
 
 
 def calculate_transition_ratio(text: str) -> Dict:
