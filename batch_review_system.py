@@ -120,40 +120,9 @@ except ImportError:
     print("[BATCH_REVIEW] ⚠️ style_analyzer not available")
 
 # ================================================================
-# 🆕 v40.1: FIRESTORE KEY SANITIZATION
+# 🆕 v44.1: FIRESTORE KEY SANITIZATION - import z firestore_utils
 # ================================================================
-def sanitize_for_firestore(data, depth=0, max_depth=50):
-    """
-    Recursively sanitize dictionary keys for Firestore compatibility.
-    """
-    if depth > max_depth:
-        return data
-    
-    if isinstance(data, dict):
-        sanitized = {}
-        for key, value in data.items():
-            if key is None:
-                continue
-            str_key = str(key).strip()
-            if not str_key:
-                continue
-            safe_key = (str_key
-                .replace('.', '_')
-                .replace('/', '_')
-                .replace('[', '(')
-                .replace(']', ')')
-                .replace('\\', '_')
-                .replace('"', '')
-                .replace("'", '')
-            )
-            if not safe_key:
-                safe_key = f"_sanitized_key_{depth}"
-            sanitized[safe_key] = sanitize_for_firestore(value, depth + 1, max_depth)
-        return sanitized
-    elif isinstance(data, list):
-        return [sanitize_for_firestore(item, depth + 1, max_depth) for item in data]
-    else:
-        return data
+from firestore_utils import sanitize_for_firestore
 
 # 🆕 v36.2: Anti-Frankenstein System
 try:
@@ -600,15 +569,9 @@ else:
         return round(raw_score * 5, 2)
 
 
-TRANSITION_WORDS_PL = [
-    "również", "także", "ponadto", "dodatkowo", "co więcej",
-    "jednak", "jednakże", "natomiast", "ale", "z drugiej strony",
-    "mimo to", "niemniej", "pomimo", "choć", "chociaż",
-    "dlatego", "w związku z tym", "w rezultacie", "ponieważ",
-    "zatem", "więc", "stąd", "w konsekwencji",
-    "na przykład", "przykładowo", "między innymi", "np.",
-    "po pierwsze", "po drugie", "następnie", "potem", "na koniec",
-]
+# 🆕 v44.1: Używamy TRANSITION_WORDS z core_metrics (Single Source of Truth)
+# Poprzednio: lokalna kopia TRANSITION_WORDS_PL - USUNIĘTA
+# Teraz: import z core_metrics (linia 104)
 
 
 def calculate_transition_score(text: str) -> dict:
@@ -619,7 +582,11 @@ def calculate_transition_score(text: str) -> dict:
     if len(sentences) < 2:
         return {"ratio": 1.0, "count": 0, "total": len(sentences), "warnings": []}
     
-    transition_count = sum(1 for s in sentences if any(tw in s.lower()[:100] for tw in TRANSITION_WORDS_PL))
+    # v44.1: Używamy TRANSITION_WORDS_CORE z core_metrics
+    transition_words = list(TRANSITION_WORDS_CORE) if CORE_METRICS_AVAILABLE else [
+        "również", "także", "ponadto", "jednak", "natomiast", "dlatego", "ponieważ"
+    ]
+    transition_count = sum(1 for s in sentences if any(tw in s.lower()[:100] for tw in transition_words))
     ratio = transition_count / len(sentences)
     
     warnings = []

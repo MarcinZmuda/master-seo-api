@@ -76,196 +76,134 @@ from firestore_tracker_routes import process_batch_in_firestore
 import google.generativeai as genai
 from seo_optimizer import unified_prevalidation
 
-# 🆕 v40.1: Keyword Conflict Validator - zapobiega stuffing/rewrite loop
-try:
-    from keyword_conflict_validator import validate_keywords_before_create
-    KEYWORD_CONFLICT_VALIDATOR_ENABLED = True
-    print("[PROJECT_ROUTES] ✅ keyword_conflict_validator loaded")
-except ImportError as e:
-    KEYWORD_CONFLICT_VALIDATOR_ENABLED = False
-    print(f"[PROJECT_ROUTES] ⚠️ keyword_conflict_validator not available: {e}")
-
 # ================================================================
-# 🆕 v43.0: PHRASE HIERARCHY MODULE
-# Analiza hierarchii fraz - zapobiega stuffing, rozpoznaje rdzenie/rozszerzenia
+# 🆕 v44.1: CENTRALIZED IMPORTS via feature_flags
+# Zastępuje ~20 bloków try/except jednym importem
 # ================================================================
-try:
-    from phrase_hierarchy import (
-        analyze_phrase_hierarchy,
-        hierarchy_to_dict,
-        dict_to_hierarchy,
-        format_hierarchy_for_agent,
-        format_hierarchy_summary_short,
-        get_batch_hierarchy_context
-    )
-    PHRASE_HIERARCHY_ENABLED = True
-    print("[PROJECT_ROUTES] ✅ phrase_hierarchy v1.0 loaded")
-except ImportError as e:
-    PHRASE_HIERARCHY_ENABLED = False
-    print(f"[PROJECT_ROUTES] ⚠️ phrase_hierarchy not available: {e}")
+from firestore_utils import sanitize_for_firestore, batch_update
+from feature_flags import FEATURES, get_module, safe_import, is_enabled
 
-# ================================================================
-# 🆕 v40.1: FIRESTORE KEY SANITIZATION
-# Firestore nie akceptuje pustych kluczy ani znaków . / [ ] w kluczach
-# ================================================================
-def sanitize_for_firestore(data, depth=0, max_depth=50):
-    """
-    Recursively sanitize dictionary keys for Firestore compatibility.
-    
-    Firestore restrictions:
-    - Keys must be non-empty strings
-    - Keys cannot contain: . / [ ] \\ " '
-    - Keys cannot start/end with whitespace
-    
-    Args:
-        data: Any data structure (dict, list, or primitive)
-        depth: Current recursion depth
-        max_depth: Maximum recursion depth to prevent infinite loops
-        
-    Returns:
-        Sanitized data structure
-    """
-    if depth > max_depth:
-        return data
-    
-    if isinstance(data, dict):
-        sanitized = {}
-        for key, value in data.items():
-            # Skip None keys
-            if key is None:
-                continue
-            
-            # Convert to string
-            str_key = str(key).strip()
-            
-            # Skip empty keys
-            if not str_key:
-                continue
-            
-            # Replace problematic characters for Firestore
-            safe_key = (str_key
-                .replace('.', '_')
-                .replace('/', '_')
-                .replace('[', '(')
-                .replace(']', ')')
-                .replace('\\', '_')
-                .replace('"', '')
-                .replace("'", '')
-            )
-            
-            # Ensure key is not empty after sanitization
-            if not safe_key:
-                safe_key = f"_sanitized_key_{depth}"
-            
-            # Recursively sanitize value
-            sanitized[safe_key] = sanitize_for_firestore(value, depth + 1, max_depth)
-        
-        return sanitized
-    
-    elif isinstance(data, list):
-        return [sanitize_for_firestore(item, depth + 1, max_depth) for item in data]
-    
-    else:
-        return data
+# Feature availability flags (for backward compatibility)
+KEYWORD_CONFLICT_VALIDATOR_ENABLED = FEATURES.keyword_conflict_validator
+PHRASE_HIERARCHY_ENABLED = FEATURES.phrase_hierarchy
+ANTI_FRANKENSTEIN_ENABLED = FEATURES.anti_frankenstein_integration
+ENHANCED_PRE_BATCH_ENABLED = FEATURES.enhanced_pre_batch
+SYNONYMS_ENABLED = FEATURES.keyword_synonyms
+BEST_OF_N_ENABLED = FEATURES.batch_best_of_n
+BATCH_PLANNER_ENABLED = FEATURES.batch_planner
+LEGAL_MODULE_ENABLED = FEATURES.legal_routes_v3
+POLISH_QUALITY_ENABLED = FEATURES.polish_language_quality
+H2_GENERATOR_ENABLED = FEATURES.h2_generator
 
-# 🆕 v36.2: Anti-Frankenstein System
-try:
-    from anti_frankenstein_integration import (
-        enhance_project_with_anti_frankenstein,
-        get_anti_frankenstein_context,
-        generate_anti_frankenstein_gpt_section,
-        update_project_after_batch
-    )
-    ANTI_FRANKENSTEIN_ENABLED = True
-except ImportError:
-    ANTI_FRANKENSTEIN_ENABLED = False
-    print("[PROJECT_ROUTES] ⚠️ Anti-Frankenstein modules not available")
+# Lazy imports - funkcje pobierane gdy potrzebne
+def _get_phrase_hierarchy_functions():
+    """Lazy import phrase_hierarchy functions."""
+    ph = get_module('phrase_hierarchy')
+    if ph:
+        return (
+            ph.analyze_phrase_hierarchy,
+            ph.hierarchy_to_dict,
+            ph.dict_to_hierarchy,
+            ph.format_hierarchy_for_agent,
+            ph.format_hierarchy_summary_short,
+            ph.get_batch_hierarchy_context
+        )
+    return (None,) * 6
 
-# 🆕 v39.0: Enhanced Pre-Batch Instructions
-try:
-    from enhanced_pre_batch import (
-        generate_enhanced_pre_batch_info,
-        get_entities_to_define,
-        get_relations_to_establish,
-        get_semantic_context,
-        get_style_instructions,
-        get_continuation_context,
-        get_keyword_tracking_info,
-        calculate_optimal_batch_count,
-        AI_PATTERNS_TO_AVOID
-    )
-    ENHANCED_PRE_BATCH_ENABLED = True
-    print("[PROJECT] ✅ Enhanced Pre-Batch v39.0 loaded")
-except ImportError as e:
-    ENHANCED_PRE_BATCH_ENABLED = False
-    print(f"[PROJECT] ⚠️ Enhanced Pre-Batch not available: {e}")
+def _get_anti_frankenstein_functions():
+    """Lazy import anti_frankenstein functions."""
+    af = get_module('anti_frankenstein_integration')
+    if af:
+        return (
+            af.enhance_project_with_anti_frankenstein,
+            af.get_anti_frankenstein_context,
+            af.generate_anti_frankenstein_gpt_section,
+            af.update_project_after_batch
+        )
+    return (None,) * 4
 
-# v26.1: Keyword synonyms for exceeded keywords
-try:
-    from keyword_synonyms import (
-        generate_exceeded_warning, 
-        generate_softcap_warning,
-        generate_synonyms_prompt_section,
-        get_synonyms
-    )
-    SYNONYMS_ENABLED = True
-    print("[PROJECT] Keyword synonyms module loaded")
-except ImportError as e:
-    SYNONYMS_ENABLED = False
-    print(f"[PROJECT] Keyword synonyms not available: {e}")
+def _get_enhanced_pre_batch_functions():
+    """Lazy import enhanced_pre_batch functions."""
+    epb = get_module('enhanced_pre_batch')
+    if epb:
+        return {
+            'generate_enhanced_pre_batch_info': epb.generate_enhanced_pre_batch_info,
+            'get_entities_to_define': getattr(epb, 'get_entities_to_define', None),
+            'get_relations_to_establish': getattr(epb, 'get_relations_to_establish', None),
+            'get_semantic_context': getattr(epb, 'get_semantic_context', None),
+            'get_style_instructions': getattr(epb, 'get_style_instructions', None),
+            'get_continuation_context': getattr(epb, 'get_continuation_context', None),
+            'get_keyword_tracking_info': getattr(epb, 'get_keyword_tracking_info', None),
+            'calculate_optimal_batch_count': getattr(epb, 'calculate_optimal_batch_count', None),
+            'AI_PATTERNS_TO_AVOID': getattr(epb, 'AI_PATTERNS_TO_AVOID', [])
+        }
+    return {}
 
-# v26.1: Best-of-N batch selection
-try:
-    from batch_best_of_n import select_best_batch, BestOfNConfig
-    BEST_OF_N_ENABLED = True
-    print("[PROJECT] Best-of-N module loaded")
-except ImportError as e:
-    BEST_OF_N_ENABLED = False
-    print(f"[PROJECT] Best-of-N not available: {e}")
+# Compatibility layer for direct imports (używane w kodzie)
+if PHRASE_HIERARCHY_ENABLED:
+    (analyze_phrase_hierarchy, hierarchy_to_dict, dict_to_hierarchy,
+     format_hierarchy_for_agent, format_hierarchy_summary_short,
+     get_batch_hierarchy_context) = _get_phrase_hierarchy_functions()
 
-# v24.0: Batch planner integration
-try:
-    from batch_planner import create_article_plan
-    BATCH_PLANNER_ENABLED = True
-    print("[PROJECT] Batch Planner loaded")
-except ImportError as e:
-    BATCH_PLANNER_ENABLED = False
-    print(f"[PROJECT] Batch Planner not available: {e}")
+if ANTI_FRANKENSTEIN_ENABLED:
+    (enhance_project_with_anti_frankenstein, get_anti_frankenstein_context,
+     generate_anti_frankenstein_gpt_section, update_project_after_batch) = _get_anti_frankenstein_functions()
 
-# 🆕 v30.0: Legal Module integration
-try:
-    from legal_routes_v3 import enhance_project_with_legal, LEGAL_MODULE_ENABLED
-    print("[PROJECT] ✅ Legal Module v3.0 loaded")
-except ImportError as e:
-    LEGAL_MODULE_ENABLED = False
+if ENHANCED_PRE_BATCH_ENABLED:
+    _epb_funcs = _get_enhanced_pre_batch_functions()
+    generate_enhanced_pre_batch_info = _epb_funcs.get('generate_enhanced_pre_batch_info')
+    AI_PATTERNS_TO_AVOID = _epb_funcs.get('AI_PATTERNS_TO_AVOID', [])
+
+if SYNONYMS_ENABLED:
+    ks = get_module('keyword_synonyms')
+    if ks:
+        generate_exceeded_warning = ks.generate_exceeded_warning
+        generate_softcap_warning = ks.generate_softcap_warning
+        generate_synonyms_prompt_section = ks.generate_synonyms_prompt_section
+        get_synonyms = ks.get_synonyms
+
+if BEST_OF_N_ENABLED:
+    bon = get_module('batch_best_of_n')
+    if bon:
+        select_best_batch = bon.select_best_batch
+        BestOfNConfig = bon.BestOfNConfig
+
+if BATCH_PLANNER_ENABLED:
+    bp = get_module('batch_planner')
+    if bp:
+        create_article_plan = bp.create_article_plan
+
+if LEGAL_MODULE_ENABLED:
+    lr = get_module('legal_routes_v3')
+    if lr:
+        enhance_project_with_legal = lr.enhance_project_with_legal
+else:
     def enhance_project_with_legal(project_data, main_keyword, h2_list):
         return project_data
-    print(f"[PROJECT] ⚠️ Legal Module not available: {e}")
 
-# v27.4: Polish language quality check
-try:
-    from polish_language_quality import (
-        quick_polish_check,
-        check_collocations,
-        check_banned_phrases,
-        INCORRECT_COLLOCATIONS
-    )
-    POLISH_QUALITY_ENABLED = True
-    print("[PROJECT] ✅ Polish Language Quality module loaded")
-except ImportError as e:
-    POLISH_QUALITY_ENABLED = False
-    print(f"[PROJECT] ⚠️ Polish Quality not available: {e}")
-    BATCH_PLANNER_ENABLED = False
-    print(f"[PROJECT] Batch Planner not available: {e}")
+if POLISH_QUALITY_ENABLED:
+    plq = get_module('polish_language_quality')
+    if plq:
+        quick_polish_check = plq.quick_polish_check
+        check_collocations = plq.check_collocations
+        check_banned_phrases = plq.check_banned_phrases
+        INCORRECT_COLLOCATIONS = getattr(plq, 'INCORRECT_COLLOCATIONS', {})
 
-# v29.2: H2 Generator - Semantic HTML + Content Relevancy
-try:
-    from h2_generator import generate_h2_plan, validate_h2_plan
-    H2_GENERATOR_ENABLED = True
-    print("[PROJECT] ✅ H2 Generator module loaded")
-except ImportError as e:
-    H2_GENERATOR_ENABLED = False
-    print(f"[PROJECT] ⚠️ H2 Generator not available: {e}")
+if H2_GENERATOR_ENABLED:
+    h2g = get_module('h2_generator')
+    if h2g:
+        generate_h2_plan = h2g.generate_h2_plan
+        validate_h2_plan = h2g.validate_h2_plan
+
+if KEYWORD_CONFLICT_VALIDATOR_ENABLED:
+    kcv = get_module('keyword_conflict_validator')
+    if kcv:
+        validate_keywords_before_create = kcv.validate_keywords_before_create
+
+print(f"[PROJECT_ROUTES] ✅ Loaded via feature_flags: "
+      f"phrase_hierarchy={PHRASE_HIERARCHY_ENABLED}, "
+      f"enhanced_pre_batch={ENHANCED_PRE_BATCH_ENABLED}, "
+      f"batch_planner={BATCH_PLANNER_ENABLED}")
 
 # ================================================================
 # v29.3: Entity & N-gram Guidance Helpers
