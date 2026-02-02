@@ -435,25 +435,9 @@ def validate_structure(text):
     return {"valid": True}
 
 
-# v40.2: Use core_metrics if available, fallback to local implementation
-if CORE_METRICS_AVAILABLE:
-    def calculate_burstiness(text):
-        """Deleguje do core_metrics.calculate_burstiness_simple"""
-        return _calculate_burstiness_core(text)
-else:
-    def calculate_burstiness(text):
-        """Target: 3.2-3.8 (FALLBACK - use core_metrics instead)"""
-        sentences = re.split(r'[.!?]+', text)
-        sentences = [s.strip() for s in sentences if s.strip()]
-        if len(sentences) < 3:
-            return 0.0
-        lengths = [len(s.split()) for s in sentences]
-        mean = sum(lengths) / len(lengths)
-        variance = sum((x - mean) ** 2 for x in lengths) / len(lengths)
-        if not mean:
-            return 0.0
-        raw_score = math.sqrt(variance) / mean
-        return round(raw_score * 5, 2)
+# 🆕 v44.1: calculate_burstiness z core_metrics (Single Source of Truth)
+# Poprzednio: warunkowy fallback - USUNIĘTY (core_metrics zawsze dostępny)
+from core_metrics import calculate_burstiness_simple as calculate_burstiness
 
 
 # 🆕 v44.1: Używamy TRANSITION_WORDS z core_metrics (Single Source of Truth)
