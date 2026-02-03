@@ -37,7 +37,7 @@ app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024  # 32 MB
 CORS(app)
 
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-VERSION = "v36.9"  # 🆕 Anti-Loop System: prioritized_issues, actionable_feedback, auto_fixes
+VERSION = "v37.0"  # 🆕 Medical Module: PubMed, ClinicalTrials, Polish Health Sources
 
 # ================================================================
 # 🆕 v32.4: Firestore persistence for projects
@@ -178,6 +178,36 @@ except ImportError as e:
     print(f"[MASTER] ⚠️ Legal Module not available: {e}")
 
 # ================================================================
+# 🆕 v37.0: Medical Module (PubMed, ClinicalTrials, Polish Health)
+# ================================================================
+try:
+    from medical_module.medical_routes import (
+        medical_routes,
+        enhance_project_with_medical,
+        check_medical_on_export
+    )
+    from medical_module.medical_module import (
+        PUBMED_AVAILABLE,
+        CLINICALTRIALS_AVAILABLE,
+        POLISH_HEALTH_AVAILABLE,
+        CLAUDE_VERIFIER_AVAILABLE
+    )
+    MEDICAL_MODULE_ENABLED = True
+    print("[MASTER] ✅ Medical Module v1.0 loaded")
+    print(f"[MASTER]    ├─ PubMed: {'✅' if PUBMED_AVAILABLE else '❌'}")
+    print(f"[MASTER]    ├─ ClinicalTrials: {'✅' if CLINICALTRIALS_AVAILABLE else '❌'}")
+    print(f"[MASTER]    ├─ Polish Health: {'✅' if POLISH_HEALTH_AVAILABLE else '❌'}")
+    print(f"[MASTER]    └─ Claude Verifier: {'✅' if CLAUDE_VERIFIER_AVAILABLE else '❌'}")
+except ImportError as e:
+    MEDICAL_MODULE_ENABLED = False
+    PUBMED_AVAILABLE = False
+    CLINICALTRIALS_AVAILABLE = False
+    POLISH_HEALTH_AVAILABLE = False
+    CLAUDE_VERIFIER_AVAILABLE = False
+    medical_routes = None
+    print(f"[MASTER] ⚠️ Medical Module not available: {e}")
+
+# ================================================================
 # 🔗 N-gram API Configuration (for S1 proxy)
 # ================================================================
 NGRAM_API_URL = os.getenv("NGRAM_API_URL", "https://gpt-ngram-api.onrender.com")
@@ -246,6 +276,11 @@ if ENTITY_ROUTES_ENABLED and entity_routes:
 if LEGAL_MODULE_ENABLED and legal_routes:
     app.register_blueprint(legal_routes)
     print("[MASTER_API] ✅ Legal routes registered (SAOS integration)")
+
+# 🆕 v37.0: Medical Module routes (jeśli dostępne)
+if MEDICAL_MODULE_ENABLED and medical_routes:
+    app.register_blueprint(medical_routes)
+    print("[MASTER_API] ✅ Medical routes registered (PubMed, ClinicalTrials, Polish Health)")
 
 # ================================================================
 # 🔗 S1 PROXY ENDPOINTS (przekierowanie do N-gram API)
@@ -999,7 +1034,9 @@ def health():
             "export_routes",
             "seo_optimizer",
             "s1_proxy (to N-gram API)",
-            "semantic_enhancement v31.0" if SEMANTIC_ENHANCEMENT_ENABLED else "semantic_enhancement (disabled)"
+            "semantic_enhancement v31.0" if SEMANTIC_ENHANCEMENT_ENABLED else "semantic_enhancement (disabled)",
+            "legal_module v3.0" if LEGAL_MODULE_ENABLED else "legal_module (disabled)",
+            "medical_module v1.0" if MEDICAL_MODULE_ENABLED else "medical_module (disabled)"
         ],
         "debug_mode": DEBUG_MODE,
         "firebase_connected": True,
@@ -1008,14 +1045,22 @@ def health():
         "s1_proxy_enabled": True,
         "semantic_enabled": SEMANTIC_ENABLED,
         "semantic_enhancement_enabled": SEMANTIC_ENHANCEMENT_ENABLED,
-        "features_v31_0": [
-            "Entity Density validation",
-            "Topic Completeness check",
-            "Entity Gap detection (auto from S1)",
-            "Source Effort scoring",
-            "/api/semantic_validate endpoint",
-            "/api/quick_semantic_check endpoint",
-            "S1 response includes semantic_enhancement_hints"
+        "legal_module_enabled": LEGAL_MODULE_ENABLED,
+        "medical_module_enabled": MEDICAL_MODULE_ENABLED,
+        "medical_sources": {
+            "pubmed": PUBMED_AVAILABLE,
+            "clinicaltrials": CLINICALTRIALS_AVAILABLE,
+            "polish_health": POLISH_HEALTH_AVAILABLE,
+            "claude_verifier": CLAUDE_VERIFIER_AVAILABLE
+        } if MEDICAL_MODULE_ENABLED else None,
+        "features_v37_0": [
+            "Medical Module v1.0",
+            "PubMed NCBI E-utilities integration",
+            "ClinicalTrials.gov API v2",
+            "Polish Health Sources (PZH, AOTMiT, MZ, NFZ)",
+            "Claude AI medical evidence verification",
+            "NLM/APA citation formatting",
+            "/api/medical/* endpoints"
         ]
     }), 200
 
@@ -1036,7 +1081,9 @@ def version_info():
             "seo_optimizer": "v23.9",
             "final_review_routes": "v23.9",
             "s1_proxy": "v31.0 (semantic hints)",
-            "unified_validator": "v31.0 (semantic enhancement)"
+            "unified_validator": "v31.0 (semantic enhancement)",
+            "legal_module": "v3.0 (SAOS integration)" if LEGAL_MODULE_ENABLED else "disabled",
+            "medical_module": "v1.0 (PubMed, ClinicalTrials, Polish Health)" if MEDICAL_MODULE_ENABLED else "disabled"
         },
         "optimizations": {
             "approve_batch_response": "~500B (was 220KB)",
@@ -1052,12 +1099,33 @@ def version_info():
                 "source_effort"
             ]
         },
+        "medical_module": {
+            "enabled": MEDICAL_MODULE_ENABLED,
+            "sources": {
+                "pubmed": PUBMED_AVAILABLE,
+                "clinicaltrials": CLINICALTRIALS_AVAILABLE,
+                "polish_health": POLISH_HEALTH_AVAILABLE,
+                "claude_verifier": CLAUDE_VERIFIER_AVAILABLE
+            } if MEDICAL_MODULE_ENABLED else {},
+            "endpoints": [
+                "/api/medical/status",
+                "/api/medical/detect",
+                "/api/medical/get_context",
+                "/api/medical/search/pubmed",
+                "/api/medical/search/trials",
+                "/api/medical/search/polish",
+                "/api/medical/validate",
+                "/api/medical/disclaimer"
+            ] if MEDICAL_MODULE_ENABLED else []
+        },
         "environment": {
             "debug_mode": DEBUG_MODE,
             "firebase_connected": True,
             "ngram_base_url": NGRAM_BASE_URL,
             "semantic_enabled": SEMANTIC_ENABLED,
-            "semantic_enhancement_enabled": SEMANTIC_ENHANCEMENT_ENABLED
+            "semantic_enhancement_enabled": SEMANTIC_ENHANCEMENT_ENABLED,
+            "legal_module_enabled": LEGAL_MODULE_ENABLED,
+            "medical_module_enabled": MEDICAL_MODULE_ENABLED
         }
     }), 200
 
@@ -2277,7 +2345,19 @@ if __name__ == "__main__":
     print(f"🆕 Semantic Enhancement v31.0: {'ENABLED ✅' if SEMANTIC_ENHANCEMENT_ENABLED else 'DISABLED ⚠️'}")
     print(f"🤖 AI Detection v33.0: {'ENABLED ✅' if AI_DETECTION_ENABLED else 'DISABLED ⚠️'}")
     print(f"⚖️ Legal Module v3.0: {'ENABLED ✅' if LEGAL_MODULE_ENABLED else 'DISABLED ⚠️'}")
-    print(f"📦 Features v35.5:")
+    print(f"🏥 Medical Module v1.0: {'ENABLED ✅' if MEDICAL_MODULE_ENABLED else 'DISABLED ⚠️'}")
+    if MEDICAL_MODULE_ENABLED:
+        print(f"   ├─ PubMed: {'✅' if PUBMED_AVAILABLE else '❌'}")
+        print(f"   ├─ ClinicalTrials: {'✅' if CLINICALTRIALS_AVAILABLE else '❌'}")
+        print(f"   ├─ Polish Health: {'✅' if POLISH_HEALTH_AVAILABLE else '❌'}")
+        print(f"   └─ Claude Verifier: {'✅' if CLAUDE_VERIFIER_AVAILABLE else '❌'}")
+    print(f"📦 Features v37.0:")
+    print(f"   ─── 🏥 MEDICAL MODULE (v37.0) ───")
+    print(f"   ✅ PubMed NCBI E-utilities")
+    print(f"   ✅ ClinicalTrials.gov API v2")
+    print(f"   ✅ Polish Health (PZH, AOTMiT, MZ, NFZ)")
+    print(f"   ✅ Claude AI evidence verification")
+    print(f"   ✅ NLM/APA citation formatting")
     print(f"   ─── 🆕 KEYWORD FIX (v35.5) ───")
     print(f"   ✅ Real-time counting in approveBatch")
     print(f"   ✅ OVERLAPPING mode (NeuronWriter)")
@@ -2298,9 +2378,13 @@ if __name__ == "__main__":
     print(f"   ─── Legal Module ───")
     print(f"   ✅ Auto-detection (prawo category)")
     print(f"   ✅ SAOS integration (judgments)")
+    print(f"   ─── Medical Module ───")
+    print(f"   ✅ Auto-detection (medycyna category)")
+    print(f"   ✅ Evidence-based sources")
     print(f"   ─── Endpoints ───")
     print(f"   /api/approveBatch (🆕 real counting)")
-    print(f"   /api/verify_keywords (🆕)")
+    print(f"   /api/verify_keywords")
     print(f"   /api/ai_detection")
-    print(f"   /api/legal/status\n")
+    print(f"   /api/legal/status")
+    print(f"   /api/medical/status (🆕)\n")
     app.run(host="0.0.0.0", port=port, debug=DEBUG_MODE)
