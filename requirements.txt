@@ -52,3 +52,7 @@ rich>=13.0.0
 # plwordnet>=0.1.0  # Wymaga pobrania plwordnet_4_2.xml (~350MB)
 # ================================================
 beautifulsoup4>=4.12.0
+
+# Medical Module
+beautifulsoup4>=4.11.0
+lxml>=4.9.0
