@@ -1,0 +1,366 @@
+#!/usr/bin/env python3
+"""
+===============================================================================
+🧪 MEDICAL MODULE TEST SCRIPT
+===============================================================================
+Uruchom ten skrypt aby przetestować wszystkie komponenty modułu.
+
+Użycie:
+    python test_medical_module.py
+
+Wymaga:
+    - Zainstalowane zależności (pip install -r requirements.txt)
+    - Skonfigurowany .env z kluczami API
+===============================================================================
+"""
+
+import os
+import sys
+from pathlib import Path
+
+# Dodaj ścieżkę do modułu
+sys.path.insert(0, str(Path(__file__).parent))
+
+# Załaduj .env
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    print("⚠️ python-dotenv nie zainstalowany, używam zmiennych systemowych")
+
+
+def print_header(title: str):
+    """Drukuje nagłówek sekcji."""
+    print(f"\n{'='*60}")
+    print(f"🧪 {title}")
+    print("="*60)
+
+
+def print_result(name: str, success: bool, details: str = ""):
+    """Drukuje wynik testu."""
+    status = "✅" if success else "❌"
+    print(f"   {status} {name}")
+    if details:
+        print(f"      → {details}")
+
+
+def test_imports():
+    """Test importów wszystkich modułów."""
+    print_header("TEST IMPORTÓW")
+    
+    modules = [
+        ("pubmed_client", "PubMed Client"),
+        ("clinicaltrials_client", "ClinicalTrials Client"),
+        ("polish_health_scraper", "Polish Health Scraper"),
+        ("medical_term_detector", "Term Detector"),
+        ("claude_medical_verifier", "Claude Verifier"),
+        ("medical_citation_generator", "Citation Generator"),
+        ("medical_module", "Main Module"),
+        ("medical_routes", "Flask Routes"),
+    ]
+    
+    results = {}
+    
+    for module_name, display_name in modules:
+        try:
+            __import__(module_name)
+            results[module_name] = True
+            print_result(display_name, True)
+        except ImportError as e:
+            results[module_name] = False
+            print_result(display_name, False, str(e))
+    
+    return all(results.values())
+
+
+def test_env_config():
+    """Test konfiguracji środowiskowej."""
+    print_header("TEST KONFIGURACJI")
+    
+    configs = [
+        ("NCBI_API_KEY", os.getenv("NCBI_API_KEY")),
+        ("NCBI_EMAIL", os.getenv("NCBI_EMAIL")),
+        ("ANTHROPIC_API_KEY", os.getenv("ANTHROPIC_API_KEY")),
+    ]
+    
+    for name, value in configs:
+        if value:
+            masked = value[:8] + "..." if len(value) > 10 else value
+            print_result(name, True, f"Set ({masked})")
+        else:
+            # ANTHROPIC_API_KEY jest opcjonalny
+            is_optional = name == "ANTHROPIC_API_KEY"
+            print_result(name, is_optional, "Not set" + (" (optional)" if is_optional else ""))
+    
+    return True
+
+
+def test_category_detection():
+    """Test wykrywania kategorii."""
+    print_header("TEST DETEKCJI KATEGORII")
+    
+    try:
+        from medical_module import detect_category
+        
+        test_cases = [
+            ("leczenie cukrzycy typu 2", True),
+            ("objawy zawału serca", True),
+            ("przepis na ciasto", False),
+            ("szczepionka covid skutki uboczne", True),
+        ]
+        
+        all_passed = True
+        for topic, expected_medical in test_cases:
+            result = detect_category(topic)
+            is_medical = result.get("is_ymyl", False)
+            passed = is_medical == expected_medical
+            
+            if not passed:
+                all_passed = False
+            
+            status = "MEDICAL" if is_medical else "GENERAL"
+            expected = "MEDICAL" if expected_medical else "GENERAL"
+            
+            print_result(
+                f'"{topic[:30]}..."',
+                passed,
+                f"{status} (expected: {expected}, confidence: {result.get('confidence', 0)})"
+            )
+        
+        return all_passed
+        
+    except Exception as e:
+        print_result("Category Detection", False, str(e))
+        return False
+
+
+def test_pubmed_search():
+    """Test wyszukiwania PubMed."""
+    print_header("TEST PUBMED")
+    
+    try:
+        from pubmed_client import search_pubmed, PUBMED_AVAILABLE
+        
+        if not PUBMED_AVAILABLE:
+            print_result("PubMed Available", False, "Module not available")
+            return False
+        
+        print_result("PubMed Available", True)
+        
+        # Test wyszukiwania
+        print("\n   📚 Searching 'diabetes metformin'...")
+        result = search_pubmed(
+            query="diabetes metformin",
+            max_results=3,
+            min_year=2020
+        )
+        
+        status = result.get("status")
+        count = len(result.get("publications", []))
+        
+        print_result(
+            "Search Result",
+            status == "OK" and count > 0,
+            f"Status: {status}, Found: {count} publications"
+        )
+        
+        if count > 0:
+            pub = result["publications"][0]
+            print(f"\n   📄 First result:")
+            print(f"      Title: {pub.get('title', 'N/A')[:60]}...")
+            print(f"      Authors: {pub.get('authors_short', 'N/A')}")
+            print(f"      Journal: {pub.get('journal_abbrev', 'N/A')} ({pub.get('year', 'N/A')})")
+            print(f"      PMID: {pub.get('pmid', 'N/A')}")
+        
+        return status == "OK"
+        
+    except Exception as e:
+        print_result("PubMed Search", False, str(e))
+        return False
+
+
+def test_clinicaltrials_search():
+    """Test wyszukiwania ClinicalTrials.gov."""
+    print_header("TEST CLINICALTRIALS.GOV")
+    
+    try:
+        from clinicaltrials_client import search_completed_trials, CLINICALTRIALS_AVAILABLE
+        
+        if not CLINICALTRIALS_AVAILABLE:
+            print_result("ClinicalTrials Available", False, "Module not available")
+            return False
+        
+        print_result("ClinicalTrials Available", True)
+        
+        # Test wyszukiwania
+        print("\n   🧪 Searching completed trials for 'diabetes'...")
+        result = search_completed_trials(
+            condition="diabetes",
+            max_results=3
+        )
+        
+        status = result.get("status")
+        count = len(result.get("studies", []))
+        
+        print_result(
+            "Search Result",
+            status == "OK" and count > 0,
+            f"Status: {status}, Found: {count} studies"
+        )
+        
+        if count > 0:
+            study = result["studies"][0]
+            print(f"\n   🔬 First result:")
+            print(f"      NCT ID: {study.get('nct_id', 'N/A')}")
+            print(f"      Title: {study.get('brief_title', 'N/A')[:60]}...")
+            print(f"      Status: {study.get('status_pl', study.get('status', 'N/A'))}")
+            print(f"      Phases: {', '.join(study.get('phases_pl', study.get('phases', [])))}")
+        
+        return status == "OK"
+        
+    except Exception as e:
+        print_result("ClinicalTrials Search", False, str(e))
+        return False
+
+
+def test_citation_generator():
+    """Test generatora cytowań."""
+    print_header("TEST CYTOWAŃ")
+    
+    try:
+        from medical_citation_generator import format_citation, CitationStyle
+        
+        test_pub = {
+            "pmid": "12345678",
+            "title": "Metformin for type 2 diabetes: A systematic review",
+            "authors": ["Smith John", "Doe Anna", "Brown Michael"],
+            "journal": "The Lancet",
+            "journal_abbrev": "Lancet",
+            "year": "2023",
+            "doi": "10.1016/example"
+        }
+        
+        # Test NLM
+        nlm = format_citation(test_pub, CitationStyle.NLM)
+        print_result("NLM Style", bool(nlm.get("full")), f'Inline: {nlm.get("inline", "N/A")}')
+        
+        # Test APA
+        apa = format_citation(test_pub, CitationStyle.APA)
+        print_result("APA Style", bool(apa.get("full")), f'Inline: {apa.get("inline", "N/A")}')
+        
+        print(f"\n   📝 NLM Full:\n      {nlm.get('full', 'N/A')[:80]}...")
+        print(f"\n   📝 APA Full:\n      {apa.get('full', 'N/A')[:80]}...")
+        
+        return True
+        
+    except Exception as e:
+        print_result("Citation Generator", False, str(e))
+        return False
+
+
+def test_full_pipeline():
+    """Test pełnego pipeline'u."""
+    print_header("TEST PEŁNEGO PIPELINE'U")
+    
+    try:
+        from medical_module import get_medical_context_for_article
+        
+        print("\n   🚀 Running full pipeline for 'leczenie cukrzycy typu 2'...")
+        
+        result = get_medical_context_for_article(
+            main_keyword="leczenie cukrzycy typu 2",
+            max_results=2,
+            include_clinical_trials=True,
+            include_polish_sources=False  # Wyłącz dla szybszego testu
+        )
+        
+        status = result.get("status")
+        pubs = len(result.get("publications", []))
+        trials = len(result.get("clinical_trials", []))
+        sources = result.get("sources_used", [])
+        
+        print_result(
+            "Pipeline Status",
+            status in ["OK", "NO_RESULTS"],
+            f"Status: {status}"
+        )
+        
+        print_result(
+            "Publications Found",
+            True,
+            f"{pubs} publications"
+        )
+        
+        print_result(
+            "Clinical Trials Found",
+            True,
+            f"{trials} trials"
+        )
+        
+        print_result(
+            "Sources Used",
+            len(sources) > 0,
+            f"{', '.join(sources)}"
+        )
+        
+        # Pokaż instrukcję (fragment)
+        instruction = result.get("instruction", "")
+        if instruction:
+            print(f"\n   📋 Generated instruction ({len(instruction)} chars)")
+            print(f"      First 200 chars: {instruction[:200]}...")
+        
+        return status in ["OK", "NO_RESULTS"]
+        
+    except Exception as e:
+        print_result("Full Pipeline", False, str(e))
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def main():
+    """Główna funkcja testowa."""
+    print("\n" + "="*60)
+    print("🏥 BRAJEN MEDICAL MODULE v1.0 - TEST SUITE")
+    print("="*60)
+    
+    tests = [
+        ("Imports", test_imports),
+        ("Configuration", test_env_config),
+        ("Category Detection", test_category_detection),
+        ("PubMed Search", test_pubmed_search),
+        ("ClinicalTrials Search", test_clinicaltrials_search),
+        ("Citation Generator", test_citation_generator),
+        ("Full Pipeline", test_full_pipeline),
+    ]
+    
+    results = {}
+    
+    for name, test_func in tests:
+        try:
+            results[name] = test_func()
+        except Exception as e:
+            print(f"\n❌ Test '{name}' crashed: {e}")
+            results[name] = False
+    
+    # Podsumowanie
+    print_header("PODSUMOWANIE")
+    
+    passed = sum(1 for v in results.values() if v)
+    total = len(results)
+    
+    for name, success in results.items():
+        print_result(name, success)
+    
+    print(f"\n   📊 Passed: {passed}/{total}")
+    
+    if passed == total:
+        print("\n   🎉 ALL TESTS PASSED!")
+        return 0
+    else:
+        print(f"\n   ⚠️ {total - passed} test(s) failed")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
