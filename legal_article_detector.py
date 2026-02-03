@@ -347,7 +347,7 @@ def search_by_articles(
     """
     Szuka orzeczeń po wykrytych artykułach.
     
-    Używa SAOS API parametru referencedRegulation.
+    🆕 v4.0: Używa nowego SAOS Client z multi-query
     """
     
     try:
@@ -357,20 +357,23 @@ def search_by_articles(
         all_judgments = []
         
         for article in articles[:3]:  # Max 3 artykuły
-            results = client.search_judgments(
-                keyword=article,
-                page_size=max_results // len(articles) + 2
+            print(f"[ARTICLE_DETECTOR] 🔍 Szukam orzeczeń dla: {article}")
+            
+            # 🆕 v4.0: Nowe API - search_for_topic zwraca judgments
+            results = client.search_for_topic(
+                topic=article,
+                max_results=max_results // len(articles) + 2,
+                fetch_full_text=True
             )
             
-            if results.get("items"):
-                for item in results["items"]:
-                    # Sprawdź czy rzeczywiście powołuje ten artykuł
-                    text = item.get("textContent", "")
-                    if article.lower() in text.lower():
-                        formatted = client._format_judgment(item, article)
-                        if formatted:
-                            formatted["matched_article"] = article
-                            all_judgments.append(formatted)
+            # 🆕 v4.0: Wyniki są w "judgments" nie "items"
+            for judgment in results.get("judgments", []):
+                # Sprawdź czy rzeczywiście powołuje ten artykuł
+                text = judgment.get("full_text", "") or judgment.get("excerpt", "")
+                if article.lower() in text.lower():
+                    judgment["matched_article"] = article
+                    all_judgments.append(judgment)
+                    print(f"[ARTICLE_DETECTOR] ✅ Znaleziono: {judgment.get('signature')}")
         
         # Deduplikacja
         seen = set()
@@ -381,6 +384,8 @@ def search_by_articles(
                 seen.add(sig)
                 unique.append(j)
         
+        print(f"[ARTICLE_DETECTOR] 📊 Znaleziono {len(unique)} unikalnych orzeczeń")
+        
         return {
             "status": "success",
             "articles_searched": articles,
@@ -389,6 +394,9 @@ def search_by_articles(
         }
         
     except Exception as e:
+        print(f"[ARTICLE_DETECTOR] ❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
         return {
             "status": "error",
             "error": str(e),
@@ -506,40 +514,78 @@ def _build_instruction(
     articles: List[str],
     judgments: List[Dict]
 ) -> str:
-    """Buduje instrukcję dla GPT jak użyć orzeczeń."""
+    """
+    Buduje instrukcję dla GPT jak użyć orzeczeń.
+    
+    🆕 v3.6: Dodano excerpt (fragment treści) - GPT wie CO orzeczenie mówi!
+    """
     
     if not judgments:
         return f"Nie znaleziono orzeczeń dla '{topic}'. Artykuł może być bez cytowań."
     
-    # Formatuj orzeczenia
+    # Formatuj orzeczenia Z FRAGMENTEM TREŚCI
     citations = []
-    for j in judgments[:2]:
+    for i, j in enumerate(judgments[:2], 1):
         sig = j.get("signature", "")
         date = j.get("formatted_date", j.get("date", ""))
         court = j.get("court", "")
         url = j.get("url", "")
         
+        # 🆕 v3.6: Wyciągnij fragment treści (teza/excerpt)
+        excerpt = j.get("excerpt", "")
+        full_text = j.get("full_text", "")
+        
+        # Jeśli brak excerpt, wyciągnij z full_text (pierwsze 300 znaków)
+        if not excerpt and full_text:
+            # Znajdź pierwszy sensowny fragment
+            clean_text = full_text[:500].replace("\n", " ").strip()
+            # Usuń nagłówki typu "POSTANOWIENIE" etc
+            for prefix in ["POSTANOWIENIE", "WYROK", "UZASADNIENIE", "W IMIENIU"]:
+                if clean_text.upper().startswith(prefix):
+                    clean_text = clean_text[len(prefix):].strip()
+            excerpt = clean_text[:300] + "..." if len(clean_text) > 300 else clean_text
+        
         if sig:
-            citations.append(f"- {court}, {sig} z {date}\n  Link: {url}")
+            citation_block = f"""
+{i}. {court}, sygn. {sig} z dnia {date}
+   Link: {url}"""
+            
+            if excerpt:
+                # Skróć excerpt do max 200 znaków
+                short_excerpt = excerpt[:200] + "..." if len(excerpt) > 200 else excerpt
+                citation_block += f"""
+   TEZA: "{short_excerpt}" """
+            
+            citations.append(citation_block)
     
-    instruction = f"""ORZECZENIA DLA TEMATU: {topic}
+    instruction = f"""⚖️ ORZECZENIA SĄDOWE DLA TEMATU: {topic}
 
-PODSTAWA PRAWNA: {', '.join(articles)}
+📋 PODSTAWA PRAWNA: {', '.join(articles)}
 
-UŻYJ MAKSYMALNIE 2 ORZECZEŃ:
+🏛️ UŻYJ MAKSYMALNIE 2 ORZECZEŃ (wybierz najlepiej pasujące):
 {chr(10).join(citations)}
 
-JAK UŻYĆ:
-1. Wpleć naturalnie w tekst (nie na siłę)
-2. Powołaj się na przepis + orzeczenie
-3. Użyj sygnatury i daty DOKŁADNIE jak podano
-4. Link do SAOS w formacie: [wyrok SO ... (sygnatura)](url)
+📝 JAK CYTOWAĆ:
+1. Wpleć NATURALNIE w tekst (nie na siłę, tylko gdy pasuje do kontekstu)
+2. Powołaj się na przepis + orzeczenie RAZEM
+3. Użyj sygnatury i daty DOKŁADNIE jak podano wyżej
+4. Możesz sparafrazować tezę własnymi słowami
 
-PRZYKŁAD:
+✅ DOBRY PRZYKŁAD:
 "Zgodnie z art. 13 k.c., osoba może być ubezwłasnowolniona całkowicie, 
-jeżeli nie jest w stanie kierować swoim postępowaniem. Jak wskazał 
-Sąd Okręgowy w Warszawie w postanowieniu z dnia 20 czerwca 2024 r. 
-(sygn. I Ns 36/23), sam wiek nie stanowi przesłanki ubezwłasnowolnienia."
+jeżeli wskutek choroby psychicznej nie jest w stanie kierować swoim 
+postępowaniem. Jak wskazał Sąd Okręgowy w Warszawie w postanowieniu 
+z dnia 20 czerwca 2024 r. (sygn. I Ns 36/23), sam podeszły wiek 
+nie stanowi samodzielnej przesłanki ubezwłasnowolnienia."
+
+❌ ZŁY PRZYKŁAD (nie rób tak):
+"Sąd Najwyższy orzekł, że ubezwłasnowolnienie jest ważne."
+(zbyt ogólne, brak sygnatury, brak konkretnej tezy)
+
+⚠️ WAŻNE:
+- NIE wymyślaj orzeczeń - używaj TYLKO tych powyżej
+- Jeśli żadne nie pasuje do kontekstu sekcji - nie cytuj na siłę
+- Lepiej 0 cytowań niż błędne/niepasujące
 """
     
     return instruction
