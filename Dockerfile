@@ -24,6 +24,9 @@ COPY *.json .
 # 🆕 v44.2: Kopiuj folder project_helpers/
 COPY project_helpers/ ./project_helpers/
 
+# 🆕 v37.0: Kopiuj folder medical_module/
+COPY medical_module/ ./medical_module/
+
 # 🆕 v44.2: Kopiuj folder tests/ (opcjonalne - dla CI/CD)
 # COPY tests/ ./tests/
 
