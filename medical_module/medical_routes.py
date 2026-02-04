@@ -30,7 +30,7 @@ from typing import Dict, Any
 # ============================================================================
 
 try:
-    from medical_module import (
+    from .medical_module import (
         detect_category,
         get_medical_context_for_article,
         validate_medical_article,
