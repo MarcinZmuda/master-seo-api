@@ -193,19 +193,25 @@ try:
         CLAUDE_VERIFIER_AVAILABLE
     )
     MEDICAL_MODULE_ENABLED = True
-    print("[MASTER] ✅ Medical Module v1.0 loaded")
+    print("[MASTER] ✅ Medical Module v1.1 loaded")
     print(f"[MASTER]    ├─ PubMed: {'✅' if PUBMED_AVAILABLE else '❌'}")
     print(f"[MASTER]    ├─ ClinicalTrials: {'✅' if CLINICALTRIALS_AVAILABLE else '❌'}")
     print(f"[MASTER]    ├─ Polish Health: {'✅' if POLISH_HEALTH_AVAILABLE else '❌'}")
     print(f"[MASTER]    └─ Claude Verifier: {'✅' if CLAUDE_VERIFIER_AVAILABLE else '❌'}")
-except ImportError as e:
+except Exception as e:
+    # Łap WSZYSTKIE błędy, nie tylko ImportError
+    import traceback
     MEDICAL_MODULE_ENABLED = False
     PUBMED_AVAILABLE = False
     CLINICALTRIALS_AVAILABLE = False
     POLISH_HEALTH_AVAILABLE = False
     CLAUDE_VERIFIER_AVAILABLE = False
     medical_routes = None
-    print(f"[MASTER] ⚠️ Medical Module not available: {e}")
+    print(f"[MASTER] ❌ Medical Module FAILED to load!")
+    print(f"[MASTER]    Error type: {type(e).__name__}")
+    print(f"[MASTER]    Error message: {e}")
+    print(f"[MASTER]    Full traceback:")
+    traceback.print_exc()
 
 # ================================================================
 # 🔗 N-gram API Configuration (for S1 proxy)
@@ -1014,6 +1020,69 @@ def verify_keywords():
         "counting_method": "OVERLAPPING (NeuronWriter compatible)",
         "word_count": len(text.split())
     }), 200
+
+
+# ================================================================
+# 🔧 MEDICAL MODULE DEBUG ENDPOINT
+# ================================================================
+@app.get("/api/debug/medical")
+def debug_medical_module():
+    """
+    Endpoint diagnostyczny dla modułu medycznego.
+    Sprawdza szczegóły dlaczego moduł może nie działać.
+    """
+    import os
+    import sys
+    
+    debug_info = {
+        "medical_module_enabled": MEDICAL_MODULE_ENABLED,
+        "checks": {}
+    }
+    
+    # 1. Sprawdź czy folder istnieje
+    module_path = os.path.join(os.path.dirname(__file__), 'medical_module')
+    debug_info["checks"]["folder_exists"] = os.path.exists(module_path)
+    debug_info["checks"]["folder_path"] = module_path
+    
+    # 2. Sprawdź pliki w folderze
+    if os.path.exists(module_path):
+        files = os.listdir(module_path)
+        debug_info["checks"]["files_in_folder"] = files
+        debug_info["checks"]["__init__.py_exists"] = "__init__.py" in files
+        debug_info["checks"]["medical_routes.py_exists"] = "medical_routes.py" in files
+        debug_info["checks"]["medical_module.py_exists"] = "medical_module.py" in files
+    else:
+        debug_info["checks"]["files_in_folder"] = []
+        debug_info["checks"]["error"] = "Folder medical_module/ nie istnieje!"
+    
+    # 3. Sprawdź czy moduł jest w sys.modules
+    debug_info["checks"]["in_sys_modules"] = "medical_module" in sys.modules
+    
+    # 4. Spróbuj zaimportować i złap błąd
+    if not MEDICAL_MODULE_ENABLED:
+        try:
+            from medical_module.medical_routes import medical_routes as test_routes
+            debug_info["checks"]["import_test"] = "SUCCESS"
+        except Exception as e:
+            import traceback
+            debug_info["checks"]["import_test"] = "FAILED"
+            debug_info["checks"]["import_error_type"] = type(e).__name__
+            debug_info["checks"]["import_error_message"] = str(e)
+            debug_info["checks"]["import_traceback"] = traceback.format_exc()
+    else:
+        debug_info["checks"]["import_test"] = "ALREADY_LOADED"
+    
+    # 5. Zmienne środowiskowe
+    debug_info["env"] = {
+        "NCBI_API_KEY": "SET" if os.getenv("NCBI_API_KEY") else "NOT_SET",
+        "NCBI_EMAIL": "SET" if os.getenv("NCBI_EMAIL") else "NOT_SET",
+        "ANTHROPIC_API_KEY": "SET" if os.getenv("ANTHROPIC_API_KEY") else "NOT_SET"
+    }
+    
+    # 6. Python path
+    debug_info["python_path"] = sys.path[:5]  # Pierwsze 5 ścieżek
+    
+    return jsonify(debug_info), 200
 
 
 # ================================================================
