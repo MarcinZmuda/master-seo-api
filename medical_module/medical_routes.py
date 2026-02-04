@@ -176,18 +176,19 @@ def get_medical_context():
         "max_results": 3,
         "include_clinical_trials": true,
         "include_polish_sources": true,
-        "force_enable": false
+        "force_enable": false,
+        "compact": true  // ← NOWE: dla GPT Actions (mniejsza odpowiedź)
     }
     
-    Response:
+    Response (compact=true):
     {
         "status": "OK",
-        "category": {...},
-        "total_found": 5,
-        "publications": [...],
-        "clinical_trials": [...],
-        "polish_sources": [...],
-        "instruction": "...",
+        "is_medical": true,
+        "sources": [
+            {"type": "pubmed", "title": "...", "url": "...", "cite_as": "..."},
+            ...
+        ],
+        "instruction_short": "...",
         "disclaimer": "..."
     }
     """
@@ -196,6 +197,7 @@ def get_medical_context():
     
     data = request.get_json() or {}
     main_keyword = data.get("main_keyword", "")
+    compact = data.get("compact", True)  # Domyślnie compact dla GPT
     
     if not main_keyword:
         return jsonify({"error": "main_keyword is required"}), 400
@@ -203,13 +205,100 @@ def get_medical_context():
     result = get_medical_context_for_article(
         main_keyword=main_keyword,
         additional_keywords=data.get("additional_keywords", []),
-        max_results=data.get("max_results"),
+        max_results=data.get("max_results", 3),  # Domyślnie 3
         include_clinical_trials=data.get("include_clinical_trials", True),
         include_polish_sources=data.get("include_polish_sources", True),
         force_enable=data.get("force_enable", False)
     )
     
+    # COMPACT MODE dla GPT Actions (mniejsza odpowiedź)
+    if compact:
+        return jsonify(_make_compact_response(result, main_keyword))
+    
     return jsonify(result)
+
+
+def _make_compact_response(result: Dict[str, Any], main_keyword: str) -> Dict[str, Any]:
+    """
+    Tworzy kompaktową odpowiedź dla GPT Actions (<50KB).
+    """
+    sources = []
+    
+    # Publikacje PubMed (tylko essentials)
+    for pub in result.get("publications", [])[:3]:
+        pmid = pub.get('pmid', '')
+        url = pub.get('url', f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/")
+        sources.append({
+            "type": "pubmed",
+            "title": pub.get('title', '')[:100],
+            "authors": pub.get('authors_short', ''),
+            "year": pub.get('year', ''),
+            "url": url,
+            "cite_as": f"(źródło: [PubMed]({url}))"
+        })
+    
+    # Badania kliniczne
+    for study in result.get("clinical_trials", [])[:2]:
+        nct_id = study.get('nct_id', '')
+        url = study.get('url', f"https://clinicaltrials.gov/study/{nct_id}")
+        sources.append({
+            "type": "clinicaltrials",
+            "title": study.get('brief_title', '')[:100],
+            "nct_id": nct_id,
+            "status": study.get('status_pl', study.get('status', '')),
+            "url": url,
+            "cite_as": f"(źródło: [ClinicalTrials.gov]({url}))"
+        })
+    
+    # Polskie źródła
+    SOURCE_NAMES = {"PZH": "NIZP-PZH", "NIZP-PZH": "NIZP-PZH", "AOTMiT": "AOTMiT", "MZ": "Ministerstwo Zdrowia"}
+    for src in result.get("polish_sources", [])[:2]:
+        source_short = src.get('source_short', 'PL')
+        source_name = SOURCE_NAMES.get(source_short, source_short)
+        url = src.get('url', '')
+        sources.append({
+            "type": "polish",
+            "source": source_name,
+            "title": src.get('title', '')[:100],
+            "url": url,
+            "cite_as": f"(źródło: [{source_name}]({url}))"
+        })
+    
+    # Krótka instrukcja
+    instruction_short = f"""
+ARTYKUŁ MEDYCZNY: {main_keyword}
+
+ZASADY CYTOWANIA:
+• Format: (źródło: [Nazwa](URL))
+• Każde źródło cytuj TYLKO RAZ w artykule
+• Dodaj disclaimer na końcu
+
+ŹRÓDŁA DO UŻYCIA:
+""".strip()
+    
+    for i, src in enumerate(sources, 1):
+        instruction_short += f"\n{i}. {src['cite_as']} - {src['title'][:50]}..."
+    
+    instruction_short += f"""
+
+DISCLAIMER (dodaj na końcu):
+Ten artykuł ma charakter informacyjny i nie zastępuje porady lekarskiej.
+"""
+    
+    category = result.get("category", {})
+    
+    return {
+        "status": result.get("status", "OK"),
+        "is_medical": category.get("is_ymyl", False),
+        "confidence": category.get("confidence", 0),
+        "specialization": category.get("specialization"),
+        "total_sources": len(sources),
+        "sources": sources,
+        "instruction": instruction_short,
+        "disclaimer": "Ten artykuł ma charakter informacyjny i nie zastępuje porady lekarskiej. W przypadku problemów zdrowotnych skonsultuj się z lekarzem.",
+        "citation_format": "(źródło: [Nazwa](URL))",
+        "medical_module_version": "1.1"
+    }
 
 
 # ============================================================================
