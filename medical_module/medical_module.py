@@ -196,7 +196,7 @@ def detect_category(
     
     # Użyj detektora terminów
     if TERM_DETECTOR_AVAILABLE:
-        detection = detect_medical_topic(main_keyword, additional_keywords)
+        detection = detect_medical_topic(main_keyword, additional_keywords=additional_keywords)
         
         return {
             "category": "medycyna" if detection["is_medical"] else "general",
