@@ -58,18 +58,18 @@ except ImportError as e:
 
 # Import poszczególnych klientów (dla bezpośredniego dostępu)
 try:
-    from pubmed_client import search_pubmed
+    from .pubmed_client import search_pubmed
 except ImportError:
     search_pubmed = None
 
 try:
-    from clinicaltrials_client import search_clinical_trials, search_completed_trials
+    from .clinicaltrials_client import search_clinical_trials, search_completed_trials
 except ImportError:
     search_clinical_trials = None
     search_completed_trials = None
 
 try:
-    from polish_health_scraper import search_polish_health
+    from .polish_health_scraper import search_polish_health
 except ImportError:
     search_polish_health = None
 

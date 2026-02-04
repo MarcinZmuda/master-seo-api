@@ -15,7 +15,7 @@ Instalacja:
     cp .env.example .env  # Uzupełnij klucze API
 
 Użycie:
-    from medical_module import (
+    from .medical_module import (
         detect_category,
         get_medical_context_for_article,
         validate_medical_article,
@@ -32,7 +32,7 @@ Użycie:
     validation = validate_medical_article(article_text)
 
 Flask Integration:
-    from medical_routes import medical_routes
+    from .medical_routes import medical_routes
     app.register_blueprint(medical_routes)
 
 Autor: BRAJEN SEO Engine

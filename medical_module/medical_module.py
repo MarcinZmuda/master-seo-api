@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 # Źródło 1: PubMed
 PUBMED_AVAILABLE = False
 try:
-    from pubmed_client import (
+    from .pubmed_client import (
         search_pubmed,
         search_pubmed_mesh,
         get_pubmed_client,
@@ -47,7 +47,7 @@ except ImportError as e:
 # Źródło 2: ClinicalTrials.gov
 CLINICALTRIALS_AVAILABLE = False
 try:
-    from clinicaltrials_client import (
+    from .clinicaltrials_client import (
         search_clinical_trials,
         search_completed_trials,
         get_clinicaltrials_client,
@@ -61,7 +61,7 @@ except ImportError as e:
 # Źródło 3: Polskie instytucje
 POLISH_HEALTH_AVAILABLE = False
 try:
-    from polish_health_scraper import (
+    from .polish_health_scraper import (
         search_polish_health,
         search_pzh,
         search_aotmit,
@@ -75,7 +75,7 @@ except ImportError as e:
 # Detektor terminów
 TERM_DETECTOR_AVAILABLE = False
 try:
-    from medical_term_detector import (
+    from .medical_term_detector import (
         detect_medical_topic,
         get_search_strategy,
         build_pubmed_query
@@ -88,7 +88,7 @@ except ImportError as e:
 # Claude Verifier
 CLAUDE_VERIFIER_AVAILABLE = False
 try:
-    from claude_medical_verifier import (
+    from .claude_medical_verifier import (
         verify_publications_with_claude,
         get_evidence_level,
         get_evidence_label,
@@ -102,7 +102,7 @@ except ImportError as e:
 # Generator cytowań
 CITATION_GENERATOR_AVAILABLE = False
 try:
-    from medical_citation_generator import (
+    from .medical_citation_generator import (
         format_citation,
         format_inline,
         CitationStyle
