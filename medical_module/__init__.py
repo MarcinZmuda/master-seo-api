@@ -118,6 +118,30 @@ from .medical_citation_generator import (
 )
 
 # ============================================================================
+# NOWY FORMAT CYTOWAŃ v1.1
+# ============================================================================
+
+def format_source_link(source_type: str, url: str, source_name: str = None) -> str:
+    """
+    Formatuje cytowanie jako link do źródła.
+    
+    NOWY FORMAT v1.1:
+    - Każde źródło cytowane TYLKO RAZ w artykule
+    - Format: (źródło: [Nazwa](URL))
+    
+    Args:
+        source_type: Typ źródła (pubmed, clinicaltrials, pzh, aotmit, etc.)
+        url: URL do źródła
+        source_name: Opcjonalna nazwa (jeśli inna niż domyślna)
+    
+    Examples:
+        >>> format_source_link("pubmed", "https://pubmed.ncbi.nlm.nih.gov/35842190/")
+        "(źródło: [PubMed](https://pubmed.ncbi.nlm.nih.gov/35842190/))"
+    """
+    gen = get_citation_generator()
+    return gen.format_source_link(source_type, url, source_name)
+
+# ============================================================================
 # ALL EXPORTS
 # ============================================================================
 
@@ -130,6 +154,7 @@ __all__ = [
     "detect_category",
     "get_medical_context_for_article",
     "validate_medical_article",
+    "format_source_link",  # NEW v1.1
     
     # Constants
     "MEDICAL_DISCLAIMER",

@@ -463,10 +463,12 @@ def _build_instruction(
         "",
         "Ten artykuł dotyczy tematyki MEDYCZNEJ. Przestrzegaj zasad:",
         "",
-        "1. ŹRÓDŁA NAUKOWE:",
-        f"   • Cytuj MAX {max_citations} publikacje z poniższej listy",
-        "   • Używaj formatu: (Autor i wsp., Rok)",
-        "   • NIE wymyślaj badań/autorów!",
+        "1. ŹRÓDŁA Z LINKAMI:",
+        f"   • Użyj MAX {max_citations} źródeł z poniższej listy",
+        "   • KAŻDE ŹRÓDŁO CYTUJ TYLKO RAZ w całym artykule!",
+        "   • Format cytowania: (źródło: [Nazwa](URL))",
+        "   • Przykład: (źródło: [PubMed](https://pubmed.ncbi.nlm.nih.gov/12345/))",
+        "   • Dane ze źródła możesz używać wielokrotnie, ale link tylko RAZ",
         "",
         "2. JĘZYK:",
         "   • Używaj precyzyjnej terminologii medycznej",
@@ -479,33 +481,24 @@ def _build_instruction(
     
     # Publikacje PubMed
     if publications:
-        lines.append("🔬 PUBLIKACJE NAUKOWE (PubMed):")
+        lines.append("🔬 PUBLIKACJE NAUKOWE (PubMed) - użyj jako źródła:")
         lines.append("")
         
         for i, pub in enumerate(publications[:max_citations], 1):
-            # Generuj cytowanie
-            if CITATION_GENERATOR_AVAILABLE:
-                citation = format_citation(pub)
-                inline = citation["inline"]
-                full = citation["full"]
-            else:
-                inline = pub.get("authors_short", "Unknown")
-                full = f"{pub.get('title', 'N/A')}"
+            pmid = pub.get('pmid', '')
+            url = pub.get('url', f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/")
             
             evidence = pub.get("evidence_level", "?")
             evidence_label = get_evidence_label(evidence) if CLAUDE_VERIFIER_AVAILABLE else ""
             
-            lines.append(f"═══ PUBLIKACJA #{i} ═══")
-            lines.append(f"   📌 Cytuj jako: {inline}")
+            lines.append(f"═══ ŹRÓDŁO #{i}: PubMed ═══")
+            lines.append(f"   📌 CYTUJ TAK: (źródło: [PubMed]({url}))")
             lines.append(f"   📄 Tytuł: {pub.get('title', 'N/A')[:80]}...")
             lines.append(f"   👥 Autorzy: {pub.get('authors_short', 'N/A')}")
-            lines.append(f"   📰 Źródło: {pub.get('journal_abbrev', pub.get('journal', 'N/A'))} ({pub.get('year', 'N/A')})")
+            lines.append(f"   📰 Czasopismo: {pub.get('journal_abbrev', pub.get('journal', 'N/A'))} ({pub.get('year', 'N/A')})")
             lines.append(f"   ⭐ Poziom dowodów: {evidence} - {evidence_label}")
-            lines.append(f"   🔗 URL: {pub.get('url', 'N/A')}")
-            
-            if pub.get("doi"):
-                lines.append(f"   📎 DOI: {pub['doi']}")
-            
+            lines.append(f"   🔗 URL: {url}")
+            lines.append(f"   ⚠️ PAMIĘTAJ: Ten link może pojawić się TYLKO RAZ w artykule!")
             lines.append("")
     
     # Badania kliniczne
@@ -514,22 +507,52 @@ def _build_instruction(
         lines.append("")
         
         for study in clinical_trials[:2]:
-            lines.append(f"   📋 {study.get('nct_id', 'N/A')}: {study.get('brief_title', 'N/A')[:60]}...")
-            lines.append(f"      Status: {study.get('status_pl', study.get('status', 'N/A'))}")
-            lines.append(f"      Faza: {', '.join(study.get('phases_pl', study.get('phases', [])))}")
-            lines.append(f"      URL: {study.get('url', 'N/A')}")
+            nct_id = study.get('nct_id', 'N/A')
+            url = study.get('url', f"https://clinicaltrials.gov/study/{nct_id}")
+            
+            lines.append(f"═══ ŹRÓDŁO: ClinicalTrials ═══")
+            lines.append(f"   📌 CYTUJ TAK: (źródło: [ClinicalTrials.gov]({url}))")
+            lines.append(f"   📋 ID: {nct_id}")
+            lines.append(f"   📄 Tytuł: {study.get('brief_title', 'N/A')[:60]}...")
+            lines.append(f"   Status: {study.get('status_pl', study.get('status', 'N/A'))}")
+            lines.append(f"   Faza: {', '.join(study.get('phases_pl', study.get('phases', [])))}")
+            lines.append(f"   ⚠️ PAMIĘTAJ: Ten link może pojawić się TYLKO RAZ w artykule!")
             lines.append("")
     
     # Polskie źródła
     if polish_sources:
-        lines.append("🇵🇱 POLSKIE ŹRÓDŁA (dla Trust signals):")
+        lines.append("🇵🇱 POLSKIE ŹRÓDŁA (Trust signals - high authority):")
         lines.append("")
         
+        # Mapowanie skrótów na pełne nazwy
+        SOURCE_NAMES = {
+            "PZH": "NIZP-PZH",
+            "NIZP-PZH": "NIZP-PZH",
+            "AOTMiT": "AOTMiT",
+            "MZ": "Ministerstwo Zdrowia",
+            "NFZ": "NFZ",
+            "MP": "Medycyna Praktyczna"
+        }
+        
         for source in polish_sources[:2]:
-            lines.append(f"   📄 [{source.get('source_short', 'PL')}] {source.get('title', 'N/A')[:60]}...")
-            lines.append(f"      URL: {source.get('url', 'N/A')[:60]}...")
+            source_short = source.get('source_short', 'PL')
+            source_name = SOURCE_NAMES.get(source_short, source_short)
+            url = source.get('url', 'N/A')
+            
+            lines.append(f"═══ ŹRÓDŁO: {source_name} ═══")
+            lines.append(f"   📌 CYTUJ TAK: (źródło: [{source_name}]({url}))")
+            lines.append(f"   📄 Tytuł: {source.get('title', 'N/A')[:60]}...")
+            lines.append(f"   ⚠️ PAMIĘTAJ: Ten link może pojawić się TYLKO RAZ w artykule!")
             lines.append("")
     
+    lines.append("=" * 60)
+    lines.append("📋 PODSUMOWANIE ZASAD CYTOWANIA:")
+    lines.append("=" * 60)
+    lines.append("• Format: (źródło: [Nazwa](URL))")
+    lines.append("• Każdy link użyj TYLKO RAZ w artykule")
+    lines.append("• Dane ze źródła możesz opisywać wielokrotnie")
+    lines.append("• Cytowanie umieść na końcu zdania/akapitu")
+    lines.append("")
     lines.append("=" * 60)
     lines.append("⚠️ OBOWIĄZKOWY DISCLAIMER (dodaj na końcu artykułu):")
     lines.append("=" * 60)
@@ -550,14 +573,17 @@ def validate_medical_article(full_text: str) -> Dict[str, Any]:
     Waliduje artykuł medyczny.
     
     Sprawdza:
-    - Obecność cytowań
+    - Obecność cytowań w formacie: (źródło: [Nazwa](URL))
     - Obecność disclaimera
     - Liczbę cytowań
+    - Czy każde źródło jest użyte tylko raz
     
     Returns:
         {
             "valid": True/False,
             "citations_found": int,
+            "unique_sources": int,
+            "duplicate_sources": [...],
             "has_disclaimer": True/False,
             "warnings": [...],
             "suggestions": [...]
@@ -568,17 +594,32 @@ def validate_medical_article(full_text: str) -> Dict[str, Any]:
     
     text_lower = full_text.lower()
     
-    # Sprawdź cytowania (format: Autor i wsp., 2023 lub Autor et al., 2023)
+    # Sprawdź cytowania w NOWYM formacie: (źródło: [Nazwa](URL))
     import re
-    citation_patterns = [
+    
+    # Nowy format: (źródło: [Nazwa](URL))
+    new_format_pattern = r'\(źródło:\s*\[([^\]]+)\]\(([^)]+)\)\)'
+    new_citations = re.findall(new_format_pattern, full_text)
+    
+    # Stary format (backwards compatibility): (Autor i wsp., 2023)
+    old_format_patterns = [
         r'\([A-Z][a-ząćęłńóśźż]+ i wsp\.,? \d{4}\)',  # Polski
         r'\([A-Z][a-z]+ et al\.,? \d{4}\)',            # Angielski
         r'\([A-Z][a-z]+,? \d{4}\)',                    # Prosty
     ]
     
-    citations_found = 0
-    for pattern in citation_patterns:
-        citations_found += len(re.findall(pattern, full_text, re.IGNORECASE))
+    old_citations_count = 0
+    for pattern in old_format_patterns:
+        old_citations_count += len(re.findall(pattern, full_text, re.IGNORECASE))
+    
+    # Łączna liczba cytowań
+    citations_found = len(new_citations) + old_citations_count
+    
+    # Sprawdź duplikaty URL (każdy link może być tylko raz!)
+    urls_found = [url for _, url in new_citations]
+    unique_urls = set(urls_found)
+    duplicate_urls = [url for url in urls_found if urls_found.count(url) > 1]
+    duplicate_urls = list(set(duplicate_urls))  # Unique duplicates
     
     # Sprawdź disclaimer
     disclaimer_keywords = [
@@ -586,14 +627,24 @@ def validate_medical_article(full_text: str) -> Dict[str, Any]:
         "nie stanowi porady",
         "konsultacja z lekarzem",
         "skonsultuj się z lekarzem",
-        "charakter informacyjny"
+        "charakter informacyjny",
+        "nie zastępuje",
+        "porada medyczna"
     ]
     has_disclaimer = any(kw in text_lower for kw in disclaimer_keywords)
     
     # Walidacja
     if citations_found == 0:
         warnings.append("Brak cytowań naukowych")
-        suggestions.append("Dodaj cytowania w formacie: (Autor i wsp., 2023)")
+        suggestions.append("Dodaj cytowania w formacie: (źródło: [PubMed](URL))")
+    
+    if len(new_citations) == 0 and old_citations_count > 0:
+        suggestions.append("Używasz starego formatu cytowań. Zalecany nowy format: (źródło: [Nazwa](URL))")
+    
+    if duplicate_urls:
+        warnings.append(f"Znaleziono duplikaty linków ({len(duplicate_urls)}). Każde źródło powinno być cytowane TYLKO RAZ!")
+        for dup in duplicate_urls[:3]:  # Max 3 przykłady
+            suggestions.append(f"Duplikat: {dup[:50]}...")
     
     if citations_found > CONFIG.MAX_CITATIONS_PER_ARTICLE * 2:
         warnings.append(f"Za dużo cytowań ({citations_found})")
@@ -606,10 +657,15 @@ def validate_medical_article(full_text: str) -> Dict[str, Any]:
     return {
         "valid": len(warnings) == 0,
         "citations_found": citations_found,
+        "new_format_citations": len(new_citations),
+        "old_format_citations": old_citations_count,
+        "unique_sources": len(unique_urls),
+        "duplicate_sources": duplicate_urls,
         "has_disclaimer": has_disclaimer,
         "warnings": warnings,
         "suggestions": suggestions,
-        "disclaimer_template": MEDICAL_DISCLAIMER_SHORT
+        "disclaimer_template": MEDICAL_DISCLAIMER_SHORT,
+        "expected_format": "(źródło: [Nazwa](URL))"
     }
 
 

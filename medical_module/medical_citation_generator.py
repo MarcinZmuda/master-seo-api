@@ -368,6 +368,71 @@ class MedicalCitationGenerator:
             return f"{surnames[0]} i wsp. ({year})"
     
     # ========================================================================
+    # NOWY FORMAT: ŹRÓDŁO Z LINKIEM (v1.1)
+    # ========================================================================
+    
+    def format_source_link(
+        self,
+        source_type: str,
+        url: str,
+        source_name: str = None
+    ) -> str:
+        """
+        Formatuje cytowanie jako link do źródła.
+        
+        NOWY FORMAT v1.1:
+        - Każde źródło cytowane TYLKO RAZ w artykule
+        - Format: (źródło: [Nazwa](URL))
+        
+        Args:
+            source_type: Typ źródła (pubmed, clinicaltrials, pzh, aotmit, etc.)
+            url: URL do źródła
+            source_name: Opcjonalna nazwa (jeśli inna niż domyślna)
+        
+        Returns:
+            str: "(źródło: [PubMed](https://pubmed.ncbi.nlm.nih.gov/12345/))"
+        
+        Examples:
+            >>> format_source_link("pubmed", "https://pubmed.ncbi.nlm.nih.gov/35842190/")
+            "(źródło: [PubMed](https://pubmed.ncbi.nlm.nih.gov/35842190/))"
+            
+            >>> format_source_link("pzh", "https://www.pzh.gov.pl/artykul/")
+            "(źródło: [NIZP-PZH](https://www.pzh.gov.pl/artykul/))"
+        """
+        # Mapowanie typów źródeł na nazwy wyświetlane
+        SOURCE_NAMES = {
+            "pubmed": "PubMed",
+            "clinicaltrials": "ClinicalTrials.gov",
+            "pzh": "NIZP-PZH",
+            "aotmit": "AOTMiT",
+            "mz": "Ministerstwo Zdrowia",
+            "nfz": "NFZ",
+            "mp": "Medycyna Praktyczna",
+            "who": "WHO",
+            "cdc": "CDC",
+            "ema": "EMA"
+        }
+        
+        # Użyj podanej nazwy lub domyślnej
+        display_name = source_name or SOURCE_NAMES.get(source_type.lower(), source_type)
+        
+        return f"(źródło: [{display_name}]({url}))"
+    
+    def format_pubmed_source_link(self, pmid: str) -> str:
+        """Formatuje link do PubMed na podstawie PMID."""
+        url = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+        return self.format_source_link("pubmed", url)
+    
+    def format_clinicaltrials_source_link(self, nct_id: str) -> str:
+        """Formatuje link do ClinicalTrials.gov na podstawie NCT ID."""
+        url = f"https://clinicaltrials.gov/study/{nct_id}"
+        return self.format_source_link("clinicaltrials", url)
+    
+    def format_polish_source_link(self, source_type: str, url: str) -> str:
+        """Formatuje link do polskiego źródła zdrowotnego."""
+        return self.format_source_link(source_type, url)
+    
+    # ========================================================================
     # CYTOWANIE BADANIA KLINICZNEGO
     # ========================================================================
     
