@@ -1,6 +1,6 @@
 """
 ===============================================================================
-🏥 MEDICAL MODULE v1.0 - BRAJEN SEO Engine
+🏥 MEDICAL MODULE v1.1 - BRAJEN SEO Engine
 ===============================================================================
 Główny moduł do obsługi treści medycznych (YMYL Health).
 
@@ -18,7 +18,7 @@ Eksportowane funkcje:
 - validate_medical_article: Waliduje cytaty
 - MEDICAL_DISCLAIMER: Tekst disclaimera
 
-Autor: BRAJEN SEO Engine v44.2
+Autor: BRAJEN SEO Engine v44.4
 ===============================================================================
 """
 
@@ -196,6 +196,7 @@ def detect_category(
     
     # Użyj detektora terminów
     if TERM_DETECTOR_AVAILABLE:
+        # FIX v1.1: Użyj nazwanego argumentu additional_keywords=
         detection = detect_medical_topic(main_keyword, additional_keywords=additional_keywords)
         
         return {
@@ -700,7 +701,7 @@ __all__ = [
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("🏥 MEDICAL MODULE v1.0 TEST")
+    print("🏥 MEDICAL MODULE v1.1 TEST")
     print("=" * 60)
     
     print(f"\n📦 Dostępne źródła:")
