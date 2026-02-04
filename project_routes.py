@@ -315,6 +315,9 @@ def create_project():
     source = data.get("source", "unknown")
     s1_data = data.get("s1_data", {})  # v39.0: Dane z S1 do generowania H2
     
+    # 🆕 v44.4: COMPACT MODE - mniejsza odpowiedź dla GPT Actions (~10KB vs ~70KB)
+    compact_mode = data.get("compact", True)  # Domyślnie TRUE dla GPT
+    
     # 🆕 v44.2: FAST MODE - artykuł w 3 batchach
     article_mode = data.get("mode", "standard").lower()
     if article_mode not in ["standard", "fast"]:
@@ -944,6 +947,88 @@ def create_project():
     warning = None
     if extended_count == 0 and len(firestore_keywords) > 5:
         warning = "⚠️ BRAK FRAZ EXTENDED! Upewnij się że wysyłasz 'type': 'EXTENDED' w keywords_list"
+
+    # 🆕 v44.5: COMPACT MODE - mniejsza odpowiedź dla GPT Actions (~8KB zamiast ~70KB)
+    if compact_mode:
+        # Kompaktowa odpowiedź z PEŁNYM PREVIEW struktury artykułu
+        
+        # 1. Skrócona instrukcja prawna (max 800 znaków)
+        compact_legal_instruction = None
+        if project_data.get("legal_instruction"):
+            full_instruction = project_data.get("legal_instruction", "")
+            compact_legal_instruction = full_instruction[:800] + "..." if len(full_instruction) > 800 else full_instruction
+        
+        # 2. 🆕 BATCH PLAN PREVIEW - okrojona wersja (~2KB zamiast ~35KB)
+        # GPT widzi strukturę całego artykułu, szczegóły pobiera przez /api/batch
+        batch_plan_preview = []
+        total_words_min = 0
+        total_words_max = 0
+        
+        if batch_plan_dict and batch_plan_dict.get("batches"):
+            for batch in batch_plan_dict.get("batches", []):
+                word_range = batch.get("word_range", [400, 500])
+                total_words_min += word_range[0] if isinstance(word_range, list) else 400
+                total_words_max += word_range[1] if isinstance(word_range, list) and len(word_range) > 1 else 500
+                
+                # Liczymy keywords dla tego batcha
+                kw_constraints = batch.get("keyword_constraints", {})
+                keywords_in_batch = len(kw_constraints) if isinstance(kw_constraints, dict) else 0
+                
+                batch_plan_preview.append({
+                    "batch": batch.get("batch_number", 0),
+                    "type": batch.get("type", "content"),
+                    "h2": batch.get("h2_title") or batch.get("h2_sections", [None])[0] if batch.get("h2_sections") else None,
+                    "words": f"{word_range[0]}-{word_range[1]}" if isinstance(word_range, list) and len(word_range) > 1 else str(word_range),
+                    "keywords": keywords_in_batch,
+                    "has_entities": len(batch.get("entities", [])) > 0,
+                    "has_legal": batch.get("type") == "intro" and project_data.get("legal_context", {}).get("legal_module_active", False)
+                })
+        
+        # 3. Legal judgments preview (tylko sygnatury, nie pełne teksty)
+        legal_judgments_preview = []
+        for j in project_data.get("legal_judgments", [])[:5]:  # Max 5
+            legal_judgments_preview.append({
+                "signature": j.get("case_number") or j.get("signature", ""),
+                "court": j.get("court_short") or j.get("court", "")[:30],
+                "date": j.get("judgment_date", "")
+            })
+        
+        return jsonify({
+            "status": "CREATED",
+            "project_id": doc_ref.id,
+            "topic": topic,
+            
+            # Keywords summary
+            "keywords_count": len(firestore_keywords),
+            "keywords_breakdown": {
+                "basic": basic_count,
+                "extended": extended_count
+            },
+            
+            # H2 structure
+            "h2_count": len(h2_structure),
+            "h2_structure": h2_structure,
+            
+            # 🆕 BATCH PLAN PREVIEW - pełna struktura artykułu w kompaktowej formie
+            "batch_plan_preview": batch_plan_preview,
+            "total_batches": len(batch_plan_preview),
+            "total_words_range": f"{total_words_min}-{total_words_max}",
+            
+            # Legal info (kompaktowe)
+            "detected_category": project_data.get("detected_category", "inne"),
+            "legal_module_active": project_data.get("legal_context", {}).get("legal_module_active", False),
+            "legal_judgments_count": len(project_data.get("legal_judgments", [])),
+            "legal_judgments_preview": legal_judgments_preview,
+            "legal_instruction_preview": compact_legal_instruction,
+            
+            # Meta
+            "target_length": target_length,
+            "warning": warning,
+            "version": "v44.5-compact",
+            
+            # 💡 Hint dla GPT
+            "next_step": f"Pobierz pierwszy batch: GET /api/batch/{doc_ref.id}/1"
+        }), 201
 
     return jsonify({
         "status": "CREATED",
