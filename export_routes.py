@@ -541,6 +541,31 @@ def editorial_review(project_id):
         if unused_extended:
             unused_keywords_section += f"EXTENDED: {', '.join(unused_extended[:15])}\n"
     
+    # 🆕 v44.5: YMYL context for editorial review
+    detected_category = project_data.get("detected_category", "inne")
+    ymyl_section = ""
+    if detected_category == "prawo":
+        ymyl_section = """
+=== ⚖️ ARTYKUŁ PRAWNY (YMYL) ===
+Ten artykuł dotyczy tematyki prawnej. Sprawdź SZCZEGÓLNIE:
+1. Czy artykuł zawiera cytowania przepisów (art. X § Y ustawy Z)?
+2. Czy są odwołania do orzeczeń sądowych (sygn. akt)?
+3. Czy NIE MA wymyślonych sygnatur, dat ani przepisów?
+4. Czy na końcu jest zastrzeżenie prawne (disclaimer)?
+5. Jeśli brakuje cytowań — DODAJ je w sekcji "luki_tresciowe"!
+"""
+    elif detected_category == "medycyna":
+        ymyl_section = """
+=== 🏥 ARTYKUŁ MEDYCZNY (YMYL) ===
+Ten artykuł dotyczy tematyki medycznej/zdrowotnej. Sprawdź SZCZEGÓLNIE:
+1. Czy artykuł zawiera odwołania do publikacji naukowych?
+2. Czy cytowane źródła istnieją (PMID, autorzy, rok)?
+3. Czy NIE MA wymyślonych statystyk, badań ani leków?
+4. Czy na końcu jest zastrzeżenie medyczne (disclaimer)?
+5. Czy tekst nie zawiera niebezpiecznych rad zdrowotnych?
+6. Jeśli brakuje cytowań — DODAJ je w sekcji "luki_tresciowe"!
+"""
+
     try:
         analysis = None
         corrected_article = ""
@@ -556,6 +581,7 @@ def editorial_review(project_id):
 
 Dostajesz artykuł pt. "{topic}" ({word_count} słów). Napisz PEŁNĄ RECENZJĘ REDAKTORSKĄ.
 {unused_keywords_section}
+{ymyl_section}
 
 === NADRZĘDNA ZASADA ===
 🔴 ROZBUDOWUJ treść, NIE USUWAJ. Każda Twoja sugestia powinna prowadzić do ROZWINIĘCIA tekstu, nie skrócenia go.
@@ -959,7 +985,14 @@ Artykuł ({word_count} słów):
             },
             "ai_model": ai_model,
             "grammar_correction": grammar_stats,
-            "rescan_result": rescan_result
+            "rescan_result": rescan_result,
+            
+            # 🆕 v44.5: YMYL validation
+            "ymyl_check": {
+                "detected_category": detected_category,
+                "is_ymyl": detected_category in ("prawo", "medycyna"),
+                "ymyl_reviewed": detected_category in ("prawo", "medycyna")
+            } if detected_category in ("prawo", "medycyna") else None
         }), 200
         
     except Exception as e:
@@ -1119,6 +1152,25 @@ def export_docx(project_id):
     if not full_text:
         return jsonify({"error": "No content to export"}), 400
     
+    # 🆕 v44.5: YMYL disclaimer guard
+    detected_category = project_data.get("detected_category", "inne")
+    if detected_category == "prawo" and "zastrzeżenie" not in full_text.lower():
+        full_text += (
+            "\n\n---\n\n"
+            "**Zastrzeżenie prawne:** Niniejszy artykuł ma charakter wyłącznie informacyjny "
+            "i nie stanowi porady prawnej. W indywidualnych sprawach zalecamy konsultację "
+            "z wykwalifikowanym prawnikiem."
+        )
+        print(f"[EXPORT_DOCX] ⚖️ Auto-dodano brakujący disclaimer prawny")
+    elif detected_category == "medycyna" and "zastrzeżenie" not in full_text.lower():
+        full_text += (
+            "\n\n---\n\n"
+            "**Zastrzeżenie medyczne:** Niniejszy artykuł ma charakter wyłącznie informacyjny "
+            "i edukacyjny. Nie stanowi porady medycznej ani nie zastępuje konsultacji "
+            "z lekarzem lub innym wykwalifikowanym specjalistą."
+        )
+        print(f"[EXPORT_DOCX] 🏥 Auto-dodano brakujący disclaimer medyczny")
+    
     topic = project_data.get("topic", "Artykuł")
     elements = parse_article_structure(full_text)
     
@@ -1193,6 +1245,23 @@ def export_html(project_id):
     
     if not full_text:
         return jsonify({"error": "No content to export"}), 400
+    
+    # 🆕 v44.5: YMYL disclaimer guard (HTML export)
+    detected_category = project_data.get("detected_category", "inne")
+    if detected_category == "prawo" and "zastrzeżenie" not in full_text.lower():
+        full_text += (
+            "\n\n---\n\n"
+            "**Zastrzeżenie prawne:** Niniejszy artykuł ma charakter wyłącznie informacyjny "
+            "i nie stanowi porady prawnej. W indywidualnych sprawach zalecamy konsultację "
+            "z wykwalifikowanym prawnikiem."
+        )
+    elif detected_category == "medycyna" and "zastrzeżenie" not in full_text.lower():
+        full_text += (
+            "\n\n---\n\n"
+            "**Zastrzeżenie medyczne:** Niniejszy artykuł ma charakter wyłącznie informacyjny "
+            "i edukacyjny. Nie stanowi porady medycznej ani nie zastępuje konsultacji "
+            "z lekarzem lub innym wykwalifikowanym specjalistą."
+        )
     
     topic = project_data.get("topic", "Artykuł")
     
