@@ -737,6 +737,7 @@ def generate_enhanced_pre_batch_info(
     style_fingerprint: Dict = None,
     is_ymyl: bool = False,
     is_legal: bool = False,
+    is_medical: bool = False,
     batch_plan: Dict = None,
     # 🆕 v42.0: Dodatkowe parametry
     overflow_buffer: Any = None,
@@ -746,7 +747,10 @@ def generate_enhanced_pre_batch_info(
     assigned_phrases: List[Dict] = None,
     assigned_entities: List[Dict] = None,
     # 🆕 v43.0: Phrase Hierarchy
-    phrase_hierarchy_data: Dict = None
+    phrase_hierarchy_data: Dict = None,
+    # 🆕 v44.5: YMYL citation instructions
+    legal_instruction: str = "",
+    medical_instruction: str = ""
 ) -> Dict[str, Any]:
     """
     Generuje KOMPLETNE enhanced pre_batch_info z konkretnymi instrukcjami.
@@ -988,7 +992,10 @@ def generate_enhanced_pre_batch_info(
     enhanced["phrase_hierarchy"] = hierarchy_context
     
     # GPT PROMPT SECTION
-    enhanced["gpt_instructions"] = _generate_gpt_prompt_section(enhanced, is_legal)
+    enhanced["gpt_instructions"] = _generate_gpt_prompt_section(
+        enhanced, is_legal=is_legal, is_medical=is_medical,
+        legal_instruction=legal_instruction, medical_instruction=medical_instruction
+    )
     
     # SMART INSTRUCTIONS
     if SMART_INSTRUCTIONS_AVAILABLE:
@@ -1015,13 +1022,49 @@ def generate_enhanced_pre_batch_info(
     return enhanced
 
 
-def _generate_gpt_prompt_section(enhanced: Dict, is_legal: bool = False) -> str:
+def _generate_gpt_prompt_section(
+    enhanced: Dict, 
+    is_legal: bool = False, 
+    is_medical: bool = False,
+    legal_instruction: str = "",
+    medical_instruction: str = ""
+) -> str:
     """Generuje gotową sekcję promptu dla GPT."""
     lines = []
     lines.append("=" * 60)
     lines.append(f"📋 BATCH #{enhanced['batch_number']} - {enhanced['batch_type']}")
     lines.append("=" * 60)
     lines.append("")
+    
+    # ================================================================
+    # 🆕 v44.5: YMYL CITATION INSTRUCTIONS - NA POCZĄTKU PROMPTU
+    # ================================================================
+    if is_legal and legal_instruction:
+        lines.append("⚖️ ARTYKUŁ PRAWNY — OBOWIĄZKOWE CYTOWANIA!")
+        lines.append("=" * 50)
+        lines.append(legal_instruction[:1200])
+        lines.append("")
+        lines.append("📌 ZASADY CYTOWANIA:")
+        lines.append("   • Powoływuj się na konkretne przepisy: art. X § Y ustawy Z")
+        lines.append("   • Odwołuj się do orzeczeń: wyrok SN z DD.MM.RRRR, sygn. XXX")
+        lines.append("   • MINIMUM 2 cytowania na sekcję H2")
+        lines.append("   • Cytowania wplataj NATURALNIE w tekst, nie na końcu akapitu")
+        lines.append("=" * 50)
+        lines.append("")
+    
+    if is_medical and medical_instruction:
+        lines.append("🏥 ARTYKUŁ MEDYCZNY — OBOWIĄZKOWE CYTOWANIA!")
+        lines.append("=" * 50)
+        lines.append(medical_instruction[:1200])
+        lines.append("")
+        lines.append("📌 ZASADY CYTOWANIA:")
+        lines.append("   • Powoływuj się na publikacje: Autor i wsp. (rok)")
+        lines.append("   • Dodawaj PMID: wg badania PMID:12345678")
+        lines.append("   • Poziomy dowodów: meta-analiza > RCT > kohorta > seria przypadków")
+        lines.append("   • MINIMUM 1-2 cytowania na sekcję H2")
+        lines.append("   • NIE wymyślaj statystyk ani źródeł!")
+        lines.append("=" * 50)
+        lines.append("")
     
     # 🆕 v42.0: Info o sub-batch
     if enhanced.get("is_sub_batch"):
