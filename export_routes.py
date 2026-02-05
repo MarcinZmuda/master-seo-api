@@ -550,43 +550,104 @@ def editorial_review(project_id):
         
         if claude_client:
             # ============================================================
-            # WYWOŁANIE 1: ANALIZA
+            # WYWOŁANIE 1: RECENZJA REDAKTORSKA (v41.0)
             # ============================================================
-            analysis_prompt = f"""Jesteś REDAKTOREM NACZELNYM i EKSPERTEM MERYTORYCZNYM.
+            analysis_prompt = f"""Jesteś REDAKTOREM NACZELNYM polskiego wydawnictwa specjalizującego się w treściach eksperckich.
 
-Przeanalizuj artykuł pt. "{topic}" i znajdź błędy do poprawy.
+Dostajesz artykuł pt. "{topic}" ({word_count} słów). Napisz PEŁNĄ RECENZJĘ REDAKTORSKĄ.
 {unused_keywords_section}
 
-=== ZADANIA ANALIZY ===
+=== NADRZĘDNA ZASADA ===
+🔴 ROZBUDOWUJ treść, NIE USUWAJ. Każda Twoja sugestia powinna prowadzić do ROZWINIĘCIA tekstu, nie skrócenia go.
 
-1. **HALUCYNACJE DANYCH** - Zmyślone statystyki, daty, nazwy raportów
-2. **BŁĘDY TERMINOLOGICZNE** - Mylenie pojęć fachowych
-3. **ZABURZONA CHRONOLOGIA** - Nielogiczna kolejność kroków
-4. **NADMIERNE UPROSZCZENIA** - "zawsze/każdy/nigdy" zamiast "zazwyczaj/często"
-5. **FRAZY AI** - "w dzisiejszych czasach", "warto wiedzieć", "nie ulega wątpliwości"
-6. **BŁĘDNE KOLOKACJE** - "robić decyzję" zamiast "podejmować decyzję"
-
-=== ODPOWIEDZ TYLKO JSON ===
+=== STRUKTURA RECENZJI (odpowiedz TYLKO JSON) ===
 
 {{
   "overall_score": <0-10>,
-  "scores": {{"merytoryka": <0-10>, "struktura": <0-10>, "styl": <0-10>, "seo": <0-10>}},
+  "scores": {{
+    "merytoryka": <0-10>,
+    "struktura": <0-10>,
+    "styl": <0-10>,
+    "seo": <0-10>
+  }},
+
+  "editorial_feedback": {{
+    
+    "recenzja_ogolna": "<3-5 zdań: ogólna ocena artykułu. Co jest mocne? Co wymaga pracy? Jaki ton ma tekst i czy jest odpowiedni? Czy artykuł odpowiada na pytanie czytelnika?>",
+    
+    "merytoryka": [
+      {{
+        "sekcja": "<H2/H3 którego dotyczy>",
+        "uwaga": "<co jest nie tak merytorycznie>",
+        "cytat": "<fragment tekstu — min 10 słów>",
+        "sugestia": "<jak ROZBUDOWAĆ ten fragment — dodaj co konkretnie dopisać>"
+      }}
+    ],
+    
+    "styl_i_jezyk": [
+      {{
+        "problem": "powtórzenie|niezręczność|fraza_AI|kolokacja|strona_bierna|monotonia",
+        "cytat": "<fragment z tekstu>",
+        "sugestia": "<jak poprawić — rozwiń, nie skracaj>"
+      }}
+    ],
+    
+    "struktura_i_narracja": [
+      {{
+        "uwaga": "<problem ze strukturą: brak przejścia, nierówne proporcje sekcji, brak podsumowania, luka logiczna>",
+        "gdzie": "<między którymi sekcjami / w której sekcji>",
+        "sugestia": "<co DOPISAĆ żeby naprawić>"
+      }}
+    ],
+    
+    "luki_tresciowe": [
+      {{
+        "brakujacy_temat": "<czego czytelnik mógłby szukać, a tekst tego nie pokrywa>",
+        "gdzie_dodac": "<w której sekcji najlepiej rozbudować>",
+        "sugestia": "<2-3 zdania co konkretnie dopisać>"
+      }}
+    ],
+
+    "halucynacje": [
+      {{
+        "cytat": "<fragment z wymyśloną statystyką/datą/źródłem>",
+        "dlaczego_falsz": "<krótkie wyjaśnienie>"
+      }}
+    ]
+  }},
+
   "errors_to_fix": [
-    {{"type": "<TYP>", "original": "<cytat z tekstu>", "replacement": "<poprawka>"}}
+    {{
+      "type": "HALUCYNACJA|TERMINOLOGIA|FRAZA_AI|KOLOKACJA|STYL|ROZBUDUJ",
+      "priority": <1-3 gdzie 1=krytyczne>,
+      "original": "<cytat z tekstu — min 10 słów>",
+      "replacement": "<poprawka — DŁUŻSZA lub RÓWNA oryginałowi>",
+      "action": "ROZBUDUJ|POPRAW|USUŃ_HALUCYNACJĘ"
+    }}
   ],
+
   "keywords_to_add": {json.dumps(unused_basic + unused_extended, ensure_ascii=False)},
-  "summary": "<2-3 zdania podsumowania>"
+  
+  "summary": "<2-3 zdania: najważniejsze co trzeba zrobić z tym artykułem>"
 }}
+
+=== WSKAZÓWKI ===
+- W "merytoryka" szukaj: brak źródeł, nieprecyzyjne twierdzenia, nadmierne uproszczenia, luki w argumentacji
+- W "styl_i_jezyk" szukaj: powtórzenia słów w sąsiednich zdaniach, frazy AI ("warto zauważyć", "kluczowym elementem"), monotonny rytm zdań
+- W "struktura_i_narracja" szukaj: sekcje za krótkie (<80 słów), brak płynnego przejścia, skok tematyczny
+- W "luki_tresciowe" szukaj: pytania które czytelnik mógłby mieć, a tekst na nie nie odpowiada
+- W "halucynacje" szukaj: konkretne liczby, daty, nazwy badań — czy brzmią wiarygodnie?
+- Każda sugestia powinna mówić CO DOPISAĆ, nie co usunąć
 
 === ARTYKUŁ ({word_count} słów) ===
 
-{full_text[:12000]}"""
+{full_text}"""
 
-            print(f"[EDITORIAL_REVIEW] ========== CALL 1: ANALYSIS ==========")
+            print(f"[EDITORIAL_REVIEW] ========== CALL 1: RECENZJA REDAKTORSKA ==========")
             
             response1 = claude_client.messages.create(
                 model="claude-sonnet-4-20250514",
-                max_tokens=4000,
+                max_tokens=6000,
                 messages=[{"role": "user", "content": analysis_prompt}]
             )
             analysis_text = response1.content[0].text.strip()
@@ -618,24 +679,36 @@ Przeanalizuj artykuł pt. "{topic}" i znajdź błędy do poprawy.
             
             diff_prompt = f"""Przeanalizuj artykuł pt. "{topic}" i zwróć TYLKO ZMIANY w formacie diff.
 
+🔴 NADRZĘDNA ZASADA: ROZBUDOWUJ, NIE USUWAJ!
+Artykuł ma {word_count} słów. Po Twoich zmianach musi mieć CO NAJMNIEJ tyle samo.
+Każda zmiana powinna ROZSZERZAĆ treść — dodawać szczegóły, kontekst, przykłady.
+
 ⛔ KRYTYCZNE ZASADY:
 - Zwróć MAX 15 zmian (tylko najważniejsze!)
 - NIE przepisuj całego artykułu
-- Krótkie zdania (2-5 słów) są CELOWE - NIE łącz ich!
+- Krótkie zdania (2-5 słów) są CELOWE — NIE łącz ich!
 - Zachowaj styl i rytm tekstu
 - Cytat w ZNAJDŹ musi być DOKŁADNY (min 10 słów dla kontekstu)
+- ZAMIEŃ musi być DŁUŻSZY lub RÓWNY co ZNAJDŹ (nigdy krótszy!)
+- Jedyny wyjątek od zakazu usuwania: halucynacje (zmyślone dane/statystyki)
+
+=== JAK ROZBUDOWYWAĆ ===
+- Dodaj drugą część zdania po przecinku/myślniku z dodatkowym kontekstem
+- Rozwiń ogólnik o konkretny przykład lub dane
+- Wpleć brakującą frazę SEO jako naturalne dopowiedzenie
+- Zamień pustą frazę AI na treść merytoryczną (nie usuwaj — zamień na coś wartościowego)
 
 === BŁĘDY DO POPRAWY ===
-{json.dumps(errors_list[:10], ensure_ascii=False, indent=2) if errors_list else "Brak krytycznych błędów - sprawdź tylko frazy AI i kolokacje."}
+{json.dumps(errors_list[:10], ensure_ascii=False, indent=2) if errors_list else "Brak krytycznych błędów — rozbuduj słabsze fragmenty i wpleć brakujące frazy."}
 
-=== FRAZY DO WPLECENIA (naturalnie, w istniejące zdania - rozwiń je) ===
+=== FRAZY DO WPLECENIA (rozbudowując istniejące zdania!) ===
 {', '.join(keywords_to_add[:10]) if keywords_to_add else "Wszystkie frazy są w tekście."}
 
 === FORMAT ODPOWIEDZI ===
 
 [ZMIANA 1]
 ZNAJDŹ: "dokładny cytat z artykułu (min 10 słów dla kontekstu)"
-ZAMIEŃ: "poprawiona wersja z zachowaniem stylu"
+ZAMIEŃ: "rozbudowana wersja z zachowaniem stylu — DŁUŻSZA niż oryginał"
 POWÓD: krótkie wyjaśnienie (max 10 słów)
 
 [ZMIANA 2]
@@ -645,7 +718,7 @@ POWÓD: ...
 
 (kontynuuj do max 15 zmian)
 
-=== ARTYKUŁ DO ANALIZY ===
+=== ARTYKUŁ DO ANALIZY ({word_count} słów — nie zmniejszaj!) ===
 
 {full_text}"""
 
@@ -711,6 +784,23 @@ Artykuł ({word_count} słów):
             corrected_article = full_text
         
         # ================================================================
+        # v41.0: WORD COUNT GUARD — artykuł nie powinien się skrócić
+        # ================================================================
+        corrected_wc = len(corrected_article.split())
+        word_count_shrinkage = False
+        shrinkage_pct = 0
+        
+        if corrected_wc < word_count and corrected_article != full_text:
+            shrinkage_pct = round((1 - corrected_wc / word_count) * 100, 1)
+            print(f"[EDITORIAL_REVIEW] ⚠️ WORD COUNT SHRINKAGE: {word_count} → {corrected_wc} (-{shrinkage_pct}%)")
+            
+            if shrinkage_pct > 5:
+                # Skrócenie o >5% = rollback do oryginału
+                word_count_shrinkage = True
+                print(f"[EDITORIAL_REVIEW] 🔴 AUTO-ROLLBACK: artykuł skrócił się o {shrinkage_pct}% — przywracam oryginał")
+                corrected_article = full_text
+        
+        # ================================================================
         # v29.0: BURSTINESS CHECK - PO + AUTO-ROLLBACK
         # ================================================================
         burstiness_after = None
@@ -730,18 +820,23 @@ Artykuł ({word_count} słów):
                 
                 if cv_drop > 0.1:
                     rollback_triggered = True
-                    rollback_reason = f"CV spadło o {cv_drop:.2f} (z {cv_before:.2f} do {cv_after:.2f}) - tekst stał się zbyt monotonny"
+                    rollback_reason = f"CV spadło o {cv_drop:.2f} (z {cv_before:.2f} do {cv_after:.2f}) — tekst stał się zbyt monotonny"
                     print(f"[EDITORIAL_REVIEW] ⚠️ AUTO-ROLLBACK: {rollback_reason}")
                     corrected_article = full_text
                     
                 elif cv_after < 0.3 and cv_before >= 0.3:
                     rollback_triggered = True
-                    rollback_reason = f"CV spadło poniżej progu AI ({cv_after:.2f} < 0.3) - tekst wygląda na wygenerowany przez AI"
+                    rollback_reason = f"CV spadło poniżej progu AI ({cv_after:.2f} < 0.3) — tekst wygląda na wygenerowany przez AI"
                     print(f"[EDITORIAL_REVIEW] ⚠️ AUTO-ROLLBACK: {rollback_reason}")
                     corrected_article = full_text
                     
             except Exception as e:
                 print(f"[EDITORIAL_REVIEW] ⚠️ Burstiness after check failed: {e}")
+        
+        # v41.0: Rollback z powodu skrócenia artykułu
+        if word_count_shrinkage and not rollback_triggered:
+            rollback_triggered = True
+            rollback_reason = f"Artykuł skrócił się o {shrinkage_pct}% ({word_count} → {corrected_wc} słów) — editorial review powinien ROZBUDOWYWAĆ, nie skracać"
         
         # Statystyki diff
         diff_stats = calculate_diff_stats(full_text, corrected_article)
@@ -789,7 +884,7 @@ Artykuł ({word_count} słów):
                 "diff_stats": diff_stats,
                 "grammar_correction": grammar_stats,
                 "ai_model": ai_model,
-                "version": "v29.0",
+                "version": "v41.0-expand",
                 "created_at": firestore.SERVER_TIMESTAMP
             }
         })
@@ -803,17 +898,20 @@ Artykuł ({word_count} słów):
         
         return jsonify({
             "status": "REVIEWED",
-            "version": "v29.0-DIFF",
+            "version": "v41.0-DIFF-EXPAND",
             "overall_score": analysis.get("overall_score") if analysis else None,
             "scores": analysis.get("scores", {}) if analysis else {},
             "summary": analysis.get("summary", "") if analysis else "",
+            
+            # 🆕 v41.0: PEŁNA RECENZJA REDAKTORSKA
+            "editorial_feedback": analysis.get("editorial_feedback", {}) if analysis else {},
             
             # v29.0: DIFF OUTPUT
             "diff_result": {
                 "total_changes_parsed": len(applied_changes) + len(failed_changes),
                 "applied": len(applied_changes),
                 "failed": len(failed_changes),
-                "applied_changes": applied_changes[:10],  # Max 10 w response
+                "applied_changes": applied_changes[:10],
                 "failed_changes": failed_changes[:5]
             },
             "diff_stats": diff_stats,
@@ -834,11 +932,20 @@ Artykuł ({word_count} słów):
                 "cv_change": round((burstiness_after.get("cv", 0) - burstiness_before.get("cv", 0)), 3) if (burstiness_before and burstiness_after) else None
             },
             
+            # v41.0: WORD COUNT GUARD
+            "word_count_guard": {
+                "original": word_count,
+                "corrected": corrected_word_count,
+                "shrinkage_pct": shrinkage_pct,
+                "rollback_triggered": word_count_shrinkage,
+                "policy": "Editorial review powinien ROZBUDOWYWAĆ treść, nie skracać"
+            },
+            
             # v29.0: ROLLBACK INFO
             "rollback": {
                 "triggered": rollback_triggered,
                 "reason": rollback_reason,
-                "original_preserved": True  # Zawsze zachowujemy oryginał
+                "original_preserved": True
             },
             
             "corrected_article": corrected_article,
