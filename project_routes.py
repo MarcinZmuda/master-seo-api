@@ -92,6 +92,7 @@ SYNONYMS_ENABLED = FEATURES.keyword_synonyms
 BEST_OF_N_ENABLED = FEATURES.batch_best_of_n
 BATCH_PLANNER_ENABLED = FEATURES.batch_planner
 LEGAL_MODULE_ENABLED = FEATURES.legal_routes_v3
+MEDICAL_MODULE_ENABLED = getattr(FEATURES, 'medical_module', False) or os.environ.get('MEDICAL_MODULE_ENABLED', 'false').lower() == 'true'
 POLISH_QUALITY_ENABLED = FEATURES.polish_language_quality
 H2_GENERATOR_ENABLED = FEATURES.h2_generator
 
@@ -186,6 +187,23 @@ if LEGAL_MODULE_ENABLED:
 else:
     def enhance_project_with_legal(project_data, main_keyword, h2_list):
         return project_data
+
+# 🆕 v44.5: Medical Module import
+if MEDICAL_MODULE_ENABLED:
+    try:
+        from medical_module.medical_routes import enhance_project_with_medical, check_medical_on_export
+        print("[PROJECT_ROUTES] ✅ Medical module available")
+    except ImportError:
+        def enhance_project_with_medical(project_data, main_keyword, h2_list=None):
+            return project_data
+        def check_medical_on_export(full_text, category):
+            return {"medical_check": "SKIPPED"}
+        print("[PROJECT_ROUTES] ⚠️ Medical module import failed")
+else:
+    def enhance_project_with_medical(project_data, main_keyword, h2_list=None):
+        return project_data
+    def check_medical_on_export(full_text, category):
+        return {"medical_check": "SKIPPED"}
 
 if POLISH_QUALITY_ENABLED:
     plq = get_module('polish_language_quality')
@@ -727,6 +745,22 @@ def create_project():
             print(f"[PROJECT] ⚠️ Legal module error: {e}")
     
     # ================================================================
+    # 🆕 v44.5: Medical Module - auto-detekcja i pobieranie publikacji
+    # ================================================================
+    if MEDICAL_MODULE_ENABLED and project_data.get("detected_category") != "prawo":
+        try:
+            project_data = enhance_project_with_medical(
+                project_data=project_data,
+                main_keyword=topic,
+                h2_list=h2_structure
+            )
+            if project_data.get("detected_category") == "medycyna":
+                pubs_count = len(project_data.get("medical_publications", []))
+                print(f"[PROJECT] 🏥 Medical module active: category=medycyna, {pubs_count} publications loaded")
+        except Exception as e:
+            print(f"[PROJECT] ⚠️ Medical module error: {e}")
+    
+    # ================================================================
     # 🆕 v36.2: ANTI-FRANKENSTEIN SYSTEM
     # Token Budgeting, Article Memory, Style Fingerprint, Soft Caps
     # ================================================================
@@ -1021,6 +1055,15 @@ def create_project():
             "legal_judgments_preview": legal_judgments_preview,
             "legal_instruction_preview": compact_legal_instruction,
             
+            # 🆕 v44.5: Medical info (kompaktowe)
+            "medical_module_active": project_data.get("medical_context", {}).get("medical_module_active", False),
+            "medical_publications_count": len(project_data.get("medical_publications", [])),
+            "medical_instruction_preview": (
+                project_data.get("medical_instruction", "")[:800] + "..."
+                if len(project_data.get("medical_instruction", "")) > 800
+                else project_data.get("medical_instruction", "")
+            ) if project_data.get("medical_instruction") else None,
+            
             # Meta
             "target_length": target_length,
             "warning": warning,
@@ -1070,6 +1113,11 @@ def create_project():
         "legal_module_active": project_data.get("legal_context", {}).get("legal_module_active", False),
         "legal_instruction": project_data.get("legal_instruction"),
         "legal_judgments": project_data.get("legal_judgments", []),
+        # 🆕 v44.5: Medical Module fields
+        "medical_module_active": project_data.get("medical_context", {}).get("medical_module_active", False),
+        "medical_instruction": project_data.get("medical_instruction"),
+        "medical_publications": project_data.get("medical_publications", []),
+        "medical_disclaimer": project_data.get("medical_disclaimer", ""),
         # 🆕 v43.0: Phrase Hierarchy
         "phrase_hierarchy_enabled": phrase_hierarchy_data is not None,
         "phrase_hierarchy_stats": phrase_hierarchy_data.get("stats", {}) if phrase_hierarchy_data else None,
@@ -2487,8 +2535,12 @@ def get_pre_batch_info(project_id):
                 style_fingerprint=data.get("style_fingerprint", {}),
                 is_ymyl=data.get("is_ymyl", False),
                 is_legal=data.get("is_legal", False) or data.get("detected_category") == "prawo",
+                is_medical=data.get("detected_category") == "medycyna",
                 batch_plan=batch_plan,  # 🆕 v40.1: Przekaż batch_plan z h2_sections
-                phrase_hierarchy_data=phrase_hierarchy_data  # 🆕 v43.0: Phrase Hierarchy
+                phrase_hierarchy_data=phrase_hierarchy_data,  # 🆕 v43.0: Phrase Hierarchy
+                # 🆕 v44.5: YMYL instructions for GPT prompt
+                legal_instruction=data.get("legal_instruction", ""),
+                medical_instruction=data.get("medical_instruction", "")
             )
             # 🆕 v40.1: Log ile H2 w batchu
             h2_in_batch = enhanced_info.get("h2_count_in_batch", 0)
@@ -2650,6 +2702,24 @@ def get_pre_batch_info(project_id):
                 if data.get("detected_articles") else None
         } if data.get("detected_category") == "prawo" else None,
         
+        # 🆕 v44.5: Medical context - publikacje naukowe i instrukcje cytowania
+        "medical_context": {
+            "active": data.get("detected_category") == "medycyna",
+            "medical_instruction": data.get("medical_instruction", ""),
+            "top_publications": [
+                {
+                    "title": p.get("title", "")[:100],
+                    "authors": p.get("authors", "")[:50],
+                    "pmid": p.get("pmid", ""),
+                    "year": p.get("year", ""),
+                    "evidence_level": p.get("evidence_level", 5)
+                }
+                for p in data.get("medical_publications", [])[:5]
+            ],
+            "must_cite": len(data.get("medical_publications", [])) > 0,
+            "citation_hint": "Cytuj źródła naukowe w formacie: Autor i wsp. (rok), PMID:XXXXX"
+        } if data.get("detected_category") == "medycyna" else None,
+        
         "gpt_prompt": gpt_prompt,
         
         # 🆕 v39.0: Enhanced Pre-Batch Instructions
@@ -2753,6 +2823,39 @@ def approve_batch_with_review(project_id):
     main_keyword = project_data.get("main_keyword", project_data.get("topic", ""))
     batch_plan = project_data.get("batch_plan", {})
     current_batch = project_data.get("current_batch_num", 1)
+    
+    # 🆕 v44.5: YMYL citation check
+    ymyl_warnings = []
+    detected_category = project_data.get("detected_category", "inne")
+    if detected_category == "prawo":
+        # Sprawdź czy batch zawiera cytowania prawne
+        import re as _re
+        legal_patterns = [
+            r'art\.\s*\d+',          # art. 13
+            r'§\s*\d+',              # § 1
+            r'sygn\.\s*akt',         # sygn. akt
+            r'wyrok\s+\w+\s+z\s+',  # wyrok SN z
+            r'Dz\.?\s*U\.',          # Dz.U.
+            r'k\.\s*[cprk]\.',       # k.c., k.p., k.r.o.
+        ]
+        has_citation = any(_re.search(p, batch_text, _re.IGNORECASE) for p in legal_patterns)
+        if not has_citation:
+            ymyl_warnings.append("⚖️ UWAGA: Batch nie zawiera cytowań prawnych! Artykuł prawny POWINIEN odwoływać się do przepisów.")
+    
+    elif detected_category == "medycyna":
+        # Sprawdź czy batch zawiera cytowania medyczne
+        import re as _re
+        medical_patterns = [
+            r'PMID[:\s]*\d+',        # PMID:12345678
+            r'i\s+wsp\.\s*\(',       # i wsp. (2023)
+            r'et\s+al\.',            # et al.
+            r'badani[aeu]\s+',       # badanie/badania
+            r'meta-analiz',          # meta-analiza
+            r'randomizowane',        # randomizowane
+        ]
+        has_citation = any(_re.search(p, batch_text, _re.IGNORECASE) for p in medical_patterns)
+        if not has_citation:
+            ymyl_warnings.append("🏥 UWAGA: Batch nie zawiera cytowań medycznych! Artykuł medyczny POWINIEN odwoływać się do publikacji naukowych.")
     
     # Znajdź wymagane frazy (nieużyte)
     keywords_required = []
@@ -2979,6 +3082,8 @@ def approve_batch_with_review(project_id):
         "word_count": len(batch_text.split()),
         "message": "Batch zatwierdzony i zapisany",
         "auto_fixes_applied": auto_fixes,  # 🆕 v36.9
+        # 🆕 v44.5: YMYL citation warnings (non-blocking)
+        "ymyl_warnings": ymyl_warnings if ymyl_warnings else None,
         **save_result
     }), 200
 
