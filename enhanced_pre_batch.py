@@ -153,8 +153,8 @@ try:
 except ImportError:
     DYNAMIC_HUMANIZATION_AVAILABLE = False
     CONTEXTUAL_SYNONYMS = {}
-    def get_dynamic_short_sentences(main_kw, h2s=None, count=8, include_q=True):
-        return {"domain": "universal", "sentences": ["To ważne.", "Co dalej?"], "instruction": "Wstaw krótkie zdania"}
+    def get_dynamic_short_sentences(main_kw, h2s=None, count=8, include_q=True, current_h2=None, batch_num=None):
+        return {"domain": "universal", "sentences": [], "grammar_patterns": [], "context_hints": [], "instruction": "Twórz krótkie zdania (3-8 słów) pasujące do kontekstu akapitu. Wstaw 2-4 na batch."}
     def get_synonym_instructions(overused=None, context=None):
         return {"instruction": "Unikaj powtórzeń", "synonyms": {}}
     def get_burstiness_instructions(prev_text=None):
@@ -479,7 +479,7 @@ def get_style_instructions(
         )
         burstiness_data = get_burstiness_instructions(previous_batch_text)
     else:
-        short_sentences_data = {"domain": "universal", "sentences": ["To ważne.", "Co dalej?"]}
+        short_sentences_data = {"domain": "universal", "sentences": [], "instruction": "Twórz krótkie zdania (3-8 słów) pasujące do kontekstu akapitu."}
         synonyms_data = {"instruction": "Unikaj powtórzeń", "synonyms": {}}
         burstiness_data = {"target_cv": ">0.40"}
     
@@ -1231,13 +1231,11 @@ def _generate_gpt_prompt_section(enhanced: Dict, is_legal: bool = False) -> str:
         lines.append("   ℹ️ Ta sekcja: same akapity, bez subheadingów")
         lines.append("")
     
-    # KRÓTKIE ZDANIA - z przykładami
+    # KRÓTKIE ZDANIA - kontekstowa instrukcja (v41.0)
     short_sentences = style.get("short_sentences_dynamic", {})
-    if short_sentences.get("examples"):
-        domain = short_sentences.get("domain", "universal")
-        lines.append(f"✂️ KRÓTKIE ZDANIA ({domain}) - wstaw 2-4 na batch:")
-        examples = short_sentences.get("examples", [])[:6]
-        lines.append(f"   {' | '.join(examples)}")
+    short_instruction = short_sentences.get("instruction", "")
+    if short_instruction:
+        lines.append(short_instruction)
         lines.append("")
     
     # AI PATTERNS DO UNIKANIA
