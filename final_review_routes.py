@@ -1309,6 +1309,21 @@ def merge_batches(project_id):
             if "Zastrzeżenie prawne" not in merged_article and "zastrzeżenie" not in merged_article.lower():
                 merged_article += legal_disclaimer
         
+        # 🆕 v44.5: Medical disclaimer
+        if detected_category == "medycyna":
+            medical_disclaimer = data.get("medical_disclaimer", "")
+            if not medical_disclaimer:
+                medical_disclaimer = (
+                    "\n\n---\n\n"
+                    "**Zastrzeżenie medyczne:** Niniejszy artykuł ma charakter wyłącznie informacyjny "
+                    "i edukacyjny. Nie stanowi porady medycznej ani nie zastępuje konsultacji "
+                    "z lekarzem lub innym wykwalifikowanym specjalistą. W przypadku problemów "
+                    "zdrowotnych skonsultuj się z lekarzem."
+                )
+            
+            if "Zastrzeżenie medyczne" not in merged_article and "zastrzeżenie" not in merged_article.lower():
+                merged_article += medical_disclaimer
+        
         word_count = len(merged_article.split())
         h2_matches = re.findall(r'^##\s+.+$|^h2:\s*.+$|<h2[^>]*>.+</h2>', merged_article, re.MULTILINE | re.IGNORECASE)
         h2_count = len(h2_matches)
@@ -1321,7 +1336,8 @@ def merge_batches(project_id):
                 "batches_merged": len(batches),
                 "word_count": word_count,
                 "h2_count": h2_count,
-                "has_disclaimer": detected_category == "prawo"
+                "has_disclaimer": detected_category in ("prawo", "medycyna"),
+                "disclaimer_type": detected_category if detected_category in ("prawo", "medycyna") else None
             }
         })
         
@@ -1334,7 +1350,8 @@ def merge_batches(project_id):
             "word_count": word_count,
             "h2_count": h2_count,
             "batches_merged": len(batches),
-            "has_disclaimer": detected_category == "prawo",
+            "has_disclaimer": detected_category in ("prawo", "medycyna"),
+            "disclaimer_type": detected_category if detected_category in ("prawo", "medycyna") else None,
             "message": f"Scalono {len(batches)} batchy w artykuł ({word_count} słów)"
         }), 200
         
