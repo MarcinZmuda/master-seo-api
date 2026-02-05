@@ -160,6 +160,19 @@ except ImportError as e:
     AI_DETECTION_ENABLED = False
     print(f"[MASTER] ⚠️ AI Detection not available: {e}")
 
+# 🆕 v41.0: Sentence Splitter (dzielenie długich zdań)
+SENTENCE_SPLITTER_AVAILABLE = False
+try:
+    from dynamic_humanization import suggest_sentence_splits, split_long_sentences
+    SENTENCE_SPLITTER_AVAILABLE = True
+    print("[MASTER] ✅ Sentence Splitter v41.0 loaded")
+except ImportError as e:
+    print(f"[MASTER] ⚠️ Sentence Splitter not available: {e}")
+    def suggest_sentence_splits(text, **kwargs):
+        return []
+    def split_long_sentences(text, **kwargs):
+        return {"modified_text": text, "splits": [], "split_count": 0, "stats": {}, "before_after": []}
+
 # ================================================================
 # 🆕 v34.0: Legal Module (SAOS Integration)
 # ================================================================
@@ -1848,22 +1861,36 @@ def approve_batch():
                 should_block_humanization = True
                 sent_dist = analyze_sentence_distribution(batch_content)
                 burst_fix = generate_burstiness_fix(burstiness_val, sent_dist)
+                
+                # 🆕 v41.0: Sugestie podziału długich zdań zamiast sztucznych wstawek
+                split_suggestions = []
+                if SENTENCE_SPLITTER_AVAILABLE:
+                    split_suggestions = suggest_sentence_splits(batch_content, max_suggestions=3)
+                
                 fix_instructions.append({
                     "type": "BURSTINESS_CRITICAL",
                     "message": f"🔴 Burstiness {burstiness_val} < {BURSTINESS_BLOCK_THRESHOLD} - PRZEPISZ batch!",
                     "fix": burst_fix.get("fix_instruction", ""),
                     "inserts": burst_fix.get("insert_suggestions", []),
+                    "sentence_splits": split_suggestions,  # 🆕 v41.0
                     "example": burst_fix.get("rewrite_example", {}),
                     "distribution": sent_dist.get("distribution_label", "")
                 })
             elif burstiness_val < BURSTINESS_WARNING_THRESHOLD:
                 sent_dist = analyze_sentence_distribution(batch_content)
                 burst_fix = generate_burstiness_fix(burstiness_val, sent_dist)
+                
+                # 🆕 v41.0: Sugestie podziału długich zdań
+                split_suggestions = []
+                if SENTENCE_SPLITTER_AVAILABLE:
+                    split_suggestions = suggest_sentence_splits(batch_content, max_suggestions=2)
+                
                 fix_instructions.append({
                     "type": "BURSTINESS_WARNING",
                     "message": f"⚠️ Burstiness {burstiness_val} < {BURSTINESS_WARNING_THRESHOLD} - popraw w tym batchu",
                     "fix": burst_fix.get("fix_instruction", ""),
-                    "inserts": burst_fix.get("insert_suggestions", [])
+                    "inserts": burst_fix.get("insert_suggestions", []),
+                    "sentence_splits": split_suggestions,  # 🆕 v41.0
                 })
             
             # 2. FORBIDDEN PHRASES CHECK
