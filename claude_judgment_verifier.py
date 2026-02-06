@@ -33,7 +33,7 @@ from anthropic import Anthropic
 # KONFIGURACJA
 # ============================================================================
 
-CLAUDE_MODEL = "claude-3-haiku-20240307"  # Najtańszy, wystarczy do klasyfikacji
+CLAUDE_MODEL = "claude-haiku-4-5-20251001"  # Najtańszy, wystarczy do klasyfikacji
 MAX_JUDGMENTS_TO_VERIFY = 10
 MAX_JUDGMENTS_TO_SELECT = 2
 

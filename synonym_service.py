@@ -187,7 +187,7 @@ Przykład: cera, naskórek, powłoka, tkanka"""
                 "content-type": "application/json"
             },
             json={
-                "model": "claude-3-haiku-20240307",  # najtańszy model
+                "model": "claude-haiku-4-5-20251001",  # najtańszy model
                 "max_tokens": 100,
                 "messages": [{"role": "user", "content": prompt}]
             },

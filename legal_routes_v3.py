@@ -256,7 +256,10 @@ def validate_endpoint():
     if not full_text:
         return jsonify({"error": "full_text is required"}), 400
     
-    result = validate_article_citations(full_text)
+    result = validate_article_citations(
+        full_text,
+        provided_judgments=data.get("provided_judgments")
+    )
     
     return jsonify(result)
 
@@ -396,28 +399,38 @@ def enhance_project_with_legal(
     return project_data
 
 
-def check_legal_on_export(full_text: str, category: str) -> Dict[str, Any]:
+def check_legal_on_export(full_text: str, category: str, provided_judgments: list = None) -> Dict[str, Any]:
     """
     Sprawdza wymagania prawne przed eksportem.
+    🆕 v44.6: Anti-hallucination — przekazuje dostarczone orzeczenia do walidacji.
     """
     if category != "prawo" or not LEGAL_MODULE_ENABLED:
         return {"legal_check": "SKIPPED"}
     
-    validation = validate_article_citations(full_text)
+    validation = validate_article_citations(full_text, provided_judgments=provided_judgments)
     
     warnings = []
     
-    if validation["citations_found"] == 0:
+    if validation["signatures_count"] == 0:
         warnings.append("Rozważ dodanie 1-2 orzeczeń sądowych")
-    elif validation["citations_found"] > validation["citations_limit"]:
-        warnings.append(f"Za dużo sygnatur ({validation['citations_found']})")
+    elif validation["signatures_count"] > CONFIG.MAX_CITATIONS_PER_ARTICLE:
+        warnings.append(f"Za dużo sygnatur ({validation['signatures_count']})")
     
     if not validation["has_disclaimer"]:
         warnings.append("Dodaj disclaimer na końcu artykułu")
     
+    # 🆕 v44.6: Hallucination warnings
+    if validation.get("signatures_hallucinated"):
+        warnings.append(
+            f"⚠️ {len(validation['signatures_hallucinated'])} wymyślonych sygnatur: "
+            f"{', '.join(validation['signatures_hallucinated'][:2])}"
+        )
+    
     return {
-        "legal_check": validation["status"],
-        "citations_found": validation["citations_found"],
+        "legal_check": "PASSED" if validation["valid"] else "WARNING",
+        "signatures_count": validation["signatures_count"],
+        "signatures_verified": validation.get("signatures_verified", []),
+        "signatures_hallucinated": validation.get("signatures_hallucinated", []),
         "has_disclaimer": validation["has_disclaimer"],
         "warnings": warnings
     }

@@ -42,7 +42,7 @@ class LegalConfig:
     """Konfiguracja modułu prawnego."""
     
     # Limity
-    MAX_CITATIONS_PER_ARTICLE: int = 2
+    MAX_CITATIONS_PER_ARTICLE: int = 4
     MIN_SCORE_TO_USE: int = 40
     
     # SAOS
@@ -172,15 +172,20 @@ LEGAL_KEYWORDS = [
 ]
 
 FINANCE_KEYWORDS = [
-    "inwestycja", "inwestować", "portfel", "akcje", "obligacje",
-    "giełda", "trading", "emerytura", "podatek", "pit", "vat",
-    "księgowość", "bilans", "bank", "ubezpieczenie", "polisa"
+    "inwestycj", "inwestowa", "portfel", "akcj", "obligacj",
+    "giełd", "trading", "emerytur", "podatk", "pit", "vat",
+    "księgowoś", "bilans", "bank", "ubezpiecz", "polis"
 ]
 
 HEALTH_KEYWORDS = [
-    "choroba", "leczenie", "terapia", "lekarz", "szpital",
-    "lek", "dawkowanie", "recepta", "diagnoza", "objawy",
-    "operacja", "rehabilitacja", "psycholog", "psychiatra"
+    "chorob", "leczeni", "terapi", "lekarz", "szpital",
+    "dawkowani", "recept", "diagnoz", "objaw",
+    "operacj", "rehabilitacj", "psycholog", "psychiatr",
+    "cukrzyc", "nadciśnieni", "nowotwór", "szczepion",
+    "antybiotyk", "insulin", "depresj", "astm",
+    "zawał", "serc", "udar", "migren", "alergi",
+    "zapaleni", "infekcj", "gryp", "covid",
+    "rak piersi", "rak płuc", "rak jelita", "onkolog",
 ]
 
 
@@ -190,19 +195,65 @@ def detect_category(
 ) -> Dict[str, Any]:
     """
     Wykrywa kategorię treści na podstawie słów kluczowych.
+    🆕 v44.6: Wagi dla terminów + lemmatyzacja spaCy.
     """
     additional_keywords = additional_keywords or []
     all_keywords = [main_keyword] + additional_keywords
     combined_text = " ".join(all_keywords).lower()
     
-    legal_matches = [kw for kw in LEGAL_KEYWORDS if kw.lower() in combined_text]
-    finance_matches = [kw for kw in FINANCE_KEYWORDS if kw.lower() in combined_text]
-    health_matches = [kw for kw in HEALTH_KEYWORDS if kw.lower() in combined_text]
+    # 🆕 Lemmatyzacja (jeśli spaCy dostępne)
+    lemmatized_text = combined_text
+    try:
+        from shared_nlp import get_nlp
+        nlp = get_nlp()
+        if nlp:
+            doc = nlp(combined_text)
+            lemmatized_text = " ".join([t.lemma_.lower() for t in doc])
+    except Exception:
+        pass
+    
+    search_text = combined_text + " " + lemmatized_text
+    
+    # 🆕 Ważone keyword matching
+    LEGAL_WEIGHTED = {
+        # Silne sygnały (waga 3) — jednoznacznie prawne
+        "ubezwłasnowolnienie": 3, "kodeks cywilny": 3, "kodeks karny": 3,
+        "kodeks pracy": 3, "k.c.": 3, "k.p.c.": 3, "k.r.o.": 3, "k.k.": 3,
+        "zdolność do czynności prawnych": 3, "postępowanie sądowe": 3,
+        "zachowek": 3, "przedawnienie roszczenia": 3, "zasiedzenie": 3,
+        "władza rodzicielska": 3, "opiekun prawny": 3, "kurator sądowy": 3,
+        "radca prawny": 3, "komornik": 3, "notariusz": 3,
+        # Średnie sygnały (waga 2) — prawne, mało dwuznaczne
+        "testament": 2, "dziedziczenie": 2,
+        "rozwód": 2, "alimenty": 2, "separacja": 2,
+        "odszkodowanie": 2, "zadośćuczynienie": 2,
+        "pozew": 2, "apelacja": 2, "kasacja": 2, "zażalenie": 2,
+        "wyrok sądu": 2, "orzeczenie sądu": 2, "sąd okręgowy": 2,
+        "przepis prawny": 2, "norma prawna": 2,
+        "hipoteka": 2, "zastaw": 2, "poręczenie": 2,
+        "przestępstwo": 2, "wykroczenie": 2,
+        "adwokat": 2, "ustawa": 2, "rozporządzenie": 2,
+        # Słabe sygnały (waga 1) — mogą być w innym kontekście
+        "umowa": 1, "kontrakt": 1, "kara": 1,
+        "skarga": 1, "odwołanie": 1,
+        "firma": 1, "spółka": 1, "kredyt": 1,
+        "spadek": 1, "sąd": 1, "wyrok": 1, "orzeczenie": 1,
+    }
+    
+    legal_score = 0
+    legal_matches = []
+    for kw, weight in LEGAL_WEIGHTED.items():
+        if kw in search_text:
+            legal_score += weight
+            legal_matches.append(kw)
+    
+    finance_matches = [kw for kw in FINANCE_KEYWORDS if kw.lower() in search_text]
+    health_matches = [kw for kw in HEALTH_KEYWORDS if kw.lower() in search_text]
     
     scores = {
-        "prawo": len(legal_matches),
-        "finanse": len(finance_matches),
-        "zdrowie": len(health_matches)
+        "prawo": legal_score,
+        "finanse": len(finance_matches) * 2,
+        "zdrowie": len(health_matches) * 2
     }
     
     max_category = max(scores, key=scores.get)
@@ -223,15 +274,17 @@ def detect_category(
             }
         }
     
-    confidence = min(1.0, max_score / 3)
-    category = max_category if max_score >= 1 else "general"
+    # Confidence: score 2 = 0.4, score 3 = 0.6, score 5+ = 1.0
+    confidence = min(1.0, max_score / 5)
+    # Prawo wymaga silniejszego sygnału (score >= 2), zdrowie/finanse mogą na 1 match (score >= 2)
+    category = max_category if max_score >= 2 else "general"
     detected = {
         "prawo": legal_matches,
         "finanse": finance_matches,
         "zdrowie": health_matches
     }.get(category, [])
     
-    is_ymyl = category in ["prawo", "finanse", "zdrowie"] and confidence >= 0.4
+    is_ymyl = category in ["prawo", "finanse", "zdrowie"] and confidence >= 0.3
     legal_enabled = category == "prawo" and SAOS_AVAILABLE
     
     return {
@@ -240,6 +293,7 @@ def detect_category(
         "is_ymyl": is_ymyl,
         "detected_keywords": detected[:10],
         "legal_enabled": legal_enabled,
+        "weighted_score": round(max_score, 1),
         "sources_available": {
             "saos": SAOS_AVAILABLE,
             "google": GOOGLE_FALLBACK_AVAILABLE,
@@ -326,6 +380,18 @@ def get_legal_context_for_article(
         }
     
     print(f"[LEGAL_MODULE] 🔍 Szukam orzeczeń dla: '{main_keyword}'")
+    
+    # 🆕 v44.6: Cache check
+    try:
+        from ymyl_cache import ymyl_cache
+        cache_key = f"{main_keyword}|{max_results}"
+        cached = ymyl_cache.get("saos", cache_key)
+        if cached:
+            print(f"[LEGAL_MODULE] 📦 Cache HIT dla '{main_keyword}'")
+            return cached
+    except ImportError:
+        ymyl_cache = None
+        cache_key = None
     
     judgments = []
     sources_used = []
@@ -455,7 +521,7 @@ def get_legal_context_for_article(
     # 9. Buduj instrukcję
     instruction = _build_citation_instruction(main_keyword, judgments)
     
-    return {
+    result = {
         "status": "OK",
         "category": "prawo",
         "judgments": judgments,
@@ -464,70 +530,47 @@ def get_legal_context_for_article(
         "disclaimer": LEGAL_DISCLAIMER,
         "instruction": instruction
     }
+    
+    # 🆕 v44.6: Cache SET
+    try:
+        if ymyl_cache and cache_key:
+            ymyl_cache.set("saos", cache_key, result)
+    except Exception:
+        pass
+    
+    return result
 
 
 def _build_citation_instruction(keyword: str, judgments: List[Dict]) -> str:
-    """Buduje instrukcję cytowania dla GPT."""
+    """Buduje KOMPAKTOWĄ instrukcję cytowania (v44.6 — oszczędność tokenów)."""
     
     lines = [
-        f"⚖️ ORZECZENIA DLA TEMATU: {keyword}",
-        f"Znaleziono: {len(judgments)} orzeczeń",
-        "",
-        "📋 STANDARD CYTOWANIA PRAWNICZEGO:",
-        f"- Użyj MAKSYMALNIE {CONFIG.MAX_CITATIONS_PER_ARTICLE} orzeczeń w tekście",
-        "- Format: sygnatura, data, sąd + portal gdzie dostępne",
-        "- NIE wklejaj pełnych URL - to nieprofesjonalne!",
-        "- Czytelnik sam wyszuka po sygnaturze",
-        "",
-        "✅ PRZYKŁAD POPRAWNEGO CYTOWANIA:",
-        "",
-        "   \"Jak wskazał Sąd Okręgowy w Łodzi w wyroku z dnia 2 października 2019 r.",
-        "   (sygn. II C 895/18), długotrwały konflikt między rodzicami może uzasadniać",
-        "   ingerencję sądu w sposób sprawowania opieki (orzeczenie dostępne na:",
-        "   orzeczenia.lodz.so.gov.pl).\"",
-        "",
-        "🏛️ DOSTĘPNE ORZECZENIA:"
+        f"⚖️ ORZECZENIA: {keyword} ({len(judgments)} szt.)",
+        f"Max {CONFIG.MAX_CITATIONS_PER_ARTICLE} w tekście. Format: sygnatura + data + sąd + portal.",
+        ""
     ]
     
     for i, j in enumerate(judgments[:CONFIG.MAX_CITATIONS_PER_ARTICLE], 1):
         sig = j.get("signature", "brak")
         date = j.get("formatted_date", j.get("date", ""))
         court = j.get("court", "")
-        score = j.get("relevance_score", "?")
-        source = j.get("source", "unknown")
+        source = j.get("source", "?")
         
-        # Portal (tylko domena)
-        official_portal = j.get("official_portal", "")
-        if official_portal:
-            portal_domain = official_portal.replace("https://", "").replace("http://", "").rstrip("/")
+        portal = j.get("official_portal", "")
+        if portal:
+            portal = portal.replace("https://", "").replace("http://", "").rstrip("/")
         else:
-            portal_domain = "orzeczenia.ms.gov.pl"
+            portal = "orzeczenia.ms.gov.pl"
         
-        lines.append(f"")
-        lines.append(f"═══ ORZECZENIE #{i} ({source.upper()}) ═══")
-        lines.append(f"   📌 Sygnatura: {sig}")
-        lines.append(f"   📅 Data: {date}")
-        lines.append(f"   🏛️ Sąd: {court}")
-        lines.append(f"   ⭐ Relevantność: {score}/100")
-        lines.append(f"   🌐 Portal: {portal_domain}")
-        lines.append(f"")
-        lines.append(f"   ✍️ CYTUJ TAK:")
-        lines.append(f"   \"...{court} w wyroku z dnia {date} (sygn. {sig})...\"")
-        lines.append(f"   \"...(orzeczenie dostępne na: {portal_domain}).\"")
+        lines.append(f"#{i} [{source}] {sig} | {date} | {court} | {portal}")
         
         excerpt = j.get("excerpt", "")
         if excerpt:
-            lines.append(f"")
-            lines.append(f"   📝 Fragment do wykorzystania:")
-            lines.append(f"   \"{excerpt[:250]}...\"")
+            lines.append(f"   → {excerpt[:180]}...")
+        lines.append("")
     
-    lines.append("")
-    lines.append("=" * 50)
-    lines.append("⚠️ PAMIĘTAJ:")
-    lines.append("   • Sygnatura + data + sąd = OBOWIĄZKOWE")
-    lines.append("   • Portal (domena) = na końcu cytatu")
-    lines.append("   • Pełny URL = NIE WKLEJAJ (nieprofesjonalne)")
-    lines.append("=" * 50)
+    lines.append("Cytuj: \"...SĄD w wyroku z DD.MM.RRRR (sygn. XXX)... (dostępne na: portal).\"")
+    lines.append("NIE wymyślaj sygnatur. NIE wklejaj URL.")
     
     return "\n".join(lines)
 
@@ -589,9 +632,10 @@ def score_judgment(text: str, keyword: str) -> Dict[str, Any]:
 # WALIDACJA CYTATÓW
 # ================================================================
 
-def validate_article_citations(full_text: str) -> Dict[str, Any]:
+def validate_article_citations(full_text: str, provided_judgments: List[Dict] = None) -> Dict[str, Any]:
     """
     Waliduje cytaty prawne w tekście artykułu.
+    🆕 v44.6: Sprawdza czy sygnatury istnieją w dostarczonych źródłach (anti-hallucination).
     """
     warnings = []
     suggestions = []
@@ -606,6 +650,42 @@ def validate_article_citations(full_text: str) -> Dict[str, Any]:
     
     if len(signatures) == 0:
         suggestions.append("Rozważ dodanie 1-2 orzeczeń sądowych")
+    
+    # 🆕 v44.6: Anti-hallucination — sprawdź czy sygnatury pasują do dostarczonych
+    hallucinated = []
+    verified = []
+    if provided_judgments and signatures_formatted:
+        provided_sigs = set()
+        for j in provided_judgments:
+            sig = j.get("signature", "").strip()
+            if sig:
+                # Normalizuj (usuń spacje wewnętrzne, uppercase)
+                sig_norm = re.sub(r'\s+', ' ', sig.upper().strip())
+                provided_sigs.add(sig_norm)
+        
+        for found_sig in signatures_formatted:
+            found_norm = re.sub(r'\s+', ' ', found_sig.upper().strip())
+            # Szukaj częściowego dopasowania (numer sprawy + rok)
+            matched = False
+            for provided in provided_sigs:
+                # Wystarczy match numeru i roku (np. "895/18")
+                found_case = re.search(r'(\d+/\d+)', found_norm)
+                prov_case = re.search(r'(\d+/\d+)', provided)
+                if found_case and prov_case and found_case.group() == prov_case.group():
+                    matched = True
+                    break
+            
+            if matched:
+                verified.append(found_sig)
+            else:
+                hallucinated.append(found_sig)
+        
+        if hallucinated:
+            warnings.append(
+                f"⚠️ HALLUCYNACJA: {len(hallucinated)} sygnatur NIE pochodzi z dostarczonych źródeł: "
+                f"{', '.join(hallucinated[:3])}"
+            )
+            suggestions.append("Usuń wymyślone sygnatury i użyj TYLKO dostarczonych orzeczeń")
     
     disclaimer_keywords = ["zastrzeżenie", "porada prawna", "konsultacja z prawnikiem"]
     has_disclaimer = any(kw in full_text.lower() for kw in disclaimer_keywords)
@@ -622,6 +702,8 @@ def validate_article_citations(full_text: str) -> Dict[str, Any]:
         "valid": valid,
         "signatures_found": signatures_formatted,
         "signatures_count": len(signatures),
+        "signatures_verified": verified,
+        "signatures_hallucinated": hallucinated,
         "articles_mentioned": len(articles),
         "has_disclaimer": has_disclaimer,
         "warnings": warnings,
@@ -634,37 +716,17 @@ def validate_article_citations(full_text: str) -> Dict[str, Any]:
 # ================================================================
 
 def get_legal_context_for_prompt(topic: str) -> str:
-    """
-    Generuje sekcję promptu z kontekstem prawnym dla GPT.
-    """
+    """Generuje sekcję promptu z kontekstem prawnym (v44.6 kompakt)."""
     detection = detect_category(topic)
     
     if detection["category"] != "prawo":
         return ""
     
-    lines = [
-        "",
-        "=" * 60,
-        "⚖️ KONTEKST PRAWNY (YMYL)",
-        "=" * 60,
-        "",
-        "Ten artykuł dotyczy tematyki PRAWNEJ. Przestrzegaj zasad:",
-        "",
-        "1. TERMINOLOGIA:",
-        "   - Używaj precyzyjnych terminów prawnych",
-        "   - Odwołuj się do aktów prawnych (KC, KPC, KRO)",
-        "",
-        "2. ORZECZENIA:",
-        f"   - Używaj TYLKO sygnatur z get_judgments",
-        f"   - Max {CONFIG.MAX_CITATIONS_PER_ARTICLE} cytaty",
-        "   - NIE wymyślaj sygnatur!",
-        "",
-        "3. DISCLAIMER:",
-        "   - Dodaj zastrzeżenie prawne (raz, w outro)",
-        "",
-    ]
-    
-    return "\n".join(lines)
+    return (
+        f"⚖️ YMYL PRAWNY: Używaj terminologii prawnej (KC, KPC, KRO). "
+        f"Max {CONFIG.MAX_CITATIONS_PER_ARTICLE} sygnatur — TYLKO z dostarczonych. "
+        f"NIE wymyślaj. Disclaimer w outro."
+    )
 
 
 # ================================================================

@@ -1037,33 +1037,16 @@ def _generate_gpt_prompt_section(
     lines.append("")
     
     # ================================================================
-    # 🆕 v44.5: YMYL CITATION INSTRUCTIONS - NA POCZĄTKU PROMPTU
+    # 🆕 v44.6: YMYL CITATION INSTRUCTIONS - kompaktowe
     # ================================================================
     if is_legal and legal_instruction:
-        lines.append("⚖️ ARTYKUŁ PRAWNY — OBOWIĄZKOWE CYTOWANIA!")
-        lines.append("=" * 50)
-        lines.append(legal_instruction[:1200])
-        lines.append("")
-        lines.append("📌 ZASADY CYTOWANIA:")
-        lines.append("   • Powoływuj się na konkretne przepisy: art. X § Y ustawy Z")
-        lines.append("   • Odwołuj się do orzeczeń: wyrok SN z DD.MM.RRRR, sygn. XXX")
-        lines.append("   • MINIMUM 2 cytowania na sekcję H2")
-        lines.append("   • Cytowania wplataj NATURALNIE w tekst, nie na końcu akapitu")
-        lines.append("=" * 50)
+        lines.append(legal_instruction[:800])
+        lines.append("Wplataj cytowania NATURALNIE w tekst, min 1-2 na sekcję H2.")
         lines.append("")
     
     if is_medical and medical_instruction:
-        lines.append("🏥 ARTYKUŁ MEDYCZNY — OBOWIĄZKOWE CYTOWANIA!")
-        lines.append("=" * 50)
-        lines.append(medical_instruction[:1200])
-        lines.append("")
-        lines.append("📌 ZASADY CYTOWANIA:")
-        lines.append("   • Powoływuj się na publikacje: Autor i wsp. (rok)")
-        lines.append("   • Dodawaj PMID: wg badania PMID:12345678")
-        lines.append("   • Poziomy dowodów: meta-analiza > RCT > kohorta > seria przypadków")
-        lines.append("   • MINIMUM 1-2 cytowania na sekcję H2")
-        lines.append("   • NIE wymyślaj statystyk ani źródeł!")
-        lines.append("=" * 50)
+        lines.append(medical_instruction[:800])
+        lines.append("Min 1-2 cytowania na sekcję H2. NIE wymyślaj statystyk!")
         lines.append("")
     
     # 🆕 v42.0: Info o sub-batch

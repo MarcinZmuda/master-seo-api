@@ -27,7 +27,7 @@ from typing import Dict, List, Any, Optional
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
 # Model Claude do wykrywania przepisów (szybki i tani)
-CLAUDE_MODEL = "claude-3-haiku-20240307"
+CLAUDE_MODEL = "claude-haiku-4-5-20251001"
 
 # Inicjalizacja
 _anthropic_client = None
