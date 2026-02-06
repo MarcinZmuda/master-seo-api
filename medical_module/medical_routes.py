@@ -469,7 +469,10 @@ def validate_article():
     if not full_text:
         return jsonify({"error": "full_text is required"}), 400
     
-    result = validate_medical_article(full_text)
+    result = validate_medical_article(
+        full_text,
+        provided_publications=data.get("provided_publications")
+    )
     
     return jsonify(result)
 
@@ -557,25 +560,21 @@ def enhance_project_with_medical(
     return project_data
 
 
-def check_medical_on_export(full_text: str, category: str) -> Dict[str, Any]:
+def check_medical_on_export(full_text: str, category: str, provided_publications: list = None) -> Dict[str, Any]:
     """
     Sprawdza wymagania medyczne przed eksportem.
-    
-    Args:
-        full_text: Pełny tekst artykułu
-        category: Kategoria artykułu
-    
-    Returns:
-        Dict z wynikami walidacji
+    🆕 v44.6: Anti-hallucination — przekazuje publikacje do walidacji.
     """
     if category != "medycyna" or not MEDICAL_MODULE_ENABLED:
         return {"medical_check": "SKIPPED", "category": category}
     
-    validation = validate_medical_article(full_text)
+    validation = validate_medical_article(full_text, provided_publications=provided_publications)
     
     return {
         "medical_check": "PASSED" if validation["valid"] else "WARNING",
         "citations_found": validation["citations_found"],
+        "verified_urls": validation.get("verified_urls", []),
+        "hallucinated_urls": validation.get("hallucinated_urls", []),
         "has_disclaimer": validation["has_disclaimer"],
         "warnings": validation["warnings"],
         "suggestions": validation["suggestions"]

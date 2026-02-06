@@ -461,21 +461,20 @@ class PubMedClient:
     ) -> Dict[str, Any]:
         """
         Wyszukuje i od razu pobiera szczegóły (główna metoda).
-        
-        Args:
-            query: Zapytanie wyszukiwania
-            max_results: Maksymalna liczba wyników
-            **kwargs: Dodatkowe argumenty dla search()
-        
-        Returns:
-            {
-                "status": "OK",
-                "query": "diabetes treatment",
-                "total_found": 15000,
-                "publications": [...],
-                "query_translation": "..."
-            }
+        🆕 v44.6: Z cache'em (TTL 24h).
         """
+        # 🆕 Cache check
+        try:
+            from ymyl_cache import ymyl_cache
+            cache_key = f"{query}|{max_results}|{kwargs.get('min_year', '')}"
+            cached = ymyl_cache.get("pubmed", cache_key)
+            if cached:
+                print(f"[PUBMED] 📦 Cache HIT dla '{query[:40]}'")
+                return cached
+        except ImportError:
+            ymyl_cache = None
+            cache_key = None
+
         # Wyszukaj
         search_result = self.search(query, max_results, **kwargs)
         
@@ -494,7 +493,7 @@ class PubMedClient:
         # Pobierz szczegóły
         publications = self.fetch_details(search_result["pmids"])
         
-        return {
+        result = {
             "status": "OK",
             "query": query,
             "total_found": search_result["count"],
@@ -502,6 +501,15 @@ class PubMedClient:
             "publications": publications,
             "query_translation": search_result.get("query_translation", "")
         }
+        
+        # 🆕 Cache SET
+        try:
+            if ymyl_cache and cache_key:
+                ymyl_cache.set("pubmed", cache_key, result)
+        except Exception:
+            pass
+        
+        return result
     
     def search_mesh(
         self,

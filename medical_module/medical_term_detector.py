@@ -205,10 +205,23 @@ class MedicalTermDetector:
         additional_keywords = additional_keywords or []
         all_text = " ".join([topic] + additional_keywords).lower()
         
+        # 🆕 v44.6: Lemmatyzacja — "cukrzycy" → "cukrzyca", "leczeniu" → "leczenie"
+        lemmatized = all_text
+        try:
+            from shared_nlp import get_nlp
+            nlp = get_nlp()
+            if nlp:
+                doc = nlp(all_text)
+                lemmatized = " ".join([t.lemma_.lower() for t in doc])
+        except Exception:
+            pass
+        
+        search_text = all_text + " " + lemmatized
+        
         # Wykryj słowa kluczowe
         detected = {}
         for category, keywords in self.config.MEDICAL_KEYWORDS.items():
-            matches = [kw for kw in keywords if kw in all_text]
+            matches = [kw for kw in keywords if kw in search_text]
             if matches:
                 detected[category] = matches
         
@@ -222,10 +235,10 @@ class MedicalTermDetector:
             main_category = max(detected.keys(), key=lambda k: len(detected[k]))
         
         # Wykryj specjalizację
-        specialization = self._detect_specialization(all_text)
+        specialization = self._detect_specialization(search_text)
         
-        # Wygeneruj sugestie MeSH
-        mesh_suggestions = self._get_mesh_suggestions(topic)
+        # Wygeneruj sugestie MeSH (use lemmatized for better matching)
+        mesh_suggestions = self._get_mesh_suggestions(lemmatized)
         
         # Przetłumacz na angielski
         english_query = self._translate_to_english(topic)
@@ -274,11 +287,22 @@ class MedicalTermDetector:
     def _translate_to_english(self, topic: str) -> str:
         """
         Tłumaczy polski temat na angielskie zapytanie PubMed.
-        
-        Używa słownika tłumaczeń + zachowuje nieznane słowa.
+        🆕 v44.6: Lemmatyzacja spaCy — łapie "cukrzycy" → "cukrzyca" → "diabetes mellitus".
         """
         topic_lower = topic.lower()
-        result = topic_lower
+        
+        # 🆕 Lemmatyzuj tekst (naprawia fleksję: cukrzycy→cukrzyca, leczeniu→leczenie)
+        lemmatized = topic_lower
+        try:
+            from shared_nlp import get_nlp
+            nlp = get_nlp()
+            if nlp:
+                doc = nlp(topic_lower)
+                lemmatized = " ".join([t.lemma_.lower() for t in doc])
+        except Exception:
+            pass
+        
+        result = lemmatized
         
         # Sortuj po długości (dłuższe frazy najpierw)
         sorted_terms = sorted(
@@ -439,7 +463,7 @@ Odpowiedz JSON:
 }}"""
         
         response = client.messages.create(
-            model="claude-3-haiku-20240307",
+            model="claude-haiku-4-5-20251001",
             max_tokens=500,
             messages=[{"role": "user", "content": prompt}]
         )
