@@ -188,6 +188,44 @@ except ImportError:
 
 
 # ================================================================
+# 🆕 v44.6: POLISH COLLOCATIONS EXPERT
+# ================================================================
+try:
+    from polish_collocations import (
+        get_collocation_insights_for_moe,
+        validate_collocations
+    )
+    COLLOCATIONS_AVAILABLE = True
+    print("[MOE_VALIDATOR] ✅ Polish Collocations v1.0 enabled")
+except ImportError:
+    COLLOCATIONS_AVAILABLE = False
+    print("[MOE_VALIDATOR] ⚠️ Polish Collocations not available")
+
+    def get_collocation_insights_for_moe(text):
+        return {"expert": "COLLOCATION_EXPERT", "severity": "info", "score": 100, "issues": [], "action": "CONTINUE"}
+
+# ================================================================
+# 🆕 v44.6: PERPLEXITY AI DETECTOR (Option C: HF API)
+# ================================================================
+try:
+    from perplexity_ai_detector import (
+        get_perplexity_for_moe,
+        is_available as perplexity_is_available
+    )
+    PERPLEXITY_AVAILABLE = perplexity_is_available()
+    if PERPLEXITY_AVAILABLE:
+        print("[MOE_VALIDATOR] ✅ Perplexity Expert v1.1 enabled (HF API)")
+    else:
+        print("[MOE_VALIDATOR] ⚠️ Perplexity Expert loaded but HF_TOKEN not set")
+except ImportError:
+    PERPLEXITY_AVAILABLE = False
+    print("[MOE_VALIDATOR] ⚠️ Perplexity Expert not available")
+
+    def get_perplexity_for_moe(text):
+        return {"expert": "PERPLEXITY_EXPERT", "severity": "info", "score": -1, "issues": [], "action": "CONTINUE"}
+
+
+# ================================================================
 # KONFIGURACJA
 # ================================================================
 class ValidationMode(Enum):
@@ -1012,6 +1050,48 @@ def validate_batch_moe(
             experts_summary["fake_humanization"] = {"enabled": False, "error": str(e)[:100]}
     
     # ═══════════════════════════════════════════════════════════════
+    # 🆕 9️⃣ POLISH COLLOCATIONS EXPERT (v44.6)
+    # ═══════════════════════════════════════════════════════════════
+    if COLLOCATIONS_AVAILABLE:
+        try:
+            collocation_result = get_collocation_insights_for_moe(corrected_text or batch_text)
+            experts_summary["collocations"] = {
+                "enabled": True,
+                "score": collocation_result.get("score", 100),
+                "issues_count": len(collocation_result.get("issues", [])),
+            }
+            # Dodaj sugestie kolokacji do fix_instructions
+            for suggestion in collocation_result.get("suggestions", [])[:5]:
+                fix_instructions.append(f"[COLLOCATIONS] {suggestion}")
+            print(f"[MOE_VALIDATOR] 📚 Collocations: score={collocation_result.get('score', 100)}, "
+                  f"issues={len(collocation_result.get('issues', []))}")
+        except Exception as e:
+            print(f"[MOE_VALIDATOR] ⚠️ Collocations Expert error: {e}")
+            experts_summary["collocations"] = {"enabled": False, "error": str(e)[:100]}
+    
+    # ═══════════════════════════════════════════════════════════════
+    # 🆕 🔟 PERPLEXITY AI DETECTOR (v44.6 — Option C: HF API)
+    # ═══════════════════════════════════════════════════════════════
+    if PERPLEXITY_AVAILABLE:
+        try:
+            ppl_result = get_perplexity_for_moe(corrected_text or batch_text)
+            experts_summary["perplexity"] = {
+                "enabled": True,
+                "score": ppl_result.get("score", -1),
+                "verdict": ppl_result.get("verdict", "unknown"),
+                "timing_ms": ppl_result.get("timing_ms", 0),
+            }
+            # Dodaj issues do fix_instructions (jeśli warning)
+            if ppl_result.get("severity") in ("warning", "critical"):
+                for issue in ppl_result.get("issues", [])[:3]:
+                    fix_instructions.append(f"[PERPLEXITY] {issue.get('message', '')} → {issue.get('fix_hint', '')}")
+            print(f"[MOE_VALIDATOR] 🔬 Perplexity: score={ppl_result.get('score', -1)}, "
+                  f"verdict={ppl_result.get('verdict', 'N/A')}")
+        except Exception as e:
+            print(f"[MOE_VALIDATOR] ⚠️ Perplexity Expert error: {e}")
+            experts_summary["perplexity"] = {"enabled": False, "error": str(e)[:100]}
+    
+    # ═══════════════════════════════════════════════════════════════
     # AGREGACJA WYNIKÓW
     # ═══════════════════════════════════════════════════════════════
     critical_issues = [i for i in all_issues if i.severity == "critical"]
@@ -1123,5 +1203,7 @@ __all__ = [
     'CONTENT_SURGEON_AVAILABLE',
     'SEMANTIC_TRIPLET_AVAILABLE',
     'FAKE_HUMANIZATION_AVAILABLE',
+    'COLLOCATIONS_AVAILABLE',
+    'PERPLEXITY_AVAILABLE',
     'FakeHumanizationExpert'
 ]
