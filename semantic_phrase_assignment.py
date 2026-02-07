@@ -465,57 +465,51 @@ def generate_contextual_short_sentences(
     domain: str = "prawo"
 ) -> List[str]:
     """
-    Generuje krótkie zdania (3-8 słów) dopasowane do kontekstu H2.
+    Generuje REGUŁY tworzenia krótkich zdań (3-8 słów) dopasowane do kontekstu H2.
     
-    Do użycia W ŚRODKU akapitów, nie jako fillery na końcu!
+    ⚠️ v45.0: Usunięto statyczne zdania ("Sąd orzeka.", "Termin biegnie.").
+    GPT kopiował je verbatim → powtarzalny pattern w setkach artykułów.
+    
+    Teraz zwraca REGUŁY, nie gotowe zdania. GPT tworzy własne z materiału sekcji.
     """
     h2_lower = h2_title.lower()
     
+    # Bazowa reguła — zawsze
+    rules = [
+        f"Krótkie zdanie MUSI zawierać termin z sekcji \"{h2_title}\"",
+    ]
+    
     if domain == "prawo":
         if any(w in h2_lower for w in ["sąd", "procedur", "postępowan"]):
-            return [
-                "Sąd orzeka.",
-                "Termin biegnie.",
-                "Procedura trwa.",
-                "Dowody decydują.",
-                "Wyrok zapada.",
-                "Sprawa się toczy."
-            ]
+            rules.append("Skondensuj kluczowy wymóg proceduralny lub termin do 3-5 słów")
+            rules.append("Użyj nazwy sądu, terminu lub wymogu z TEGO akapitu")
         
-        if any(w in h2_lower for w in ["kar", "przestępst"]):
-            return [
-                "Prawo wymaga.",
-                "Kara grozi.",
-                "Przepis obowiązuje.",
-                "Odpowiedzialność istnieje.",
-                "Sankcja jest surowa."
-            ]
+        elif any(w in h2_lower for w in ["kar", "przestępst"]):
+            rules.append("Skondensuj konsekwencję prawną lub wymiar kary do 3-5 słów")
+            rules.append("Użyj artykułu ustawy lub nazwy przestępstwa z TEGO akapitu")
         
-        if any(w in h2_lower for w in ["dziec", "rodzic", "opiek"]):
-            return [
-                "Dobro dziecka.",
-                "Rodzic decyduje.",
-                "Opieka trwa.",
-                "Kontakt jest ważny.",
-                "Relacja ma znaczenie."
-            ]
+        elif any(w in h2_lower for w in ["dziec", "rodzic", "opiek"]):
+            rules.append("Skondensuj kluczowy obowiązek lub prawo do 3-5 słów")
+            rules.append("Użyj terminu rodzinno-prawnego z TEGO akapitu")
         
-        if any(w in h2_lower for w in ["defin", "czym", "co to"]):
-            return [
-                "To ważne pojęcie.",
-                "Definicja jest kluczowa.",
-                "Znaczenie jest jasne.",
-                "Termin wymaga wyjaśnienia."
-            ]
+        elif any(w in h2_lower for w in ["defin", "czym", "co to"]):
+            rules.append("Skondensuj kluczowy element definicji do 3-5 słów")
+            rules.append("Użyj terminu definiowanego w TEJ sekcji")
+        
+        else:
+            rules.append("Wyciągnij kluczowy fakt prawny z poprzedniego zdania")
     
-    # Fallback - uniwersalne
-    return [
-        "To istotne.",
-        "Warto rozważyć.",
-        "Szczegóły poniżej.",
-        "Praktyka pokazuje.",
-        "Sytuacja jest złożona."
-    ]
+    elif domain == "medycyna":
+        rules.append("Użyj nazwy leku, objawu lub parametru medycznego z TEGO akapitu")
+        rules.append("Skondensuj kluczowe zalecenie lub wynik do 3-5 słów")
+    
+    else:
+        rules.append("Wyciągnij kluczowy fakt z poprzedniego zdania i skondensuj do 3-5 słów")
+    
+    # Uniwersalna reguła końcowa
+    rules.append("TEST: czy to zdanie pasowałoby do innego artykułu? Jeśli tak → przepisz")
+    
+    return rules
 
 
 # ============================================================================
