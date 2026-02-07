@@ -78,39 +78,39 @@ except ImportError as e:
 # ============================================================================
 
 # Wzorce gramatyczne (3-8 słów) — GPT wypełnia kontekstem z aktualnej sekcji
+# ⚠️ v45.0: ZERO przykładów gotowych zdań! GPT kopiował je verbatim.
+# Podajemy TYLKO struktury gramatyczne — treść MUSI pochodzić z akapitu.
 SHORT_SENTENCE_GRAMMAR_PATTERNS = {
     # Wzorce stwierdzające — GPT wstawia podmiot/dopełnienie z tematu sekcji
     "stwierdzenie": [
-        "[Podmiot z akapitu] + orzeczenie (3-5 słów)",
-        "To + przymiotnik kontekstowy (np. 'To częste.', 'To ryzykowne.')",
-        "Krótkie podsumowanie ostatniego zdania (max 5 słów)",
-        "Zdanie nominalne — sam rzeczownik + przymiotnik (np. 'Częsty problem.', 'Ważna różnica.')",
+        "[Podmiot z TEGO akapitu] + orzeczenie (3-5 słów)",
+        "[Rzeczownik kluczowy z poprzedniego zdania] + krótki komentarz",
+        "Skondensowanie wniosku z ostatniego zdania do 3-5 słów",
     ],
     # Pytania retoryczne — nawiązują do tego co jest DALEJ w akapicie
     "pytanie": [
-        "Pytanie zaczynające nowy wątek (np. 'A co z dawkowaniem?')",
-        "'Dlaczego/Jak/Kiedy + nawiązanie do następnego zdania'",
-        "Pytanie potwierdzające (np. 'Brzmi skomplikowanie?')",
+        "[Słowo kluczowe z następnego zdania] w formie pytania",
+        "Pytanie, na które odpowiada NASTĘPNE zdanie w akapicie",
     ],
     # Tranzycje — łączą myśli
     "tranzycja": [
-        "Ale/Jednak + krótka uwaga (np. 'Ale jest wyjątek.')",
-        "Kontrast do poprzedniego zdania (3-6 słów)",
-        "Zapowiedź zwrotu (np. 'Tu robi się ciekawie.')",
+        "Kontrast do konkretnego faktu z poprzedniego zdania (3-6 słów)",
+        "Zapowiedź konkretnej informacji z następnego zdania",
     ],
 }
 
-# Domeny tematyczne — słowa kluczowe do detekcji + KONTEKSTOWE PODPOWIEDZI
-# (nie gotowe zdania, a wskazówki jakie krótkie zdania pasują do domeny)
+# Domeny tematyczne — słowa kluczowe do detekcji + REGUŁY kontekstowe
+# ⚠️ v45.0: Usunięto WSZYSTKIE gotowe zdania z context_hints.
+# Hints opisują JAKIE zdania tworzyć, ale NIE podają gotowych fraz.
 TOPIC_DOMAIN_CONFIG = {
     "prawo": {
         "keywords": ["sąd", "ustawa", "kodeks", "prawo", "wyrok", "pozew",
                      "ubezwłasnowolnienie", "kuratela", "opiekun", "prawny",
                      "notariusz", "akt", "przepis", "roszczenie", "apelacja"],
         "context_hints": [
-            "Krótkie zdania prawnicze: odniesienie do terminu, procedury lub konsekwencji",
-            "Np. po opisie procedury: 'Termin jest sztywny.' / 'Tu nie ma wyjątków.'",
-            "Np. po opisie ryzyka: 'Warto to sprawdzić wcześniej.'",
+            "Krótkie zdanie MUSI zawierać termin prawny LUB nazwę instytucji z TEGO akapitu",
+            "Po opisie procedury: skondensuj kluczowy warunek/termin do 3-5 słów",
+            "Po opisie ryzyka: wyciągnij konkretną konsekwencję z poprzedniego zdania",
         ],
     },
     "medycyna": {
@@ -118,43 +118,43 @@ TOPIC_DOMAIN_CONFIG = {
                      "terapia", "pacjent", "zdrowie", "psychiczny", "psychiatra",
                      "badanie", "lek", "dawka", "zabieg", "profilaktyka"],
         "context_hints": [
-            "Krótkie zdania medyczne: odniesienie do objawu, leczenia lub rokowania",
-            "Np. po opisie objawów: 'Nie u każdego.' / 'Zależy od pacjenta.'",
-            "Np. po opisie leczenia: 'Efekty nie są natychmiastowe.'",
+            "Krótkie zdanie MUSI zawierać termin medyczny LUB parametr z TEGO akapitu",
+            "Po opisie objawów: wyciągnij kluczowy objaw lub jego częstotliwość",
+            "Po opisie leczenia: skondensuj efekt lub czas trwania do 3-5 słów",
         ],
     },
     "finanse": {
         "keywords": ["podatek", "opłata", "koszt", "budżet", "finanse",
                      "pieniądze", "kredyt", "rata", "faktura", "rozliczenie"],
         "context_hints": [
-            "Krótkie zdania finansowe: odniesienie do kwoty, terminu lub ryzyka",
-            "Np. po opisie kosztów: 'To sporo.' / 'Zależy od umowy.'",
-            "Np. po opisie procedury: 'Warto policzyć wcześniej.'",
+            "Krótkie zdanie MUSI zawierać kwotę, termin lub nazwę instrumentu z TEGO akapitu",
+            "Po opisie kosztów: wyciągnij kluczową liczbę lub porównanie",
+            "Po opisie procedury: skondensuj warunek lub deadline do 3-5 słów",
         ],
     },
     "technologia": {
         "keywords": ["system", "aplikacja", "software", "kod", "program",
                      "technologia", "digital", "online", "algorytm", "serwer"],
         "context_hints": [
-            "Krótkie zdania tech: odniesienie do działania, wymagań lub ograniczeń",
-            "Np. po opisie funkcji: 'Działa automatycznie.' / 'Nie zawsze.'",
-            "Np. po opisie problemu: 'Łatwa poprawka.' / 'To znany problem.'",
+            "Krótkie zdanie MUSI zawierać nazwę technologii lub parametr z TEGO akapitu",
+            "Po opisie funkcji: wyciągnij kluczowy efekt lub ograniczenie",
+            "Po opisie problemu: skondensuj przyczynę lub rozwiązanie do 3-5 słów",
         ],
     },
     "edukacja": {
         "keywords": ["dziecko", "nauka", "szkoła", "rozwój", "edukacja",
                      "terapia", "ćwiczenia", "przedszkole", "uczeń", "nauczyciel"],
         "context_hints": [
-            "Krótkie zdania edukacyjne: odniesienie do postępów, metod lub efektów",
-            "Np. po opisie metody: 'Wymaga cierpliwości.' / 'Efekty przyjdą.'",
-            "Np. po opisie problemu: 'To normalne na tym etapie.'",
+            "Krótkie zdanie MUSI zawierać termin edukacyjny lub etap rozwoju z TEGO akapitu",
+            "Po opisie metody: wyciągnij kluczowy warunek lub efekt",
+            "Po opisie problemu: skondensuj przyczynę lub rozwiązanie do 3-5 słów",
         ],
     },
     "universal": {
         "keywords": [],
         "context_hints": [
-            "Krótkie zdania odnoszące się do treści poprzedniego lub następnego zdania",
-            "Unikaj ogólników — zdanie musi wynikać z kontekstu akapitu",
+            "Krótkie zdanie MUSI być skondensowaniem konkretnego faktu z TEGO akapitu",
+            "NIE twórz zdań, które mogłyby pasować do dowolnego artykułu — muszą być specyficzne",
         ],
     },
 }
@@ -245,44 +245,46 @@ def get_dynamic_short_sentences(
     if current_h2:
         section_context = f"\nAktualna sekcja: \"{current_h2}\" — krótkie zdania MUSZĄ dotyczyć tego tematu."
     
-    instruction = f"""✂️ KRÓTKIE ZDANIA (3-8 słów) — twórz WŁASNE, pasujące do kontekstu:
+    instruction = f"""✂️ KRÓTKIE ZDANIA (3-8 słów) — twórz z materiału TEGO akapitu:
 
 TEMAT ARTYKUŁU: {main_keyword}
 DOMENA: {domain}{section_context}
 
-ZASADY TWORZENIA (2-4 krótkie zdania na batch):
-1. Każde krótkie zdanie MUSI wynikać z poprzedniego lub następnego zdania
-2. NIE wstawiaj ogólników oderwanych od treści
-3. Wstaw po długim zdaniu (>25 słów) jako "oddech" dla czytelnika
-4. Przed zmianą wątku w akapicie
+═══════════════════════════════════════════════════════════
+⚠️ ZASADA NACZELNA: Każde krótkie zdanie to KONDENSACJA faktu z tego akapitu.
+Weź KONKRETNY fakt, liczbę, termin lub wniosek z poprzedniego zdania
+i skróć go do 3-8 słów. NIE wymyślaj zdań oderwanych od treści.
+═══════════════════════════════════════════════════════════
 
-WZORCE GRAMATYCZNE (wypełnij treścią z akapitu):
-• Stwierdzenie: podmiot z akapitu + krótkie orzeczenie (np. "Termin jest sztywny.", "To zależy od dawki.")
-• Zdanie nominalne: rzeczownik + przymiotnik z kontekstu (np. "Częsty błąd.", "Ważna różnica.")
-• Pytanie retoryczne: nawiązanie do następnego zdania (np. "A co z kosztami?", "Jak to wygląda w praktyce?")
-• Kontrast/tranzycja: krótki zwrot akcji (np. "Ale jest wyjątek.", "Nie zawsze.")
-• Podsumowanie: esencja ostatniego zdania w 3-5 słów
+METODA TWORZENIA (2-3 krótkie zdania na batch):
+1. Przeczytaj poprzednie zdanie w akapicie
+2. Wyciągnij z niego JEDNO pojęcie, liczbę lub wniosek
+3. Zbuduj zdanie 3-8 słów zawierające TO pojęcie
+4. Wstaw PO długim zdaniu (>25 słów) jako oddech
 
-PODPOWIEDZI DLA TEJ DOMENY ({domain}):
+STRUKTURY GRAMATYCZNE (wypełnij treścią Z AKAPITU):
+• [Podmiot z tego zdania] + krótkie orzeczenie
+• Skondensowanie wniosku do 3-5 słów
+• Pytanie zawierające termin z następnego zdania
+• Kontrast do KONKRETNEGO faktu z poprzedniego zdania
+
+REGUŁY DLA DOMENY ({domain}):
 {chr(10).join(f"• {h}" for h in context_hints)}
 
-❌ NIE RÓB TAK (oderwane od kontekstu):
-• "To ważne." (ogólnik)
-• "Warto wiedzieć." (nic nie mówi)
-• "Pamiętaj." (pusty rozkaz)
+🚫 ZAKAZANE (zdania pasujące do KAŻDEGO artykułu):
+• Zdania bez terminów specyficznych dla tematu
+• Ogólniki typu stwierdzenie + przymiotnik wartościujący
+• Zdania, które mógłbyś wstawić w dowolny inny artykuł
+• Powtarzanie tych samych krótkich zdań w różnych artykułach
 
-✅ RÓB TAK (wynika z kontekstu):
-• Po akapicie o skutkach ubocznych leku: "Nie u każdego pacjenta."
-• Po akapicie o terminach sądowych: "Termin jest nieprzekraczalny."
-• Po opisie skomplikowanej procedury: "Brzmi skomplikowanie? Niekoniecznie."
+TEST: Czy to zdanie ma sens TYLKO w kontekście tego akapitu?
+Jeśli pasowałoby do dowolnego artykułu → USUŃ i napisz od nowa.
 
-💡 DZIELENIE DŁUGICH ZDAŃ:
-Jeśli zdanie ma >25 słów, podziel je na dwa krótsze w naturalnym punkcie:
-• Przed "ale", "jednak", "natomiast" → kropka, usuń spójnik, capitalize resztę
+💡 DZIELENIE DŁUGICH ZDAŃ (preferowane nad wstawianiem nowych!):
+Jeśli zdanie ma >25 słów, podziel je w naturalnym punkcie:
+• Przed "ale", "jednak", "natomiast" → kropka, capitalize resztę
 • Przy średniku → zamień na kropkę
 • Przed "ponieważ", "gdyż" → przebuduj na samodzielne zdanie przyczynowe
-Przykład: "Leczenie trwa kilka tygodni, ale efekty są widoczne już po pierwszym cyklu."
-→ "Leczenie trwa kilka tygodni. Efekty są widoczne już po pierwszym cyklu."
 """
     
     return {
