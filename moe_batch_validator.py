@@ -224,6 +224,17 @@ except ImportError:
     def get_perplexity_for_moe(text):
         return {"expert": "PERPLEXITY_EXPERT", "severity": "info", "score": -1, "issues": [], "action": "CONTINUE"}
 
+# ================================================================
+# 🆕 v45.0: DEPTH SCORER
+# ================================================================
+try:
+    from depth_scorer import analyze_batch_depth, get_depth_hints
+    DEPTH_SCORER_AVAILABLE = True
+    print("[MOE_VALIDATOR] ✅ Depth Scorer v1.0 enabled")
+except ImportError:
+    DEPTH_SCORER_AVAILABLE = False
+    print("[MOE_VALIDATOR] ℹ️ Depth Scorer not available (optional)")
+
 
 # ================================================================
 # KONFIGURACJA
@@ -1090,6 +1101,55 @@ def validate_batch_moe(
         except Exception as e:
             print(f"[MOE_VALIDATOR] ⚠️ Perplexity Expert error: {e}")
             experts_summary["perplexity"] = {"enabled": False, "error": str(e)[:100]}
+    
+    # ═══════════════════════════════════════════════════════════════
+    # 🆕 1️⃣1️⃣ DEPTH SCORER (v45.0)
+    # ═══════════════════════════════════════════════════════════════
+    if DEPTH_SCORER_AVAILABLE:
+        try:
+            h2_list = [current_h2] if current_h2 else []
+            is_ymyl = project_data.get("is_ymyl", False)
+            
+            depth_result = analyze_batch_depth(
+                corrected_text or batch_text,
+                h2_list,
+                is_ymyl
+            )
+            
+            experts_summary["depth"] = {
+                "enabled": True,
+                "overall_score": depth_result["overall_score"],
+                "shallow_count": depth_result["shallow_count"],
+                "sections": depth_result["sections"][:5],
+            }
+            
+            # Dodaj fix instructions dla płytkich sekcji
+            for fix in depth_result["fix_instructions"][:3]:
+                fix_instructions.append(f"[DEPTH] {fix}")
+            
+            # Issue jeśli sekcja jest płytka
+            if depth_result["shallow_count"] > 0:
+                shallow_names = ", ".join(depth_result["shallow_sections"][:3])
+                all_issues.append(ValidationIssue(
+                    expert="depth",
+                    severity="warning",
+                    code="SHALLOW_SECTION",
+                    message=f"Płytka sekcja: {shallow_names} "
+                            f"(depth score: {depth_result['overall_score']}/100)",
+                    fix_instruction=depth_result["fix_instructions"][0] if depth_result["fix_instructions"] else "",
+                    auto_fixable=False,
+                    context={
+                        "overall_score": depth_result["overall_score"],
+                        "shallow_sections": depth_result["shallow_sections"]
+                    }
+                ))
+            
+            print(f"[MOE_VALIDATOR] 📏 Depth: score={depth_result['overall_score']}, "
+                  f"shallow={depth_result['shallow_count']}")
+                  
+        except Exception as e:
+            print(f"[MOE_VALIDATOR] ⚠️ Depth Scorer error: {e}")
+            experts_summary["depth"] = {"enabled": False, "error": str(e)[:100]}
     
     # ═══════════════════════════════════════════════════════════════
     # AGREGACJA WYNIKÓW
