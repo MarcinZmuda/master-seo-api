@@ -26,7 +26,11 @@ class FakeHumanizationConfig:
     """Konfiguracja wykrywania fake humanization."""
     
     # Znane fillery
+    # v45.0: Rozszerzono o zdania z usuniętej statycznej biblioteki
+    # (smart_batch_instructions.py + semantic_phrase_assignment.py)
+    # Jeśli GPT nadal je generuje mimo braku w bibliotece → to filler
     KNOWN_FILLERS = [
+        # Oryginalne fillery
         "to ważne",
         "to istotne", 
         "sprawdź to",
@@ -38,7 +42,38 @@ class FakeHumanizationConfig:
         "co dalej",
         "ale uwaga",
         "to proste",
-        "to jasne"
+        "to jasne",
+        # v45.0: Usunięte z biblioteki, ale GPT może je generować z przyzwyczajenia
+        "sąd orzeka",
+        "termin biegnie",
+        "dowody decydują",
+        "prawo wymaga",
+        "procedura trwa",
+        "wyrok zapada",
+        "sprawa się toczy",
+        "kara grozi",
+        "przepis obowiązuje",
+        "lekarz decyduje",
+        "badanie wykaże",
+        "leczenie trwa",
+        "diagnoza potwierdzona",
+        "zysk rośnie",
+        "ryzyko istnieje",
+        "rynek reaguje",
+        "warto rozważyć",
+        "szczegóły poniżej",
+        "praktyka pokazuje",
+        "sytuacja jest złożona",
+        "definicja jest kluczowa",
+        "znaczenie jest jasne",
+        "relacja ma znaczenie",
+        "kontakt jest ważny",
+        "opieka trwa",
+        "dobro dziecka",
+        "to ważne pojęcie",
+        "sankcja jest surowa",
+        "odpowiedzialność istnieje",
+        "wyrok jest prawomocny",
     ]
     
     # AI zone - zdania które AI typowo produkuje
