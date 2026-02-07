@@ -497,8 +497,7 @@ def get_style_instructions(
         "short_sentences_dynamic": {
             "instruction": short_sentences_data.get("instruction", "Wstaw krótkie zdania"),
             "domain": short_sentences_data.get("domain", "universal"),
-            "examples": short_sentences_data.get("sentences", [])[:8],
-            "usage": "Wstaw 2-4 takie zdania w każdym batchu"
+            "usage": "Twórz 2-3 krótkie zdania z materiału akapitu — NIE kopiuj gotowych fraz"
         },
         "synonyms_dynamic": {
             "instruction": synonyms_data.get("instruction", "NIE POWTARZAJ tych samych słów!"),
@@ -991,6 +990,18 @@ def generate_enhanced_pre_batch_info(
     # Dodaj do enhanced
     enhanced["phrase_hierarchy"] = hierarchy_context
     
+    # ================================================================
+    # 🆕 v45.0: CAUSAL TRIPLETS + CONTENT GAPS CONTEXT
+    # ================================================================
+    # Przekaż agent_instruction z S1 do agenta GPT
+    causal_triplets = s1_data.get("causal_triplets", {}) if s1_data else {}
+    if causal_triplets and isinstance(causal_triplets, dict) and causal_triplets.get("agent_instruction"):
+        enhanced["causal_context"] = causal_triplets["agent_instruction"]
+    
+    content_gaps = s1_data.get("content_gaps", {}) if s1_data else {}
+    if content_gaps and isinstance(content_gaps, dict) and content_gaps.get("agent_instruction"):
+        enhanced["information_gain"] = content_gaps["agent_instruction"]
+    
     # GPT PROMPT SECTION
     enhanced["gpt_instructions"] = _generate_gpt_prompt_section(
         enhanced, is_legal=is_legal, is_medical=is_medical,
@@ -1287,6 +1298,18 @@ def _generate_gpt_prompt_section(
             lines.append(f"   Przyczyna: {', '.join(transitions['przyczyna'][:4])}")
         if transitions.get("skutek"):
             lines.append(f"   Skutek: {', '.join(transitions['skutek'][:4])}")
+        lines.append("")
+    
+    # 🆕 v45.0: KAUZALNE RELACJE (z S1)
+    causal_context = enhanced.get("causal_context", "")
+    if causal_context:
+        lines.append(causal_context)
+        lines.append("")
+    
+    # 🆕 v45.0: INFORMATION GAIN / CONTENT GAPS (z S1)
+    gain_context = enhanced.get("information_gain", "")
+    if gain_context:
+        lines.append(gain_context)
         lines.append("")
     
     lines.append("=" * 60)
