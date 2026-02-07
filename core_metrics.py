@@ -281,7 +281,7 @@ def _evaluate_burstiness(
         severity = Severity.CRITICAL.value
         message = f"⚠️ SYGNAŁ AI: burstiness {burstiness} (CV {cv:.2f} < 0.26). Wszystkie zdania mają podobną długość."
         recommendations = [
-            "Dodaj krótkie zdania (3-8 słów): 'Sąd orzeka.', 'To ważne.', 'Co dalej?'",
+            "Dodaj krótkie zdania (3-8 słów) — skondensuj fakty z akapitu, nie wstawiaj ogólników",
             "Dodaj długie zdania (25-35 słów) z rozbudowanymi wyjaśnieniami",
             "Unikaj zdań o podobnej długości (15-20 słów) - to wzorzec AI"
         ]
