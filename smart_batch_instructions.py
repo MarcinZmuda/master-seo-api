@@ -486,46 +486,31 @@ def generate_humanization_tips(
     domain: str = "prawo"
 ) -> Tuple[List[str], List[str]]:
     """
-    Generuje konkretne tipy humanizacyjne i krótkie zdania do wstawienia.
+    Generuje konkretne tipy humanizacyjne.
+    
+    ⚠️ v45.0: Usunięto statyczną bibliotekę krótkich zdań.
+    GPT dostawał gotowe "Sąd orzeka." | "Ale uwaga." i kopiował je
+    verbatim w setkach artykułów — tworząc nowy marker AI.
+    
+    Krótkie zdania teraz generowane wyłącznie z kontekstu akapitu
+    (instrukcja z dynamic_humanization.py).
     
     Returns:
-        (variety_tips, short_sentences)
+        (variety_tips, short_sentence_rules)
     """
     # Tips
     tips = [
         "Przeplataj długości: 5 słów → 22 słowa → 8 słów → 28 słów → 6 słów",
         "Krótkie zdania W ŚRODKU akapitu, nie tylko na końcu",
-        "Nie używaj 'To ważne.', 'Sprawdź to.' jako fillery na końcach"
+        "Nie twórz krótkich zdań oderwanych od treści akapitu"
     ]
     
-    # Domain-specific short sentences
-    short_sentences = {
-        "prawo": [
-            "Sąd orzeka.",
-            "Termin biegnie.",
-            "Dowody decydują.",
-            "Prawo wymaga.",
-            "To istotne.",
-            "Co dalej?",
-            "Ale uwaga.",
-            "Procedura trwa.",
-            "Wyrok jest prawomocny.",
-            "Sprawa toczy się."
-        ],
-        "medycyna": [
-            "Lekarz decyduje.",
-            "Badanie wykaże.",
-            "Diagnoza potwierdzona.",
-            "Leczenie trwa."
-        ],
-        "finanse": [
-            "Zysk rośnie.",
-            "Ryzyko istnieje.",
-            "Rynek reaguje."
-        ]
-    }
-    
-    sentences = short_sentences.get(domain, short_sentences["prawo"])
+    # ⚠️ v45.0: Zamiast gotowych zdań — REGUŁY tworzenia
+    short_sentence_rules = [
+        "Weź kluczowy fakt z poprzedniego zdania i skondensuj do 3-8 słów",
+        "Krótkie zdanie MUSI zawierać termin/nazwę/liczbę z tego akapitu",
+        "TEST: czy to zdanie pasowałoby do INNEGO artykułu? Jeśli tak → przepisz"
+    ]
     
     # Add batch-specific tips
     if batch_type == "INTRO":
@@ -534,7 +519,7 @@ def generate_humanization_tips(
     elif batch_type == "FINAL":
         tips.append("FINAL: Podsumuj kluczowe punkty, ale NIE powtarzaj definicji")
     
-    return tips, sentences[:6]
+    return tips, short_sentence_rules
 
 
 # ============================================================================
@@ -769,9 +754,10 @@ def format_instructions_for_gpt(instructions: Dict) -> str:
     for tip in instructions["sentence_variety_tips"][:3]:
         lines.append(f"  • {tip}")
     
-    lines.append("\n  Krótkie zdania do użycia W ŚRODKU akapitu:")
-    sentences = instructions["short_sentences_library"][:4]
-    lines.append(f"  {' | '.join(sentences)}")
+    # v45.0: Reguły zamiast gotowych zdań
+    lines.append("\n  ✂️ Krótkie zdania (3-8 słów) — REGUŁY:")
+    for rule in instructions["short_sentences_library"][:3]:
+        lines.append(f"  • {rule}")
     
     # Checklist
     lines.append("\n" + "━" * 40)
