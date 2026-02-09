@@ -660,9 +660,9 @@ def get_structure_instructions(
     if batch_type == "INTRO":
         paragraphs_target = 2
         length_profile = "SHORT"
-    elif batch_type == "FINAL":
-        paragraphs_target = 3
-        length_profile = "MEDIUM"
+    elif batch_type in ["FINAL", "FAQ"]:
+        paragraphs_target = 0  # FAQ has its own structure (Q&A pairs)
+        length_profile = "FAQ"
     elif h2_index == longest_section_index:
         paragraphs_target = 5
         length_profile = "LONG"
@@ -799,13 +799,28 @@ def generate_enhanced_pre_batch_info(
     if current_batch_num == 1:
         batch_type = "INTRO"
     elif current_batch_num >= total_batches:
-        batch_type = "FINAL"
+        # 🆕 v45.1: Ostatni batch to ZAWSZE FAQ/PAA zamiast "Podsumowanie"
+        batch_type = "FAQ"
     else:
         batch_type = "CONTENT"
     
-    # 🆕 v42.0: Sprawdź czy to FAQ batch
+    # 🆕 v42.0: Sprawdź czy to FAQ batch (overflow)
     if overflow_buffer and overflow_buffer.faq_items and current_batch_num == total_batches:
         batch_type = "FAQ"
+    
+    # 🆕 v45.1: Dla FAQ ostatniego batcha — załaduj PAA z SERP
+    paa_from_serp = []
+    if batch_type == "FAQ" and current_batch_num >= total_batches:
+        serp_data = project_data.get("serp_data", {}) or project_data.get("s1_data", {})
+        paa_raw = serp_data.get("paa_questions", []) or serp_data.get("paa", [])
+        for paa_item in paa_raw:
+            if isinstance(paa_item, dict):
+                paa_from_serp.append(paa_item.get("question", ""))
+            elif isinstance(paa_item, str):
+                paa_from_serp.append(paa_item)
+        # Nadpisz H2 na FAQ
+        current_h2 = "Najczęściej zadawane pytania"
+        current_h2_list = [current_h2]
     
     previous_batch_text = batches[-1].get("text", "") if batches else None
     overused_words = style_fingerprint.get("overused_words", [])
@@ -924,6 +939,10 @@ def generate_enhanced_pre_batch_info(
     # ================================================================
     if batch_type == "FAQ" and overflow_buffer:
         enhanced["faq_instructions"] = get_faq_instructions(overflow_buffer, batch_type)
+    
+    # 🆕 v45.1: PAA from SERP data for FAQ batch
+    if batch_type == "FAQ" and paa_from_serp:
+        enhanced["paa_from_serp"] = paa_from_serp
     
     # ================================================================
     # 🆕 v42.0: SUB-BATCH SPECIFIC INSTRUCTIONS
@@ -1133,13 +1152,47 @@ def _generate_gpt_prompt_section(
         lines.append("")
         lines.append("=" * 40)
     
-    # 🆕 v42.0: FAQ instructions
-    if enhanced.get("batch_type") == "FAQ" and enhanced.get("faq_instructions"):
-        faq = enhanced["faq_instructions"]
-        lines.append("📦 SEKCJA FAQ:")
-        for item in faq.get("faq_items", [])[:5]:
-            lines.append(f"   ❓ {item['question']}")
-            lines.append(f"      → Fraza MUST: \"{item['target_phrase']}\"")
+    # 🆕 v42.0 + v45.1: FAQ instructions (PAA-driven)
+    if enhanced.get("batch_type") == "FAQ":
+        faq = enhanced.get("faq_instructions", {})
+        paa_serp = enhanced.get("paa_from_serp", [])
+        
+        lines.append("📦 SEKCJA FAQ — ZAMIAST PODSUMOWANIA:")
+        lines.append("=" * 40)
+        lines.append("   ❌ NIE pisz sekcji \"Podsumowanie\" ani \"Podsumowując\"")
+        lines.append("   ✅ Napisz sekcję FAQ z 3-5 pytaniami i odpowiedziami")
+        lines.append("")
+        lines.append("   FORMAT KAŻDEGO PYTANIA:")
+        lines.append("   h3: [Pytanie 5-10 słów, zaczynaj od Jak/Czy/Co/Dlaczego/Ile]")
+        lines.append("   [Odpowiedź 60-120 słów]")
+        lines.append("   → Zdanie 1: BEZPOŚREDNIA odpowiedź na pytanie")
+        lines.append("   → Zdanie 2-3: rozwinięcie z konkretem")
+        lines.append("   → Zdanie 4: praktyczna wskazówka lub wyjątek")
+        lines.append("")
+        
+        # Pytania z Google PAA (priorytet!)
+        if paa_serp:
+            lines.append("   ❓ PYTANIA Z GOOGLE (People Also Ask) — UŻYJ ICH:")
+            for i, paa_q in enumerate(paa_serp[:5], 1):
+                if paa_q.strip():
+                    lines.append(f"      {i}. {paa_q}")
+            lines.append("")
+            lines.append("   💡 Te pytania NAPRAWDĘ zadają użytkownicy w Google.")
+            lines.append("   Odpowiedzi na nie mają szansę na featured snippet!")
+            lines.append("")
+        
+        # FAQ items z overflow (jeśli są)
+        if faq and faq.get("faq_items"):
+            lines.append("   📌 DODATKOWE PYTANIA (z analizy fraz):")
+            for item in faq.get("faq_items", [])[:5]:
+                lines.append(f"      ❓ {item['question']}")
+                lines.append(f"         → Fraza MUST: \"{item['target_phrase']}\"")
+            lines.append("")
+        
+        lines.append("   ⚠️ FAQ NIE MOŻE powtarzać tematów z artykułu!")
+        lines.append("   ⚠️ Każda odpowiedź powinna wnosić NOWĄ informację")
+        lines.append("   ⚠️ Google wyciąga FAQ do rich snippets — pisz zwięźle i konkretnie")
+        lines.append("=" * 40)
         lines.append("")
     
     # 🆕 v42.0: Required triplets with semantic instructions
@@ -1227,6 +1280,41 @@ def _generate_gpt_prompt_section(
         lines.append("")
         lines.append("   ⚠️ NIE PISZ wszystkich akapitów tej samej długości!")
         lines.append("   ⚠️ NIE PISZ zawsze 2 lub 3 akapitów w każdej sekcji!")
+        lines.append("")
+    
+    # ================================================================
+    # 🆕 v45.1: PASSAGE-FIRST WRITING (Featured Snippets + AI Overview)
+    # ================================================================
+    if batch_type not in ["FAQ"]:
+        lines.append("🎯 PASSAGE INDEXING — Google indeksuje FRAGMENTY osobno:")
+        lines.append("=" * 40)
+        lines.append("   Pod KAŻDYM H2 napisz 1 akapit, który SAMODZIELNIE")
+        lines.append("   odpowiada na pytanie zawarte w nagłówku.")
+        lines.append("")
+        lines.append("   WZÓR \"passage-ready\" akapitu:")
+        lines.append("   → Zdanie 1: BEZPOŚREDNIA odpowiedź/definicja")
+        lines.append("   → Zdanie 2: KONKRET (liczba, data, ustawa, źródło)")
+        lines.append("   → Zdanie 3: DOPRECYZOWANIE lub wyjątek")
+        lines.append("")
+        lines.append("   Google może wyciągnąć taki akapit jako featured snippet")
+        lines.append("   lub źródło do AI Overview. KAŻDA sekcja H2 potrzebuje")
+        lines.append("   takiego samodzielnego bloku odpowiedzi.")
+        lines.append("=" * 40)
+        lines.append("")
+    
+    # ================================================================
+    # 🆕 v45.1: ANTI-WALL-OF-INFORMATION (Reader Engagement)
+    # ================================================================
+    if batch_type not in ["INTRO", "FAQ"] and batch_num > 1:
+        lines.append("💬 ODDECH W TEKŚCIE (anty-ściana-informacji):")
+        lines.append("   • MIĘDZY akapitami — 1 krótkie zdanie łączące (bridge)")
+        lines.append("     Np.: \"Jak to wygląda w praktyce?\" / \"Co to oznacza?\"")
+        lines.append("   • Na KOŃCU sekcji H2 — zdanie przejściowe do następnej")
+        lines.append("   • Co 3-4 akapity — pytanie retoryczne lub podsumowanie")
+        lines.append("   • UNIKAJ 4+ akapitów z rzędu bez żadnego 'oddechu'")
+        lines.append("")
+        lines.append("   ❌ Akapit. Akapit. Akapit. Akapit. (ściana tekstu)")
+        lines.append("   ✅ Akapit. Bridge. Akapit. Akapit. Pytanie. Akapit.")
         lines.append("")
     
     # 🆕 v43.1: LISTY I WYPUNKTOWANIA

@@ -541,6 +541,48 @@ def editorial_review(project_id):
         if unused_extended:
             unused_keywords_section += f"EXTENDED: {', '.join(unused_extended[:15])}\n"
     
+    # ================================================================
+    # 🆕 v45.1: SEMANTIC COVERAGE COMPLETENESS
+    # ================================================================
+    coverage_section = ""
+    s1_data = project_data.get("s1_data", {})
+    
+    # Check entity coverage
+    entity_seo = s1_data.get("entity_seo", {})
+    all_entities = [e.get("name", "") for e in entity_seo.get("entities", []) if e.get("name")]
+    article_lower = full_article.lower() if full_article else ""
+    
+    missing_entities = [e for e in all_entities if e.lower() not in article_lower]
+    covered_entities = [e for e in all_entities if e.lower() in article_lower]
+    entity_coverage_pct = (len(covered_entities) / len(all_entities) * 100) if all_entities else 100
+    
+    # Check content gap coverage
+    content_gaps = s1_data.get("content_gaps", {})
+    gap_topics = []
+    for gap in content_gaps.get("gaps", []):
+        if isinstance(gap, dict):
+            gap_topics.append(gap.get("topic", ""))
+        elif isinstance(gap, str):
+            gap_topics.append(gap)
+    
+    uncovered_gaps = []
+    for topic in gap_topics:
+        topic_words = [w for w in topic.lower().split() if len(w) > 3]
+        if topic_words:
+            found = sum(1 for w in topic_words if w in article_lower)
+            if found / len(topic_words) < 0.4:
+                uncovered_gaps.append(topic)
+    
+    if missing_entities or uncovered_gaps:
+        coverage_section = "\n=== 📊 POKRYCIE TEMATYCZNE (Semantic Coverage) ===\n"
+        coverage_section += f"Encje z S1: {len(covered_entities)}/{len(all_entities)} pokryte ({entity_coverage_pct:.0f}%)\n"
+        if missing_entities[:10]:
+            coverage_section += f"BRAKUJĄCE ENCJE: {', '.join(missing_entities[:10])}\n"
+            coverage_section += "→ Wpleć brakujące encje w tekst lub zasugeruj w luki_tresciowe!\n"
+        if uncovered_gaps[:5]:
+            coverage_section += f"\nNIEPOKRYTE TEMATY (Information Gain): {', '.join(uncovered_gaps[:5])}\n"
+            coverage_section += "→ Te tematy NIE SĄ pokryte przez konkurencję — dodanie ich to przewaga!\n"
+    
     # 🆕 v44.5: YMYL context for editorial review
     detected_category = project_data.get("detected_category", "inne")
     ymyl_section = ""
@@ -582,6 +624,7 @@ Ten artykuł dotyczy tematyki medycznej/zdrowotnej. Sprawdź SZCZEGÓLNIE:
 Dostajesz artykuł pt. "{topic}" ({word_count} słów). Napisz PEŁNĄ RECENZJĘ REDAKTORSKĄ.
 {unused_keywords_section}
 {ymyl_section}
+{coverage_section}
 
 === NADRZĘDNA ZASADA ===
 🔴 ROZBUDOWUJ treść, NIE USUWAJ. Każda Twoja sugestia powinna prowadzić do ROZWINIĘCIA tekstu, nie skrócenia go.

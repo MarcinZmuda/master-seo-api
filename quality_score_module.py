@@ -129,11 +129,12 @@ def get_grade(score: int, max_grade: Optional[str] = None, config: QualityConfig
 # Research: Entity-based SEO gives 1400% visibility increase
 # Changes: keywords -10, grammar -5, structure +5, semantic +10
 QUALITY_WEIGHTS = {
-    "keywords": 20,      # v40.1: 30 → v40.2: 20 (keyword stuffing less important)
-    "humanness": 25,     # unchanged (AI detection still crucial)
-    "grammar": 10,       # v40.1: 15 → v40.2: 10 (PL grammar tools limited)
-    "structure": 15,     # v40.1: 10 → v40.2: 15 (H2/H3 structure matters)
-    "semantic": 20,      # v40.1: 10 → v40.2: 20 (ENTITY SEO critical!)
+    "keywords": 15,      # v45.1: 20 → 15 (keyword stuffing less important post-HCU)
+    "humanness": 20,     # v45.1: 25 → 20 (important but not dominant)
+    "grammar": 10,       # unchanged (PL grammar tools limited)
+    "structure": 15,     # unchanged
+    "semantic": 20,      # unchanged — entity SEO critical
+    "depth": 10,         # 🆕 v45.1: depth scoring now works (gap_analyzer fix)
     "coherence": 10      # unchanged
 }
 
@@ -384,6 +385,38 @@ def calculate_global_quality_score(
         })
     else:
         scores["coherence"] = 100
+    
+    # ================================================================
+    # 7. DEPTH (10%) — 🆕 v45.1
+    # ================================================================
+    moe = validation_results.get("moe_validation", {})
+    depth_expert = {}
+    if isinstance(moe, dict):
+        depth_expert = moe.get("experts_summary", {}).get("depth", {})
+    
+    if depth_expert.get("enabled"):
+        depth_overall = depth_expert.get("overall_score", 50)
+        scores["depth"] = min(100, max(0, depth_overall))
+        shallow_count = depth_expert.get("shallow_count", 0)
+        
+        if depth_overall < 30:
+            decision_trace.append(f"depth: CRITICAL ({depth_overall}/100, {shallow_count} shallow)")
+            issues.append({
+                "severity": "WARNING",
+                "component": "depth",
+                "message": f"Shallow content (depth {depth_overall}/100)",
+                "fix": "Add specific numbers, named institutions, dates, citations"
+            })
+        elif depth_overall < 50:
+            decision_trace.append(f"depth: WARNING ({depth_overall}/100)")
+            issues.append({
+                "severity": "INFO",
+                "component": "depth",
+                "message": f"Content could be more specific (depth {depth_overall}/100)",
+                "fix": "Add concrete examples, data points, source references"
+            })
+    else:
+        scores["depth"] = 50  # neutral when scorer unavailable
     
     # ================================================================
     # OBLICZ GLOBAL SCORE
