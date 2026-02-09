@@ -550,7 +550,7 @@ def editorial_review(project_id):
     # Check entity coverage
     entity_seo = s1_data.get("entity_seo", {})
     all_entities = [e.get("name", "") for e in entity_seo.get("entities", []) if e.get("name")]
-article_lower = full_text.lower() if full_text else ""
+    article_lower = full_text.lower() if full_text else ""
     
     missing_entities = [e for e in all_entities if e.lower() not in article_lower]
     covered_entities = [e for e in all_entities if e.lower() in article_lower]
