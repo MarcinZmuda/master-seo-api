@@ -572,6 +572,19 @@ def create_simplified_response(
             "use_instead": exc.get("synonyms", [])[:3]
         })
     
+    # 🆕 v45.0: Extract depth scoring from MoE validation
+    moe_data = full_results.get("moe_validation", {})
+    depth_expert = {}
+    if isinstance(moe_data, dict):
+        depth_expert = moe_data.get("experts_summary", {}).get("depth", {})
+    
+    depth_score = depth_expert.get("overall_score") if depth_expert.get("enabled") else None
+    depth_shallow = []
+    if depth_expert.get("enabled") and depth_expert.get("shallow_count", 0) > 0:
+        for s in depth_expert.get("sections", []):
+            if isinstance(s, dict) and s.get("is_shallow"):
+                depth_shallow.append(s.get("h2", "unknown"))
+    
     return {
         "accepted": gpt_action["accepted"],
         "action": gpt_action["action"],
@@ -590,6 +603,10 @@ def create_simplified_response(
         
         "exceeded_keywords": exceeded_summary,
         "next_task": gpt_action["next_task"],
+        
+        # 🆕 v45.0: Depth Scorer
+        "depth_score": depth_score,
+        "depth_shallow_sections": depth_shallow if depth_shallow else None,
         
         "decision_trace": gpt_action["decision_trace"]  # 🆕 Audit
     }

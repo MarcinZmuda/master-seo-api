@@ -228,7 +228,7 @@ except ImportError:
 # 🆕 v45.0: DEPTH SCORER
 # ================================================================
 try:
-    from depth_scorer import analyze_batch_depth, get_depth_hints
+    from gap_analyzer import analyze_batch_depth, get_depth_hints
     DEPTH_SCORER_AVAILABLE = True
     print("[MOE_VALIDATOR] ✅ Depth Scorer v1.0 enabled")
 except ImportError:
