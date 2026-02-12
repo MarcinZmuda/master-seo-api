@@ -54,17 +54,23 @@ except ImportError:
     SEMANTIC_ENABLED = False
 
 # ================================================================
-# 🧠 Ładowanie modelu spaCy (Polish)
+# 🧠 Ładowanie modelu spaCy (Polish) - SHARED (oszczędność RAM)
 # ================================================================
 try:
-    nlp = spacy.load("pl_core_news_md")
-    print("[SEO_OPT] ✅ Załadowano model pl_core_news_md (Light Edition)")
-except OSError:
-    from spacy.cli import download
-    print("[SEO_OPT] ⚠️ Model pl_core_news_md nieznaleziony – próba pobrania...")
-    download("pl_core_news_md")
-    nlp = spacy.load("pl_core_news_md")
-    print("[SEO_OPT] ✅ Model pobrany i załadowany")
+    from shared_nlp import get_nlp
+    nlp = get_nlp()
+    print("[SEO_OPT] ✅ Używam współdzielonego modelu spaCy")
+except ImportError:
+    import spacy
+    try:
+        nlp = spacy.load("pl_core_news_md")
+        print("[SEO_OPT] ✅ Załadowano model pl_core_news_md (Light Edition)")
+    except OSError:
+        from spacy.cli import download
+        print("[SEO_OPT] ⚠️ Model pl_core_news_md nieznaleziony – próba pobrania...")
+        download("pl_core_news_md")
+        nlp = spacy.load("pl_core_news_md")
+        print("[SEO_OPT] ✅ Model pobrany i załadowany")
 
 # ================================================================
 # 🛡️ HELPER: Safe Gemini Call (Anti-Crash)
