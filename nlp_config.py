@@ -64,7 +64,8 @@ NLP_MODES = {
 }
 
 # Domyślny tryb (można zmienić przez env var)
-DEFAULT_MODE = os.environ.get("NLP_MODE", "balanced")
+# v40.3: Changed default from "balanced" to "fast" to prevent auto-downloading pl_core_news_lg (~540MB)
+DEFAULT_MODE = os.environ.get("NLP_MODE", "fast")
 
 # Global cache dla załadowanych modeli
 _nlp_cache: Dict[str, Any] = {}
@@ -81,11 +82,12 @@ _nlp_info: Dict[str, Any] = {
 # ============================================================
 
 def _check_available_models() -> list:
-    """Sprawdza które modele są dostępne."""
+    """Sprawdza które modele są dostępne (BEZ ładowania do RAM)."""
     available = []
     
     try:
         import spacy
+        from spacy.util import is_package
     except ImportError:
         warnings.warn("[NLP_CONFIG] spaCy not installed!")
         return available
@@ -98,11 +100,8 @@ def _check_available_models() -> list:
     ]
     
     for model_name in models_to_check:
-        try:
-            spacy.load(model_name)
+        if is_package(model_name):
             available.append(model_name)
-        except OSError:
-            pass
     
     return available
 
