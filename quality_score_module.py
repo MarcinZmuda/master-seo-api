@@ -502,7 +502,8 @@ def get_gpt_action_response(
     validation_results: Dict,
     quality_result: Dict,
     project_data: Dict,
-    batch_number: int
+    batch_number: int,
+    forced: bool = False
 ) -> Dict:
     """Generuje response dla GPT z akcją i decision_trace."""
     score = quality_result.get("score", 0)
@@ -514,8 +515,15 @@ def get_gpt_action_response(
     
     exceeded_critical = validation_results.get("exceeded_critical", [])
     
-    # DECYZJA (osobna od score!)
-    if exceeded_critical:
+    # ═══ FIX v45.3.1: forced=True ALWAYS accepts ═══
+    if forced:
+        accepted = True
+        action = "CONTINUE"
+        message = f"⚡ Forced accept (score: {score}/100, grade: {grade})"
+        if exceeded_critical:
+            message += f" — {len(exceeded_critical)} exceeded keywords ignored"
+        decision_trace.append(f"action: CONTINUE (forced=True)")
+    elif exceeded_critical:
         accepted = False
         action = "REWRITE"
         message = f"❌ Rejected - {len(exceeded_critical)} keyword(s) exceeded 50%+. Rewrite with synonyms."
@@ -581,11 +589,12 @@ def get_gpt_action_response(
 def create_simplified_response(
     full_results: Dict,
     project_data: Dict,
-    batch_number: int
+    batch_number: int,
+    forced: bool = False
 ) -> Dict:
     """Tworzy uproszczony response dla GPT."""
     quality = calculate_global_quality_score(full_results, project_data)
-    gpt_action = get_gpt_action_response(full_results, quality, project_data, batch_number)
+    gpt_action = get_gpt_action_response(full_results, quality, project_data, batch_number, forced=forced)
     
     # Exceeded summary
     exceeded_critical = full_results.get("exceeded_critical", [])
