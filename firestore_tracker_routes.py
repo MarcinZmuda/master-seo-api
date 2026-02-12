@@ -2631,6 +2631,6 @@ def submit_batch_simple(project_id):
     batch_number = len(project_data.get("batches", []))
     
     # Utwórz simplified response
-    simplified = create_simplified_response(result, project_data, batch_number)
+    simplified = create_simplified_response(result, project_data, batch_number, forced=forced)
     
     return jsonify(simplified), 200
