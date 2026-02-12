@@ -83,20 +83,22 @@ except ImportError:
     print("[AI_DETECTION] ⚠️ wordfreq not available - lexical sophistication disabled")
 
 # ================================================================
-# 📦 v33.3: Opcjonalny import spacy dla POS diversity
+# 📦 v33.3: Opcjonalny import spacy dla POS diversity (SHARED)
 # ================================================================
 try:
-    import spacy
+    from shared_nlp import get_nlp
+    _nlp_pos = get_nlp()
+    SPACY_POS_AVAILABLE = True
+    print("[AI_DETECTION] ✅ Using shared spaCy model for POS analysis")
+except (ImportError, RuntimeError):
     try:
+        import spacy
         _nlp_pos = spacy.load("pl_core_news_sm")
         SPACY_POS_AVAILABLE = True
         print("[AI_DETECTION] ✅ spacy pl_core_news_sm loaded for POS analysis")
-    except OSError:
+    except (ImportError, OSError):
         SPACY_POS_AVAILABLE = False
-        print("[AI_DETECTION] ⚠️ spacy pl_core_news_sm not found - POS diversity disabled")
-except ImportError:
-    SPACY_POS_AVAILABLE = False
-    print("[AI_DETECTION] ⚠️ spacy not available - POS diversity disabled")
+        print("[AI_DETECTION] ⚠️ spacy not available - POS diversity disabled")
 
 
 # ================================================================
