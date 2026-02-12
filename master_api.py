@@ -37,7 +37,7 @@ app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024  # 32 MB
 CORS(app)
 
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-VERSION = "v37.0"  # 🆕 Medical Module: PubMed, ClinicalTrials, Polish Health Sources
+VERSION = "v45.3.1"  # 🆕 AI Middleware, forced mode fix, Anti-Frankenstein enabled
 
 # ================================================================
 # 🆕 v32.4: Firestore persistence for projects
