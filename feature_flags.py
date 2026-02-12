@@ -64,7 +64,7 @@ class FeatureFlags:
     batch_best_of_n: bool = False
     
     # Anti-patterns modules
-    anti_frankenstein_integration: bool = False
+    anti_frankenstein_integration: bool = True
     overflow_buffer: bool = False
     dynamic_sub_batch: bool = False
     
