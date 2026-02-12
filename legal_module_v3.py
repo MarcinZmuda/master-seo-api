@@ -189,19 +189,97 @@ HEALTH_KEYWORDS = [
 ]
 
 
+# ================================================================
+# 🧠 v45.3: CLAUDE HAIKU SEMANTIC YMYL CLASSIFIER
+# ================================================================
+
+def _classify_ymyl_with_claude(
+    main_keyword: str,
+    additional_keywords: List[str] = None
+) -> Optional[Dict[str, Any]]:
+    """
+    Klasyfikuje temat jako YMYL używając Claude Haiku.
+    Rozumie kontekst semantyczny — nie wymaga listy keywords.
+    
+    Returns: {"category": "prawo"|"finanse"|"zdrowie"|"general",
+              "confidence": 0.0-1.0, "reasoning": str, "reasoning_keywords": []}
+    Or None if Claude unavailable.
+    """
+    import os
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        print("[YMYL] ⚠️ ANTHROPIC_API_KEY not set — Claude classifier unavailable")
+        return None
+    
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+    except (ImportError, Exception) as e:
+        print(f"[YMYL] ⚠️ anthropic client error: {e}")
+        return None
+    
+    additional = ", ".join(additional_keywords) if additional_keywords else ""
+    topic_str = f"{main_keyword}" + (f" (dodatkowe: {additional})" if additional else "")
+    
+    prompt = f"""Klasyfikuj poniższy temat artykułu SEO według kategorii Google YMYL (Your Money or Your Life).
+
+TEMAT: "{topic_str}"
+
+Kategorie:
+- "prawo" — tematy wymagające wiedzy prawnej, dotyczące przepisów, kar, postępowań, praw i obowiązków (np. jazda po alkoholu, rozwód, umowa o pracę, mandat za prędkość, eksmisja)
+- "finanse" — tematy dotyczące pieniędzy, inwestycji, podatków, kredytów, emerytur
+- "zdrowie" — tematy dotyczące zdrowia, chorób, leków, terapii, diety zdrowotnej
+- "general" — tematy niezwiązane z YMYL (np. ogrodnictwo, hobby, przepisy kulinarne)
+
+Odpowiedz WYŁĄCZNIE w formacie JSON (bez markdown):
+{{"category": "prawo|finanse|zdrowie|general", "confidence": 0.0-1.0, "reasoning": "krótkie uzasadnienie po polsku", "reasoning_keywords": ["słowo1", "słowo2"]}}"""
+
+    try:
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=200,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        
+        raw = response.content[0].text.strip()
+        # Parse JSON — handle possible markdown fences
+        import json
+        raw = raw.replace("```json", "").replace("```", "").strip()
+        result = json.loads(raw)
+        
+        # Validate
+        if result.get("category") not in ("prawo", "finanse", "zdrowie", "general"):
+            print(f"[YMYL] ⚠️ Claude returned invalid category: {result.get('category')}")
+            return None
+        
+        result["confidence"] = max(0.0, min(1.0, float(result.get("confidence", 0))))
+        print(f"[YMYL] 🧠 Claude: '{main_keyword}' → {result['category']} ({result['confidence']}) — {result.get('reasoning', '')[:80]}")
+        return result
+        
+    except Exception as e:
+        print(f"[YMYL] ⚠️ Claude classifier error: {e}")
+        return None
+
+
 def detect_category(
     main_keyword: str,
     additional_keywords: List[str] = None
 ) -> Dict[str, Any]:
     """
-    Wykrywa kategorię treści na podstawie słów kluczowych.
-    🆕 v44.6: Wagi dla terminów + lemmatyzacja spaCy.
+    Wykrywa kategorię treści (prawo/finanse/zdrowie/general).
+    
+    🆕 v45.3: Dwustopniowy klasyfikator:
+      1. Keyword pre-filter — szybki, dla oczywistych trafień (score >= 4)
+      2. Claude Haiku semantic — dla niejednoznacznych przypadków (score 0-3)
+      
+    Dzięki temu system rozumie DOWOLNY temat prawny/medyczny/finansowy,
+    nie tylko te z hardkodowanej listy.
     """
     additional_keywords = additional_keywords or []
     all_keywords = [main_keyword] + additional_keywords
     combined_text = " ".join(all_keywords).lower()
     
-    # 🆕 Lemmatyzacja (jeśli spaCy dostępne)
+    # Lemmatyzacja (jeśli spaCy dostępne)
     lemmatized_text = combined_text
     try:
         from shared_nlp import get_nlp
@@ -214,7 +292,9 @@ def detect_category(
     
     search_text = combined_text + " " + lemmatized_text
     
-    # 🆕 Ważone keyword matching
+    # ──────────────────────────────────────────────────────
+    # STAGE 1: Keyword pre-filter (szybki, zero kosztu)
+    # ──────────────────────────────────────────────────────
     LEGAL_WEIGHTED = {
         # Silne sygnały (waga 3) — jednoznacznie prawne
         "ubezwłasnowolnienie": 3, "kodeks cywilny": 3, "kodeks karny": 3,
@@ -223,7 +303,8 @@ def detect_category(
         "zachowek": 3, "przedawnienie roszczenia": 3, "zasiedzenie": 3,
         "władza rodzicielska": 3, "opiekun prawny": 3, "kurator sądowy": 3,
         "radca prawny": 3, "komornik": 3, "notariusz": 3,
-        # Średnie sygnały (waga 2) — prawne, mało dwuznaczne
+        "kodeks wykroczeń": 3, "k.w.": 3,
+        # Średnie sygnały (waga 2)
         "testament": 2, "dziedziczenie": 2,
         "rozwód": 2, "alimenty": 2, "separacja": 2,
         "odszkodowanie": 2, "zadośćuczynienie": 2,
@@ -233,7 +314,7 @@ def detect_category(
         "hipoteka": 2, "zastaw": 2, "poręczenie": 2,
         "przestępstwo": 2, "wykroczenie": 2,
         "adwokat": 2, "ustawa": 2, "rozporządzenie": 2,
-        # Słabe sygnały (waga 1) — mogą być w innym kontekście
+        # Słabe sygnały (waga 1)
         "umowa": 1, "kontrakt": 1, "kara": 1,
         "skarga": 1, "odwołanie": 1,
         "firma": 1, "spółka": 1, "kredyt": 1,
@@ -259,13 +340,25 @@ def detect_category(
     max_category = max(scores, key=scores.get)
     max_score = scores[max_category]
     
-    if max_score == 0:
+    # High-confidence keyword match → return immediately (no Claude needed)
+    # Score 3+ = at least one strong signal (weight 3) or multiple medium signals
+    KEYWORD_CONFIDENCE_THRESHOLD = 3
+    if max_score >= KEYWORD_CONFIDENCE_THRESHOLD:
+        confidence = min(1.0, max_score / 5)
+        category = max_category
+        detected = {"prawo": legal_matches, "finanse": finance_matches, "zdrowie": health_matches}.get(category, [])
+        is_ymyl = True
+        legal_enabled = category == "prawo" and SAOS_AVAILABLE
+        
+        print(f"[YMYL] ✅ Keyword pre-filter: '{main_keyword}' → {category} (score={max_score}, high confidence)")
         return {
-            "category": "general",
-            "confidence": 0.0,
-            "is_ymyl": False,
-            "detected_keywords": [],
-            "legal_enabled": False,
+            "category": category,
+            "confidence": round(confidence, 2),
+            "is_ymyl": is_ymyl,
+            "detected_keywords": detected[:10],
+            "legal_enabled": legal_enabled,
+            "weighted_score": round(max_score, 1),
+            "detection_method": "keyword_prefilter",
             "sources_available": {
                 "saos": SAOS_AVAILABLE,
                 "google": GOOGLE_FALLBACK_AVAILABLE,
@@ -274,19 +367,69 @@ def detect_category(
             }
         }
     
-    # Confidence: score 2 = 0.4, score 3 = 0.6, score 5+ = 1.0
-    confidence = min(1.0, max_score / 5)
-    # Prawo wymaga silniejszego sygnału (score >= 2), zdrowie/finanse mogą na 1 match (score >= 2)
-    category = max_category if max_score >= 2 else "general"
-    detected = {
-        "prawo": legal_matches,
-        "finanse": finance_matches,
-        "zdrowie": health_matches
-    }.get(category, [])
+    # ──────────────────────────────────────────────────────
+    # STAGE 2: Claude Haiku semantic classifier
+    # (for ambiguous cases: keyword score 0-3)
+    # ──────────────────────────────────────────────────────
+    claude_result = _classify_ymyl_with_claude(main_keyword, additional_keywords)
     
+    if claude_result:
+        category = claude_result["category"]
+        confidence = claude_result["confidence"]
+        is_ymyl = category in ["prawo", "finanse", "zdrowie"] and confidence >= 0.5
+        legal_enabled = category == "prawo" and SAOS_AVAILABLE
+        
+        # Merge: keyword matches + Claude reasoning
+        detected = claude_result.get("reasoning_keywords", [])
+        if legal_matches and category == "prawo":
+            detected = list(set(legal_matches + detected))
+        
+        print(f"[YMYL] 🧠 Claude classifier: '{main_keyword}' → {category} (conf={confidence})")
+        return {
+            "category": category,
+            "confidence": round(confidence, 2),
+            "is_ymyl": is_ymyl,
+            "detected_keywords": detected[:10],
+            "legal_enabled": legal_enabled,
+            "weighted_score": round(max_score, 1),
+            "detection_method": "claude_semantic",
+            "claude_reasoning": claude_result.get("reasoning", ""),
+            "sources_available": {
+                "saos": SAOS_AVAILABLE,
+                "google": GOOGLE_FALLBACK_AVAILABLE,
+                "local": LOCAL_SCRAPER_AVAILABLE,
+                "scoring": SCORING_AVAILABLE
+            }
+        }
+    
+    # ──────────────────────────────────────────────────────
+    # FALLBACK: Claude unavailable, use keyword score as-is
+    # ──────────────────────────────────────────────────────
+    if max_score == 0:
+        print(f"[YMYL] ℹ️ No YMYL signals: '{main_keyword}' → general")
+        return {
+            "category": "general",
+            "confidence": 0.0,
+            "is_ymyl": False,
+            "detected_keywords": [],
+            "legal_enabled": False,
+            "weighted_score": 0,
+            "detection_method": "keyword_fallback",
+            "sources_available": {
+                "saos": SAOS_AVAILABLE,
+                "google": GOOGLE_FALLBACK_AVAILABLE,
+                "local": LOCAL_SCRAPER_AVAILABLE,
+                "scoring": SCORING_AVAILABLE
+            }
+        }
+    
+    confidence = min(1.0, max_score / 5)
+    category = max_category if max_score >= 2 else "general"
+    detected = {"prawo": legal_matches, "finanse": finance_matches, "zdrowie": health_matches}.get(category, [])
     is_ymyl = category in ["prawo", "finanse", "zdrowie"] and confidence >= 0.3
     legal_enabled = category == "prawo" and SAOS_AVAILABLE
     
+    print(f"[YMYL] ⚠️ Keyword fallback (Claude unavailable): '{main_keyword}' → {category} (score={max_score})")
     return {
         "category": category,
         "confidence": round(confidence, 2),
@@ -294,6 +437,7 @@ def detect_category(
         "detected_keywords": detected[:10],
         "legal_enabled": legal_enabled,
         "weighted_score": round(max_score, 1),
+        "detection_method": "keyword_fallback",
         "sources_available": {
             "saos": SAOS_AVAILABLE,
             "google": GOOGLE_FALLBACK_AVAILABLE,
