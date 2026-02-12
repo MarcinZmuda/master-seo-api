@@ -607,7 +607,13 @@ def create_project():
         "manual_mode": False if source == "n8n-brajen-workflow" else True,
         "output_format": "clean_text_with_headers",
         "s1_data": s1_data,
-        "article_mode": article_mode  # 🆕 v44.2: "standard" lub "fast"
+        "article_mode": article_mode,  # 🆕 v44.2: "standard" lub "fast"
+        # 🆕 v45.3: YMYL flags + context from webapp
+        "is_ymyl": data.get("is_ymyl", False),
+        "is_legal": data.get("is_legal", False),
+        "is_medical": data.get("is_medical", False),
+        "legal_context": data.get("legal_context") or {},
+        "medical_context": data.get("medical_context") or {}
     }
     
     # ================================================================
