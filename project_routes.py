@@ -558,9 +558,9 @@ def create_project():
             # Sprawdź czy wszystkie słowa z krótkiej frazy są w dłuższej
             # LUB czy krótka fraza jest substringiem dłuższej
             words_match = keyword_words.issubset(set(other_words))
-            substring_match = keyword_lower in other_kw
+             # substring_match REMOVED — false positives (rok∈wyrok)
             
-            if words_match or substring_match:
+            if words_match:
                 other_meta = firestore_keywords[other_rid]
                 containing_keywords.append({
                     "keyword": other_kw,
