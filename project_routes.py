@@ -294,14 +294,18 @@ if GEMINI_API_KEY:
 else:
     print("[PROJECT_ROUTES] ⚠️ GEMINI_API_KEY not set - some features disabled")
 
-# spaCy Polish model
+# spaCy Polish model (SHARED - oszczędność RAM)
 try:
-    nlp = spacy.load("pl_core_news_md")
-except OSError:
-    print("[PROJECT_ROUTES] 📥 Downloading pl_core_news_md...")
-    from spacy.cli import download
-    download("pl_core_news_md")
-    nlp = spacy.load("pl_core_news_md")
+    from shared_nlp import get_nlp
+    nlp = get_nlp()
+except ImportError:
+    try:
+        nlp = spacy.load("pl_core_news_md")
+    except OSError:
+        print("[PROJECT_ROUTES] 📥 Downloading pl_core_news_md...")
+        from spacy.cli import download
+        download("pl_core_news_md")
+        nlp = spacy.load("pl_core_news_md")
 
 print(f"[PROJECT_ROUTES] ✅ Blueprint defined, nlp loaded, Gemini={'OK' if GEMINI_API_KEY else 'DISABLED'}")
 
