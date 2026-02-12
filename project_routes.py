@@ -565,7 +565,7 @@ def create_project():
                 containing_keywords.append({
                     "keyword": other_kw,
                     "max": other_meta.get("target_max", 1),
-                    "match_type": "words" if words_match else "substring"
+                    "match_type": "words"
                 })
         
         if containing_keywords:
