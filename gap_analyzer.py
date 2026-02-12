@@ -387,4 +387,371 @@ def _format_gaps_for_agent(gaps: List[ContentGap], main_keyword: str) -> str:
 __all__ = [
     'analyze_content_gaps',
     'ContentGap',
+    'analyze_batch_depth',
+    'get_depth_hints',
 ]
+
+
+# ================================================================
+# 📏 DEPTH SCORER v1.0 — 10 sygnałów głębi treści
+# ================================================================
+# Importowane przez moe_batch_validator.py (Expert #11)
+# Docs: Sekcja 5.3 — Depth Scorer
+# ================================================================
+
+# --- Signal definitions: (name, weight, patterns, expected_count) ---
+_DEPTH_SIGNALS = [
+    {
+        "name": "legal_reference",
+        "weight": 2.5,
+        "expected": 2,
+        "patterns": [
+            r'\bart\.\s*\d+',                           # art. 58
+            r'\b§\s*\d+',                               # § 3
+            r'\bk\.c\.\b',                              # k.c.
+            r'\bk\.p\.c\.\b',                           # k.p.c.
+            r'\bk\.r\.o\.\b',                           # k.r.o.
+            r'\bk\.k\.\b',                              # k.k.
+            r'\bk\.p\.\b',                              # k.p.
+            r'\bDz\.\s*U\.',                            # Dz. U.
+            r'\bSN\b.*\bwyrok',                         # wyrok SN
+            r'\bwyrok\b.*\bSN\b',                       # wyrok ... SN
+            r'\b(?:I|II|III|IV|V)\s+C[SK]?\s+\d+/\d+',  # sygnatura I CSK 123/20
+            r'\bustaw[ayę]\b',                          # ustawy/ustawę
+            r'\brozporządzen',                          # rozporządzeni-e/a
+        ],
+    },
+    {
+        "name": "scientific_reference",
+        "weight": 2.5,
+        "expected": 1,
+        "patterns": [
+            r'\bPMID\s*:?\s*\d+',                       # PMID: 12345678
+            r'\bDOI\s*:?\s*10\.\d+',                    # DOI: 10.xxx
+            r'\bbadani[ae]\b.*\b(?:wykazał|potwierdził|dowodzą)',
+            r'\bmeta[\-\s]?analiz',                     # meta-analiza
+            r'\bprzegląd\s+systematyczny',
+            r'\brandomizowane\b',
+            r'\bpublikacj[iaę]\b.*\b\d{4}\b',           # publikacja ... 2023
+            r'\bwg\s+(?:[A-Z][a-z]+)',                  # wg Kowalski
+            r'\bwedług\s+(?:[A-Z][a-z]+)',              # według Nowaka
+        ],
+    },
+    {
+        "name": "specific_number",
+        "weight": 2.0,
+        "expected": 3,
+        "patterns": [
+            r'\d+\s*(?:zł|PLN|EUR|USD)',                # kwoty
+            r'\d+\s*%',                                 # procenty
+            r'\d+\s*(?:dni|miesięc|lat|godzin|tygodni)',  # okresy
+            r'\d+\s*(?:mm|cm|m|km|kg|g|mg|ml|l)',       # miary
+            r'(?:od|do|około|ok\.)\s+\d+',              # od/do X
+            r'\d+(?:\s*-\s*|\s*–\s*)\d+',              # zakresy 10-20
+            r'(?:co najmniej|minimum|maksimum)\s+\d+',
+        ],
+    },
+    {
+        "name": "named_institution",
+        "weight": 1.8,
+        "expected": 2,
+        "patterns": [
+            r'\b(?:Sąd\s+(?:Najwyższy|Okręgowy|Rejonowy|Apelacyjny))',
+            r'\b(?:ZUS|NFZ|GUS|NBP|KNF|UOKiK|PIP|GIODO|UODO)\b',
+            r'\b(?:WHO|FDA|EMA|CDC|EFSA)\b',
+            r'\b(?:Ministerstwo|Minister)\s+\w+',
+            r'\b(?:Urząd|Izba|Komisja|Rada|Instytut)\s+\w+',
+            r'\b(?:Uniwersytet|Politechnika|Akademia)\s+\w+',
+            r'\b(?:Rzecznik|Prokurator|Komornik)\b',
+        ],
+    },
+    {
+        "name": "practical_advice",
+        "weight": 1.8,
+        "expected": 2,
+        "patterns": [
+            r'\b(?:warto|zaleca się|rekomenduje|sugeruje)\b',
+            r'\b(?:najlepiej|optymalnie|idealnie)\b',
+            r'\b(?:pamiętaj|uwaga|ważne|istotne)\b',
+            r'\b(?:w praktyce|w rzeczywistości)\b',
+            r'\b(?:tip|wskazówka|rada|porada)\b',
+            r'\b(?:unikaj|nie rób|nie stosuj)\b',
+            r'\b(?:krok\s+\d+|po\s+pierwsze|po\s+drugie)\b',
+        ],
+    },
+    {
+        "name": "causal_explanation",
+        "weight": 1.5,
+        "expected": 2,
+        "patterns": [
+            r'\b(?:ponieważ|dlatego(?:\s+że)?|gdyż|bowiem|albowiem)\b',
+            r'\b(?:w\s+rezultacie|w\s+konsekwencji|w\s+efekcie|skutkiem)\b',
+            r'\b(?:powoduje|prowadzi\s+do|skutkuje|wynika\s+z)\b',
+            r'\b(?:przyczyn[ayą]|źródł[eo]m?)\b',
+            r'\b(?:mechanizm|proces)\b.*\b(?:polega|działa)\b',
+        ],
+    },
+    {
+        "name": "exception_case",
+        "weight": 1.5,
+        "expected": 1,
+        "patterns": [
+            r'\b(?:wyjąt(?:ek|kiem|kowo)|z\s+wyjątkiem)\b',
+            r'\b(?:jednakże|niemniej|aczkolwiek)\b',
+            r'\b(?:chyba\s+że|o\s+ile|pod\s+warunkiem)\b',
+            r'\b(?:nie\s+dotyczy|nie\s+obejmuje|wyłącz(?:ając|enie))\b',
+            r'\b(?:szczególn(?:ym|ie|ych)\s+przypadk)\b',
+            r'\b(?:odstępstwo|wyjątek\s+od\s+zasady)\b',
+        ],
+    },
+    {
+        "name": "date_reference",
+        "weight": 1.5,
+        "expected": 2,
+        "patterns": [
+            r'\b(?:20[12]\d)\s*(?:r\.?|roku)\b',        # 2024 r.
+            r'\b(?:od|do|w)\s+(?:stycznia|lutego|marca|kwietnia|maja|czerwca'
+            r'|lipca|sierpnia|września|października|listopada|grudnia)\b',
+            r'\b(?:od|do|w)\s+\d{4}\b',                 # od 2023
+            r'\b(?:nowelizacj[aię]|zmiana)\b.*\b\d{4}\b',
+            r'\b(?:obowiązuje|wchodzi\s+w\s+życie)\b',
+        ],
+    },
+    {
+        "name": "comparison",
+        "weight": 1.2,
+        "expected": 1,
+        "patterns": [
+            r'\b(?:w\s+porównaniu|w\s+odróżnieniu|w\s+przeciwieństwie)\b',
+            r'\b(?:z\s+kolei|natomiast|tymczasem)\b',
+            r'\b(?:więcej|mniej|szybciej|wolniej|drożej|taniej)\s+niż\b',
+            r'\b(?:podobnie|analogicznie|tak\s+jak)\b',
+            r'\b(?:z\s+jednej\s+strony|z\s+drugiej\s+strony)\b',
+        ],
+    },
+    {
+        "name": "process_steps",
+        "weight": 1.0,
+        "expected": 1,
+        "patterns": [
+            r'\b(?:krok\s+\d+|etap\s+\d+|faz[aę]\s+\d+)\b',
+            r'\b(?:następnie|kolejno|w\s+dalszej\s+kolejności)\b',
+            r'\b(?:najpierw|na\s+początku|na\s+końcu|na\s+koniec)\b',
+            r'\b(?:procedura|proces)\b.*\b(?:obejmuje|polega|składa\s+się)\b',
+            r'\bpo\s+(?:pierwsze|drugie|trzecie|czwarte)\b',
+        ],
+    },
+]
+
+_MAX_RAW_SCORE = sum(s["weight"] for s in _DEPTH_SIGNALS)  # 17.3
+
+
+def _count_signal(text: str, patterns: List[str]) -> int:
+    """Count unique matches for a set of regex patterns in text."""
+    count = 0
+    for pattern in patterns:
+        try:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            count += len(matches)
+        except re.error:
+            continue
+    return count
+
+
+def _score_signal(count: int, expected: int, weight: float) -> float:
+    """Score a single signal: capped at weight, proportional to expected count."""
+    if expected <= 0:
+        return weight if count > 0 else 0.0
+    ratio = min(1.0, count / expected)
+    return ratio * weight
+
+
+def analyze_batch_depth(
+    batch_text: str,
+    h2_list: List[str] = None,
+    is_ymyl: bool = False
+) -> Dict:
+    """
+    Analyze batch text for 10 depth signals.
+    
+    Returns:
+        Dict with overall_score (0-100), sections[], shallow_count,
+        shallow_sections[], fix_instructions[]
+    
+    Used by: moe_batch_validator.py (Expert #11)
+    Docs: Section 5.3 Depth Scorer
+    """
+    if not batch_text or len(batch_text.strip()) < 50:
+        return {
+            "overall_score": 0,
+            "raw_score": 0.0,
+            "sections": [],
+            "shallow_count": 1 if h2_list else 0,
+            "shallow_sections": h2_list or [],
+            "fix_instructions": ["Zbyt krótki tekst — brak sygnałów głębi"],
+            "signals": {},
+        }
+    
+    threshold = 40 if is_ymyl else 30
+    text = batch_text
+    
+    # --- Score the full batch text ---
+    signals_detail = {}
+    raw_score = 0.0
+    
+    for signal_def in _DEPTH_SIGNALS:
+        name = signal_def["name"]
+        count = _count_signal(text, signal_def["patterns"])
+        score = _score_signal(count, signal_def["expected"], signal_def["weight"])
+        raw_score += score
+        signals_detail[name] = {
+            "count": count,
+            "score": round(score, 2),
+            "weight": signal_def["weight"],
+            "max_score": signal_def["weight"],
+        }
+    
+    overall_score = round((raw_score / _MAX_RAW_SCORE) * 100) if _MAX_RAW_SCORE > 0 else 0
+    overall_score = min(100, max(0, overall_score))
+    
+    # --- Per-section analysis (split by H2) ---
+    sections = []
+    section_texts = []
+    
+    if h2_list:
+        # Split text by H2 markers
+        h2_pattern = r'(?:^|\n)\s*h2:\s*(.+?)(?:\n|$)'
+        parts = re.split(h2_pattern, text, flags=re.IGNORECASE)
+        
+        # parts = [before_first_h2, h2_title_1, content_1, h2_title_2, content_2, ...]
+        for i in range(1, len(parts) - 1, 2):
+            h2_title = parts[i].strip()
+            h2_content = parts[i + 1].strip() if i + 1 < len(parts) else ""
+            section_texts.append((h2_title, h2_content))
+        
+        # If no splits found, treat whole text as one section
+        if not section_texts and h2_list:
+            section_texts = [(h2_list[0], text)]
+    else:
+        section_texts = [("batch", text)]
+    
+    shallow_sections = []
+    
+    for h2_title, section_text in section_texts:
+        section_raw = 0.0
+        section_signals = {}
+        
+        for signal_def in _DEPTH_SIGNALS:
+            name = signal_def["name"]
+            count = _count_signal(section_text, signal_def["patterns"])
+            score = _score_signal(count, signal_def["expected"], signal_def["weight"])
+            section_raw += score
+            if count > 0:
+                section_signals[name] = count
+        
+        section_score = round((section_raw / _MAX_RAW_SCORE) * 100) if _MAX_RAW_SCORE > 0 else 0
+        is_shallow = section_score < threshold
+        
+        sections.append({
+            "h2": h2_title,
+            "score": section_score,
+            "is_shallow": is_shallow,
+            "signals_found": section_signals,
+            "word_count": len(section_text.split()),
+        })
+        
+        if is_shallow:
+            shallow_sections.append(h2_title)
+    
+    # --- Fix instructions ---
+    fix_instructions = []
+    
+    # Find missing signals (score = 0)
+    missing_signals = [
+        name for name, detail in signals_detail.items()
+        if detail["count"] == 0
+    ]
+    
+    signal_hints = {
+        "legal_reference": "Dodaj referencje prawne (art., wyroki, ustawy)",
+        "scientific_reference": "Dodaj cytowania naukowe (badania, PMID, DOI)",
+        "specific_number": "Dodaj konkretne liczby (kwoty, %, okresy, wymiary)",
+        "named_institution": "Wymień konkretne instytucje (sądy, urzędy, organizacje)",
+        "practical_advice": "Dodaj praktyczne porady i wskazówki",
+        "causal_explanation": "Wyjaśnij przyczyny i skutki (dlaczego/dlatego)",
+        "exception_case": "Opisz wyjątki i przypadki szczególne",
+        "date_reference": "Dodaj daty i odniesienia czasowe",
+        "comparison": "Dodaj porównania (więcej niż, w odróżnieniu od)",
+        "process_steps": "Opisz kroki procedury (krok 1, następnie, po pierwsze)",
+    }
+    
+    # Top 3 missing high-weight signals
+    missing_sorted = sorted(
+        missing_signals,
+        key=lambda n: next(
+            (s["weight"] for s in _DEPTH_SIGNALS if s["name"] == n), 0
+        ),
+        reverse=True
+    )
+    
+    for sig_name in missing_sorted[:3]:
+        if sig_name in signal_hints:
+            fix_instructions.append(signal_hints[sig_name])
+    
+    if overall_score < threshold:
+        fix_instructions.insert(0,
+            f"Depth score {overall_score}/100 < próg {threshold} "
+            f"({'YMYL' if is_ymyl else 'non-YMYL'}). Wzbogać treść o konkretne dane."
+        )
+    
+    return {
+        "overall_score": overall_score,
+        "raw_score": round(raw_score, 2),
+        "max_raw_score": round(_MAX_RAW_SCORE, 2),
+        "threshold": threshold,
+        "is_ymyl": is_ymyl,
+        "sections": sections,
+        "shallow_count": len(shallow_sections),
+        "shallow_sections": shallow_sections,
+        "fix_instructions": fix_instructions,
+        "signals": signals_detail,
+    }
+
+
+def get_depth_hints(
+    s1_data: Dict,
+    is_ymyl: bool = False
+) -> str:
+    """
+    Generate depth hints for GPT prompt (pre_batch_info).
+    
+    Returns formatted string with depth guidance based on S1 analysis.
+    Used by: enhanced_pre_batch.py
+    """
+    hints = []
+    threshold = 40 if is_ymyl else 30
+    
+    hints.append(f"=== DEPTH SIGNALS (próg: {threshold}/100) ===")
+    
+    if is_ymyl:
+        hints.append("⚠️ YMYL: Wymagane referencje prawne/naukowe i cytowania instytucji.")
+        hints.append("Każda sekcja MUSI zawierać: konkretne liczby, daty, nazwy instytucji.")
+    
+    # Extract competitor depth signals from S1
+    content_gaps = s1_data.get("content_gaps", {})
+    depth_missing = content_gaps.get("depth_missing", [])
+    
+    if depth_missing:
+        hints.append(f"\nBrakujące sygnały głębi u konkurencji ({len(depth_missing)}):")
+        for gap in depth_missing[:5]:
+            topic = gap.get("topic", "") if isinstance(gap, dict) else str(gap)
+            hints.append(f"  → {topic}")
+    
+    hints.append("\n10 sygnałów głębi (wagi):")
+    hints.append("  2.5: referencje prawne (art., wyroki) + naukowe (badania, PMID)")
+    hints.append("  2.0: konkretne liczby (kwoty, %, okresy)")
+    hints.append("  1.8: instytucje + praktyczne porady")
+    hints.append("  1.5: wyjaśnienia przyczynowe + wyjątki + daty")
+    hints.append("  1.2: porównania | 1.0: kroki procedur")
+    
+    return "\n".join(hints)
