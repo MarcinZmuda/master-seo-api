@@ -534,6 +534,22 @@ def s1_analysis_proxy():
                       f"(must_cover: {topical_summary.get('must_cover_count', 0)}, "
                       f"should_cover: {topical_summary.get('should_cover_count', 0)})")
             
+            # 🆕 v47.0: Propaguj salience, co-occurrence i placement instructions
+            entity_salience = entity_seo.get("entity_salience", [])
+            if entity_salience:
+                result["entity_salience"] = entity_salience
+                print(f"[S1_PROXY] ✅ Propagated {len(entity_salience)} entity salience scores")
+            
+            entity_cooccurrence = entity_seo.get("entity_cooccurrence", [])
+            if entity_cooccurrence:
+                result["entity_cooccurrence"] = entity_cooccurrence
+                print(f"[S1_PROXY] ✅ Propagated {len(entity_cooccurrence)} co-occurrence pairs")
+            
+            entity_placement = entity_seo.get("entity_placement", {})
+            if entity_placement and entity_placement.get("status") == "OK":
+                result["entity_placement"] = entity_placement
+                print(f"[S1_PROXY] ✅ Propagated entity placement instructions")
+            
             print(f"[S1_PROXY] ✅ Enhanced entity_seo with must_mention_entities")
             
         except Exception as e:
@@ -581,12 +597,28 @@ def s1_analysis_proxy():
                     "concept_instruction": (
                         result.get("topical_summary", {}).get("agent_instruction", "")
                     ),
+                    "placement_instruction": (
+                        result.get("entity_placement", {}).get("placement_instruction", "")
+                    ),
+                    "primary_entity": (
+                        result.get("entity_placement", {}).get("primary_entity", {})
+                    ),
+                    "cooccurrence_pairs": (
+                        result.get("entity_placement", {}).get("cooccurrence_pairs", [])[:5]
+                    ),
+                    "first_paragraph_entities": (
+                        result.get("entity_placement", {}).get("first_paragraph_entities", [])
+                    ),
+                    "h2_entities": (
+                        result.get("entity_placement", {}).get("h2_entities", [])
+                    ),
                     "checkpoints": {
-                        "batch_3": "entity_density >= 2.5, min 50% critical entities, min 30% must_cover_concepts",
-                        "batch_5": "topic_completeness >= 50%, source_effort signals, concept coverage >= 50%",
-                        "pre_faq": "all critical entities, all MUST topics, all must_cover_concepts"
+                        "batch_1": "H1 contains primary entity, first paragraph has primary + 2 secondary entities",
+                        "batch_3": "entity_density >= 2.5, min 50% critical entities, min 30% must_cover_concepts, co-occurring pairs in same paragraphs",
+                        "batch_5": "topic_completeness >= 50%, source_effort signals, concept coverage >= 50%, all E-A-V triples described",
+                        "pre_faq": "all critical entities, all MUST topics, all must_cover_concepts, H2s contain secondary entities"
                     },
-                    "version": "v46.0"
+                    "version": "v47.0"
                 }
                 
                 print(f"[S1_PROXY] ✅ Added semantic_enhancement_hints (critical={len(critical_entities)}, high={len(high_entities)}, must_topics={len(must_topics)})")
