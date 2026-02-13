@@ -521,6 +521,19 @@ def s1_analysis_proxy():
                 result["topical_coverage"] = topical
                 print(f"[S1_PROXY] ✅ Propagated {len(topical)} topics to top level")
             
+            # 🆕 v46.0: Propaguj concept_entities i topical_summary
+            concept_entities = entity_seo.get("concept_entities", [])
+            if concept_entities:
+                result["concept_entities"] = concept_entities
+                print(f"[S1_PROXY] ✅ Propagated {len(concept_entities)} concept entities to top level")
+            
+            topical_summary = entity_seo.get("topical_summary", {})
+            if topical_summary and topical_summary.get("status") == "OK":
+                result["topical_summary"] = topical_summary
+                print(f"[S1_PROXY] ✅ Propagated topical summary "
+                      f"(must_cover: {topical_summary.get('must_cover_count', 0)}, "
+                      f"should_cover: {topical_summary.get('should_cover_count', 0)})")
+            
             print(f"[S1_PROXY] ✅ Enhanced entity_seo with must_mention_entities")
             
         except Exception as e:
@@ -562,12 +575,18 @@ def s1_analysis_proxy():
                     "critical_entities": critical_entities,
                     "high_entities": high_entities,
                     "must_topics": must_topics,
+                    "must_cover_concepts": (
+                        result.get("topical_summary", {}).get("must_cover", [])[:10]
+                    ),
+                    "concept_instruction": (
+                        result.get("topical_summary", {}).get("agent_instruction", "")
+                    ),
                     "checkpoints": {
-                        "batch_3": "entity_density >= 2.5, min 50% critical entities",
-                        "batch_5": "topic_completeness >= 50%, source_effort signals",
-                        "pre_faq": "all critical entities, all MUST topics"
+                        "batch_3": "entity_density >= 2.5, min 50% critical entities, min 30% must_cover_concepts",
+                        "batch_5": "topic_completeness >= 50%, source_effort signals, concept coverage >= 50%",
+                        "pre_faq": "all critical entities, all MUST topics, all must_cover_concepts"
                     },
-                    "version": "v31.0"
+                    "version": "v46.0"
                 }
                 
                 print(f"[S1_PROXY] ✅ Added semantic_enhancement_hints (critical={len(critical_entities)}, high={len(high_entities)}, must_topics={len(must_topics)})")
