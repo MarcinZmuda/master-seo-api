@@ -3,6 +3,12 @@ import json
 import re
 import requests
 from collections import Counter, defaultdict
+
+# 🆕 v46.0: Clean content extraction (replaces regex scraper)
+from content_extractor import (
+    extract_serp_sources,
+    should_skip_url as clean_should_skip_url,
+)
 from flask import Flask, request, jsonify
 import spacy
 import google.generativeai as genai
@@ -80,15 +86,8 @@ except OSError:
 # ⭐ v22.3 Helper: Check if URL should be skipped
 # ======================================================
 def should_skip_url(url):
-    """Sprawdza czy URL powinien być pominięty (duże dokumenty, PDF, BIP)."""
-    url_lower = url.lower()
-    for skip_pattern in SKIP_DOMAINS:
-        if skip_pattern in url_lower:
-            return True
-    # Skip jeśli URL kończy się na rozszerzenie pliku
-    if any(url_lower.endswith(ext) for ext in ['.pdf', '.doc', '.docx', '.xls', '.xlsx']):
-        return True
-    return False
+    """Wrapper — deleguje do content_extractor (rozszerzona lista filtrów)."""
+    return clean_should_skip_url(url)
 
 # ======================================================
 # 🧠 Helper: Semantic extraction using Gemini Flash
@@ -297,81 +296,18 @@ def fetch_serp_sources(keyword, num_results=10):
 
         print(f"[S1] ✅ Found {len(organic_results)} SERP results")
 
-        # ⭐ 6. Scrapuj PEŁNĄ treść każdej strony + strukturę H2
-        sources = []
-        total_content_size = 0  # ⭐ v22.3: Track total size
-        
-        for result in organic_results[:num_results]:
-            url = result.get("link", "")
-            title = result.get("title", "")
-            if not url:
-                continue
-            
-            # ⭐ v22.3: Skip duże dokumenty (BIP, PDF, etc.)
-            if should_skip_url(url):
-                print(f"[S1] ⏭️ Skipping large doc pattern: {url[:50]}...")
-                continue
-            
-            # ⭐ v22.3: Stop jeśli przekroczono total limit
-            if total_content_size >= MAX_TOTAL_CONTENT:
-                print(f"[S1] ⚠️ Total content limit reached ({MAX_TOTAL_CONTENT} chars), stopping scrape")
-                break
+        # ⭐ 6. Wyciągnij CZYSTĄ treść za pomocą content_extractor (v46.0)
+        # Zastępuje stary regex-based scraper — używa trafilatura + BeautifulSoup
+        sources = extract_serp_sources(
+            organic_results=organic_results,
+            num_results=num_results,
+            max_total_content=MAX_TOTAL_CONTENT,
+            max_content_per_page=MAX_CONTENT_SIZE,
+            timeout=SCRAPE_TIMEOUT,
+        )
 
-            try:
-                print(f"[S1] 📄 Scraping: {url[:60]}...")
-                page_response = requests.get(
-                    url,
-                    timeout=SCRAPE_TIMEOUT,  # ⭐ v22.3: Reduced timeout
-                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
-                )
-
-                if page_response.status_code == 200:
-                    content = page_response.text
-                    
-                    # ⭐ v22.3: Limit content size PRZED przetwarzaniem
-                    if len(content) > MAX_CONTENT_SIZE * 2:  # Raw HTML jest ~2x większy
-                        print(f"[S1] ⚠️ Content too large ({len(content)} chars), truncating: {url[:40]}")
-                        content = content[:MAX_CONTENT_SIZE * 2]
-
-                    # ⭐ Wyciągnij H2 przed usunięciem tagów
-                    h2_tags = re.findall(r'<h2[^>]*>(.*?)</h2>', content, re.IGNORECASE | re.DOTALL)
-                    h2_clean = [re.sub(r'<[^>]+>', '', h).strip() for h in h2_tags]
-                    h2_clean = [h for h in h2_clean if h and len(h) < 200]  # ⭐ v22.3: Skip too long H2
-
-                    # Usuń script, style, nav, footer, header
-                    content = re.sub(r'<script[^>]*>.*?</script>', '', content, flags=re.DOTALL | re.IGNORECASE)
-                    content = re.sub(r'<style[^>]*>.*?</style>', '', content, flags=re.DOTALL | re.IGNORECASE)
-                    content = re.sub(r'<nav[^>]*>.*?</nav>', '', content, flags=re.DOTALL | re.IGNORECASE)
-                    content = re.sub(r'<footer[^>]*>.*?</footer>', '', content, flags=re.DOTALL | re.IGNORECASE)
-                    content = re.sub(r'<header[^>]*>.*?</header>', '', content, flags=re.DOTALL | re.IGNORECASE)
-                    # Usuń wszystkie tagi HTML
-                    content = re.sub(r'<[^>]+>', ' ', content)
-                    # Usuń wielokrotne spacje
-                    content = re.sub(r'\s+', ' ', content).strip()
-                    
-                    # ⭐ v22.3: Final content limit
-                    content = content[:MAX_CONTENT_SIZE]
-
-                    if len(content) > 500:
-                        sources.append({
-                            "url": url,
-                            "title": title,
-                            "content": content,
-                            "h2_structure": h2_clean[:15]
-                        })
-                        total_content_size += len(content)  # ⭐ v22.3: Track size
-                        print(f"[S1] ✅ Scraped {len(content)} chars, {len(h2_clean)} H2 from {url[:40]}")
-                    else:
-                        print(f"[S1] ⚠️ Too short content from {url[:40]}")
-
-            except requests.exceptions.Timeout:
-                print(f"[S1] ⏱️ Timeout for {url[:40]} (>{SCRAPE_TIMEOUT}s)")
-                continue
-            except Exception as e:
-                print(f"[S1] ⚠️ Scrape error for {url[:40]}: {e}")
-                continue
-
-        print(f"[S1] ✅ Successfully scraped {len(sources)} sources ({total_content_size} total chars)")
+        total_content_size = sum(len(s.get("content", "")) for s in sources)
+        print(f"[S1] ✅ Clean extraction: {len(sources)} sources ({total_content_size} total chars)")
 
         return {
             "sources": sources,
