@@ -811,7 +811,7 @@ def generate_enhanced_pre_batch_info(
     # 🆕 v45.1: Dla FAQ ostatniego batcha — załaduj PAA z SERP
     paa_from_serp = []
     if batch_type == "FAQ" and current_batch_num >= total_batches:
-        serp_data = project_data.get("serp_data", {}) or project_data.get("s1_data", {})
+        serp_data = s1_data.get("serp_data", {}) or s1_data.get("serp_analysis", {}) or {}
         paa_raw = serp_data.get("paa_questions", []) or serp_data.get("paa", [])
         for paa_item in paa_raw:
             if isinstance(paa_item, dict):
