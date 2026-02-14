@@ -950,11 +950,15 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         ][:15]  # Max 15 keywords
         
         if proximity_clusters or supporting_entities.get("all"):
+            concept_map = {
+                "proximity_clusters": proximity_clusters,
+                "supporting_entities": supporting_entities,
+            }
             proximity_result = full_semantic_validation(
                 text=batch_text,
                 keywords=keywords_to_check,
-                proximity_clusters=proximity_clusters,
-                supporting_entities=supporting_entities
+                concept_map=concept_map,
+                batch_number=current_batch_num
             )
             
             isolated_keywords = proximity_result.get("isolated_keywords", [])
