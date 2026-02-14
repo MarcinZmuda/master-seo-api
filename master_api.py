@@ -405,7 +405,10 @@ def s1_analysis_proxy():
             avg = sum(word_counts) // n
             recommended = int(median * 1.1)
             recommended = round(recommended / 100) * 100
-            recommended = max(1000, min(6000, recommended))
+            recommended = max(800, min(6000, recommended))
+            # v49: If median < 1000, recommend at least median * 1.5 to beat competition
+            if median < 800:
+                recommended = max(recommended, int(median * 1.5))
         else:
             median = 3000
             avg = 3000
@@ -422,6 +425,47 @@ def s1_analysis_proxy():
         }
         
         print(f"[S1_PROXY] 📏 Length analysis: median={median}, recommended={recommended} words")
+        
+        # v49: Extract depth signals from competitor content
+        depth_signals = {}
+        for comp in competitors:
+            if not isinstance(comp, dict):
+                continue
+            content = comp.get("content", comp.get("text", ""))
+            if not isinstance(content, str) or len(content) < 100:
+                continue
+            # Check for specific depth markers
+            import re as _re
+            if _re.search(r'\d+[\s,]*(?:tys|mln|mld|zł|PLN|%|procent)', content):
+                depth_signals["numbers"] = depth_signals.get("numbers", 0) + 1
+            if _re.search(r'\b(?:2[0-2]\d{2}|1[9]\d{2})\b|(?:stycz|lut|marc|kwiet|maj|czerw|lip|sierp|wrześ|październ|listop|grudz)', content, _re.IGNORECASE):
+                depth_signals["dates"] = depth_signals.get("dates", 0) + 1
+            if _re.search(r'(?:sąd|ministerst|urzą|komisj|inspekcj|instytut|fundusz|agencj|komitet)', content, _re.IGNORECASE):
+                depth_signals["institutions"] = depth_signals.get("institutions", 0) + 1
+            if _re.search(r'(?:badani|raport|analiz|statystyk|źródło|według|publikacj)', content, _re.IGNORECASE):
+                depth_signals["research"] = depth_signals.get("research", 0) + 1
+            if _re.search(r'(?:art\.\s*\d|§\s*\d|ustaw|rozporządz|kodeks|dyrektywa|regulacj)', content, _re.IGNORECASE):
+                depth_signals["legal_refs"] = depth_signals.get("legal_refs", 0) + 1
+            if _re.search(r'(?:wyjąte|jednak|natomiast|z zastrzeżen|nie dotyczy|za wyjąt|chyba że|pod warunki)', content, _re.IGNORECASE):
+                depth_signals["exceptions"] = depth_signals.get("exceptions", 0) + 1
+            if _re.search(r'(?:w porównaniu|z kolei|natomiast|więcej niż|mniej niż|w przeciwieństw)', content, _re.IGNORECASE):
+                depth_signals["comparisons"] = depth_signals.get("comparisons", 0) + 1
+            if _re.search(r'(?:krok\s*\d|etap\s*\d|po pierwsze|po drugie|następnie|najpierw)', content, _re.IGNORECASE):
+                depth_signals["step_by_step"] = depth_signals.get("step_by_step", 0) + 1
+        
+        result["depth_signals"] = {
+            "numbers_data": depth_signals.get("numbers", 0),
+            "dates_timeframes": depth_signals.get("dates", 0),
+            "institutions": depth_signals.get("institutions", 0),
+            "research_sources": depth_signals.get("research", 0),
+            "legal_references": depth_signals.get("legal_refs", 0),
+            "exceptions_edge_cases": depth_signals.get("exceptions", 0),
+            "comparisons": depth_signals.get("comparisons", 0),
+            "step_by_step": depth_signals.get("step_by_step", 0),
+            "total": sum(depth_signals.values()),
+            "analyzed_competitors": len(competitors),
+        }
+        print(f"[S1_PROXY] 📊 Depth signals: {sum(depth_signals.values())} total across {len(competitors)} competitors")
         
         # Semantic analysis
         if SEMANTIC_ENABLED:
