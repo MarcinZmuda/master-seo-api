@@ -208,7 +208,13 @@ def get_medical_context():
         max_results=data.get("max_results", 3),  # Domyślnie 3
         include_clinical_trials=data.get("include_clinical_trials", True),
         include_polish_sources=data.get("include_polish_sources", True),
-        force_enable=data.get("force_enable", False)
+        force_enable=data.get("force_enable", False),
+        # v47.2: Claude unified classifier hints
+        mesh_hints=data.get("mesh_hints", []),
+        condition_en=data.get("condition_en", ""),
+        specialization=data.get("specialization", ""),
+        key_drugs=data.get("key_drugs", []),
+        evidence_note=data.get("evidence_note", ""),
     )
     
     # COMPACT MODE dla GPT Actions (mniejsza odpowiedź)
