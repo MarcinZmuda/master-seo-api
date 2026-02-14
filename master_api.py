@@ -303,7 +303,7 @@ if MEDICAL_MODULE_ENABLED and medical_routes:
 
 # 🆕 v47.2: Unified YMYL Classifier (Claude-based, replaces keyword detection)
 try:
-    from ymyl_unified_classifier import register_routes as register_ymyl_routes
+    from ymyl.ymyl_unified_classifier import register_routes as register_ymyl_routes
     register_ymyl_routes(app)
     print("[MASTER_API] ✅ Unified YMYL classifier registered (/api/ymyl/detect_and_enrich)")
 except ImportError as e:
