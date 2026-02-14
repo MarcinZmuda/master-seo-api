@@ -786,6 +786,8 @@ def perform_final_review(project_id):
                 # Topic Completeness - czy pokrywa temat kompleksowo
                 expected_entities = []
                 entity_seo = s1_data.get("entity_seo", {})
+                if not isinstance(entity_seo, dict):
+                    entity_seo = {}
                 for ent in entity_seo.get("entities", [])[:20]:
                     expected_entities.append(ent.get("name", "") if isinstance(ent, dict) else str(ent))
                 
@@ -832,7 +834,16 @@ def perform_final_review(project_id):
         if ENTITY_SCORING_ENABLED:
             try:
                 # Pobierz encje i relacje z S1
-                s1_entities = s1_data.get("entity_seo", {}).get("entities", [])
+                s1_entities_raw = s1_data.get("entity_seo", {}).get("entities", [])
+                # v49: Normalize entity dicts to strings for scoring
+                s1_entities = []
+                for ent in s1_entities_raw:
+                    if isinstance(ent, str):
+                        s1_entities.append(ent)
+                    elif isinstance(ent, dict):
+                        name = ent.get("entity") or ent.get("name") or ent.get("text") or ""
+                        if name:
+                            s1_entities.append(name)
                 s1_relationships = s1_data.get("relationships", [])
                 
                 # Kompleksowy scoring encji
