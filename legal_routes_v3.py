@@ -231,7 +231,9 @@ def get_context_endpoint():
     result = get_legal_context_for_article(
         main_keyword=main_keyword,
         additional_keywords=data.get("additional_keywords", []),
-        force_enable=data.get("force_enable", False)
+        force_enable=data.get("force_enable", False),
+        article_hints=data.get("article_hints", []),
+        search_queries=data.get("search_queries", []),
     )
     
     return jsonify(result)
