@@ -304,6 +304,21 @@ def detect_category(
         "władza rodzicielska": 3, "opiekun prawny": 3, "kurator sądowy": 3,
         "radca prawny": 3, "komornik": 3, "notariusz": 3,
         "kodeks wykroczeń": 3, "k.w.": 3,
+        # v47.2: Prawo drogowe / karne — jazda po alkoholu, narkotyki etc.
+        "jazda po alkoholu": 3, "prowadzenie pod wpływem": 3,
+        "stan nietrzeźwości": 3, "konfiskata pojazdu": 3,
+        "prowadzenie pojazdu pod wpływem": 3,
+        "art. 178a": 3, "art. 87": 3,
+        "pozbawienie wolności": 3, "areszt": 3,
+        "recydywa": 3, "warunkowe umorzenie": 3,
+        # v47.2: Prawo karne — częste przestępstwa
+        "kradzież": 3, "rozbój": 3, "oszustwo": 3,
+        "groźby karalne": 3, "stalking": 3, "znęcanie": 3,
+        "nękanie": 3, "przemoc domowa": 3,
+        "posiadanie narkotyków": 3, "handel narkotykami": 3,
+        # v47.2: Prawo administracyjne
+        "pozwolenie na budowę": 3, "warunki zabudowy": 3,
+        "decyzja administracyjna": 3, "odwołanie od decyzji": 3,
         # Średnie sygnały (waga 2)
         "testament": 2, "dziedziczenie": 2,
         "rozwód": 2, "alimenty": 2, "separacja": 2,
@@ -314,11 +329,29 @@ def detect_category(
         "hipoteka": 2, "zastaw": 2, "poręczenie": 2,
         "przestępstwo": 2, "wykroczenie": 2,
         "adwokat": 2, "ustawa": 2, "rozporządzenie": 2,
+        # v47.2: Prawo drogowe — średnie sygnały
+        "promil": 2, "zatrzymanie prawa jazdy": 2,
+        "zakaz prowadzenia": 2, "mandat": 2, "punkty karne": 2,
+        "utrata prawa jazdy": 2, "alkohol za kierownicą": 2,
+        "narkotyki za kierownicą": 2, "kontrola drogowa": 2,
+        "alkomat": 2, "badanie trzeźwości": 2,
+        "świadczenie pieniężne": 2, "fundusz pomocy pokrzywdzonym": 2,
+        "dozór elektroniczny": 2, "wyrok w zawieszeniu": 2,
+        "grzywna": 2, "kara ograniczenia wolności": 2,
+        "kara pozbawienia wolności": 2, "zarzuty": 2,
+        "prokuratura": 2, "prokurator": 2,
+        # v47.2: Prawo pracy — rozszerzenie
+        "zwolnienie dyscyplinarne": 2, "mobbing": 2,
+        "wypowiedzenie umowy": 2, "odprawa": 2,
         # Słabe sygnały (waga 1)
         "umowa": 1, "kontrakt": 1, "kara": 1,
         "skarga": 1, "odwołanie": 1,
         "firma": 1, "spółka": 1, "kredyt": 1,
         "spadek": 1, "sąd": 1, "wyrok": 1, "orzeczenie": 1,
+        # v47.2: Weak — mogą być prawne w kontekście
+        "alkohol": 1, "narkotyki": 1, "policja": 1,
+        "zatrzymanie": 1, "areszt": 1, "więzienie": 1,
+        "prawo jazdy": 1, "kierowca": 1, "pojazd": 1,
     }
     
     legal_score = 0
@@ -493,20 +526,26 @@ def get_legal_context_for_article(
     main_keyword: str,
     additional_keywords: List[str] = None,
     force_enable: bool = False,
-    max_results: int = 5
+    max_results: int = 5,
+    article_hints: List[str] = None,
+    search_queries: List[str] = None,
 ) -> Dict[str, Any]:
     """
     Główna funkcja - pobiera kontekst prawny z 4 źródeł.
     
-    🆕 v3.1: Dodano local_court_scraper jako 3. źródło (fallback)
+    🆕 v47.2: Accepts article_hints from Claude unified classifier.
+    When provided, searches SAOS by specific articles (e.g. "art. 178a k.k.")
+    in addition to keyword search → much more relevant judgments.
     
     Kolejność:
-    1. SAOS API (główne źródło)
+    1. SAOS API (główne źródło) — keyword + article-specific queries
     2. Google Fallback (gdy SAOS brak)
     3. Local Court Scraper (gdy SAOS < 2 wyniki)
     4. Scoring i filtrowanie
     """
     additional_keywords = additional_keywords or []
+    article_hints = article_hints or []
+    search_queries = search_queries or []
     
     # 1. Wykryj kategorię
     detection = detect_category(main_keyword, additional_keywords)
@@ -546,19 +585,39 @@ def get_legal_context_for_article(
     saos_count = 0
     if SAOS_AVAILABLE and CONFIG.SAOS_ENABLED:
         try:
-            print(f"[LEGAL_MODULE] 📡 Zapytanie do SAOS...")
-            saos_result = saos_search(
-                query=main_keyword,
-                max_results=max_results * 2
-            )
+            # v47.2: Search by keyword AND by specific articles from Claude
+            all_saos_queries = [main_keyword]
+            if article_hints:
+                # Normalize article references for SAOS search
+                for art in article_hints[:4]:
+                    # "art. 178a § 1 k.k." → search by article
+                    all_saos_queries.append(art)
+                print(f"[LEGAL_MODULE] 📜 Claude article hints: {', '.join(article_hints[:4])}")
+            if search_queries:
+                all_saos_queries.extend(search_queries[:3])
             
-            if saos_result and saos_result.get("judgments"):
-                for j in saos_result["judgments"]:
-                    j["source"] = "saos"
-                judgments.extend(saos_result["judgments"])
-                sources_used.append("saos")
-                saos_count = len(saos_result["judgments"])
-                print(f"[LEGAL_MODULE] ✅ SAOS: {saos_count} wyników")
+            for sq in all_saos_queries:
+                print(f"[LEGAL_MODULE] 📡 SAOS query: '{sq}'")
+                saos_result = saos_search(
+                    query=sq,
+                    max_results=max_results * 2
+                )
+                
+                if saos_result and saos_result.get("judgments"):
+                    for j in saos_result["judgments"]:
+                        j["source"] = "saos"
+                        if sq != main_keyword:
+                            j["matched_article"] = sq
+                    judgments.extend(saos_result["judgments"])
+                    if "saos" not in sources_used:
+                        sources_used.append("saos")
+                    saos_count += len(saos_result["judgments"])
+                    print(f"[LEGAL_MODULE] ✅ SAOS '{sq}': {len(saos_result['judgments'])} wyników")
+                    
+                    # If we already have enough results, stop querying
+                    if saos_count >= max_results * 3:
+                        break
+                        
         except Exception as e:
             print(f"[LEGAL_MODULE] ⚠️ SAOS error: {e}")
     
