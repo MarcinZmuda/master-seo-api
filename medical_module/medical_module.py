@@ -255,14 +255,23 @@ def get_medical_context_for_article(
     max_results: int = None,
     include_clinical_trials: bool = True,
     include_polish_sources: bool = True,
-    force_enable: bool = False
+    force_enable: bool = False,
+    mesh_hints: List[str] = None,
+    condition_en: str = None,
+    specialization: str = None,
+    key_drugs: List[str] = None,
+    evidence_note: str = None,
 ) -> Dict[str, Any]:
     """
     Główna funkcja - pobiera kontekst medyczny dla artykułu.
     
+    v47.2: Accepts mesh_hints from Claude unified classifier.
+    When provided, uses Claude's MeSH terms for PubMed search
+    instead of keyword-based detection → much more relevant publications.
+    
     Pipeline:
-    1. Wykryj czy temat medyczny
-    2. Wygeneruj strategię wyszukiwania
+    1. Wykryj czy temat medyczny (or use force_enable if Claude already classified)
+    2. Wygeneruj strategię wyszukiwania (or use mesh_hints from Claude)
     3. Szukaj w PubMed
     4. Szukaj w ClinicalTrials.gov (opcjonalnie)
     5. Szukaj w polskich źródłach (opcjonalnie)
@@ -313,6 +322,27 @@ def get_medical_context_for_article(
     if TERM_DETECTOR_AVAILABLE:
         search_strategy = get_search_strategy(main_keyword)
     
+    # v47.2: Override search strategy with Claude's hints (more precise)
+    if mesh_hints:
+        mesh_query = " OR ".join(f'"{term}"[MeSH]' for term in mesh_hints[:3])
+        if not search_strategy:
+            search_strategy = {}
+        # Claude's MeSH terms are more precise than keyword detection
+        search_strategy["pubmed_query"] = mesh_query
+        search_strategy["_claude_mesh"] = mesh_hints
+        print(f"[MEDICAL_MODULE] 🧠 Using Claude MeSH hints: {', '.join(mesh_hints[:3])}")
+    if condition_en:
+        if not search_strategy:
+            search_strategy = {}
+        search_strategy["clinicaltrials_condition"] = condition_en
+        if not search_strategy.get("pubmed_query"):
+            search_strategy["pubmed_query"] = condition_en
+        print(f"[MEDICAL_MODULE] 🧠 Using Claude condition: {condition_en}")
+    if key_drugs and len(key_drugs) > 0:
+        if not search_strategy:
+            search_strategy = {}
+        search_strategy["clinicaltrials_intervention"] = key_drugs[0]
+    
     # Zmienne do zbierania wyników
     all_publications = []
     clinical_trials = []
@@ -340,6 +370,25 @@ def get_medical_context_for_article(
                 all_publications.extend(pubs)
                 sources_used.append("PubMed")
                 print(f"[MEDICAL_MODULE] ✅ PubMed: {len(pubs)} results")
+            
+            # v47.2: If MeSH query returned few results, also try keyword search
+            if mesh_hints and len(all_publications) < 3:
+                print(f"[MEDICAL_MODULE] 🔄 MeSH returned {len(all_publications)} — supplementing with keyword search")
+                kw_result = search_pubmed(
+                    query=condition_en or main_keyword,
+                    max_results=CONFIG.MAX_PUBMED_RESULTS,
+                    min_year=CONFIG.MIN_YEAR,
+                    article_types=CONFIG.PREFERRED_ARTICLE_TYPES
+                )
+                if kw_result.get("status") == "OK":
+                    extra_pubs = kw_result.get("publications", [])
+                    # Deduplicate by PMID
+                    existing_pmids = {p.get("pmid") for p in all_publications if p.get("pmid")}
+                    for pub in extra_pubs:
+                        if pub.get("pmid") not in existing_pmids:
+                            pub["_source"] = "pubmed_keyword_supplement"
+                            all_publications.append(pub)
+                    print(f"[MEDICAL_MODULE] ✅ PubMed supplement: +{len(extra_pubs)} candidates")
                 
         except Exception as e:
             print(f"[MEDICAL_MODULE] ⚠️ PubMed error: {e}")
