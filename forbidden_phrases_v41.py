@@ -107,6 +107,18 @@ FORBIDDEN_PATTERNS_V41 = [
     (r'\bw obecnych czasach\b', "w obecnych czasach"),
     (r'\bw nowoczesnym społeczeństwie\b', "w nowoczesnym społeczeństwie"),
     (r'\bw dynamicznie zmieniającym się\b', "w dynamicznie zmieniającym się"),
+    
+    # ========================================================================
+    # v50 - Szablonowe pytania retoryczne (nadużywane przez AI)
+    # ========================================================================
+    (r'\bjak to wygląda w praktyce\b', "jak to wygląda w praktyce"),
+    (r'\bco to (dokładnie )?oznacza\b', "co to oznacza"),
+    (r'\bczy zawsze tak jest\b', "czy zawsze tak jest"),
+    (r'\bczy to takie proste\b', "czy to takie proste"),
+    (r'\bjakie są (zatem |więc )?wyjątki\b', "jakie są wyjątki"),
+    (r'\bale czy to wystarczy\b', "ale czy to wystarczy"),
+    (r'\bi tu zaczyna się\b', "i tu zaczyna się"),
+    (r'\bczas na konkrety\b', "czas na konkrety"),
 ]
 
 # ============================================================================
