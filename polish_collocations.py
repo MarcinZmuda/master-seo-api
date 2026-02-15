@@ -54,7 +54,7 @@ from collections import defaultdict
 class CollocationConfig:
     """Konfiguracja walidatora kolokacji."""
     # Severity
-    CRITICAL_COLLOCATIONS: bool = False   # Nie blokuj batcha (jeszcze)
+    CRITICAL_COLLOCATIONS: bool = True    # v50: Włączone — flaguje błędne kolokacje
     MIN_TEXT_LENGTH: int = 100            # Min tekst do analizy
     
     # Scoring
