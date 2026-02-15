@@ -205,6 +205,39 @@ except ImportError:
         return {"expert": "COLLOCATION_EXPERT", "severity": "info", "score": 100, "issues": [], "action": "CONTINUE"}
 
 # ================================================================
+# 🆕 v50: NATURAL POLISH WRITING VALIDATOR
+# ================================================================
+try:
+    from natural_polish_instructions import (
+        validate_natural_writing,
+        validate_all_spacing,
+        detect_paragraph_stuffing,
+        detect_sentence_repetition,
+    )
+    NATURAL_POLISH_AVAILABLE = True
+    print("[MOE_VALIDATOR] ✅ Natural Polish Instructions v1.0 enabled")
+except ImportError:
+    NATURAL_POLISH_AVAILABLE = False
+    print("[MOE_VALIDATOR] ⚠️ Natural Polish Instructions not available")
+
+    def validate_natural_writing(text, keywords_state, previous_batch_text=""):
+        return {"is_natural": True, "score": 100, "spacing_violations": [], "stuffing_warnings": [], "sentence_repetitions": [], "suggestions": []}
+
+# ================================================================
+# 🆕 v50: ENTITY SALIENCE SCORING
+# ================================================================
+try:
+    from entity_scoring import (
+        calculate_entity_salience,
+        calculate_entity_coverage,
+    )
+    ENTITY_SCORING_AVAILABLE = True
+    print("[MOE_VALIDATOR] ✅ Entity Scoring v1.0 enabled")
+except ImportError:
+    ENTITY_SCORING_AVAILABLE = False
+    print("[MOE_VALIDATOR] ⚠️ Entity Scoring not available")
+
+# ================================================================
 # 🆕 v44.6: PERPLEXITY AI DETECTOR (Option C: HF API)
 # ================================================================
 try:
@@ -1022,7 +1055,7 @@ def validate_batch_moe(
             experts_summary["unified_bridge"] = {"enabled": False, "error": str(e)}
     
     # ═══════════════════════════════════════════════════════════════
-    # 7️⃣ CORPUS INSIGHTS (NIGDY nie blokuje!)
+    # 7️⃣ CORPUS INSIGHTS (v50: extreme deviations → fix_instructions)
     # ═══════════════════════════════════════════════════════════════
     corpus_insights = None
     naturalness_hints = []
@@ -1032,11 +1065,40 @@ def validate_batch_moe(
             corpus_insights = get_corpus_insights_for_moe(corrected_text or batch_text)
             if corpus_insights.get("enabled"):
                 naturalness_hints = corpus_insights.get("suggestions", [])
+                naturalness_score = corpus_insights.get("naturalness_score", 100)
                 experts_summary["corpus_insights"] = {
                     "enabled": True,
-                    "naturalness_score": corpus_insights.get("naturalness_score", 100),
-                    "affects_validation": False,
+                    "naturalness_score": naturalness_score,
+                    "affects_validation": naturalness_score < 60,  # v50: affects if very low
                 }
+                
+                # v50: Extreme deviations → actionable fix_instructions
+                warning_count = 0
+                for metric_data in corpus_insights.get("insights", []):
+                    metric = metric_data.get("metric", "")
+                    sev = metric_data.get("severity", "info")
+                    suggestion = metric_data.get("suggestion", "")
+                    message = metric_data.get("message", "")
+                    
+                    if sev == "warning" and suggestion:
+                        # v50: WARNING = extreme deviation → priority fix
+                        fix_instructions.insert(0, f"[⚠️ POLSZCZYZNA] {suggestion}")
+                        warning_count += 1
+                    elif sev == "suggestion" and suggestion:
+                        fix_instructions.append(f"[POLSZCZYZNA] {suggestion}")
+                
+                # v50: If any WARNING, mark corpus as affecting validation
+                if warning_count > 0:
+                    experts_summary["corpus_insights"]["affects_validation"] = True
+                    experts_summary["corpus_insights"]["warning_count"] = warning_count
+                
+                # v50: Low naturalness → hint do reviewera
+                if naturalness_score < 70:
+                    for hint in naturalness_hints[:2]:
+                        hint_text = hint.get("suggestion", hint.get("message", ""))
+                        if hint_text:
+                            fix_instructions.append(f"[NATURALNOŚĆ] {hint_text}")
+                
         except Exception as e:
             corpus_insights = {"enabled": False, "error": str(e)[:100]}
     
@@ -1152,6 +1214,164 @@ def validate_batch_moe(
             experts_summary["depth"] = {"enabled": False, "error": str(e)[:100]}
     
     # ═══════════════════════════════════════════════════════════════
+    # 🆕 1️⃣2️⃣ NATURAL POLISH WRITING VALIDATOR (v50)
+    # ═══════════════════════════════════════════════════════════════
+    if NATURAL_POLISH_AVAILABLE:
+        try:
+            # Build keywords_state from s1_data
+            kw_state = {}
+            keywords_data = s1_data.get("keywords") or project_data.get("keywords") or {}
+            for rid, meta in keywords_data.items() if isinstance(keywords_data, dict) else []:
+                kw = meta.get("keyword", "") if isinstance(meta, dict) else ""
+                kw_type = meta.get("type", "BASIC") if isinstance(meta, dict) else "BASIC"
+                if kw:
+                    kw_state[rid] = {"keyword": kw, "type": kw_type}
+            
+            if kw_state:
+                prev_text = project_data.get("previous_batch_text", "")
+                np_result = validate_natural_writing(
+                    corrected_text or batch_text,
+                    kw_state,
+                    previous_batch_text=prev_text
+                )
+                
+                experts_summary["natural_polish"] = {
+                    "enabled": True,
+                    "score": np_result.get("score", 100),
+                    "is_natural": np_result.get("is_natural", True),
+                    "spacing_violations": len(np_result.get("spacing_violations", [])),
+                    "stuffing_warnings": len(np_result.get("stuffing_warnings", [])),
+                }
+                
+                # Spacing violations → fix_instructions
+                for viol in np_result.get("spacing_violations", [])[:3]:
+                    phrase = viol.get("phrase", "")
+                    dist = viol.get("distance", 0)
+                    minr = viol.get("min_required", 0)
+                    fix_instructions.append(
+                        f"[SPACING] Fraza \"{phrase}\" powtórzona co {dist} słów "
+                        f"(min. {minr}). Rozłóż równomiernie."
+                    )
+                
+                # Stuffing → fix_instructions
+                for warn in np_result.get("stuffing_warnings", [])[:3]:
+                    fix_instructions.append(f"[STUFFING] {warn}")
+                
+                # Sentence repetitions → fix_instructions
+                for rep in np_result.get("sentence_repetitions", [])[:2]:
+                    fix_instructions.append(f"[REPETITION] {rep}")
+                
+                np_score = np_result.get("score", 100)
+                print(f"[MOE_VALIDATOR] 🇵🇱 Natural Polish: score={np_score}, "
+                      f"spacing={len(np_result.get('spacing_violations', []))}, "
+                      f"stuffing={len(np_result.get('stuffing_warnings', []))}")
+        except Exception as e:
+            print(f"[MOE_VALIDATOR] ⚠️ Natural Polish error: {e}")
+            experts_summary["natural_polish"] = {"enabled": False, "error": str(e)[:100]}
+    
+    # ═══════════════════════════════════════════════════════════════
+    # 🆕 1️⃣3️⃣ ENTITY SALIENCE SCORER (v50)
+    # ═══════════════════════════════════════════════════════════════
+    if ENTITY_SCORING_AVAILABLE:
+        try:
+            main_keyword = project_data.get("main_keyword", "")
+            if main_keyword:
+                sal_result = calculate_entity_salience(
+                    corrected_text or batch_text,
+                    main_keyword
+                )
+                
+                sal_score = sal_result.get("score", 0)
+                experts_summary["entity_salience"] = {
+                    "enabled": True,
+                    "score": sal_score,
+                    "status": sal_result.get("status", "UNKNOWN"),
+                    "is_in_first_sentence": sal_result.get("is_in_first_sentence", False),
+                    "frequency": sal_result.get("frequency", 0),
+                }
+                
+                # Low salience → fix_instructions
+                if sal_score < 40:
+                    fix_instructions.append(
+                        f"[ENTITY SALIENCE] Encja główna \"{main_keyword}\" ma niską salience "
+                        f"(score: {sal_score}/100). Umieść ją jako PODMIOT w pierwszym zdaniu "
+                        f"i na początku akapitów."
+                    )
+                elif sal_score < 60 and not sal_result.get("is_in_first_sentence"):
+                    fix_instructions.append(
+                        f"[ENTITY SALIENCE] \"{main_keyword}\" brakuje w pierwszym zdaniu. "
+                        f"Dodaj jako podmiot gramatyczny."
+                    )
+                
+                print(f"[MOE_VALIDATOR] 🎯 Entity Salience: score={sal_score}, "
+                      f"status={sal_result.get('status', 'N/A')}")
+        except Exception as e:
+            print(f"[MOE_VALIDATOR] ⚠️ Entity Salience error: {e}")
+            experts_summary["entity_salience"] = {"enabled": False, "error": str(e)[:100]}
+    
+    # ═══════════════════════════════════════════════════════════════
+    # 🆕 1️⃣4️⃣ CO-OCCURRENCE PROXIMITY VALIDATOR (v50)
+    # ═══════════════════════════════════════════════════════════════
+    cooc_pairs = project_data.get("entity_cooccurrence") or project_data.get("cooccurrence_pairs") or []
+    if cooc_pairs:
+        try:
+            text_to_check = corrected_text or batch_text
+            paragraphs = [p.strip() for p in text_to_check.split("\n") if p.strip()]
+            
+            cooc_violations = []
+            cooc_ok = 0
+            
+            for pair in cooc_pairs[:10]:
+                if isinstance(pair, dict):
+                    e1 = (pair.get("entity1") or pair.get("source") or "").lower()
+                    e2 = (pair.get("entity2") or pair.get("target") or "").lower()
+                elif isinstance(pair, str) and "+" in pair:
+                    parts_p = pair.split("+")
+                    e1, e2 = parts_p[0].strip().lower(), parts_p[1].strip().lower() if len(parts_p) > 1 else ""
+                else:
+                    continue
+                
+                if not e1 or not e2:
+                    continue
+                
+                # Check if both entities appear in the same paragraph
+                found_together = False
+                for para in paragraphs:
+                    para_lower = para.lower()
+                    if e1 in para_lower and e2 in para_lower:
+                        found_together = True
+                        break
+                
+                if found_together:
+                    cooc_ok += 1
+                else:
+                    # Check if both are at least in the text
+                    text_lower = text_to_check.lower()
+                    if e1 in text_lower and e2 in text_lower:
+                        cooc_violations.append(f'"{e1}" + "{e2}" — obecne, ale w różnych akapitach')
+                    elif e1 in text_lower or e2 in text_lower:
+                        missing = e2 if e1 in text_lower else e1
+                        cooc_violations.append(f'"{e1}" + "{e2}" — brakuje "{missing}"')
+            
+            total_checked = cooc_ok + len(cooc_violations)
+            proximity_score = round((cooc_ok / total_checked) * 100) if total_checked > 0 else 100
+            
+            experts_summary["cooccurrence_proximity"] = {
+                "enabled": True,
+                "score": proximity_score,
+                "pairs_ok": cooc_ok,
+                "pairs_violated": len(cooc_violations),
+            }
+            
+            for viol in cooc_violations[:3]:
+                fix_instructions.append(f"[CO-OCCURRENCE] {viol} — przenieś do jednego akapitu")
+            
+            print(f"[MOE_VALIDATOR] 🔗 Co-occurrence: {cooc_ok}/{total_checked} par w bliskości")
+        except Exception as e:
+            print(f"[MOE_VALIDATOR] ⚠️ Co-occurrence Proximity error: {e}")
+            experts_summary["cooccurrence_proximity"] = {"enabled": False, "error": str(e)[:100]}
+    
+    # ═══════════════════════════════════════════════════════════════
     # AGREGACJA WYNIKÓW
     # ═══════════════════════════════════════════════════════════════
     critical_issues = [i for i in all_issues if i.severity == "critical"]
@@ -1265,5 +1485,7 @@ __all__ = [
     'FAKE_HUMANIZATION_AVAILABLE',
     'COLLOCATIONS_AVAILABLE',
     'PERPLEXITY_AVAILABLE',
+    'NATURAL_POLISH_AVAILABLE',
+    'ENTITY_SCORING_AVAILABLE',
     'FakeHumanizationExpert'
 ]
