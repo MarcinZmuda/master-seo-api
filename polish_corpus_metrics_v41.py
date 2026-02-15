@@ -86,10 +86,16 @@ CORPUS_REFERENCE = {
         "tolerance": 0.01,    # ±1%
         "min_natural": 0.05,  # <5% = nienaturalne
         "max_natural": 0.09,  # >9% = nienaturalne
+        # v50: Extreme thresholds → WARNING
+        "min_extreme": 0.035, # <3.5% = ekstremalnie nienaturalne
+        "max_extreme": 0.11,  # >11% = ekstremalnie nienaturalne
     },
     "word_length": {
         "target": 6.0,        # 6 znaków
         "tolerance": 0.5,
+        # v50: Extreme thresholds → WARNING
+        "min_extreme": 4.5,   # <4.5 = tekst zbyt prosty / nie-polski
+        "max_extreme": 7.5,   # >7.5 = tekst zbyt specjalistyczny
         "by_style": {
             "literatura": 5.32,
             "publicystyka": 6.00,
@@ -101,13 +107,21 @@ CORPUS_REFERENCE = {
         "target": 0.365,      # 36.5%
         "min": 0.35,
         "max": 0.38,
+        # v50: Extreme thresholds → WARNING
+        "min_extreme": 0.30,  # <30% = prawdopodobnie nie-polski tekst
+        "max_extreme": 0.42,  # >42% = nienaturalny rozkład
     },
     "punctuation": {
         "comma_min": 0.0147,  # Przecinek > 1.47% (częstszy niż litera "b")
+        # v50: Extreme threshold → WARNING
+        "comma_extreme_low": 0.008,  # <0.8% = brak przecinków (AI marker)
     },
     "fog_pl": {
         "optimal_min": 8,
         "optimal_max": 9,
+        # v50: Extreme thresholds → WARNING
+        "extreme_high": 16,   # >16 = tekst niezrozumiały dla odbiorcy
+        "extreme_low": 4,     # <4 = tekst zbyt prymitywny
         "ranges": {
             (1, 6): "szkoła podstawowa",
             (7, 9): "gimnazjum/liceum (optymalne)",
@@ -134,13 +148,15 @@ CORPUS_REFERENCE = {
 
 class InsightSeverity(Enum):
     """
-    BEZPIECZNE poziomy severity - nigdy nie blokują walidacji!
+    Poziomy severity dla corpus insights.
     
-    WAŻNE: Celowo brak CRITICAL i WARNING (blokujących).
+    v50: Dodano WARNING dla ekstremalnych odchyleń.
+    WARNING NIE blokuje batcha, ale trafia do fix_instructions w MoE.
     """
-    INFO = "info"               # Neutralna informacja
-    SUGGESTION = "suggestion"   # Sugestia poprawy (nie wymóg)
+    INFO = "info"               # Neutralna informacja (w normie)
+    SUGGESTION = "suggestion"   # Sugestia poprawy (poza normą)
     OBSERVATION = "observation" # Obserwacja bez oceny
+    WARNING = "warning"         # v50: Ekstremalne odchylenie — wymaga uwagi reviewera
 
 
 @dataclass
@@ -148,23 +164,23 @@ class CorpusInsight:
     """
     Pojedynczy insight z analizy korpusowej.
     
-    GWARANCJA: severity NIGDY nie może być "critical" lub "warning"!
+    v50: WARNING dozwolone dla ekstremalnych odchyleń.
+    Corpus insights NIE blokują walidacji, ale WARNING trafia do fix_instructions.
     """
     metric: str               # np. "diacritic_ratio"
     value: float              # Zmierzona wartość
     target: float             # Wartość docelowa z NKJP
     deviation: float          # Odchylenie od celu (może być ujemne)
-    severity: InsightSeverity # Tylko INFO/SUGGESTION/OBSERVATION
+    severity: InsightSeverity # INFO/SUGGESTION/OBSERVATION/WARNING
     message: str              # Opis dla użytkownika
     suggestion: str = ""      # Opcjonalna sugestia poprawy
     details: Dict = field(default_factory=dict)  # Dodatkowe dane
     
     def __post_init__(self):
-        """Walidacja że severity jest bezpieczne."""
-        if self.severity not in [InsightSeverity.INFO, 
-                                  InsightSeverity.SUGGESTION, 
-                                  InsightSeverity.OBSERVATION]:
-            # Fallback do INFO zamiast rzucania wyjątku
+        """Walidacja że severity jest dozwolone."""
+        allowed = [InsightSeverity.INFO, InsightSeverity.SUGGESTION, 
+                   InsightSeverity.OBSERVATION, InsightSeverity.WARNING]
+        if self.severity not in allowed:
             self.severity = InsightSeverity.INFO
     
     def to_dict(self) -> Dict[str, Any]:
@@ -323,17 +339,30 @@ def calculate_diacritic_ratio(text: str) -> CorpusInsight:
         "reference_range": "5-9%",
     }
     
-    # Określ severity (tylko INFO lub SUGGESTION, nigdy nie blokuje!)
+    # Określ severity (INFO / SUGGESTION / WARNING)
     if ref["min_natural"] <= ratio <= ref["max_natural"]:
         severity = InsightSeverity.INFO
         message = f"Udział diakrytyków ({ratio*100:.1f}%) w normie NKJP (5-9%)"
         suggestion = ""
+    elif ratio < ref.get("min_extreme", 0):
+        # v50: Extreme low → WARNING
+        severity = InsightSeverity.WARNING
+        message = f"⚠️ EKSTREMALNIE niski udział diakrytyków ({ratio*100:.1f}%) — poniżej 3.5%"
+        suggestion = ("KRYTYCZNE: Tekst wygląda na maszynowy. Użyj polskich form: "
+                     "'że' nie 'ze', 'są' nie 'sa', 'będzie' nie 'bedzie', "
+                     "'możliwość' nie 'mozliwosc'. Brak diakrytyków to #1 sygnał AI.")
     elif ratio < ref["min_natural"]:
         severity = InsightSeverity.SUGGESTION
         message = f"Niski udział diakrytyków ({ratio*100:.1f}%) - poniżej normy 5%"
         suggestion = ("Rozważ użycie bardziej polskich form: "
                      "'że' zamiast 'ze', 'są' zamiast 'sa', "
                      "'będzie' zamiast 'bedzie', 'możliwość' zamiast 'mozliwosc'")
+    elif ratio > ref.get("max_extreme", 1):
+        # v50: Extreme high → WARNING
+        severity = InsightSeverity.WARNING
+        message = f"⚠️ EKSTREMALNIE wysoki udział diakrytyków ({ratio*100:.1f}%) — powyżej 11%"
+        suggestion = ("Tekst ma nienaturalnie dużo diakrytyków. "
+                     "Sprawdź czy nie ma sztucznego upychania polskich słów.")
     else:
         severity = InsightSeverity.SUGGESTION
         message = f"Wysoki udział diakrytyków ({ratio*100:.1f}%) - powyżej normy 9%"
@@ -415,6 +444,18 @@ def calculate_word_length_stats(text: str) -> CorpusInsight:
         severity = InsightSeverity.INFO
         message = f"Średnia długość słowa ({avg_length:.2f} zn.) zgodna z normą NKJP"
         suggestion = ""
+    elif avg_length < ref.get("min_extreme", 0):
+        # v50: Extreme short → WARNING
+        severity = InsightSeverity.WARNING
+        message = f"⚠️ EKSTREMALNIE krótkie słowa ({avg_length:.2f} zn.) — poniżej 4.5 zn."
+        suggestion = ("Tekst wygląda na uproszczony lub nie-polski. "
+                     "Średnia polska to 6.0 zn. Używaj pełnych form zamiast skrótów.")
+    elif avg_length > ref.get("max_extreme", 99):
+        # v50: Extreme long → WARNING
+        severity = InsightSeverity.WARNING
+        message = f"⚠️ EKSTREMALNIE długie słowa ({avg_length:.2f} zn.) — powyżej 7.5 zn."
+        suggestion = ("Tekst zbyt specjalistyczny/urzędowy. "
+                     "Zastąp nominalizacje czasownikami: 'wykorzystanie' → 'używać'.")
     else:
         severity = InsightSeverity.SUGGESTION
         if deviation > 0:
@@ -528,6 +569,19 @@ def calculate_fog_pl_index(text: str) -> CorpusInsight:
         severity = InsightSeverity.INFO
         message = f"FOG-PL = {fog:.1f} (optymalne dla ogółu odbiorców)"
         suggestion = ""
+    elif fog >= ref.get("extreme_high", 99):
+        # v50: Extreme high FOG → WARNING
+        severity = InsightSeverity.WARNING
+        message = f"⚠️ FOG-PL = {fog:.1f} — tekst NIEZROZUMIAŁY dla większości ({level_desc})"
+        suggestion = ("KRYTYCZNE: FOG >16 = tekst zbyt trudny. "
+                     "Skróć zdania do max 15 słów, zastąp 4-sylabowe słowa prostszymi. "
+                     "Docelowe FOG-PL to 8-9.")
+    elif fog <= ref.get("extreme_low", 0):
+        # v50: Extreme low FOG → WARNING
+        severity = InsightSeverity.WARNING
+        message = f"⚠️ FOG-PL = {fog:.1f} — tekst ZBYT PRYMITYWNY ({level_desc})"
+        suggestion = ("Tekst wygląda na sztuczny — zbyt proste zdania. "
+                     "Naturalny polski ma FOG 8-9, dodaj złożone zdania i fachowe terminy.")
     elif fog < ref["optimal_min"]:
         severity = InsightSeverity.INFO
         message = f"FOG-PL = {fog:.1f} - tekst łatwy ({level_desc})"
@@ -625,6 +679,13 @@ def calculate_punctuation_density(text: str) -> CorpusInsight:
         severity = InsightSeverity.INFO
         message = f"Gęstość przecinków ({comma_ratio*100:.2f}%) zgodna z normą polską"
         suggestion = ""
+    elif comma_ratio < CORPUS_REFERENCE["punctuation"].get("comma_extreme_low", 0):
+        # v50: Extreme low commas → WARNING
+        severity = InsightSeverity.WARNING
+        message = f"⚠️ EKSTREMALNIE mało przecinków ({comma_ratio*100:.2f}%) — brak interpunkcji to sygnał AI"
+        suggestion = ("KRYTYCZNE: Polski tekst wymaga >1.47% przecinków. "
+                     "Dodaj przecinki przed: że, który, ponieważ, gdyż, aby, żeby. "
+                     "Brak przecinka przed 'że' to #1 sygnał sztuczności.")
     elif missing_commas:
         severity = InsightSeverity.SUGGESTION
         message = f"Wykryto potencjalnie brakujące przecinki: {', '.join(missing_commas[:3])}"
@@ -705,12 +766,20 @@ def analyze_vowel_ratio(text: str) -> CorpusInsight:
     if ref["min"] <= ratio <= ref["max"]:
         severity = InsightSeverity.INFO
         message = f"Udział samogłosek ({ratio*100:.1f}%) w normie NKJP (35-38%)"
+    elif ratio < ref.get("min_extreme", 0):
+        # v50: Extreme low vowels → WARNING
+        severity = InsightSeverity.WARNING
+        message = f"⚠️ EKSTREMALNIE niski udział samogłosek ({ratio*100:.1f}%) — prawdopodobnie nie-polski tekst"
+    elif ratio > ref.get("max_extreme", 1):
+        # v50: Extreme high vowels → WARNING
+        severity = InsightSeverity.WARNING
+        message = f"⚠️ EKSTREMALNIE wysoki udział samogłosek ({ratio*100:.1f}%) — nienaturalny rozkład"
+    elif ratio < ref["min"]:
+        severity = InsightSeverity.SUGGESTION
+        message = f"Niski udział samogłosek ({ratio*100:.1f}%) - poniżej normy 35%"
     else:
-        severity = InsightSeverity.INFO  # Tylko INFO, nie blokuje
-        if ratio < ref["min"]:
-            message = f"Niski udział samogłosek ({ratio*100:.1f}%) - poniżej normy 35%"
-        else:
-            message = f"Wysoki udział samogłosek ({ratio*100:.1f}%) - powyżej normy 38%"
+        severity = InsightSeverity.SUGGESTION
+        message = f"Wysoki udział samogłosek ({ratio*100:.1f}%) - powyżej normy 38%"
     
     return CorpusInsight(
         metric="vowel_ratio",
@@ -811,7 +880,7 @@ def analyze_corpus_metrics(
             message=f"Błąd podczas analizy: {str(e)[:100]}"
         ))
     
-    # Oblicz orientacyjną "naturalność" (tylko informacyjnie, NIE do blokowania!)
+    # Oblicz orientacyjną "naturalność"
     valid_insights = [i for i in insights if i.value > 0 and i.target > 0]
     if valid_insights:
         deviations = []
@@ -824,6 +893,11 @@ def analyze_corpus_metrics(
             naturalness = max(0, (1 - avg_deviation) * 100)
         else:
             naturalness = 100.0
+        
+        # v50: Extra penalty for WARNING insights
+        warning_count = sum(1 for i in insights if i.severity == InsightSeverity.WARNING)
+        if warning_count > 0:
+            naturalness = max(0, naturalness - (warning_count * 15))  # -15 per WARNING
     else:
         naturalness = 100.0
     
@@ -835,8 +909,11 @@ def analyze_corpus_metrics(
             break
     
     # Generuj podsumowanie
+    warnings = [i for i in insights if i.severity == InsightSeverity.WARNING]
     suggestions = [i for i in insights if i.severity == InsightSeverity.SUGGESTION]
-    if suggestions:
+    if warnings:
+        summary = f"⚠️ {len(warnings)} ekstremalnych odchyleń + {len(suggestions)} sugestii poprawy."
+    elif suggestions:
         summary = f"Wykryto {len(suggestions)} sugestii poprawy naturalności tekstu."
     else:
         summary = "Tekst zgodny z normami korpusu NKJP."
@@ -895,7 +972,7 @@ def get_corpus_insights_for_moe(
             include_vowels=include_all
         )
         
-        # Wyodrębnij tylko sugestie (do pola naturalness_hints)
+        # Wyodrębnij sugestie i ostrzeżenia (do pola naturalness_hints)
         suggestions = [
             {
                 "metric": i.metric,
@@ -903,8 +980,11 @@ def get_corpus_insights_for_moe(
                 "suggestion": i.suggestion,
             }
             for i in analysis.insights
-            if i.severity == InsightSeverity.SUGGESTION and i.suggestion
+            if i.severity in (InsightSeverity.SUGGESTION, InsightSeverity.WARNING) and i.suggestion
         ]
+        
+        # v50: Count warnings
+        warning_count = sum(1 for i in analysis.insights if i.severity == InsightSeverity.WARNING)
         
         return {
             "enabled": True,
@@ -916,8 +996,10 @@ def get_corpus_insights_for_moe(
             "suggestions": suggestions,
             "suggestions_count": len(suggestions),
             
-            # WAŻNE: Jawne oznaczenie że to tylko informacja
-            "affects_validation": False,
+            # v50: WARNING insights wpływają na walidację (nie blokują, ale flagują)
+            "has_warnings": warning_count > 0,
+            "warning_count": warning_count,
+            "affects_validation": warning_count > 0,
             "is_blocking": False,
             "blocks_action": False,
         }
@@ -997,10 +1079,10 @@ def _run_self_tests() -> Dict[str, Any]:
             results["failed"] += 1
             results["tests"].append({"name": f"blocks_validation=False for '{text[:20]}...'", "passed": False})
     
-    # Test 2: Severity nigdy nie jest critical
+    # Test 2: Severity nigdy nie jest critical (WARNING jest dozwolone od v50)
     result = analyze_corpus_metrics("Test tekstu polskiego z różnymi znakami." * 10)
     all_safe = all(
-        i.severity in [InsightSeverity.INFO, InsightSeverity.SUGGESTION, InsightSeverity.OBSERVATION]
+        i.severity in [InsightSeverity.INFO, InsightSeverity.SUGGESTION, InsightSeverity.OBSERVATION, InsightSeverity.WARNING]
         for i in result.insights
     )
     
