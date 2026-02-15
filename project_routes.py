@@ -740,8 +740,13 @@ def create_project():
     
     # ================================================================
     # 🆕 v30.0: Legal Module - auto-detekcja i pobieranie orzeczeń
+    # 🔧 v50.3: GATE on YMYL classifier — Legal Module runs ONLY when
+    #   classifier confirmed is_legal=True. Previously Legal Module had
+    #   its own detection (Claude Haiku) which overrode classifier's NIE,
+    #   causing legal injection into non-legal articles (e.g. "prąd").
     # ================================================================
-    if LEGAL_MODULE_ENABLED:
+    _ymyl_is_legal = data.get("is_legal", False)
+    if LEGAL_MODULE_ENABLED and _ymyl_is_legal:
         try:
             project_data = enhance_project_with_legal(
                 project_data=project_data,
@@ -753,11 +758,15 @@ def create_project():
                 print(f"[PROJECT] ⚖️ Legal module active: category=prawo, {judgments_count} judgments loaded")
         except Exception as e:
             print(f"[PROJECT] ⚠️ Legal module error: {e}")
+    elif LEGAL_MODULE_ENABLED and not _ymyl_is_legal:
+        print(f"[PROJECT] ℹ️ Legal module SKIPPED — YMYL classifier: is_legal=False for '{topic}'")
     
     # ================================================================
     # 🆕 v44.5: Medical Module - auto-detekcja i pobieranie publikacji
+    # 🔧 v50.3: GATE on YMYL classifier — same logic as Legal Module
     # ================================================================
-    if MEDICAL_MODULE_ENABLED and project_data.get("detected_category") != "prawo":
+    _ymyl_is_medical = data.get("is_medical", False)
+    if MEDICAL_MODULE_ENABLED and _ymyl_is_medical:
         try:
             project_data = enhance_project_with_medical(
                 project_data=project_data,
@@ -769,6 +778,8 @@ def create_project():
                 print(f"[PROJECT] 🏥 Medical module active: category=medycyna, {pubs_count} publications loaded")
         except Exception as e:
             print(f"[PROJECT] ⚠️ Medical module error: {e}")
+    elif MEDICAL_MODULE_ENABLED and not _ymyl_is_medical:
+        print(f"[PROJECT] ℹ️ Medical module SKIPPED — YMYL classifier: is_medical=False for '{topic}'")
     
     # ================================================================
     # 🆕 v36.2: ANTI-FRANKENSTEIN SYSTEM
@@ -2544,8 +2555,11 @@ def get_pre_batch_info(project_id):
                 entity_state=data.get("entity_state", {}),
                 style_fingerprint=data.get("style_fingerprint", {}),
                 is_ymyl=data.get("is_ymyl", False),
-                is_legal=data.get("is_legal", False) or data.get("detected_category") == "prawo",
-                is_medical=data.get("detected_category") == "medycyna",
+                # v50.3: Removed `or data.get("detected_category") == "prawo"` — 
+                # classifier is the single source of truth for YMYL flags.
+                # Previously Legal Module's auto-detection overrode classifier's NIE.
+                is_legal=data.get("is_legal", False),
+                is_medical=data.get("is_medical", False),
                 batch_plan=batch_plan,  # 🆕 v40.1: Przekaż batch_plan z h2_sections
                 phrase_hierarchy_data=phrase_hierarchy_data,  # 🆕 v43.0: Phrase Hierarchy
                 # 🆕 v44.5: YMYL instructions for GPT prompt
@@ -2694,8 +2708,9 @@ def get_pre_batch_info(project_id):
         "soft_cap_recommendations": soft_cap_data,
         
         # 🆕 v36.5: Legal context - przepisy prawne i instrukcje cytowania
+        # 🔧 v50.3: Defense-in-depth — also check is_legal from YMYL classifier
         "legal_context": {
-            "active": data.get("detected_category") == "prawo",
+            "active": data.get("is_legal", False) and data.get("detected_category") == "prawo",
             "detected_articles": data.get("detected_articles", []),
             "legal_instruction": data.get("legal_instruction", ""),
             "top_judgments": [
@@ -2710,11 +2725,12 @@ def get_pre_batch_info(project_id):
             "must_cite": len(data.get("detected_articles", [])) > 0,
             "citation_hint": f"Odwołaj się do: {', '.join(data.get('detected_articles', []))}" 
                 if data.get("detected_articles") else None
-        } if data.get("detected_category") == "prawo" else None,
+        } if data.get("is_legal", False) and data.get("detected_category") == "prawo" else None,
         
         # 🆕 v44.5: Medical context - publikacje naukowe i instrukcje cytowania
+        # 🔧 v50.3: Defense-in-depth — also check is_medical from YMYL classifier
         "medical_context": {
-            "active": data.get("detected_category") == "medycyna",
+            "active": data.get("is_medical", False) and data.get("detected_category") == "medycyna",
             "medical_instruction": data.get("medical_instruction", ""),
             "top_publications": [
                 {
@@ -2728,7 +2744,7 @@ def get_pre_batch_info(project_id):
             ],
             "must_cite": len(data.get("medical_publications", [])) > 0,
             "citation_hint": "Cytuj źródła naukowe w formacie: Autor i wsp. (rok), PMID:XXXXX"
-        } if data.get("detected_category") == "medycyna" else None,
+        } if data.get("is_medical", False) and data.get("detected_category") == "medycyna" else None,
         
         "gpt_prompt": gpt_prompt,
         
@@ -2835,9 +2851,12 @@ def approve_batch_with_review(project_id):
     current_batch = project_data.get("current_batch_num", 1)
     
     # 🆕 v44.5: YMYL citation check
+    # 🔧 v50.3: Also check is_legal/is_medical flags from classifier
     ymyl_warnings = []
     detected_category = project_data.get("detected_category", "inne")
-    if detected_category == "prawo":
+    _is_legal_flag = project_data.get("is_legal", False)
+    _is_medical_flag = project_data.get("is_medical", False)
+    if detected_category == "prawo" and _is_legal_flag:
         # Sprawdź czy batch zawiera cytowania prawne
         import re as _re
         legal_patterns = [
@@ -2852,7 +2871,7 @@ def approve_batch_with_review(project_id):
         if not has_citation:
             ymyl_warnings.append("⚖️ UWAGA: Batch nie zawiera cytowań prawnych! Artykuł prawny POWINIEN odwoływać się do przepisów.")
     
-    elif detected_category == "medycyna":
+    elif detected_category == "medycyna" and _is_medical_flag:
         # Sprawdź czy batch zawiera cytowania medyczne
         import re as _re
         medical_patterns = [
