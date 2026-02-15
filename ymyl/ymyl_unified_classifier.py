@@ -56,23 +56,42 @@ UNIFIED_PROMPT = """Jesteś ekspertem od klasyfikacji treści YMYL (Your Money o
 
 TEMAT ARTYKUŁU: "{topic}"
 
-ZADANIE: Sklasyfikuj temat i — jeśli jest YMYL — podaj KONKRETNE źródła do zacytowania.
+ZADANIE: Sklasyfikuj temat, określ INTENSYWNOŚĆ YMYL i — jeśli jest YMYL full — podaj KONKRETNE źródła.
 
 ═══ KATEGORIE ═══
-• "prawo" — Każdy temat dotyczący przepisów, kar, postępowań, praw, obowiązków, umów.
+• "prawo" — Temat GŁÓWNIE dotyczy przepisów prawnych. Czytelnik szuka PRZEDE WSZYSTKIM
+  porady prawnej, nie edukacyjnej/technicznej.
   Przykłady: jazda po alkoholu, alimenty, rozwód, mandat, eksmisja, spadek, umowa o pracę,
-  zakup mieszkania (aspekt prawny), konfiskata, wykroczenie, przestępstwo, odszkodowanie.
+  odszkodowanie, konfiskata, wykroczenie, przestępstwo.
   
-• "zdrowie" — Każdy temat dotyczący chorób, leków, terapii, objawów, badań, diety zdrowotnej.
+• "zdrowie" — Temat GŁÓWNIE dotyczy chorób, leczenia, terapii. Czytelnik szuka porady zdrowotnej.
   Przykłady: cukrzyca, nadciśnienie, depresja, lek na X, objawy Y, dieta przy Z,
   szczepionki, rehabilitacja, ciąża, zespół Turnera, ADHD, migrena.
 
-• "finanse" — Każdy temat dotyczący pieniędzy, inwestycji, podatków, kredytów, ubezpieczeń.
+• "finanse" — Temat GŁÓWNIE dotyczy pieniędzy, inwestycji, podatków, kredytów.
   Przykłady: PIT-37, kredyt hipoteczny, OFE, kryptowaluty, emerytura, PPK, lokata.
 
-• "general" — Tematy nie-YMYL (hobby, kulinaria, ogrodnictwo, rozrywka, turystyka).
+• "general" — Tematy nie-YMYL (hobby, kulinaria, ogrodnictwo, rozrywka, turystyka)
+  ORAZ tematy edukacyjne/techniczne, które jedynie PERYFERYJNIE dotykają regulacji.
+  Przykłady: prąd elektryczny (fizyka), fotowoltaika (technika), kamica nerkowa (info, nie leczenie),
+  gotowanie (dieta, nie medycyna), budowa domu (technika, nie prawo budowlane).
 
-═══ DLA PRAWA — podaj konkretne przepisy ═══
+═══ YMYL INTENSITY (KRYTYCZNE!) ═══
+• "full" — Temat JEST o prawie/zdrowiu/finansach. Czytelnik szuka porady YMYL.
+  Test: Czy błąd w artykule może komuś zaszkodzić finansowo/zdrowotnie/prawnie?
+  Przykłady: "jazda po alkoholu" → full, "rozwód" → full, "cukrzyca leczenie" → full
+  
+• "light" — Temat DOTYKA regulacji, ale jest przede wszystkim edukacyjny/techniczny.
+  Czytelnik nie szuka porady prawnej/medycznej — szuka wiedzy ogólnej.
+  Przykłady: "prąd" → light (fizyka, nie prawo energetyczne), 
+  "fotowoltaika" → light (technika + dotacje), "kalorie" → light (dieta, nie medycyna)
+  
+• "none" — Zero powiązań z YMYL.
+
+KLUCZOWA ZASADA: Jeśli czytelnik wpisuje temat w Google, czy szuka PRZEDE WSZYSTKIM
+porady prawnej/medycznej/finansowej? Jeśli NIE → "general" + intensity "light" lub "none".
+
+═══ DLA PRAWA (TYLKO jeśli intensity=full!) — podaj konkretne przepisy ═══
 Zidentyfikuj 2-5 artykułów ustaw, które są PODSTAWĄ PRAWNĄ tematu.
 Używaj skrótów: k.c., k.r.o., k.p.c., k.k., k.p., k.w., k.s.h.
 Pełne nazwy ustaw szczególnych (np. "Ustawa prawo o ruchu drogowym z dnia 20.06.1997").
@@ -92,10 +111,11 @@ Zidentyfikuj:
 
 ═══ FORMAT ODPOWIEDZI — TYLKO JSON ═══
 
-Jeśli PRAWO:
+Jeśli PRAWO (intensity=full):
 {{
   "category": "prawo",
   "confidence": 0.95,
+  "ymyl_intensity": "full",
   "reasoning": "Krótkie uzasadnienie",
   "legal": {{
     "articles": ["art. 178a § 1 k.k.", "art. 87 § 1 k.w."],
@@ -105,10 +125,11 @@ Jeśli PRAWO:
   }}
 }}
 
-Jeśli ZDROWIE:
+Jeśli ZDROWIE (intensity=full):
 {{
   "category": "zdrowie",
   "confidence": 0.90,
+  "ymyl_intensity": "full",
   "reasoning": "Krótkie uzasadnienie",
   "medical": {{
     "condition": "Cukrzyca typu 2",
@@ -122,10 +143,11 @@ Jeśli ZDROWIE:
   }}
 }}
 
-Jeśli FINANSE:
+Jeśli FINANSE (intensity=full):
 {{
   "category": "finanse",
   "confidence": 0.85,
+  "ymyl_intensity": "full",
   "reasoning": "Krótkie uzasadnienie",
   "finance": {{
     "regulations": ["Ustawa o podatku dochodowym od osób fizycznych"],
@@ -135,11 +157,13 @@ Jeśli FINANSE:
   }}
 }}
 
-Jeśli GENERAL:
+Jeśli GENERAL (lub tematy edukacyjne peryferyjnie dotykające YMYL):
 {{
   "category": "general",
   "confidence": 0.80,
-  "reasoning": "Krótkie uzasadnienie"
+  "ymyl_intensity": "light" lub "none",
+  "reasoning": "Krótkie uzasadnienie",
+  "light_ymyl_note": "Opcjonalna notatka jeśli intensity=light, np. 'Temat dotyka regulacji energetycznych ale jest przede wszystkim fizyczny/techniczny'"
 }}"""
 
 
@@ -222,7 +246,16 @@ def detect_and_enrich(
             category = "general"
         
         confidence = max(0.0, min(1.0, float(result.get("confidence", 0.5))))
-        is_ymyl = category != "general" and confidence >= 0.5
+        ymyl_intensity = result.get("ymyl_intensity", "none")
+        
+        # v50: Only full intensity triggers YMYL pipeline
+        is_ymyl = category != "general" and confidence >= 0.5 and ymyl_intensity == "full"
+        
+        # For "general" category with "light" intensity — pass note, but NOT legal pipeline
+        light_note = ""
+        if ymyl_intensity == "light":
+            light_note = result.get("light_ymyl_note", "")
+            is_ymyl = False  # Don't activate legal/medical pipeline
         
         output = {
             "category": category,
@@ -231,6 +264,8 @@ def detect_and_enrich(
             "is_medical": category == "zdrowie" and is_ymyl,
             "is_finance": category == "finanse" and is_ymyl,
             "confidence": round(confidence, 2),
+            "ymyl_intensity": ymyl_intensity,
+            "light_ymyl_note": light_note,
             "reasoning": result.get("reasoning", ""),
             "detection_method": "claude_sonnet_unified",
         }
@@ -243,7 +278,7 @@ def detect_and_enrich(
         elif category == "finanse" and "finance" in result:
             output["finance"] = result["finance"]
         
-        print(f"[YMYL_UNIFIED] ✅ '{main_keyword}' → {category} ({confidence}) "
+        print(f"[YMYL_UNIFIED] ✅ '{main_keyword}' → {category} ({confidence}, intensity={ymyl_intensity}) "
               f"| {result.get('reasoning', '')[:60]}")
         
         if category == "prawo" and "legal" in result:
