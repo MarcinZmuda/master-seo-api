@@ -1308,9 +1308,11 @@ def _generate_gpt_prompt_section(
     if batch_type not in ["INTRO", "FAQ"] and batch_num > 1:
         lines.append("💬 ODDECH W TEKŚCIE (anty-ściana-informacji):")
         lines.append("   • MIĘDZY akapitami — 1 krótkie zdanie łączące (bridge)")
-        lines.append("     Np.: \"Jak to wygląda w praktyce?\" / \"Co to oznacza?\"")
+        lines.append("     Bridge to zdanie przejściowe, NIE pytanie retoryczne!")
+        lines.append("     ❌ 'Jak to wygląda w praktyce?' ❌ 'Co to oznacza?' ❌ 'Czy zawsze?'")
+        lines.append("     ✅ 'To prowadzi do kolejnego aspektu.' ✅ 'Z tym wiąże się...' ✅ 'Wynika z tego...'")
         lines.append("   • Na KOŃCU sekcji H2 — zdanie przejściowe do następnej")
-        lines.append("   • Co 3-4 akapity — pytanie retoryczne lub podsumowanie")
+        lines.append("   • MAX 1 pytanie retoryczne w CAŁYM batchu (nie więcej!)")
         lines.append("   • UNIKAJ 4+ akapitów z rzędu bez żadnego 'oddechu'")
         lines.append("")
         lines.append("   ❌ Akapit. Akapit. Akapit. Akapit. (ściana tekstu)")
