@@ -71,10 +71,12 @@ export_routes = Blueprint("export_routes", __name__)
 
 # Claude config
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+# v50.5: Configurable editorial model via env var
+EDITORIAL_MODEL = os.getenv("EDITORIAL_MODEL", "claude-sonnet-4-5-20250929")
 claude_client = None
 if ANTHROPIC_API_KEY:
     claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    print("[EXPORT] ✅ Claude API configured")
+    print(f"[EXPORT] ✅ Claude API configured (editorial model: {EDITORIAL_MODEL})")
 else:
     print("[EXPORT] ⚠️ ANTHROPIC_API_KEY not set")
 
@@ -537,17 +539,39 @@ def editorial_review(project_id):
     if unused_basic or unused_extended:
         unused_keywords_section = "\n=== ⚠️ NIEWYKORZYSTANE FRAZY SEO ===\n"
         if unused_basic:
-            unused_keywords_section += f"BASIC: {', '.join(unused_basic[:15])}\n"
+            unused_keywords_section += f"BASIC (MUSZĄ być w tekście): {', '.join(unused_basic[:15])}\n"
         if unused_extended:
-            unused_keywords_section += f"EXTENDED: {', '.join(unused_extended[:15])}\n"
+            unused_keywords_section += f"EXTENDED (wpleć jeśli pasują): {', '.join(unused_extended[:15])}\n"
+    
+    # v50.5: Overused keywords (stuffing) from Firebase
+    overused_keywords = []
+    for rid, meta in keywords_state.items():
+        kw = meta.get("keyword", "")
+        kw_type = meta.get("type", "BASIC").upper()
+        actual = meta.get("actual_uses", 0)
+        target_max = meta.get("target_max", 999)
+        if actual > target_max and kw:
+            overused_keywords.append({
+                "keyword": kw,
+                "actual": actual,
+                "max": target_max,
+                "excess": actual - target_max
+            })
+    
+    if overused_keywords:
+        overused_section = "\n=== 🔴 FRAZY NADUŻYTE (STUFFING — zmniejsz!) ===\n"
+        for ow in sorted(overused_keywords, key=lambda x: -x["excess"])[:10]:
+            overused_section += f"  - '{ow['keyword']}': {ow['actual']}× (max: {ow['max']}, usuń {ow['excess']}×)\n"
+        overused_section += "→ Zastąp nadmiarowe wystąpienia synonimami lub zaimkami.\n"
+        unused_keywords_section += overused_section
     
     # ================================================================
-    # 🆕 v45.1: SEMANTIC COVERAGE COMPLETENESS
+    # 🆕 v45.1 + v50.5: SEMANTIC COVERAGE + ENTITY PLACEMENT
     # ================================================================
     coverage_section = ""
     s1_data = project_data.get("s1_data", {})
     
-    # Check entity coverage
+    # Check entity coverage (from S1 entities)
     entity_seo = s1_data.get("entity_seo", {})
     all_entities = [e.get("name", "") for e in entity_seo.get("entities", []) if e.get("name")]
     article_lower = full_text.lower() if full_text else ""
@@ -555,6 +579,29 @@ def editorial_review(project_id):
     missing_entities = [e for e in all_entities if e.lower() not in article_lower]
     covered_entities = [e for e in all_entities if e.lower() in article_lower]
     entity_coverage_pct = (len(covered_entities) / len(all_entities) * 100) if all_entities else 100
+    
+    # v50.5: Concept entities (topical generator) — these are the KEY entities
+    concept_entities = []
+    for tc in entity_seo.get("topical_coverage", []):
+        if isinstance(tc, dict):
+            name = tc.get("entity", tc.get("name", ""))
+            if name:
+                concept_entities.append(name)
+    
+    # v50.5: Must-cover concepts from project data
+    must_cover = project_data.get("must_cover_concepts", [])
+    if must_cover:
+        must_names = []
+        for mc in must_cover:
+            if isinstance(mc, dict):
+                must_names.append(mc.get("text", mc.get("name", "")))
+            elif isinstance(mc, str):
+                must_names.append(mc)
+        if must_names:
+            concept_entities = must_names
+    
+    # Check which concept entities are missing from article
+    missing_concepts = [e for e in concept_entities if e.lower() not in article_lower]
     
     # Check content gap coverage
     content_gaps = s1_data.get("content_gaps", {})
@@ -566,22 +613,37 @@ def editorial_review(project_id):
             gap_topics.append(gap)
     
     uncovered_gaps = []
-    for topic in gap_topics:
-        topic_words = [w for w in topic.lower().split() if len(w) > 3]
+    for gtopic in gap_topics:
+        topic_words = [w for w in gtopic.lower().split() if len(w) > 3]
         if topic_words:
             found = sum(1 for w in topic_words if w in article_lower)
             if found / len(topic_words) < 0.4:
-                uncovered_gaps.append(topic)
+                uncovered_gaps.append(gtopic)
     
-    if missing_entities or uncovered_gaps:
-        coverage_section = "\n=== 📊 POKRYCIE TEMATYCZNE (Semantic Coverage) ===\n"
-        coverage_section += f"Encje z S1: {len(covered_entities)}/{len(all_entities)} pokryte ({entity_coverage_pct:.0f}%)\n"
-        if missing_entities[:10]:
-            coverage_section += f"BRAKUJĄCE ENCJE: {', '.join(missing_entities[:10])}\n"
-            coverage_section += "→ Wpleć brakujące encje w tekst lub zasugeruj w luki_tresciowe!\n"
+    if missing_entities or uncovered_gaps or missing_concepts or concept_entities:
+        coverage_section = "\n=== 📊 POKRYCIE ENCJI I TEMATÓW ===\n"
+        
+        if concept_entities:
+            coverage_section += f"\nENCJE TEMATYCZNE (MUST — muszą być w artykule):\n"
+            for ce in concept_entities[:12]:
+                present = "✅" if ce.lower() in article_lower else "❌ BRAK"
+                coverage_section += f"  {present} {ce}\n"
+            coverage_section += (
+                "\n→ Encje oznaczone ❌ MUSZĄ pojawić się w tekście.\n"
+                "→ Wpleć je naturalnie w istniejące zdania — NIE twórz nowych akapitów.\n"
+                "→ Encje to POJĘCIA do opisania, NIE źródła do cytowania.\n"
+                "→ ❌ NIE pisz: 'według [encji]...', '[encja] podaje...'\n"
+                "→ ✅ PISZ: 'W kontekście [encji] warto zauważyć, że...'\n"
+            )
+        
+        if missing_entities and not concept_entities:
+            coverage_section += f"\nEncje z S1: {len(covered_entities)}/{len(all_entities)} pokryte ({entity_coverage_pct:.0f}%)\n"
+            if missing_entities[:10]:
+                coverage_section += f"BRAKUJĄCE ENCJE: {', '.join(missing_entities[:10])}\n"
+        
         if uncovered_gaps[:5]:
             coverage_section += f"\nNIEPOKRYTE TEMATY (Information Gain): {', '.join(uncovered_gaps[:5])}\n"
-            coverage_section += "→ Te tematy NIE SĄ pokryte przez konkurencję — dodanie ich to przewaga!\n"
+            coverage_section += "→ Dodanie tych tematów daje przewagę nad konkurencją.\n"
     
     # 🆕 v44.5: YMYL context for editorial review
     detected_category = project_data.get("detected_category", "inne")
@@ -627,7 +689,30 @@ Dostajesz artykuł pt. "{topic}" ({word_count} słów). Napisz PEŁNĄ RECENZJĘ
 {coverage_section}
 
 === NADRZĘDNA ZASADA ===
-🔴 ROZBUDOWUJ treść, NIE USUWAJ. Każda Twoja sugestia powinna prowadzić do ROZWINIĘCIA tekstu, nie skrócenia go.
+🔴 POPRAWIAJ tekst, NIE PRZEPISUJ go. Zachowaj oryginalny styl, ton i strukturę.
+Każda Twoja sugestia powinna prowadzić do PUNKTOWEJ POPRAWY, nie do przepisania akapitu.
+
+=== CZEGO SZUKAĆ (KRYTYCZNE) ===
+
+🚫 ANTY-FILLER: Znajdź zdania, które nie dodają żadnej informacji:
+  - Truizmy: „Przewodnik elektryczny przewodzi prąd." — to nic nie wnosi
+  - Puste przejścia: „To prowadzi do kolejnego aspektu." — usuń lub zamień na treść
+  - Banały: „Warto zauważyć, że temat jest ważny." — zamień na konkret
+
+🚫 ANTY-HALUCYNACJA: Znajdź wymyślone dane:
+  - Wymyślone statystyki: „Według GUS w 2022 roku doszło do 300 wypadków..."
+  - Wymyślone rozporządzenia: „Rozporządzenie Ministra X z dnia Y..."
+  - Wymyślone ceny/daty: „od 1 stycznia 2026 stawka wynosi..."
+  → Jeśli znajdziesz — zaznacz jako HALUCYNACJA w errors_to_fix
+
+🚫 ENCJE JAKO ŹRÓDŁA: Znajdź zdania w stylu:
+  - „Wikipedia podaje, że..." — max 1× w artykule
+  - „Według [nazwy encji]..." — encje to pojęcia, nie źródła
+  - „[cokolwiek] potwierdza / podaje / przywołuje..."
+  → Zamień na bezpośrednie stwierdzenie faktu
+
+📊 ENCJE TEMATYCZNE: Sprawdź czy encje z sekcji POKRYCIE ENCJI są w tekście.
+  Brakujące encje wpleć w istniejące zdania — NIE twórz nowych akapitów.
 
 === STRUKTURA RECENZJI (odpowiedz TYLKO JSON) ===
 
@@ -649,30 +734,30 @@ Dostajesz artykuł pt. "{topic}" ({word_count} słów). Napisz PEŁNĄ RECENZJĘ
         "sekcja": "<H2/H3 którego dotyczy>",
         "uwaga": "<co jest nie tak merytorycznie>",
         "cytat": "<fragment tekstu — min 10 słów>",
-        "sugestia": "<jak ROZBUDOWAĆ ten fragment — dodaj co konkretnie dopisać>"
+        "sugestia": "<jak poprawić — konkretnie>"
       }}
     ],
     
     "styl_i_jezyk": [
       {{
-        "problem": "powtórzenie|niezręczność|fraza_AI|kolokacja|strona_bierna|monotonia",
+        "problem": "powtórzenie|niezręczność|fraza_AI|kolokacja|strona_bierna|monotonia|filler|truizm",
         "cytat": "<fragment z tekstu>",
-        "sugestia": "<jak poprawić — rozwiń, nie skracaj>"
+        "sugestia": "<jak poprawić>"
       }}
     ],
     
     "struktura_i_narracja": [
       {{
-        "uwaga": "<problem ze strukturą: brak przejścia, nierówne proporcje sekcji, brak podsumowania, luka logiczna>",
+        "uwaga": "<problem ze strukturą>",
         "gdzie": "<między którymi sekcjami / w której sekcji>",
-        "sugestia": "<co DOPISAĆ żeby naprawić>"
+        "sugestia": "<co zmienić>"
       }}
     ],
     
     "luki_tresciowe": [
       {{
         "brakujacy_temat": "<czego czytelnik mógłby szukać, a tekst tego nie pokrywa>",
-        "gdzie_dodac": "<w której sekcji najlepiej rozbudować>",
+        "gdzie_dodac": "<w której sekcji najlepiej>",
         "sugestia": "<2-3 zdania co konkretnie dopisać>"
       }}
     ],
@@ -682,16 +767,24 @@ Dostajesz artykuł pt. "{topic}" ({word_count} słów). Napisz PEŁNĄ RECENZJĘ
         "cytat": "<fragment z wymyśloną statystyką/datą/źródłem>",
         "dlaczego_falsz": "<krótkie wyjaśnienie>"
       }}
+    ],
+
+    "brakujace_encje": [
+      {{
+        "encja": "<nazwa encji brakującej w tekście>",
+        "gdzie_wplesc": "<w którym zdaniu/akapicie>",
+        "jak": "<konkretna sugestia wplecenia>"
+      }}
     ]
   }},
 
   "errors_to_fix": [
     {{
-      "type": "HALUCYNACJA|TERMINOLOGIA|FRAZA_AI|KOLOKACJA|STYL|ROZBUDUJ",
+      "type": "HALUCYNACJA|FILLER|ENCJA_JAKO_ZRODLO|TERMINOLOGIA|FRAZA_AI|KOLOKACJA|STYL|BRAK_ENCJI",
       "priority": <1-3 gdzie 1=krytyczne>,
       "original": "<cytat z tekstu — min 10 słów>",
-      "replacement": "<poprawka — DŁUŻSZA lub RÓWNA oryginałowi>",
-      "action": "ROZBUDUJ|POPRAW|USUŃ_HALUCYNACJĘ"
+      "replacement": "<poprawka — ZACHOWAJ długość oryginału>",
+      "action": "POPRAW|USUŃ_HALUCYNACJĘ|WPLEĆ_ENCJĘ"
     }}
   ],
 
@@ -701,12 +794,13 @@ Dostajesz artykuł pt. "{topic}" ({word_count} słów). Napisz PEŁNĄ RECENZJĘ
 }}
 
 === WSKAZÓWKI ===
-- W "merytoryka" szukaj: brak źródeł, nieprecyzyjne twierdzenia, nadmierne uproszczenia, luki w argumentacji
-- W "styl_i_jezyk" szukaj: powtórzenia słów w sąsiednich zdaniach, frazy AI ("warto zauważyć", "kluczowym elementem"), monotonny rytm zdań
-- W "struktura_i_narracja" szukaj: sekcje za krótkie (<80 słów), brak płynnego przejścia, skok tematyczny
-- W "luki_tresciowe" szukaj: pytania które czytelnik mógłby mieć, a tekst na nie nie odpowiada
-- W "halucynacje" szukaj: konkretne liczby, daty, nazwy badań — czy brzmią wiarygodnie?
-- Każda sugestia powinna mówić CO DOPISAĆ, nie co usunąć
+- W "merytoryka" szukaj: brak źródeł, nieprecyzyjne twierdzenia, nadmierne uproszczenia
+- W "styl_i_jezyk" szukaj: truizmy, filler, frazy AI ("warto zauważyć", "kluczowym elementem"), puste przejścia
+- W "halucynacje" szukaj: konkretne liczby, daty, nazwy badań, rozporządzenia — czy brzmią wiarygodnie?
+- W "brakujace_encje" szukaj: encje z sekcji POKRYCIE ENCJI oznaczone ❌
+- Każda poprawka w errors_to_fix musi mieć DOKŁADNY cytat z tekstu (min 10 słów)
+- REPLACEMENT nie może być krótszy niż ORIGINAL
+- NIE przepisuj całych akapitów — poprawiaj punktowo
 
 === ARTYKUŁ ({word_count} słów) ===
 
@@ -715,7 +809,7 @@ Dostajesz artykuł pt. "{topic}" ({word_count} słów). Napisz PEŁNĄ RECENZJĘ
             print(f"[EDITORIAL_REVIEW] ========== CALL 1: RECENZJA REDAKTORSKA ==========")
             
             response1 = claude_client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model=EDITORIAL_MODEL,
                 max_tokens=6000,
                 messages=[{"role": "user", "content": analysis_prompt}]
             )
@@ -748,36 +842,40 @@ Dostajesz artykuł pt. "{topic}" ({word_count} słów). Napisz PEŁNĄ RECENZJĘ
             
             diff_prompt = f"""Przeanalizuj artykuł pt. "{topic}" i zwróć TYLKO ZMIANY w formacie diff.
 
-🔴 NADRZĘDNA ZASADA: ROZBUDOWUJ, NIE USUWAJ!
-Artykuł ma {word_count} słów. Po Twoich zmianach musi mieć CO NAJMNIEJ tyle samo.
-Każda zmiana powinna ROZSZERZAĆ treść — dodawać szczegóły, kontekst, przykłady.
+🔴 NADRZĘDNA ZASADA: POPRAWIAJ, NIE PRZEPISUJ!
+Artykuł ma {word_count} słów. Zachowaj oryginalny styl, ton i strukturę.
+Zmieniaj TYLKO to, co jest błędne lub wymaga poprawy. Reszta musi zostać nietknięta.
 
 ⛔ KRYTYCZNE ZASADY:
 - Zwróć MAX 15 zmian (tylko najważniejsze!)
-- NIE przepisuj całego artykułu
+- NIE przepisuj całego artykułu — to KOREKTA, nie rewrite
 - Krótkie zdania (2-5 słów) są CELOWE — NIE łącz ich!
-- Zachowaj styl i rytm tekstu
-- Cytat w ZNAJDŹ musi być DOKŁADNY (min 10 słów dla kontekstu)
-- ZAMIEŃ musi być DŁUŻSZY lub RÓWNY co ZNAJDŹ (nigdy krótszy!)
-- Jedyny wyjątek od zakazu usuwania: halucynacje (zmyślone dane/statystyki)
+- Zachowaj styl i rytm tekstu — każda zmiana musi pasować do kontekstu
+- Cytat w ZNAJDŹ musi być DOKŁADNY (min 10 słów, copy-paste z artykułu)
+- ZAMIEŃ musi mieć PODOBNĄ długość do ZNAJDŹ (±20%)
+- Jedyny wyjątek: halucynacje (zmyślone dane) — te USUŃ
 
-=== JAK ROZBUDOWYWAĆ ===
-- Dodaj drugą część zdania po przecinku/myślniku z dodatkowym kontekstem
-- Rozwiń ogólnik o konkretny przykład lub dane
-- Wpleć brakującą frazę SEO jako naturalne dopowiedzenie
-- Zamień pustą frazę AI na treść merytoryczną (nie usuwaj — zamień na coś wartościowego)
+=== PRIORYTET ZMIAN (od najważniejszych) ===
+1. 🔴 HALUCYNACJE — wymyślone statystyki, rozporządzenia, daty → USUŃ lub zamień na pewne fakty
+2. 🔴 FILLER/TRUIZMY — zdania bez informacji ("To prowadzi do...", "Warto zauważyć...") → zamień na treść merytoryczną
+3. 🔴 ENCJA JAKO ŹRÓDŁO — "Wikipedia podaje...", "Według [encji]..." → zamień na bezpośrednie stwierdzenie
+4. 🟡 BRAKUJĄCE ENCJE — wpleć brakujące encje tematyczne w istniejące zdania
+5. 🟡 BRAKUJĄCE FRAZY SEO — wpleć nieużyte frazy naturalnie w tekst
+6. 🟢 STYL — popraw frazy AI, nienaturalne kolokacje, powtórzenia
 
 === BŁĘDY DO POPRAWY ===
-{json.dumps(errors_list[:10], ensure_ascii=False, indent=2) if errors_list else "Brak krytycznych błędów — rozbuduj słabsze fragmenty i wpleć brakujące frazy."}
+{json.dumps(errors_list[:10], ensure_ascii=False, indent=2) if errors_list else "Brak krytycznych błędów."}
 
-=== FRAZY DO WPLECENIA (rozbudowując istniejące zdania!) ===
+=== FRAZY DO WPLECENIA (w istniejące zdania!) ===
 {', '.join(keywords_to_add[:10]) if keywords_to_add else "Wszystkie frazy są w tekście."}
+
+{coverage_section}
 
 === FORMAT ODPOWIEDZI ===
 
 [ZMIANA 1]
-ZNAJDŹ: "dokładny cytat z artykułu (min 10 słów dla kontekstu)"
-ZAMIEŃ: "rozbudowana wersja z zachowaniem stylu — DŁUŻSZA niż oryginał"
+ZNAJDŹ: "dokładny cytat z artykułu (min 10 słów, copy-paste)"
+ZAMIEŃ: "poprawiona wersja — zachowaj styl i podobną długość"
 POWÓD: krótkie wyjaśnienie (max 10 słów)
 
 [ZMIANA 2]
@@ -787,14 +885,14 @@ POWÓD: ...
 
 (kontynuuj do max 15 zmian)
 
-=== ARTYKUŁ DO ANALIZY ({word_count} słów — nie zmniejszaj!) ===
+=== ARTYKUŁ DO KOREKTY ({word_count} słów — zachowaj długość!) ===
 
 {full_text}"""
 
             print(f"[EDITORIAL_REVIEW] ========== CALL 2: DIFF-BASED CORRECTION ==========")
             
             response2 = claude_client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model=EDITORIAL_MODEL,
                 max_tokens=8000,
                 messages=[{"role": "user", "content": diff_prompt}]
             )
