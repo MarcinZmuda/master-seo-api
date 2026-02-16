@@ -64,7 +64,7 @@ if GEMINI_API_KEY:
 else:
     print("[FINAL_REVIEW] ⚠️ GEMINI_API_KEY not set")
 
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = os.getenv("FINAL_REVIEW_MODEL", "gemini-2.5-flash")
 
 # 🆕 v40.1: Tolerancja dla przekroczenia limitu
 # 🆕 v42.1: Różne tolerancje dla BASIC i EXTENDED
