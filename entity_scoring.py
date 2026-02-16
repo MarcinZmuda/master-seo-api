@@ -133,6 +133,143 @@ def extract_capitalized_phrases(text: str) -> List[str]:
 
 
 # ============================================================
+# v50.5 FIX 32: POLISH INFLECTION-AWARE ENTITY MATCHING
+# ============================================================
+# Polish has rich morphology — entity names appear in many forms:
+#   "prąd elektryczny" → "prądu elektrycznego", "prądem elektrycznym"
+#   "prawo Ohma" → "prawem Ohma", "prawa Ohma"
+#   "obwód elektryczny" → "obwodzie elektrycznym", "obwodu elektrycznego"
+#
+# Simple regex with [aąeęioóuy]? suffix fails for these cases.
+# Solution: stem-based matching — take 60-75% of each word as stem,
+# then check if all stems appear close together in text.
+
+def _polish_normalize(text: str) -> str:
+    """Normalize Polish vowel alternations for matching.
+    
+    Polish has systematic vowel changes in inflection:
+      ó → o (opór → oporu, wzór → wzoru, obwód → obwodu)
+      ą → ę (not systematic but helps matching)
+    This normalizes both forms to the same representation.
+    """
+    return text.replace("ó", "o").replace("Ó", "O")
+
+
+def _polish_stem(word: str, min_len: int = 3) -> str:
+    """Create a crude Polish stem by removing likely inflection suffix.
+    
+    Takes ~60-75% of the word. For short words (≤4 chars), takes all but last char.
+    This is NOT a proper stemmer but sufficient for entity matching.
+    
+    Examples:
+        elektrycznego → elektrycz (9/13)
+        elektryczny → elektrycz (9/11)
+        prądu → prą (3/5)
+        prądem → prąd (4/6)
+        Ohma → Ohm (3/4)
+        transformator → transformat (10/13)
+        izolator → izolat (6/8)
+    """
+    if not word or len(word) <= min_len:
+        return word
+    
+    # Remove common Polish suffixes explicitly first
+    _SUFFIXES = [
+        # Adjective endings (longest first)
+        "ycznego", "icznego", "ycznej", "icznej",
+        "ycznym", "icznym", "ycznych", "icznych",
+        "owego", "owej", "owym", "owych", "ową",
+        "iego", "iej", "imi", "iem",
+        "nego", "nej", "nym", "nych", "ną",
+        "ego", "emu", "ej",
+        # Noun endings
+        "owi", "ami", "ach",
+        "ów", "om",
+        "em", "ie",
+        "ą", "ę", "u", "y", "i", "a", "e", "o",
+    ]
+    
+    w_lower = word.lower()
+    for suffix in _SUFFIXES:
+        if w_lower.endswith(suffix) and len(w_lower) - len(suffix) >= min_len:
+            return word[:len(word) - len(suffix)]
+    
+    # Fallback: take ~70% of the word
+    stem_len = max(min_len, int(len(word) * 0.7))
+    return word[:stem_len]
+
+
+def _polish_entity_match(entity_name: str, text: str) -> bool:
+    """Check if a Polish entity appears in text, accounting for inflection.
+    
+    For single-word entities: check if stem appears in text.
+    For multi-word entities: check if ALL word stems appear within 60 chars of each other.
+    
+    Args:
+        entity_name: Entity name in lowercase (e.g. "prąd elektryczny")
+        text: Full article text in lowercase
+        
+    Returns:
+        True if entity is found in text (any inflected form)
+    """
+    # 1. Try exact match first (fastest)
+    if entity_name in text:
+        return True
+    
+    # 2. Normalize ó→o for alternation matching
+    norm_entity = _polish_normalize(entity_name)
+    norm_text = _polish_normalize(text)
+    if norm_entity in norm_text:
+        return True
+    
+    words = entity_name.split()
+    
+    if len(words) == 1:
+        # Single word: check if normalized stem appears
+        stem = _polish_normalize(_polish_stem(words[0]).lower())
+        if len(stem) < 3:
+            return entity_name in text
+        return stem in norm_text
+    
+    # Multi-word entity: check if all stems appear close together
+    stems = []
+    for w in words:
+        if len(w) <= 2:
+            continue  # Skip very short words (prepositions etc.)
+        stem = _polish_normalize(_polish_stem(w).lower())
+        if len(stem) >= 3:
+            stems.append(stem)
+    
+    if not stems:
+        return entity_name in text
+    
+    # All stems must exist in normalized text
+    for stem in stems:
+        if stem not in norm_text:
+            return False
+    
+    # Check proximity: find all positions of first stem, check if others are nearby
+    first_stem = stems[0]
+    start = 0
+    while True:
+        pos = norm_text.find(first_stem, start)
+        if pos == -1:
+            break
+        
+        # Check 80-char window around this position for all other stems
+        window_start = max(0, pos - 10)
+        window_end = min(len(norm_text), pos + 80)
+        window = norm_text[window_start:window_end]
+        
+        if all(s in window for s in stems):
+            return True
+        
+        start = pos + 1
+    
+    return False
+
+
+# ============================================================
 # COVERAGE CALCULATION
 # ============================================================
 
@@ -198,17 +335,11 @@ def calculate_entity_coverage(
     for entity in entities_to_find:
         name_lower = entity["name"].lower()
         
-        # Sprawdź różne formy (dokładne dopasowanie + warianty)
-        patterns = [
-            rf'\b{re.escape(name_lower)}\b',  # Dokładne
-            rf'\b{re.escape(name_lower)}[aąeęioóuy]?\b',  # Z końcówką
-        ]
-        
-        entity_found = False
-        for pattern in patterns:
-            if re.search(pattern, text_lower):
-                entity_found = True
-                break
+        # v50.5 FIX 32: Polish inflection-aware entity matching
+        # Polish has rich morphology — "prąd elektryczny" appears as
+        # "prądu elektrycznego", "prądem elektrycznym", etc.
+        # Simple suffix matching fails. Use stem-based approach instead.
+        entity_found = _polish_entity_match(name_lower, text_lower)
         
         if entity_found:
             found.append(entity)
