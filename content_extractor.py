@@ -241,7 +241,14 @@ def _extract_with_beautifulsoup(html: str) -> Optional[str]:
     _garbage_classes = [
         "cookie", "sidebar", "widget", "advertisement", "ad-", "ads-",
         "social-share", "share-buttons", "related-posts", "breadcrumb",
-        "menu", "navigation", "comment", "popup", "modal", "newsletter"
+        "menu", "navigation", "comment", "popup", "modal", "newsletter",
+        # v50.5 FIX 22a: Wikipedia/MediaWiki sidebar & navigation elements
+        # Without these, language sidebar (Asturianu, Azərbaycanca, Afrikaans...)
+        # and category links get extracted as article content and become entities.
+        "interlanguage", "mw-panel", "mw-portlet", "vector-menu",
+        "catlinks", "mw-indicators", "sistersitebox", "reflist",
+        "references", "toc", "portal", "navbox", "infobox",
+        "mw-editsection", "mw-jump-link", "noprint",
     ]
     for cls in _garbage_classes:
         for tag in soup.find_all(class_=re.compile(cls, re.IGNORECASE)):
@@ -376,6 +383,105 @@ DEFAULT_USER_AGENT = (
 )
 
 
+# ================================================================
+# v50.5 FIX 22b: WIKIPEDIA API — clean text without scraping
+# ================================================================
+# Wikipedia provides free API that returns PURE TEXT without any
+# HTML, sidebar, navigation, language links, or CSS artifacts.
+# This eliminates the root cause of "Asturianu Azərbaycanca" etc.
+
+_WIKI_URL_PATTERN = re.compile(r'https?://([a-z]{2,3})\.wikipedia\.org/wiki/(.+)')
+
+def _extract_wikipedia_api(url: str, timeout: int = 10) -> Optional[Dict]:
+    """Extract clean content from Wikipedia using TextExtracts API.
+    
+    Uses MediaWiki API prop=extracts with explaintext=1 to get pure text.
+    No HTML, no sidebar, no language links, no CSS.
+    
+    Returns same format as scrape_and_extract() or None on failure.
+    """
+    match = _WIKI_URL_PATTERN.match(url)
+    if not match:
+        return None
+    
+    lang = match.group(1)  # e.g. "pl"
+    page_title = match.group(2)  # e.g. "Prąd_elektryczny"
+    
+    # Use TextExtracts API for full plain text
+    api_url = f"https://{lang}.wikipedia.org/w/api.php"
+    params = {
+        "action": "query",
+        "titles": page_title.replace("_", " "),
+        "prop": "extracts|revisions",
+        "exintro": "0",          # Full article, not just intro
+        "explaintext": "1",      # Plain text, no HTML
+        "exsectionformat": "plain",
+        "rvprop": "content",
+        "rvslots": "main",
+        "format": "json",
+        "formatversion": "2",
+    }
+    
+    try:
+        print(f"[EXTRACTOR] 📖 Wikipedia API: {lang}.wikipedia.org → {page_title}")
+        resp = requests.get(api_url, params=params, timeout=timeout,
+                           headers={"User-Agent": "BrajenSEO/1.0 (content analysis)"})
+        
+        if resp.status_code != 200:
+            print(f"[EXTRACTOR] ❌ Wikipedia API HTTP {resp.status_code}")
+            return None
+        
+        data = resp.json()
+        pages = data.get("query", {}).get("pages", [])
+        if not pages:
+            return None
+        
+        page = pages[0]
+        if page.get("missing"):
+            print(f"[EXTRACTOR] ❌ Wikipedia page not found: {page_title}")
+            return None
+        
+        content = page.get("extract", "")
+        if not content or len(content) < 100:
+            print(f"[EXTRACTOR] ⚠️ Wikipedia extract too short ({len(content)} chars)")
+            return None
+        
+        # Extract H2 sections from content (marked by == Section == in wikitext)
+        h2_list = []
+        for line in content.split("\n"):
+            line = line.strip()
+            if line.startswith("== ") and line.endswith(" ==") and not line.startswith("=== "):
+                h2_text = line.strip("= ").strip()
+                if h2_text and len(h2_text) > 2:
+                    h2_list.append(h2_text)
+        
+        # Clean content: remove section markers
+        clean_content = re.sub(r'^={2,}\s*(.+?)\s*={2,}$', r'\1', content, flags=re.MULTILINE)
+        clean_content = re.sub(r'\n{3,}', '\n\n', clean_content)
+        
+        word_count = len(clean_content.split())
+        
+        print(f"[EXTRACTOR] ✅ Wikipedia API: {word_count} words, {len(h2_list)} H2s")
+        
+        return {
+            "url": url,
+            "title": page.get("title", page_title.replace("_", " ")),
+            "content": clean_content[:30000],
+            "h2_structure": h2_list[:15],
+            "h1": [page.get("title", "")],
+            "h3": [],
+            "word_count": word_count,
+            "source": "wikipedia_api",
+        }
+        
+    except requests.exceptions.Timeout:
+        print(f"[EXTRACTOR] ⏱️ Wikipedia API timeout")
+        return None
+    except Exception as e:
+        print(f"[EXTRACTOR] ❌ Wikipedia API error: {e}")
+        return None
+
+
 def scrape_and_extract(
     url: str,
     title: str = "",
@@ -398,6 +504,13 @@ def scrape_and_extract(
         "word_count": int,      # Liczba słów
     } or None jeśli ekstrakcja się nie powiodła
     """
+    # v50.5 FIX 22b: Use Wikipedia API for Wikipedia URLs (clean text, no sidebar)
+    if _WIKI_URL_PATTERN.match(url):
+        wiki_result = _extract_wikipedia_api(url, timeout=timeout)
+        if wiki_result:
+            return wiki_result
+        print(f"[EXTRACTOR] ⚠️ Wikipedia API failed, falling back to scraper: {url[:60]}")
+    
     # 1. Skip non-article URLs
     if should_skip_url(url):
         print(f"[EXTRACTOR] ⏭️ Skipping non-article URL: {url[:60]}")
