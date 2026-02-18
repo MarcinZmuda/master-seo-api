@@ -1062,7 +1062,7 @@ def create_article_plan_fast(
         
         # Zlicz BASIC i EXTENDED
         basic_count = sum(1 for kw, meta in keywords_state.items() 
-                        if meta.get("type", "BASIC").upper() in ["BASIC", "MAIN"] 
+                        if meta.get("type", "BASIC").upper() in ["BASIC", "MAIN", "ENTITY"] 
                         and kw in batch_keywords)
         extended_count = sum(1 for kw, meta in keywords_state.items() 
                            if meta.get("type", "BASIC").upper() == "EXTENDED" 
@@ -1168,8 +1168,8 @@ def _consolidate_keywords_for_fast(
         if kw_type == "MAIN":
             # Main keyword: 2 w każdym batchu
             per_batch = [2, 2, 2]
-        elif kw_type == "BASIC":
-            # BASIC: rozłóż target_min
+        elif kw_type in ("BASIC", "ENTITY"):
+            # BASIC/ENTITY: rozłóż target_min
             uses_per = max(1, target_min // total_batches)
             per_batch = [uses_per, uses_per, uses_per]
         else:

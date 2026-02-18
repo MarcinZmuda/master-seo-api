@@ -830,7 +830,7 @@ def validate_batch_with_structural_awareness(
         keyword = meta.get("keyword", "")
         kw_type = meta.get("type", "BASIC").upper()
         
-        if kw_type not in ["BASIC", "MAIN"]:
+        if kw_type not in ["BASIC", "MAIN", "ENTITY"]:
             continue
         
         target_max = meta.get("target_max", 999)
@@ -922,7 +922,7 @@ def validate_fast_mode(
         keyword = meta.get("keyword", "")
         kw_type = meta.get("type", "BASIC").upper()
         
-        if kw_type not in ["BASIC", "MAIN"]:
+        if kw_type not in ["BASIC", "MAIN", "ENTITY"]:
             continue
         
         target_max = meta.get("target_max", 999)

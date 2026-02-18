@@ -351,7 +351,7 @@ def rescan_keywords_after_editorial(project_id: str, corrected_article: str) -> 
             "extended": f"{extended_covered}/{extended_total} ({extended_pct}%)"
         },
         "missing_after_rescan": {
-            "basic": [c["keyword"] for c in changes if c["type"].upper() in ["BASIC", "MAIN"] and c["new"] == 0],
+            "basic": [c["keyword"] for c in changes if c["type"].upper() in ["BASIC", "MAIN", "ENTITY"] and c["new"] == 0],
             "extended": [c["keyword"] for c in changes if c["type"].upper() == "EXTENDED" and c["new"] == 0]
         }
     }

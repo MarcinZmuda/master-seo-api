@@ -453,7 +453,7 @@ class SEOExpert:
         basic_used = []
         
         for rid, meta in keywords_state.items():
-            if meta.get("type", "BASIC").upper() not in ["BASIC", "MAIN"]:
+            if meta.get("type", "BASIC").upper() not in ["BASIC", "MAIN", "ENTITY"]:
                 continue
             
             keyword = meta.get("keyword", "")

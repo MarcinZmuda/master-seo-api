@@ -90,7 +90,7 @@ def analyze_for_paa(project_id):
         if current == 0:
             if kw_type == "EXTENDED":
                 unused_extended.append(keyword)
-            elif kw_type in ["BASIC", "MAIN"]:
+            elif kw_type in ["BASIC", "MAIN", "ENTITY"]:
                 unused_basic.append(keyword)
         elif current < target_min:
             underused.append({

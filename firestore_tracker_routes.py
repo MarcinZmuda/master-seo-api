@@ -672,7 +672,7 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
             stuffing_warnings = []
             paragraphs = batch_text.split('\n\n')
             for rid, meta in keywords_state.items():
-                if meta.get("type", "BASIC").upper() not in ["BASIC", "MAIN"]:
+                if meta.get("type", "BASIC").upper() not in ["BASIC", "MAIN", "ENTITY"]:
                     continue
                 keyword = meta.get("keyword", "").lower()
                 if not keyword:
@@ -706,7 +706,7 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
             continue
         meta = keywords_state[rid]
         kw_type = meta.get("type", "BASIC").upper()
-        if kw_type not in ["BASIC", "MAIN"]:
+        if kw_type not in ["BASIC", "MAIN", "ENTITY"]:
             continue
         
         keyword = meta.get("keyword", "")
@@ -759,8 +759,8 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
     for rid, batch_count in batch_counts.items():
         meta = keywords_state[rid]
         
-        # Tylko BASIC i MAIN - EXTENDED pomijamy (mogą być przekroczone)
-        if meta.get("type", "BASIC").upper() not in ["BASIC", "MAIN"]:
+        # Tylko BASIC, MAIN i ENTITY - EXTENDED pomijamy (mogą być przekroczone)
+        if meta.get("type", "BASIC").upper() not in ["BASIC", "MAIN", "ENTITY"]:
             continue
         
         keyword = meta.get("keyword", "")
@@ -946,7 +946,7 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         keywords_to_check = [
             meta.get("keyword", "") 
             for meta in keywords_state.values() 
-            if meta.get("keyword") and meta.get("type", "BASIC").upper() in ["BASIC", "MAIN"]
+            if meta.get("keyword") and meta.get("type", "BASIC").upper() in ["BASIC", "MAIN", "ENTITY"]
         ][:15]  # Max 15 keywords
         
         if proximity_clusters or supporting_entities.get("all"):
@@ -2556,7 +2556,7 @@ def get_project_quality(project_id):
     # Frazy UNDER
     under_keywords = [
         meta.get("keyword") for rid, meta in keywords_state.items()
-        if meta.get("status") == "UNDER" and meta.get("type", "").upper() in ["BASIC", "MAIN"]
+        if meta.get("status") == "UNDER" and meta.get("type", "").upper() in ["BASIC", "MAIN", "ENTITY"]
     ]
     if under_keywords:
         recommendations.append({

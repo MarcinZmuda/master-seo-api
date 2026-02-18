@@ -188,13 +188,13 @@ def detect_missing_keywords(text, keywords_state):
                 print(f"[FINAL_REVIEW] ⚠️ '{keyword}': {actual}/{target_max} (tolerance {tolerance_percent}%) - within tolerance")
             elif actual == 0:
                 # WARNING: fraza brakuje - Claude uzupełni
-                if kw_type in ["BASIC", "MAIN"]:
+                if kw_type in ["BASIC", "MAIN", "ENTITY"]:
                     missing_basic.append(info)
                 else:
                     missing_extended.append(info)
             elif actual < target_min:
                 # OK: mogłoby być więcej
-                if kw_type in ["BASIC", "MAIN"]:
+                if kw_type in ["BASIC", "MAIN", "ENTITY"]:
                     underused_basic.append(info)
                 else:
                     underused_extended.append(info)

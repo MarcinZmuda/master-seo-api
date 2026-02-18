@@ -141,7 +141,7 @@ def _legacy_stuffing_check(batch_text: str, keywords_state: Dict) -> Dict[str, A
     paragraphs = batch_text.split('\n\n')
     
     for rid, meta in keywords_state.items():
-        if meta.get("type", "BASIC").upper() not in ["BASIC", "MAIN"]:
+        if meta.get("type", "BASIC").upper() not in ["BASIC", "MAIN", "ENTITY"]:
             continue
         
         keyword = meta.get("keyword", "").lower()

@@ -878,7 +878,7 @@ def create_project():
     doc_ref.set(project_data)
     
     # v27.2: Policz ile BASIC vs EXTENDED
-    basic_count = sum(1 for k in firestore_keywords.values() if k.get("type", "BASIC").upper() in ["BASIC", "MAIN"])
+    basic_count = sum(1 for k in firestore_keywords.values() if k.get("type", "BASIC").upper() in ["BASIC", "MAIN", "ENTITY"])
     extended_count = sum(1 for k in firestore_keywords.values() if k.get("type", "").upper() == "EXTENDED")
     total_keywords = basic_count + extended_count
     
