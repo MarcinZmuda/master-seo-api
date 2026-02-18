@@ -37,11 +37,7 @@ app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024  # 32 MB
 CORS(app)
 
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-try:
-    with open(os.path.join(os.path.dirname(__file__), "VERSION")) as _vf:
-        VERSION = f"v{_vf.read().strip()}"
-except FileNotFoundError:
-    VERSION = "v45.3.1"  # fallback
+VERSION = "v45.3.1"  # 🆕 AI Middleware, forced mode fix, Anti-Frankenstein enabled
 
 # ================================================================
 # 🆕 v32.4: Firestore persistence for projects
@@ -682,6 +678,91 @@ def s1_analysis_proxy():
             except Exception as e:
                 print(f"[S1_PROXY] ⚠️ Semantic enhancement hints failed: {e}")
         
+
+        # ================================================================
+        # COMPACT MODE: auto-detect ChatGPT → przycinamy response
+        # Custom GPT Actions limit ~8KB. Full response ~10-15KB.
+        # Kompaktujemy: usuwamy zduplikowane propagacje + pola nieużywane przez GPT.
+        # Cały result trafia do Firestore przez createProject — GPT nie traci danych.
+        # ================================================================
+        ua = request.headers.get("User-Agent", "")
+        is_chatgpt = "ChatGPT" in ua or "OpenAI" in ua
+        compact_param = request.args.get("compact", "").lower() == "true"
+
+        if is_chatgpt or compact_param:
+            try:
+                entity_seo_full = result.get("entity_seo", {})
+                hints = result.get("semantic_enhancement_hints", {})
+                serp = result.get("serp_analysis", {})
+                content_gaps = result.get("content_gaps", {})
+
+                compact = {
+                    "recommended_length": result.get("recommended_length"),
+                    "ngrams": [
+                        {"ngram": n.get("ngram",""), "weight": n.get("weight",0)}
+                        for n in (result.get("ngrams") or result.get("hybrid_ngrams") or [])[:20]
+                    ],
+                    "content_gaps": {
+                        "suggested_new_h2s": content_gaps.get("suggested_new_h2s", [])[:12],
+                        "subtopic_missing": content_gaps.get("subtopic_missing", [])[:8],
+                        "total_gaps": content_gaps.get("total_gaps", 0),
+                    },
+                    "causal_triplets": {
+                        "chains": (result.get("causal_triplets") or {}).get("chains", [])[:8],
+                    },
+                    "paa": [
+                        {"question": p.get("question","") if isinstance(p, dict) else str(p)}
+                        for p in (result.get("paa") or serp.get("paa_questions") or [])[:10]
+                    ],
+                    "entity_seo": {
+                        "entities": [
+                            {
+                                "name": e.get("text") or e.get("name",""),
+                                "type": e.get("type",""),
+                                "importance": round(e.get("importance",0), 2),
+                            }
+                            for e in sorted(
+                                entity_seo_full.get("entities", []),
+                                key=lambda x: x.get("importance", 0) if isinstance(x, dict) else 0,
+                                reverse=True
+                            )[:10] if isinstance(e, dict)
+                        ],
+                        "entity_relationships": entity_seo_full.get("entity_relationships", [])[:5],
+                        "must_mention_entities": entity_seo_full.get("must_mention_entities", [])[:5],
+                        "topical_coverage": [
+                            {"subtopic": t.get("subtopic",""), "priority": t.get("priority","")}
+                            for t in entity_seo_full.get("topical_coverage", [])[:8]
+                            if isinstance(t, dict)
+                        ],
+                    },
+                    "serp_analysis": {
+                        "featured_snippet": serp.get("featured_snippet"),
+                        "ai_overview": serp.get("ai_overview"),
+                        "paa_questions": serp.get("paa_questions", [])[:8],
+                        "related_searches": serp.get("related_searches", [])[:6],
+                        "competitor_h2_patterns": serp.get("competitor_h2_patterns", [])[:10],
+                        "search_intent": serp.get("search_intent") or result.get("search_intent"),
+                    },
+                    "semantic_enhancement_hints": {
+                        "critical_entities": hints.get("critical_entities", [])[:5],
+                        "high_entities": hints.get("high_entities", [])[:5],
+                        "must_topics": hints.get("must_topics", [])[:5],
+                        "must_cover_concepts": hints.get("must_cover_concepts", [])[:8],
+                        "concept_instruction": hints.get("concept_instruction", ""),
+                    },
+                    "semantic_keyphrases": (result.get("semantic_keyphrases") or [])[:8],
+                    "_compact": True,
+                }
+
+                import json as _json
+                compact_size = len(_json.dumps(compact, ensure_ascii=False))
+                full_size = len(_json.dumps(result, ensure_ascii=False))
+                print(f"[S1_PROXY] Compact mode: {compact_size} chars (was {full_size} chars)")
+                return jsonify(compact), 200
+
+            except Exception as e:
+                print(f"[S1_PROXY] Compact mode failed: {e}, returning full response")
+
         return jsonify(result), 200
         
     except requests.exceptions.Timeout:
