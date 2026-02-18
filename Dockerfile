@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     git \
     libffi-dev \
+    default-jre-headless \
     && rm -rf /var/lib/apt/lists/*
 
 # Kopiuj requirements i instaluj zależności
