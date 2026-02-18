@@ -83,8 +83,8 @@ def _safe_get_full_article(project_data):
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 # v50.5: Configurable editorial model via env var
 # v51: Changed default to alias (no snapshot) + added fallback chain
-EDITORIAL_MODEL = os.getenv("EDITORIAL_MODEL", "claude-sonnet-4-5")
-EDITORIAL_MODEL_FALLBACK = os.getenv("EDITORIAL_MODEL_FALLBACK", "claude-sonnet-4-6")
+EDITORIAL_MODEL = os.getenv("EDITORIAL_MODEL", "claude-sonnet-4-6")
+EDITORIAL_MODEL_FALLBACK = os.getenv("EDITORIAL_MODEL_FALLBACK", "claude-haiku-4-5-20251001")
 claude_client = None
 if ANTHROPIC_API_KEY:
     claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)

@@ -1,0 +1,74 @@
+# Master SEO API v33.0 - Dependencies
+# ================================================
+# 🆕 v33.0: Dodano synonym_service z dynamicznymi synonimami
+
+# Web Framework
+flask>=3.0.0
+flask-cors>=4.0.0
+gunicorn>=21.0.0
+
+# Firebase
+firebase-admin>=6.2.0
+google-cloud-firestore>=2.13.0
+google-cloud-storage>=2.14.0
+
+# NLP - Polski
+spacy>=3.7.0
+pl_core_news_md @ https://github.com/explosion/spacy-models/releases/download/pl_core_news_md-3.7.0/pl_core_news_md-3.7.0-py3-none-any.whl
+
+# 🆕 v32.0: AI Detection
+wordfreq>=3.0.0
+
+# Grammar Check - LanguageTool (v28.1)
+# UWAGA: Wymaga Java 8+ na serwerze!
+# W Render Build Command dodaj: apt-get update && apt-get install -y default-jre
+language-tool-python>=2.7.1
+
+# Claude Reviewer (v28.2) + 🆕 v33.0: Synonym LLM fallback
+anthropic>=0.40.0
+
+# Fuzzy matching
+rapidfuzz>=3.5.0
+
+# Text statistics (readability, SMOG index)
+textstat>=0.7.3
+
+# AI APIs
+google-generativeai>=0.3.0
+
+# Document generation
+python-docx>=1.1.0
+markdown>=3.5.0
+
+# Utilities
+python-dotenv>=1.0.0
+requests>=2.31.0
+
+# Rich console output
+rich>=13.0.0
+
+# ================================================
+# 🆕 v33.0: OPCJONALNE - Polish WordNet (jeśli chcesz lokalnie)
+# plwordnet>=0.1.0  # Wymaga pobrania plwordnet_4_2.xml (~350MB)
+# ================================================
+beautifulsoup4>=4.12.0
+
+# 🆕 v46.0: Clean content extraction (replaces regex scraper)
+trafilatura>=1.8.0
+
+# Medical Module
+beautifulsoup4>=4.11.0
+lxml>=4.9.0
+
+# ================================================
+# 🆕 v45.4: Semantic Analysis (optional — enables SEMANTIC_ENABLED)
+# Used in: semantic_matcher.py, seo_optimizer.py, text_analyzer.py, semantic_analyzer.py
+# NOTE: sentence-transformers pulls ~800MB model on first run
+sentence-transformers>=2.7.0
+scikit-learn>=1.4.0
+numpy>=1.26.0
+
+# 🆕 morfeusz2 (optional — Polish morphological analyzer)
+# Requires native C library: apt-get install -y morfeusz2 python3-morfeusz2
+# morfeusz2>=1.0.0
+# ================================================

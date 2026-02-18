@@ -656,7 +656,7 @@ def review_with_claude(text: str, ctx: Dict) -> ReviewResult:
         client = anthropic.Anthropic()
         
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
             max_tokens=4000,
             messages=[{"role": "user", "content": build_review_prompt(text, ctx)}]
         )
