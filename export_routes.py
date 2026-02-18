@@ -82,13 +82,37 @@ def _safe_get_full_article(project_data):
 # Claude config
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 # v50.5: Configurable editorial model via env var
-EDITORIAL_MODEL = os.getenv("EDITORIAL_MODEL", "claude-sonnet-4-5-20250929")
+# v51: Changed default to alias (no snapshot) + added fallback chain
+EDITORIAL_MODEL = os.getenv("EDITORIAL_MODEL", "claude-sonnet-4-5")
+EDITORIAL_MODEL_FALLBACK = os.getenv("EDITORIAL_MODEL_FALLBACK", "claude-sonnet-4-6")
 claude_client = None
 if ANTHROPIC_API_KEY:
     claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    print(f"[EXPORT] ✅ Claude API configured (editorial model: {EDITORIAL_MODEL})")
+    print(f"[EXPORT] ✅ Claude API configured (editorial model: {EDITORIAL_MODEL}, fallback: {EDITORIAL_MODEL_FALLBACK})")
 else:
     print("[EXPORT] ⚠️ ANTHROPIC_API_KEY not set")
+
+
+def _claude_call(prompt: str, max_tokens: int = 6000, label: str = "CALL") -> tuple:
+    """Call Claude with model fallback. Returns (response_text, model_used)."""
+    models_to_try = [EDITORIAL_MODEL, EDITORIAL_MODEL_FALLBACK]
+    for model in models_to_try:
+        try:
+            print(f"[EDITORIAL_REVIEW] {label}: trying model={model}")
+            resp = claude_client.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            text = resp.content[0].text.strip()
+            print(f"[EDITORIAL_REVIEW] {label}: ✅ model={model} → {len(text)} chars")
+            return text, model
+        except Exception as e:
+            err_str = str(e)
+            print(f"[EDITORIAL_REVIEW] {label}: ❌ model={model} → {err_str[:200]}")
+            if model == models_to_try[-1]:
+                raise  # re-raise if last model also fails
+    raise RuntimeError("All Claude models failed")
 
 # Fallback: Gemini (jeśli Claude niedostępny)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -827,13 +851,7 @@ Każda Twoja sugestia powinna prowadzić do PUNKTOWEJ POPRAWY, nie do przepisani
 
             print(f"[EDITORIAL_REVIEW] ========== CALL 1: RECENZJA REDAKTORSKA ==========")
             
-            response1 = claude_client.messages.create(
-                model=EDITORIAL_MODEL,
-                max_tokens=6000,
-                messages=[{"role": "user", "content": analysis_prompt}]
-            )
-            analysis_text = response1.content[0].text.strip()
-            ai_model = "claude"
+            analysis_text, ai_model = _claude_call(analysis_prompt, max_tokens=6000, label="CALL 1")
             
             # Parsuj JSON analizy
             try:
@@ -910,12 +928,7 @@ POWÓD: ...
 
             print(f"[EDITORIAL_REVIEW] ========== CALL 2: DIFF-BASED CORRECTION ==========")
             
-            response2 = claude_client.messages.create(
-                model=EDITORIAL_MODEL,
-                max_tokens=8000,
-                messages=[{"role": "user", "content": diff_prompt}]
-            )
-            diff_response = response2.content[0].text.strip()
+            diff_response, _ = _claude_call(diff_prompt, max_tokens=8000, label="CALL 2")
             
             # Parsuj diffy
             changes = parse_diff_response(diff_response)
