@@ -724,7 +724,9 @@ Ten artykuł dotyczy tematyki medycznej/zdrowotnej. Sprawdź SZCZEGÓLNIE:
             # ============================================================
             # WYWOŁANIE 1: RECENZJA REDAKTORSKA (v41.0)
             # ============================================================
-            analysis_prompt = f"""Jesteś REDAKTOREM NACZELNYM polskiego wydawnictwa specjalizującego się w treściach eksperckich.
+            analysis_prompt = f"""Jesteś redaktorem naczelnym specjalistycznych serwisów branżowych.
+Twoim standardem jest jakość redakcyjna mediów eksperckich — nie bloga, nie portalu generycznego.
+Nie jesteś copywriterem. Oceniasz tekst jak senior editor, który odrzuca słabe materiały.
 
 Dostajesz artykuł pt. "{topic}" ({word_count} słów). Napisz PEŁNĄ RECENZJĘ REDAKTORSKĄ.
 {unused_keywords_section}
@@ -736,32 +738,53 @@ Dostajesz artykuł pt. "{topic}" ({word_count} słów). Napisz PEŁNĄ RECENZJĘ
 Każda Twoja sugestia powinna prowadzić do PUNKTOWEJ POPRAWY, nie do przepisania akapitu.
 
 === OBOWIĄZKOWE KOREKTY JĘZYKOWE ===
-1. 🔡 WIELKA LITERA: Każde zdanie musi zaczynać się wielką literą. Znajdź i popraw wszystkie zdania zaczynające się od małej litery po kropce lub w nowym akapicie.
-2. 🔁 POWTÓRZENIA POCZĄTKÓW AKAPITÓW: Jeśli akapit zaczyna się od frazy głównego słowa kluczowego (np. "uchwyty i gałki do mebli" lub "jazda po alkoholu"), zmień początek akapitu na inne sformułowanie.
-3. 🔂 IDENTYCZNE ZDANIA: Jeśli to samo zdanie słowo w słowo pojawia się 2+ razy, usuń lub przepisz duplikaty.
-4. 🎯 ODMIANA: Jeśli encja/fraza jest w złym przypadku (np. "jak odróżnić gałka meblowa" zamiast "gałkę meblową"), popraw fleksję.
+1. 🔡 WIELKA LITERA: Każde zdanie musi zaczynać się wielką literą.
+2. 🔁 POWTÓRZENIA POCZĄTKÓW AKAPITÓW: Zmień jeśli akapit zaczyna się od frazy głównego słowa kluczowego.
+3. 🔂 IDENTYCZNE ZDANIA: Usuń lub przepisz zdania powtórzone słowo w słowo 2+ razy.
+4. 🎯 ODMIANA: Popraw encje/frazy w złym przypadku gramatycznym.
 
-=== CZEGO SZUKAĆ (KRYTYCZNE) ===
+=== CZEGO SZUKAĆ — STYL I JAKOŚĆ ===
 
-🚫 ANTY-FILLER: Znajdź zdania, które nie dodają żadnej informacji:
-  - Truizmy: „Przewodnik elektryczny przewodzi prąd." — to nic nie wnosi
-  - Puste przejścia: „To prowadzi do kolejnego aspektu." — usuń lub zamień na treść
-  - Banały: „Warto zauważyć, że temat jest ważny." — zamień na konkret
+🚫 DRAMATYZATORY — znajdź i oznacz zdania będące pustymi "pointami" lub "myślami":
+  Wzorzec: krótkie zdanie (1-5 słów) bez konkretnej informacji, służące "efektowi".
+  Przykłady do wyeliminowania:
+    ❌ "Granice są sztywne." / "Sąd patrzy. I słucha." / "I protokół."
+    ❌ "To nie jest sprawa na skróty." / "Liczy się uzasadnienie."
+    ❌ "W tle zostaje pytanie." / "Prawo jest bezwzględne."
+  Reguła: krótkie zdanie musi nieść konkretną informację (liczbę, fakt, datę).
+  ✅ OK: "Zakaz trwa od 3 do 15 lat." / "Próg to 0,5‰."
 
-🚫 ANTY-HALUCYNACJA: Znajdź wymyślone dane:
-  - Wymyślone statystyki: „Według GUS w 2022 roku doszło do 300 wypadków..."
-  - Wymyślone rozporządzenia: „Rozporządzenie Ministra X z dnia Y..."
-  - Wymyślone ceny/daty: „od 1 stycznia 2026 stawka wynosi..."
-  → Jeśli znajdziesz — zaznacz jako HALUCYNACJA w errors_to_fix
+🚫 ANTY-FILLER — zdania bez informacji:
+  - Truizmy: "Jazda po alkoholu to poważne przestępstwo." (oczywistość)
+  - Puste przejścia: "To prowadzi do kolejnego aspektu."
+  - Zapowiedzi: "Kolejna część artykułu wyjaśnia..."
+  - Banały: "Warto zauważyć, że temat jest ważny."
 
-🚫 ENCJE JAKO ŹRÓDŁA: Znajdź zdania w stylu:
-  - „Wikipedia podaje, że..." — max 1× w artykule
-  - „Według [nazwy encji]..." — encje to pojęcia, nie źródła
-  - „[cokolwiek] potwierdza / podaje / przywołuje..."
+🚫 FRAZY AI — lista zakazanych klisz:
+  "warto zauważyć", "należy podkreślić", "co istotne", "kluczowe jest",
+  "nie ulega wątpliwości", "warto pamiętać", "kluczowym aspektem",
+  "w dzisiejszych czasach", "podsumowując", "jak wspomniano wcześniej"
+
+🚫 ANTY-HALUCYNACJA — wymyślone dane:
+  - Wymyślone statystyki, rozporządzenia, daty, ceny
+  - Nieistniejące wyroki sądowe lub przepisy
+  → Zaznacz jako HALUCYNACJA w errors_to_fix
+
+🚫 WYROKI SĄDOWE (tylko dla YMYL prawo) — weryfikacja sygnatur:
+  Sygnatura zdradza typ sprawy:
+  • II K, III K, AKa, AKo = KARNE → pasuje do art. KK, KW
+  • I C, II C, ACa, ACo = CYWILNE → pasuje do art. KC, KRO
+  ❌ Wyrok cywilny (I C, II C) w artykule karnym = błąd merytoryczny
+  ❌ Wyrok karny (II K) w artykule cywilnym = błąd merytoryczny
+  → Zaznacz jako BŁĄD_WYROKU w errors_to_fix z sugestią usunięcia
+
+🚫 ENCJE JAKO ŹRÓDŁA:
+  - "Wikipedia podaje..." — max 1× w artykule
+  - "Według [nazwy encji]..." — encje to pojęcia, nie źródła
   → Zamień na bezpośrednie stwierdzenie faktu
 
-📊 ENCJE TEMATYCZNE: Sprawdź czy encje z sekcji POKRYCIE ENCJI są w tekście.
-  Brakujące encje wpleć w istniejące zdania — NIE twórz nowych akapitów.
+📊 ENCJE TEMATYCZNE: Wpleć brakujące encje z sekcji POKRYCIE ENCJI
+  w istniejące zdania — NIE twórz nowych akapitów.
 
 === STRUKTURA RECENZJI (odpowiedz TYLKO JSON) ===
 
@@ -775,9 +798,9 @@ Każda Twoja sugestia powinna prowadzić do PUNKTOWEJ POPRAWY, nie do przepisani
   }},
 
   "editorial_feedback": {{
-    
-    "recenzja_ogolna": "<3-5 zdań: ogólna ocena artykułu. Co jest mocne? Co wymaga pracy? Jaki ton ma tekst i czy jest odpowiedni? Czy artykuł odpowiada na pytanie czytelnika?>",
-    
+
+    "recenzja_ogolna": "<3-5 zdań: ogólna ocena. Co jest mocne? Co wymaga pracy? Jaki ton i czy jest odpowiedni? Czy artykuł odpowiada na Search Intent?>",
+
     "merytoryka": [
       {{
         "sekcja": "<H2/H3 którego dotyczy>",
@@ -786,41 +809,41 @@ Każda Twoja sugestia powinna prowadzić do PUNKTOWEJ POPRAWY, nie do przepisani
         "sugestia": "<jak poprawić — konkretnie>"
       }}
     ],
-    
+
     "styl_i_jezyk": [
       {{
-        "problem": "powtórzenie|niezręczność|fraza_AI|kolokacja|strona_bierna|monotonia|filler|truizm",
+        "problem": "dramatyzator|powtórzenie|niezręczność|fraza_AI|kolokacja|strona_bierna|filler|truizm",
         "cytat": "<fragment z tekstu>",
         "sugestia": "<jak poprawić>"
       }}
     ],
-    
+
     "struktura_i_narracja": [
       {{
         "uwaga": "<problem ze strukturą>",
-        "gdzie": "<między którymi sekcjami / w której sekcji>",
+        "gdzie": "<między którymi sekcjami>",
         "sugestia": "<co zmienić>"
       }}
     ],
-    
+
     "luki_tresciowe": [
       {{
-        "brakujacy_temat": "<czego czytelnik mógłby szukać, a tekst tego nie pokrywa>",
-        "gdzie_dodac": "<w której sekcji najlepiej>",
+        "brakujacy_temat": "<czego czytelnik szuka, a tekst nie pokrywa>",
+        "gdzie_dodac": "<w której sekcji>",
         "sugestia": "<2-3 zdania co konkretnie dopisać>"
       }}
     ],
 
     "halucynacje": [
       {{
-        "cytat": "<fragment z wymyśloną statystyką/datą/źródłem>",
+        "cytat": "<fragment z wymyśloną statystyką/datą/wyrokiem>",
         "dlaczego_falsz": "<krótkie wyjaśnienie>"
       }}
     ],
 
     "brakujace_encje": [
       {{
-        "encja": "<nazwa encji brakującej w tekście>",
+        "encja": "<nazwa brakującej encji>",
         "gdzie_wplesc": "<w którym zdaniu/akapicie>",
         "jak": "<konkretna sugestia wplecenia>"
       }}
@@ -829,25 +852,25 @@ Każda Twoja sugestia powinna prowadzić do PUNKTOWEJ POPRAWY, nie do przepisani
 
   "errors_to_fix": [
     {{
-      "type": "HALUCYNACJA|FILLER|ENCJA_JAKO_ZRODLO|TERMINOLOGIA|FRAZA_AI|KOLOKACJA|STYL|BRAK_ENCJI",
-      "priority": <1-3 gdzie 1=krytyczne>,
+      "type": "DRAMATYZATOR|HALUCYNACJA|FILLER|FRAZA_AI|ENCJA_JAKO_ZRODLO|BŁĄD_WYROKU|KOLOKACJA|STYL|BRAK_ENCJI",
+      "priority": <1-3, gdzie 1=krytyczne>,
       "original": "<cytat z tekstu — min 10 słów>",
-      "replacement": "<poprawka — ZACHOWAJ długość oryginału>",
-      "action": "POPRAW|USUŃ_HALUCYNACJĘ|WPLEĆ_ENCJĘ"
+      "replacement": "<poprawka — zachowaj długość oryginału>",
+      "action": "POPRAW|USUŃ|WPLEĆ_ENCJĘ|USUŃ_WYROK"
     }}
   ],
 
   "keywords_to_add": {json.dumps(unused_basic + unused_extended, ensure_ascii=False)},
-  
-  "summary": "<2-3 zdania: najważniejsze co trzeba zrobić z tym artykułem>"
+
+  "summary": "<2-3 zdania: najważniejsze co trzeba zrobić>"
 }}
 
 === WSKAZÓWKI ===
-- W "merytoryka" szukaj: brak źródeł, nieprecyzyjne twierdzenia, nadmierne uproszczenia
-- W "styl_i_jezyk" szukaj: truizmy, filler, frazy AI ("warto zauważyć", "kluczowym elementem"), puste przejścia
-- W "halucynacje" szukaj: konkretne liczby, daty, nazwy badań, rozporządzenia — czy brzmią wiarygodnie?
-- W "brakujace_encje" szukaj: encje z sekcji POKRYCIE ENCJI oznaczone ❌
-- Każda poprawka w errors_to_fix musi mieć DOKŁADNY cytat z tekstu (min 10 słów)
+- DRAMATYZATORY to priorytet 1 — szukaj w każdym akapicie
+- W "styl_i_jezyk" szukaj: dramatyzatory, filler, frazy AI, klisze
+- W "halucynacje": konkretne liczby, daty, nazwy badań, wyroki — czy brzmią wiarygodnie?
+- W "brakujace_encje": encje z sekcji POKRYCIE ENCJI oznaczone ❌
+- Każda poprawka w errors_to_fix musi mieć DOKŁADNY cytat (min 10 słów)
 - REPLACEMENT nie może być krótszy niż ORIGINAL
 - NIE przepisuj całych akapitów — poprawiaj punktowo
 
@@ -883,54 +906,66 @@ Każda Twoja sugestia powinna prowadzić do PUNKTOWEJ POPRAWY, nie do przepisani
             errors_list = analysis.get("errors_to_fix", []) if analysis else []
             keywords_to_add = analysis.get("keywords_to_add", []) if analysis else []
             
-            diff_prompt = f"""Przeanalizuj artykuł pt. "{topic}" i zwróć TYLKO ZMIANY w formacie diff.
+            diff_prompt = f"""Jesteś redaktorem naczelnym. Poniżej artykuł do korekty, a następnie lista błędów do poprawienia.
 
-🔴 NADRZĘDNA ZASADA: POPRAWIAJ, NIE PRZEPISUJ!
-Artykuł ma {word_count} słów. Zachowaj oryginalny styl, ton i strukturę.
-Zmieniaj TYLKO to, co jest błędne lub wymaga poprawy. Reszta musi zostać nietknięta.
+=== ARTYKUŁ DO KOREKTY: "{topic}" ({word_count} słów) ===
+
+{full_text}
+
+=== KONIEC ARTYKUŁU ===
+
+Przeanalizuj artykuł powyżej i zwróć TYLKO ZMIANY w formacie diff.
+
+🔴 NADRZĘDNA ZASADA: POPRAWIAJ, NIE PRZEPISUJ.
+Zachowaj oryginalny styl, ton i strukturę. Zmieniaj TYLKO to co błędne.
 
 ⛔ KRYTYCZNE ZASADY:
-- Zwróć MAX 15 zmian (tylko najważniejsze!)
-- NIE przepisuj całego artykułu — to KOREKTA, nie rewrite
-- Krótkie zdania (2-5 słów) są CELOWE — NIE łącz ich!
-- Zachowaj styl i rytm tekstu — każda zmiana musi pasować do kontekstu
-- Cytat w ZNAJDŹ musi być DOKŁADNY (min 10 słów, copy-paste z artykułu)
-- ZAMIEŃ musi mieć PODOBNĄ długość do ZNAJDŹ (±20%)
-- Jedyny wyjątek: halucynacje (zmyślone dane) — te USUŃ
+- MAX 15 zmian (tylko najważniejsze)
+- NIE przepisuj całych akapitów — to KOREKTA, nie rewrite
+- Cytat w ZNAJDŹ: DOKŁADNY (min 10 słów, copy-paste z artykułu powyżej)
+- ZAMIEŃ: PODOBNA długość do ZNAJDŹ (±20%)
+- Wyjątek: halucynacje i błędne wyroki → USUŃ bez zastępnika
 
-=== PRIORYTET ZMIAN (od najważniejszych) ===
-1. 🔴 HALUCYNACJE — wymyślone statystyki, rozporządzenia, daty → USUŃ lub zamień na pewne fakty
-2. 🔴 FILLER/TRUIZMY — zdania bez informacji ("To prowadzi do...", "Warto zauważyć...") → zamień na treść merytoryczną
-3. 🔴 ENCJA JAKO ŹRÓDŁO — "Wikipedia podaje...", "Według [encji]..." → zamień na bezpośrednie stwierdzenie
-4. 🟡 BRAKUJĄCE ENCJE — wpleć brakujące encje tematyczne w istniejące zdania
-5. 🟡 BRAKUJĄCE FRAZY SEO — wpleć nieużyte frazy naturalnie w tekst
-6. 🟢 STYL — popraw frazy AI, nienaturalne kolokacje, powtórzenia
+=== PRIORYTET ZMIAN ===
+1. 🔴 DRAMATYZATORY — krótkie zdania-pointy bez informacji → zastąp zdaniem z konkretną informacją
+2. 🔴 HALUCYNACJE — wymyślone statystyki, rozporządzenia, daty → USUŃ lub zastąp pewnym faktem
+3. 🔴 BŁĘDY WYROKÓW — wyrok cywilny (I C) w artykule karnym lub odwrotnie → USUŃ_WYROK
+4. 🔴 FILLER/TRUIZMY — zdania bez informacji → zastąp treścią merytoryczną
+5. 🔴 ENCJA JAKO ŹRÓDŁO — "Wikipedia podaje...", "Według [encji]..." → bezpośrednie stwierdzenie
+6. 🟡 BRAKUJĄCE ENCJE — wpleć w istniejące zdania
+7. 🟡 BRAKUJĄCE FRAZY SEO — wpleć naturalnie
+8. 🟢 STYL — frazy AI, złe kolokacje, powtórzenia
 
-=== BŁĘDY DO POPRAWY ===
-{json.dumps(errors_list[:10], ensure_ascii=False, indent=2) if errors_list else "Brak krytycznych błędów."}
+=== BŁĘDY DO POPRAWY (z analizy redaktorskiej) ===
+{json.dumps(errors_list[:12], ensure_ascii=False, indent=2) if errors_list else "Brak krytycznych błędów."}
 
-=== FRAZY DO WPLECENIA (w istniejące zdania!) ===
+=== FRAZY DO WPLECENIA ===
 {', '.join(keywords_to_add[:10]) if keywords_to_add else "Wszystkie frazy są w tekście."}
 
 {coverage_section}
 
 === FORMAT ODPOWIEDZI ===
 
+Każda zmiana w dokładnie tym formacie:
+
 [ZMIANA 1]
-ZNAJDŹ: "dokładny cytat z artykułu (min 10 słów, copy-paste)"
-ZAMIEŃ: "poprawiona wersja — zachowaj styl i podobną długość"
-POWÓD: krótkie wyjaśnienie (max 10 słów)
+ZNAJDŹ: "dokładny cytat z artykułu powyżej (min 10 słów)"
+ZAMIEŃ: "poprawiona wersja o podobnej długości"
+POWÓD: typ błędu (max 5 słów)
 
+Przykład poprawnej zmiany:
+[ZMIANA 1]
+ZNAJDŹ: "Granice są sztywne. Sąd nie ma tu wiele do powiedzenia i musi działać zgodnie z przepisami."
+ZAMIEŃ: "Sąd nie ma tu uznaniowości — zakaz prowadzenia pojazdów jest obligatoryjny przy każdym wyroku skazującym z art. 178a KK."
+POWÓD: dramatyzator → konkretna informacja prawna
+
+Przykład usunięcia błędnego wyroku:
 [ZMIANA 2]
-ZNAJDŹ: "..."
-ZAMIEŃ: "..."
-POWÓD: ...
+ZNAJDŹ: "Potwierdza to wyrok Sądu Okręgowego w Słupsku z dnia 15 marca 2021 r. (sygn. I C 245/21), który wskazał na konieczność"
+ZAMIEŃ: [USUŃ — wyrok cywilny (I C) w artykule karnym]
+POWÓD: błędny wyrok — cywilny w artykule karnym
 
-(kontynuuj do max 15 zmian)
-
-=== ARTYKUŁ DO KOREKTY ({word_count} słów — zachowaj długość!) ===
-
-{full_text}"""
+(kontynuuj do max 15 zmian)"""
 
             print(f"[EDITORIAL_REVIEW] ========== CALL 2: DIFF-BASED CORRECTION ==========")
             
