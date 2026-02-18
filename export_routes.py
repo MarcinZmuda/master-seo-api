@@ -69,6 +69,16 @@ except Exception as e:
 
 export_routes = Blueprint("export_routes", __name__)
 
+# v51: Safe full_article extraction — handles both string and dict formats
+def _safe_get_full_article(project_data):
+    """Extract text from full_article field, handling both dict and string."""
+    fa = project_data.get("full_article")
+    if isinstance(fa, dict):
+        return fa.get("content", "")
+    elif isinstance(fa, str):
+        return fa
+    return ""
+
 # Claude config
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 # v50.5: Configurable editorial model via env var
@@ -141,7 +151,7 @@ def parse_article_structure(text: str) -> list:
 def extract_text_from_batches(batches: list) -> tuple:
     """
     Bezpieczne składanie treści z batchów.
-    Obsługuje różne formaty: batch.text, batch.content, batch.html
+    Obsługuje różne formaty: batch.text, batch.content, batch.html, lub string
     
     Returns:
         (full_text, debug_info)
@@ -157,18 +167,25 @@ def extract_text_from_batches(batches: list) -> tuple:
     for i, batch in enumerate(batches):
         text = None
         
-        for field in ["text", "content", "html", "batch_text", "raw_text"]:
-            if field in batch and batch[field]:
-                text = str(batch[field]).strip()
-                debug_info["fields_found"].add(field)
-                break
+        # v51: Handle string batches
+        if isinstance(batch, str):
+            text = batch.strip()
+            if text:
+                debug_info["fields_found"].add("string")
+        elif isinstance(batch, dict):
+            for field in ["text", "content", "html", "batch_text", "raw_text"]:
+                if field in batch and batch[field]:
+                    text = str(batch[field]).strip()
+                    debug_info["fields_found"].add(field)
+                    break
         
         if text:
             texts.append(text)
             debug_info["batches_with_text"] += 1
         else:
             debug_info["batches_empty"] += 1
-            print(f"[EXPORT] ⚠️ Batch {i} jest pusty. Klucze: {list(batch.keys())}")
+            batch_keys = list(batch.keys()) if isinstance(batch, dict) else [type(batch).__name__]
+            print(f"[EXPORT] ⚠️ Batch {i} jest pusty. Klucze: {batch_keys}")
     
     debug_info["fields_found"] = list(debug_info["fields_found"])
     full_text = "\n\n".join(texts)
@@ -476,8 +493,10 @@ def editorial_review(project_id):
     full_text = None
     debug_info = {}
     
-    if project_data.get("full_article", {}).get("content"):
-        full_text = project_data["full_article"]["content"]
+    # v51: Defensive — full_article can be string or dict
+    fa_text = _safe_get_full_article(project_data)
+    if fa_text:
+        full_text = fa_text
         debug_info = {"source": "full_article"}
     else:
         batches = project_data.get("batches", [])
@@ -1137,13 +1156,16 @@ Artykuł ({word_count} słów):
         }), 200
         
     except Exception as e:
-        print(f"[EDITORIAL_REVIEW] Error: {e}")
         import traceback
-        traceback.print_exc()
+        tb = traceback.format_exc()
+        print(f"[EDITORIAL_REVIEW] ❌ Error: {e}")
+        print(f"[EDITORIAL_REVIEW] Traceback:\n{tb}")
         return jsonify({
             "error": f"Review failed: {str(e)}",
-            "word_count": word_count,
-            "debug": debug_info
+            "error_type": type(e).__name__,
+            "word_count": word_count if 'word_count' in dir() else 0,
+            "debug": debug_info if 'debug_info' in dir() else {},
+            "traceback_hint": tb.strip().split("\n")[-1] if tb else ""
         }), 500
 
 
@@ -1216,8 +1238,8 @@ def export_status(project_id):
     debug_info = {"source": "none"}
     batches_count = 0
     
-    if project_data.get("full_article", {}).get("content"):
-        full_text = project_data["full_article"]["content"]
+    if _safe_get_full_article(project_data):
+        full_text = _safe_get_full_article(project_data)
         debug_info = {"source": "full_article"}
     else:
         batches = project_data.get("batches", [])
@@ -1282,8 +1304,8 @@ def export_docx(project_id):
     if corrected:
         full_text = corrected
         print(f"[EXPORT_DOCX] Using corrected article ({len(corrected.split())} words)")
-    elif project_data.get("full_article", {}).get("content"):
-        full_text = project_data["full_article"]["content"]
+    elif _safe_get_full_article(project_data):
+        full_text = _safe_get_full_article(project_data)
         print(f"[EXPORT_DOCX] Using full_article ({len(full_text.split())} words)")
     else:
         batches = project_data.get("batches", [])
@@ -1378,8 +1400,8 @@ def export_html(project_id):
     
     if corrected:
         full_text = corrected
-    elif project_data.get("full_article", {}).get("content"):
-        full_text = project_data["full_article"]["content"]
+    elif _safe_get_full_article(project_data):
+        full_text = _safe_get_full_article(project_data)
     else:
         batches = project_data.get("batches", [])
         full_text, _ = extract_text_from_batches(batches)
@@ -1483,8 +1505,8 @@ def export_txt(project_id):
     
     if corrected:
         full_text = corrected
-    elif project_data.get("full_article", {}).get("content"):
-        full_text = project_data["full_article"]["content"]
+    elif _safe_get_full_article(project_data):
+        full_text = _safe_get_full_article(project_data)
     else:
         batches = project_data.get("batches", [])
         full_text, _ = extract_text_from_batches(batches)
