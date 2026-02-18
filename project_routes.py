@@ -1679,8 +1679,19 @@ def get_pre_batch_info(project_id):
             if len(extended_this_batch) < 5:
                 extended_this_batch.append(kw_info)
         else:
-            # Universal BASIC - dodaj do must_use
-            basic_must_use.append(kw_info)
+            # v52.1 FIX: Universal BASIC idzie do MUST tylko gdy brakuje do target_min.
+            # Po osiągnięciu target_min fraza jest "OK" — nie blokuj każdego batcha.
+            # To eliminuje problem 18 MUST w każdej sekcji przez całą długość artykułu.
+            if actual < target_min:
+                # Nie osiągnięto minimum — MUST
+                basic_must_use.append(kw_info)
+            elif actual < target_max and suggested_use > 0:
+                # W normie, ale suggested > 0 → zachęć (nie nakazuj)
+                kw_info["priority"] = "OPTIONAL"
+                kw_info["instruction"] = f"🟢 Opcjonalnie - możesz użyć {suggested_use}x (actual: {actual}, max: {target_max})"
+                kw_info["flexibility"] = "HIGH"
+                extended_this_batch.append(kw_info)  # ląduje w sekcji "bezpieczne do użycia"
+            # else: actual >= target_max → continue (already handled above)
     
     # ================================================================
     # KROK 3: FALLBACK - jeśli brak semantic_plan, użyj starej logiki
