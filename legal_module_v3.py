@@ -519,6 +519,89 @@ def deduplicate_judgments(judgments: List[Dict]) -> List[Dict]:
 
 
 # ================================================================
+# v52.5: FILTR TYPÓW SPRAW — civil vs criminal
+# ================================================================
+
+_CIVIL_SIG_PATTERNS = re.compile(
+    r'^(I|II|III|IV|V|VI|VII|VIII|IX|X|XI|XII|I\s+A|II\s+A)?'
+    r'\s*(C|Ca|ACa|ACo|ACz|AGa|Cz|Co|Nc|GC|GCo|GCz)\b',
+    re.IGNORECASE
+)
+_CRIMINAL_SIG_PATTERNS = re.compile(
+    r'^(I|II|III|IV|V|VI|VII|VIII|IX|X|XI|XII|I\s+A|II\s+A)?'
+    r'\s*(K|Ka|AKa|AKo|AKz|AKp|AKzp|Kow|Kop|Ko|Kk|Kzd|Kzw|SDI)\b',
+    re.IGNORECASE
+)
+
+def _is_civil_judgment(signature: str) -> bool:
+    """Zwraca True jeśli sygnatura wskazuje na sprawę cywilną."""
+    if not signature:
+        return False
+    sig = signature.strip().upper()
+    # Usuń prefix sądu (np. "SO w Słupsku I C 245/21" → "I C 245/21")
+    sig = re.sub(r'^(SO|SA|SR|SN|TK|NSA|WSA)\s+.*?\s+', '', sig)
+    return bool(_CIVIL_SIG_PATTERNS.match(sig))
+
+def _is_criminal_judgment(signature: str) -> bool:
+    """Zwraca True jeśli sygnatura wskazuje na sprawę karną."""
+    if not signature:
+        return False
+    sig = signature.strip().upper()
+    sig = re.sub(r'^(SO|SA|SR|SN|TK|NSA|WSA)\s+.*?\s+', '', sig)
+    return bool(_CRIMINAL_SIG_PATTERNS.match(sig))
+
+def _infer_required_judgment_type(article_hints: list, keyword: str) -> str:
+    """
+    Na podstawie article_hints i słowa kluczowego określa jaki typ wyroku jest potrzebny.
+    Zwraca: 'criminal', 'civil', lub 'any'
+    """
+    combined = ' '.join(article_hints + [keyword]).lower()
+    criminal_markers = ['k.k.', 'kodeks karny', 'kk', 'art. 178', 'art. 177',
+                        'art. 286', 'art. 297', 'art. 300', 'przestępstwo',
+                        'przestępstw', 'kodeks karny', 'postępowanie karne',
+                        'wykroczenie', 'k.w.', 'kodeks wykroczeń']
+    civil_markers = ['k.c.', 'kodeks cywilny', 'odszkodowanie', 'umowa',
+                     'odpowiedzialność cywilna', 'k.r.o.', 'kodeks rodzinny']
+    
+    criminal_score = sum(1 for m in criminal_markers if m in combined)
+    civil_score = sum(1 for m in civil_markers if m in combined)
+    
+    if criminal_score > civil_score and criminal_score >= 1:
+        return 'criminal'
+    elif civil_score > criminal_score and civil_score >= 1:
+        return 'civil'
+    return 'any'
+
+def filter_judgments_by_type(judgments: list, required_type: str) -> list:
+    """
+    Filtruje wyroki po typie (karne/cywilne).
+    Jeśli required_type == 'criminal': odrzuca wyroki I C, II C, ACa itp.
+    Jeśli required_type == 'civil': odrzuca wyroki II K, AKa itp.
+    Jeśli required_type == 'any': nie filtruje.
+    """
+    if required_type == 'any':
+        return judgments
+    
+    filtered = []
+    rejected = []
+    for j in judgments:
+        sig = j.get('signature', j.get('caseNumber', ''))
+        if required_type == 'criminal':
+            if _is_civil_judgment(sig):
+                rejected.append(sig)
+                continue
+        elif required_type == 'civil':
+            if _is_criminal_judgment(sig):
+                rejected.append(sig)
+                continue
+        filtered.append(j)
+    
+    if rejected:
+        print(f"[LEGAL_MODULE] 🔍 Odrzucono {len(rejected)} wyroków niezgodnych z typem '{required_type}': {rejected[:3]}")
+    return filtered
+
+
+# ================================================================
 # GŁÓWNA FUNKCJA - POBIERANIE KONTEKSTU PRAWNEGO
 # ================================================================
 
@@ -705,6 +788,35 @@ def get_legal_context_for_article(
         except Exception as e:
             print(f"[LEGAL_MODULE] ⚠️ Scoring error: {e}")
     
+    # 6b. v52.5: Filtr mechaniczny (karne/cywilne) — szybki pre-filter
+    required_type = _infer_required_judgment_type(article_hints, main_keyword)
+    if required_type != 'any':
+        before_type_filter = len(judgments)
+        judgments = filter_judgments_by_type(judgments, required_type)
+        print(f"[LEGAL_MODULE] ⚖️ Filtr typu '{required_type}': {before_type_filter} → {len(judgments)} wyroków")
+
+    # 6c. v52.5: Weryfikacja AI przez Claude Haiku — wybiera najlepsze, odrzuca niepasujące
+    if judgments and CLAUDE_VERIFIER_AVAILABLE:
+        try:
+            print(f"[LEGAL_MODULE] 🤖 Claude Haiku weryfikuje {len(judgments)} orzeczeń dla: '{main_keyword}'")
+            verified = verify_judgments_with_claude(
+                article_topic=main_keyword,
+                judgments=judgments,
+                max_to_select=min(3, max_results)
+            )
+            if verified.get("status") == "OK" and verified.get("selected"):
+                # Mapuj wybrane indeksy z powrotem na obiekty orzeczeń
+                selected_indices = {s["index"] - 1 for s in verified["selected"]}
+                judgments = [j for i, j in enumerate(judgments) if i in selected_indices]
+                print(f"[LEGAL_MODULE] ✅ Claude wybrał {len(judgments)} orzeczeń (reasoning: {verified.get('reasoning', '')[:80]})")
+            elif verified.get("status") == "OK" and not verified.get("selected"):
+                print(f"[LEGAL_MODULE] ⚠️ Claude odrzucił WSZYSTKIE orzeczenia jako niepasujące do tematu")
+                judgments = []
+            else:
+                print(f"[LEGAL_MODULE] ⚠️ Verifier fallback: {verified.get('error', 'unknown')}")
+        except Exception as e:
+            print(f"[LEGAL_MODULE] ⚠️ Verifier error (kontynuuję bez): {e}")
+
     # 7. Ogranicz do max_results
     judgments = judgments[:max_results]
     
