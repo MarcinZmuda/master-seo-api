@@ -390,8 +390,13 @@ def validate_h3_length(text, min_words=80):
             words = len(section.split())
             
             if words < min_words:
+                # v52.1: Truncate h3_title to avoid embedding full paragraph
+                # content in the recommendation string (caused by merged lines)
+                h3_display = h3_title[:70].strip()
+                if len(h3_title) > 70:
+                    h3_display += "..."
                 issues.append({
-                    "h3": h3_title,
+                    "h3": h3_display,
                     "word_count": words,
                     "deficit": min_words - words
                 })
