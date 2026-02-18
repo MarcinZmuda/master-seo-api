@@ -735,6 +735,12 @@ Dostajesz artykuł pt. "{topic}" ({word_count} słów). Napisz PEŁNĄ RECENZJĘ
 🔴 POPRAWIAJ tekst, NIE PRZEPISUJ go. Zachowaj oryginalny styl, ton i strukturę.
 Każda Twoja sugestia powinna prowadzić do PUNKTOWEJ POPRAWY, nie do przepisania akapitu.
 
+=== OBOWIĄZKOWE KOREKTY JĘZYKOWE ===
+1. 🔡 WIELKA LITERA: Każde zdanie musi zaczynać się wielką literą. Znajdź i popraw wszystkie zdania zaczynające się od małej litery po kropce lub w nowym akapicie.
+2. 🔁 POWTÓRZENIA POCZĄTKÓW AKAPITÓW: Jeśli akapit zaczyna się od frazy głównego słowa kluczowego (np. "uchwyty i gałki do mebli" lub "jazda po alkoholu"), zmień początek akapitu na inne sformułowanie.
+3. 🔂 IDENTYCZNE ZDANIA: Jeśli to samo zdanie słowo w słowo pojawia się 2+ razy, usuń lub przepisz duplikaty.
+4. 🎯 ODMIANA: Jeśli encja/fraza jest w złym przypadku (np. "jak odróżnić gałka meblowa" zamiast "gałkę meblową"), popraw fleksję.
+
 === CZEGO SZUKAĆ (KRYTYCZNE) ===
 
 🚫 ANTY-FILLER: Znajdź zdania, które nie dodają żadnej informacji:
