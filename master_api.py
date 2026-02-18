@@ -37,7 +37,11 @@ app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024  # 32 MB
 CORS(app)
 
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
-VERSION = "v45.3.1"  # 🆕 AI Middleware, forced mode fix, Anti-Frankenstein enabled
+try:
+    with open(os.path.join(os.path.dirname(__file__), "VERSION")) as _vf:
+        VERSION = f"v{_vf.read().strip()}"
+except FileNotFoundError:
+    VERSION = "v45.3.1"  # fallback
 
 # ================================================================
 # 🆕 v32.4: Firestore persistence for projects
