@@ -160,8 +160,14 @@ Fragment: "{excerpt}..."
 """
     else:
         division_hint = """
-FILTR WYDZIAŁÓW:
-- Temat dotyczy przestępstwa → sygnatury K, Ka, AKa = ✅ OK
+⛔ FILTR WYDZIAŁÓW (sprawdź sygnaturę!):
+- Sygnatury K, Ka, AKa, AKo, AKz = KARNE → ✅ OK dla tematów karnych
+- Sygnatury C, Ca, ACa, RC, CZP = CYWILNE → ❌ ODRZUĆ dla tematów karnych!
+  Przykłady do odrzucenia: I C 245/21, II Ca 1086/15, III ACa 33/22
+  Przykłady OK: II K 134/23, III AKa 55/24, IV K 28/22
+
+Temat KARNY (KK/KW) = NIE cytuj wyroków cywilnych (I C, II C, ACa)!
+Wyrok cywilny w artykule karnym to błąd merytoryczny.
 """
     
     prompt = f"""Jesteś ekspertem prawa polskiego. Znasz WSZYSTKIE polskie kodeksy:
