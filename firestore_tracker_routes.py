@@ -2610,9 +2610,23 @@ def submit_batch_simple(project_id):
         {"text": "h2: Tytuł\n\nTreść batcha..."}
     """
     if not QUALITY_SCORE_ENABLED:
+        # Graceful degradation — zaakceptuj batch bez quality check
+        data = request.get_json() or {}
+        if not data.get("text", "").strip():
+            return jsonify({"error": "No text provided"}), 400
         return jsonify({
-            "error": "Quality Score module not available"
-        }), 503
+            "accepted": True,
+            "action": "CONTINUE",
+            "confidence": 0.5,
+            "message": "Quality Score unavailable — batch accepted without scoring",
+            "quality": {"score": None, "grade": "N/A", "status": "quality_module_offline"},
+            "issues": [],
+            "fixes_needed": [],
+            "fixes_applied": [],
+            "depth_score": None,
+            "depth_shallow_sections": None,
+            "next_task": {"action": "CONTINUE"}
+        }), 200
     
     data = request.get_json() or {}
     text = data.get("text", "").strip()
