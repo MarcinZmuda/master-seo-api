@@ -33,7 +33,7 @@ import re
 from typing import Dict, Any, Optional, List
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-CLASSIFIER_MODEL = os.getenv("YMYL_CLASSIFIER_MODEL", "claude-sonnet-4-5-20250514")
+CLASSIFIER_MODEL = os.getenv("YMYL_CLASSIFIER_MODEL", "claude-haiku-4-5-20251001")
 
 _client = None
 
