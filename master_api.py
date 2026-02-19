@@ -6,6 +6,33 @@ except ImportError:
     def _log_prompt(*a, **kw): pass
     def get_log_html(**kw): return "(prompt_logger niedostępny)"
     def clear_log(): return False
+
+try:
+    from legal_post_validator import validate_traffic_law_content as _validate_traffic
+    _TRAFFIC_VALIDATOR_ENABLED = True
+    print("[MASTER_API] ✅ Traffic Law Validator loaded")
+except ImportError:
+    _TRAFFIC_VALIDATOR_ENABLED = False
+    def _validate_traffic(text, auto_fix=False):
+        return {"errors": [], "warnings": [], "has_critical_errors": False}
+
+try:
+    from content_editorial import (
+        run_content_editorial,
+        result_to_dict as _editorial_to_dict,
+        ContentEditorialResult,
+    )
+    _CONTENT_EDITORIAL_ENABLED = True
+    print("[MASTER_API] ✅ Content Editorial loaded")
+except ImportError:
+    _CONTENT_EDITORIAL_ENABLED = False
+    def run_content_editorial(article_text, topic, category="inne", is_ymyl=False):
+        from dataclasses import dataclass, field
+        class _R:
+            status="OK"; issues=[]; corrected_text=None; summary=""; score=100
+            domain=category; is_ymyl=is_ymyl; blocked_reason=""
+        return _R()
+    def _editorial_to_dict(r): return {"status": r.status, "score": r.score}
 import re
 import requests
 from flask import Flask, jsonify, request
@@ -2155,6 +2182,19 @@ def approve_batch():
         }
     }
     
+    # ── v52.7: TRAFFIC LAW VALIDATION ──────────────────────────────
+    if _TRAFFIC_VALIDATOR_ENABLED and batch_content:
+        _tv = _validate_traffic(batch_content, auto_fix=False)
+        if _tv.get("errors") or _tv.get("warnings"):
+            result["traffic_law_check"] = {
+                "errors": _tv.get("errors", []),
+                "warnings": _tv.get("warnings", []),
+                "has_critical": _tv.get("has_critical_errors", False),
+            }
+            if _tv.get("has_critical_errors"):
+                print(f"[APPROVE_BATCH] ⚠️ LEGAL ERRORS: {len(_tv['errors'])} critical — placeholder/wrong terms found")
+    # ────────────────────────────────────────────────────────────────
+
     return jsonify(result), 200
 
 
@@ -2514,6 +2554,128 @@ def get_synonyms_endpoint():
     except Exception as e:
         return jsonify({"status": "ERROR", "message": str(e)}), 500
 
+
+
+@app.route("/api/project/<project_id>/content_editorial", methods=["POST"])
+def content_editorial_endpoint(project_id):
+    """
+    Merytoryczny editorial artykułu — NOWY ETAP w pipeline.
+
+    Uruchamiać PO merge batchów, PRZED final_review i editorial językowym.
+
+    Pipeline (poprawna kolejność):
+      1. batch review (podczas generacji)
+      2. merge batchów
+      3. POST /api/project/<id>/content_editorial  ← TEN ENDPOINT
+      4. POST /api/project/<id>/final_review
+      5. POST /api/project/<id>/editorial_review
+
+    Request body (opcjonalne — jeśli nie podasz, pobiera z Firestore):
+      {
+        "article_text": "...",   // jeśli nie — pobiera z projektu
+        "category": "prawo",     // jeśli nie — bierze z projektu
+        "is_ymyl": true          // jeśli nie — bierze z projektu
+      }
+
+    Response:
+      {
+        "status": "OK|WARNING|BLOCKED",
+        "blocked": false,
+        "score": 87,
+        "critical_count": 0,
+        "warning_count": 2,
+        "issues": [...],
+        "corrected_text": "..." (jeśli były poprawki),
+        "summary": "..."
+      }
+    """
+    if not _CONTENT_EDITORIAL_ENABLED:
+        return jsonify({"status": "OK", "message": "Content editorial disabled"}), 200
+
+    data = request.get_json(force=True) or {}
+
+    # Pobierz projekt z Firestore
+    from firebase_admin import firestore as _fs
+    db = _fs.client()
+    doc = db.collection("seo_projects").document(project_id).get()
+    if not doc.exists:
+        return jsonify({"error": "Project not found"}), 404
+
+    project_data = doc.to_dict()
+    topic = project_data.get("main_keyword", "")
+
+    # Tekst artykułu
+    article_text = data.get("article_text", "")
+    if not article_text:
+        # Pobierz z projektu — próbuj różne pola
+        for field_name in ["full_article", "merged_article", "article"]:
+            val = project_data.get(field_name, "")
+            if isinstance(val, dict):
+                val = val.get("text", "")
+            if val and len(val) > 100:
+                article_text = val
+                break
+        if not article_text:
+            # Złóż z batchów
+            batches = project_data.get("batches", [])
+            if batches:
+                article_text = "\n\n".join(
+                    b.get("content", b) if isinstance(b, dict) else b
+                    for b in batches if b
+                )
+
+    if not article_text:
+        return jsonify({"error": "Brak tekstu artykułu w projekcie"}), 400
+
+    # Kategoria i YMYL
+    category = data.get("category") or project_data.get("detected_category", "inne")
+    is_ymyl_raw = data.get("is_ymyl")
+    if is_ymyl_raw is None:
+        ymyl_data = project_data.get("ymyl_classification", {})
+        if isinstance(ymyl_data, dict):
+            is_ymyl = ymyl_data.get("is_ymyl", False)
+            if not is_ymyl:
+                is_ymyl = category in ("prawo", "medycyna", "finanse")
+        else:
+            is_ymyl = category in ("prawo", "medycyna", "finanse")
+    else:
+        is_ymyl = bool(is_ymyl_raw)
+
+    print(f"[CONTENT_EDITORIAL] project={project_id} | topic={topic} | category={category} | ymyl={is_ymyl}")
+
+    result = run_content_editorial(
+        article_text=article_text,
+        topic=topic,
+        category=category,
+        is_ymyl=is_ymyl,
+    )
+
+    result_dict = _editorial_to_dict(result)
+
+    # Jeśli był corrected_text — zapisz do projektu
+    if result.corrected_text:
+        try:
+            db.collection("seo_projects").document(project_id).update({
+                "full_article": result.corrected_text,
+                "content_editorial_applied": True,
+            })
+            print(f"[CONTENT_EDITORIAL] ✅ Zapisano poprawiony artykuł do Firestore")
+        except Exception as e:
+            print(f"[CONTENT_EDITORIAL] ⚠️ Błąd zapisu: {e}")
+
+    # Zapisz wynik editorialu do projektu
+    try:
+        db.collection("seo_projects").document(project_id).update({
+            "content_editorial_result": result_dict,
+        })
+    except Exception as e:
+        print(f"[CONTENT_EDITORIAL] ⚠️ Błąd zapisu wyniku: {e}")
+
+    status_code = 200
+    if result.status == "BLOCKED":
+        status_code = 422  # Unprocessable — artykuł wymaga poprawy przed dalszym przetwarzaniem
+
+    return jsonify(result_dict), status_code
 
 
 @app.route("/api/debug/prompts", methods=["GET"])
