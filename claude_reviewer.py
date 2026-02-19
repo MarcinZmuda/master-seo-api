@@ -21,6 +21,11 @@ from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass, asdict, field
 from collections import Counter
 import math
+from llm_retry import llm_call_with_retry
+try:
+    from prompt_logger import log_prompt as _log_prompt
+except ImportError:
+    def _log_prompt(*a, **kw): pass
 
 try:
     import anthropic
@@ -655,11 +660,28 @@ def review_with_claude(text: str, ctx: Dict) -> ReviewResult:
     try:
         client = anthropic.Anthropic()
         
-        response = client.messages.create(
+        # v52.2: wrapped with llm_call_with_retry for 529 handling
+        _review_prompt = build_review_prompt(text, ctx)
+
+        # ── PROMPT LOGGING ────────────────────────────────────────
+        _log_prompt(
+            stage="batch_review",
+            system_prompt=None,
+            user_prompt=_review_prompt,
+            keyword=ctx.get("topic", ""),
+            batch=ctx.get("batch_number"),
+            engine="claude",
+            extra={"is_ymyl": ctx.get("is_ymyl", False)},
+        )
+        # ──────────────────────────────────────────────────────────
+
+        def _llm_call_658():
+            return client.messages.create(
             model=os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
             max_tokens=4000,
-            messages=[{"role": "user", "content": build_review_prompt(text, ctx)}]
-        )
+            messages=[{"role": "user", "content": _review_prompt}]
+            )
+        response = llm_call_with_retry(_llm_call_658)
         
         resp_text = response.content[0].text
         json_match = re.search(r'\{[\s\S]*\}', resp_text)
@@ -788,8 +810,10 @@ TEKST:
 KRYTERIA OCENY:
 
 1️⃣ HUMANIZACJA (KRYTYCZNE!)
-• Zdania: mix KRÓTKICH (3-8 słów, 20-25%), ŚREDNICH (10-18, 50-60%), DŁUGICH (22-35, 15-25%)
-• Akapity: różna liczba zdań (NIE: 4,4,4,4 | TAK: 2,5,3,6)
+• Zdania: urozmaicona długość — krótkie dla faktów, dłuższe dla wyjaśnień; unikaj monotonii
+• Akapity: różna liczba zdań — nie pisz wszystkich akapitów identycznej długości
+• Zdania z kilkoma zagnieżdżonymi klauzulami względnymi — rozbij na prostsze
+• Dramatyzatory jako samodzielne "myśli" ("Granice są sztywne.", "I protokół.") — USUŃ
 • FORBIDDEN PHRASES (USUŃ!): {', '.join(f'"{p}"' for p in forbidden_phrases[:6])}
 • Zamień: "należy pamiętać" → "Pamiętaj:", "istotne jest" → "Ważne:"
 

@@ -1029,7 +1029,17 @@ ARTYKUŁ:
 {full_text[:14000]}
 
 Zwróć TYLKO poprawiony artykuł."""
-        
+
+        # ── PROMPT LOGGING ─────────────────────────────────────────
+        _log_prompt(
+            stage="final_review_correction",
+            system_prompt=None,
+            user_prompt=prompt,
+            keyword=main_keyword,
+            engine="gemini",
+        )
+        # ───────────────────────────────────────────────────────────
+
         response = model.generate_content(prompt)
         corrected = response.text.strip()
         corrected = re.sub(r'^```(?:html|markdown)?\n?', '', corrected)
