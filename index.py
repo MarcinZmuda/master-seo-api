@@ -3,17 +3,20 @@ import json
 import re
 import requests
 from collections import Counter, defaultdict
-
-# 🆕 v46.0: Clean content extraction (replaces regex scraper)
-from content_extractor import (
-    extract_serp_sources,
-    should_skip_url as clean_should_skip_url,
-)
 from flask import Flask, request, jsonify
 import spacy
 import google.generativeai as genai
 import firebase_admin
 from firebase_admin import credentials, firestore
+
+# 🆕 v28.0: trafilatura for clean content extraction (eliminates CSS garbage)
+try:
+    import trafilatura
+    TRAFILATURA_AVAILABLE = True
+    print("[S1] ✅ trafilatura loaded — clean content extraction")
+except ImportError:
+    TRAFILATURA_AVAILABLE = False
+    print("[S1] ⚠️ trafilatura not installed — using regex fallback (may include CSS garbage)")
 
 # ======================================================
 # ⭐ v22.3 LIMITS - zapobieganie OOM
@@ -64,9 +67,120 @@ else:
 try:
     from .synthesize_topics import synthesize_topics
     from .generate_compliance_report import generate_compliance_report
+    from .entity_extractor import perform_entity_seo_analysis
 except ImportError:
     from synthesize_topics import synthesize_topics
     from generate_compliance_report import generate_compliance_report
+    from entity_extractor import perform_entity_seo_analysis
+
+# Flag do włączania/wyłączania Entity SEO
+ENTITY_SEO_ENABLED = os.getenv("ENTITY_SEO_ENABLED", "true").lower() == "true"
+print(f"[S1] {'✅' if ENTITY_SEO_ENABLED else '⚠️'} Entity SEO: {'ENABLED' if ENTITY_SEO_ENABLED else 'DISABLED'}")
+
+# 🆕 v45.0: Causal Triplet Extractor
+CAUSAL_EXTRACTOR_ENABLED = False
+try:
+    try:
+        from .causal_extractor import extract_causal_triplets, format_causal_for_agent
+    except ImportError:
+        from causal_extractor import extract_causal_triplets, format_causal_for_agent
+    CAUSAL_EXTRACTOR_ENABLED = True
+    print("[S1] ✅ Causal Triplet Extractor v1.0 enabled")
+except ImportError:
+    print("[S1] ℹ️ Causal Triplet Extractor not available")
+
+# 🆕 v45.0: Gap Analyzer
+GAP_ANALYZER_ENABLED = False
+try:
+    try:
+        from .gap_analyzer import analyze_content_gaps
+    except ImportError:
+        from gap_analyzer import analyze_content_gaps
+    GAP_ANALYZER_ENABLED = True
+    print("[S1] ✅ Gap Analyzer v1.0 enabled")
+except ImportError:
+    print("[S1] ℹ️ Gap Analyzer not available")
+
+
+def _generate_paa_claude_fallback(keyword: str, serp_data: dict) -> list:
+    """
+    Generate PAA questions using Claude when SerpAPI returns no related_questions.
+    Uses top SERP snippets + AI Overview as context.
+    """
+    try:
+        import anthropic, os
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            print("[S1] ⚠️ PAA fallback: brak ANTHROPIC_API_KEY")
+            return []
+
+        # Build context from snippets
+        snippets = []
+        for r in serp_data.get("organic_results", [])[:6]:
+            s = r.get("snippet", "")
+            if s:
+                snippets.append(s)
+        
+        ai_overview_text = ""
+        aio = serp_data.get("ai_overview", {})
+        if isinstance(aio, dict):
+            ai_overview_text = aio.get("text", "") or aio.get("snippet", "")
+        elif isinstance(aio, str):
+            ai_overview_text = aio
+
+        context_parts = []
+        if snippets:
+            context_parts.append("Fragmenty z SERP:\n" + "\n".join(f"- {s}" for s in snippets))
+        if ai_overview_text:
+            context_parts.append(f"Google AI Overview:\n{ai_overview_text[:400]}")
+
+        context = "\n\n".join(context_parts) if context_parts else f"Temat: {keyword}"
+
+        prompt = f"""Dla zapytania "{keyword}" wygeneruj 6 pytań z sekcji Google "Ludzie pytają też" (PAA).
+        
+Kontekst z SERP:
+{context}
+
+Zwróć TYLKO JSON array (bez markdown):
+[
+  {{"question": "Pytanie 1?", "answer": "Krótka odpowiedź 1-2 zdania"}},
+  {{"question": "Pytanie 2?", "answer": "Krótka odpowiedź 1-2 zdania"}}
+]
+
+6 pytań. Pytania muszą być naturalne, jak rzeczywiście zadają je użytkownicy Google."""
+
+        client = anthropic.Anthropic(api_key=api_key)
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=800,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        raw = resp.content[0].text.strip()
+        
+        # Parse JSON
+        first = raw.find("[")
+        last = raw.rfind("]")
+        if first == -1 or last == -1:
+            return []
+        
+        import json
+        items = json.loads(raw[first:last+1])
+        result = []
+        for item in items[:6]:
+            if isinstance(item, dict) and item.get("question"):
+                result.append({
+                    "question": item["question"],
+                    "answer": item.get("answer", ""),
+                    "source": "claude_fallback"
+                })
+        
+        print(f"[S1] ✅ Claude PAA fallback: {len(result)} questions generated")
+        return result
+        
+    except Exception as e:
+        print(f"[S1] ⚠️ PAA fallback error: {e}")
+        return []
+
 
 app = Flask(__name__)
 
@@ -86,8 +200,15 @@ except OSError:
 # ⭐ v22.3 Helper: Check if URL should be skipped
 # ======================================================
 def should_skip_url(url):
-    """Wrapper — deleguje do content_extractor (rozszerzona lista filtrów)."""
-    return clean_should_skip_url(url)
+    """Sprawdza czy URL powinien być pominięty (duże dokumenty, PDF, BIP)."""
+    url_lower = url.lower()
+    for skip_pattern in SKIP_DOMAINS:
+        if skip_pattern in url_lower:
+            return True
+    # Skip jeśli URL kończy się na rozszerzenie pliku
+    if any(url_lower.endswith(ext) for ext in ['.pdf', '.doc', '.docx', '.xls', '.xlsx']):
+        return True
+    return False
 
 # ======================================================
 # 🧠 Helper: Semantic extraction using Gemini Flash
@@ -206,6 +327,7 @@ def fetch_serp_sources(keyword, num_results=10):
         "sources": [],
         "paa": [],
         "featured_snippet": None,
+        "ai_overview": None,  # v27.0
         "related_searches": [],
         "serp_titles": [],
         "serp_snippets": []
@@ -235,6 +357,24 @@ def fetch_serp_sources(keyword, num_results=10):
 
         serp_data = serp_response.json()
 
+        # ⭐ v27.0: Wyciągnij AI Overview (Google SGE)
+        ai_overview = None
+        ai_overview_data = serp_data.get("ai_overview", {})
+        if ai_overview_data:
+            ai_overview = {
+                "text": ai_overview_data.get("text", "") or ai_overview_data.get("snippet", ""),
+                "sources": [
+                    {
+                        "title": src.get("title", ""),
+                        "link": src.get("link", ""),
+                        "snippet": src.get("snippet", "")
+                    }
+                    for src in ai_overview_data.get("sources", [])[:5]
+                ],
+                "text_blocks": ai_overview_data.get("text_blocks", [])
+            }
+            print(f"[S1] ✅ Found AI Overview ({len(ai_overview.get('text', ''))} chars)")
+
         # ⭐ 2. Wyciągnij PAA (People Also Ask)
         paa_questions = []
         related_questions = serp_data.get("related_questions", [])
@@ -247,6 +387,9 @@ def fetch_serp_sources(keyword, num_results=10):
             })
         if paa_questions:
             print(f"[S1] ✅ Found {len(paa_questions)} PAA questions")
+        else:
+            print(f"[S1] ⚠️ No PAA from SerpAPI — generating with Claude fallback...")
+            paa_questions = _generate_paa_claude_fallback(main_keyword, serp_data)
 
         # ⭐ 3. Wyciągnij Featured Snippet (Answer Box)
         featured_snippet = None
@@ -289,6 +432,7 @@ def fetch_serp_sources(keyword, num_results=10):
                 "sources": [],
                 "paa": paa_questions,
                 "featured_snippet": featured_snippet,
+                "ai_overview": ai_overview,  # v27.0
                 "related_searches": related_searches,
                 "serp_titles": serp_titles,
                 "serp_snippets": serp_snippets
@@ -296,23 +440,131 @@ def fetch_serp_sources(keyword, num_results=10):
 
         print(f"[S1] ✅ Found {len(organic_results)} SERP results")
 
-        # ⭐ 6. Wyciągnij CZYSTĄ treść za pomocą content_extractor (v46.0)
-        # Zastępuje stary regex-based scraper — używa trafilatura + BeautifulSoup
-        sources = extract_serp_sources(
-            organic_results=organic_results,
-            num_results=num_results,
-            max_total_content=MAX_TOTAL_CONTENT,
-            max_content_per_page=MAX_CONTENT_SIZE,
-            timeout=SCRAPE_TIMEOUT,
-        )
+        # ⭐ 6. Scrapuj PEŁNĄ treść każdej strony + strukturę H2
+        # ⭐ v47.1: Parallel scraping with ThreadPoolExecutor
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import time as _time
 
-        total_content_size = sum(len(s.get("content", "")) for s in sources)
-        print(f"[S1] ✅ Clean extraction: {len(sources)} sources ({total_content_size} total chars)")
+        def _scrape_one(item):
+            """Scrape a single URL — runs in thread pool."""
+            url = item.get("link", "")
+            title = item.get("title", "")
+            if not url:
+                return None
+            if should_skip_url(url):
+                print(f"[S1] ⏭️ Skipping large doc pattern: {url[:50]}...")
+                return None
+
+            t0 = _time.time()
+            try:
+                page_response = requests.get(
+                    url,
+                    timeout=SCRAPE_TIMEOUT,
+                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+                )
+
+                if page_response.status_code != 200:
+                    print(f"[S1] ⚠️ HTTP {page_response.status_code} from {url[:40]}")
+                    return None
+
+                # v52.4: Smart encoding — requests domyślnie używa ISO-8859-1 dla text/html
+                # bez deklaracji charset w nagłówkach, co powoduje pojÄciem zamiast pojęciem.
+                content_type = page_response.headers.get('Content-Type', '')
+                if 'charset=' in content_type.lower():
+                    raw_html = page_response.text  # Zaufaj zadeklarowanemu charset
+                else:
+                    try:
+                        raw_html = page_response.content.decode('utf-8')
+                    except UnicodeDecodeError:
+                        try:
+                            raw_html = page_response.content.decode('windows-1250')
+                        except UnicodeDecodeError:
+                            raw_html = page_response.content.decode('utf-8', errors='replace')
+
+                # Limit content size PRZED przetwarzaniem
+                if len(raw_html) > MAX_CONTENT_SIZE * 2:
+                    print(f"[S1] ⚠️ Content too large ({len(raw_html)} chars), truncating: {url[:40]}")
+                    raw_html = raw_html[:MAX_CONTENT_SIZE * 2]
+
+                # Wyciągnij H2 PRZED usunięciem tagów
+                h2_tags = re.findall(r'<h2[^>]*>(.*?)</h2>', raw_html, re.IGNORECASE | re.DOTALL)
+                h2_clean = [re.sub(r'<[^>]+>', '', h).strip() for h in h2_tags]
+                h2_clean = [h for h in h2_clean if h and len(h) < 200 and not re.search(r'[{};]|webkit|moz-|flex-|align-items', h, re.IGNORECASE)]
+
+                # Ekstrakcja treści — trafilatura lub regex fallback
+                content = None
+                if TRAFILATURA_AVAILABLE:
+                    try:
+                        content = trafilatura.extract(
+                            raw_html,
+                            include_comments=False,
+                            include_tables=True,
+                            no_fallback=False,
+                            favor_precision=True
+                        )
+                    except Exception as e:
+                        print(f"[S1] ⚠️ trafilatura failed for {url[:40]}: {e}")
+                        content = None
+
+                # Fallback: regex
+                if not content:
+                    content = raw_html
+                    content = re.sub(r'<script[^>]*>.*?</script>', '', content, flags=re.DOTALL | re.IGNORECASE)
+                    content = re.sub(r'<style[^>]*>.*?</style>', '', content, flags=re.DOTALL | re.IGNORECASE)
+                    content = re.sub(r'<nav[^>]*>.*?</nav>', '', content, flags=re.DOTALL | re.IGNORECASE)
+                    content = re.sub(r'<footer[^>]*>.*?</footer>', '', content, flags=re.DOTALL | re.IGNORECASE)
+                    content = re.sub(r'<header[^>]*>.*?</header>', '', content, flags=re.DOTALL | re.IGNORECASE)
+                    content = re.sub(r'<[^>]+>', ' ', content)
+                    content = re.sub(r'\s+', ' ', content).strip()
+
+                content = content[:MAX_CONTENT_SIZE]
+                elapsed = _time.time() - t0
+
+                if len(content) > 500:
+                    word_count = len(content.split())
+                    print(f"[S1] ✅ Scraped {len(content)} chars ({word_count} words), {len(h2_clean)} H2 from {url[:40]} [{elapsed:.1f}s]")
+                    return {
+                        "url": url,
+                        "title": title,
+                        "content": content,
+                        "h2_structure": h2_clean[:15],
+                        "word_count": word_count
+                    }
+                else:
+                    print(f"[S1] ⚠️ Too short content from {url[:40]}")
+                    return None
+
+            except requests.exceptions.Timeout:
+                print(f"[S1] ⏱️ Timeout for {url[:40]} (>{SCRAPE_TIMEOUT}s)")
+                return None
+            except Exception as e:
+                print(f"[S1] ⚠️ Scrape error for {url[:40]}: {e}")
+                return None
+
+        # Launch all scrapes in parallel (max 6 threads)
+        scrape_targets = [r for r in organic_results[:num_results] if r.get("link")]
+        t_start = _time.time()
+        print(f"[S1] 🚀 Parallel scraping {len(scrape_targets)} pages...")
+
+        sources = []
+        total_content_size = 0
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            futures = {pool.submit(_scrape_one, item): item for item in scrape_targets}
+            for future in as_completed(futures):
+                result = future.result()
+                if result and total_content_size < MAX_TOTAL_CONTENT:
+                    sources.append(result)
+                    total_content_size += len(result["content"])
+
+        t_elapsed = _time.time() - t_start
+        print(f"[S1] ✅ Parallel scrape done: {len(sources)} sources ({total_content_size} chars) in {t_elapsed:.1f}s")
+
 
         return {
             "sources": sources,
             "paa": paa_questions,
             "featured_snippet": featured_snippet,
+            "ai_overview": ai_overview,  # v27.0
             "related_searches": related_searches,
             "serp_titles": serp_titles,
             "serp_snippets": serp_snippets
@@ -328,7 +580,10 @@ def fetch_serp_sources(keyword, num_results=10):
 @app.route("/api/ngram_entity_analysis", methods=["POST"])
 def perform_ngram_analysis():
     data = request.get_json(force=True)
-    main_keyword = data.get("main_keyword", "")
+    
+    # v27.0: Akceptuj zarówno "keyword" jak i "main_keyword"
+    main_keyword = data.get("main_keyword") or data.get("keyword", "")
+    
     sources = data.get("sources", [])
     top_n = int(data.get("top_n", 30))
     project_id = data.get("project_id")
@@ -336,6 +591,7 @@ def perform_ngram_analysis():
     # ⭐ Zmienne na dodatkowe dane SERP
     paa_questions = []
     featured_snippet = None
+    ai_overview = None  # v27.0: Google SGE
     related_searches = []
     serp_titles = []
     serp_snippets = []
@@ -353,6 +609,7 @@ def perform_ngram_analysis():
         sources = serp_result.get("sources", [])
         paa_questions = serp_result.get("paa", [])
         featured_snippet = serp_result.get("featured_snippet")
+        ai_overview = serp_result.get("ai_overview")  # v27.0
         related_searches = serp_result.get("related_searches", [])
         serp_titles = serp_result.get("serp_titles", [])
         serp_snippets = serp_result.get("serp_snippets", [])
@@ -368,49 +625,149 @@ def perform_ngram_analysis():
 
     print(f"[S1] 🔍 Analiza n-gramów dla: {main_keyword}")
 
+    # ═══════════════════════════════════════════════════════════════════════════
     # 1️⃣ NLP Statystyczne (N-gramy)
+    # v52.0: LEMMA-BASED N-GRAMS + HIGH-SIGNAL SOURCES
+    #
+    # Problem który rozwiązujemy:
+    # A) FLEKSJA: "wpływem alkoholu", "wpływu alkoholu", "wpływ alkoholu" to ta
+    #    sama fraza - Surfer liczy je razem, Brajn liczył jako 3 osobne n-gramy.
+    #    FIX: indeksujemy po LEMATACH (canonical form), zachowujemy najczęstszą
+    #    formę powierzchniową do wyświetlania.
+    #
+    # B) BRAKUJĄCE FRAZY: "warunkowe umorzenie" pojawia się w related_searches /
+    #    PAA / snippetach ale rzadko w treści stron (bo to krótkie strony).
+    #    FIX: PAA + related_searches + snippety = "high-signal source" - niższy
+    #    próg freq dla tych fraz (wystarczy 1x, nie 2x).
+    # ═══════════════════════════════════════════════════════════════════════════
     ngram_presence = defaultdict(set)
     ngram_freqs = Counter()
+    ngram_per_source = defaultdict(lambda: Counter())
+    lemma_surface_freq = defaultdict(Counter)  # lemma_key → {surface_form: count}
     all_text_content = []
 
-    for src in sources:
+    def _lemmatize_tokens(text_content, limit=50000):
+        """Zwraca dwie listy: tokeny raw i tokeny-lematy (wyrównane, tylko alfa)."""
+        doc = nlp(text_content[:limit])
+        raw_toks, lem_toks = [], []
+        for t in doc:
+            if t.is_alpha:
+                raw_toks.append(t.text.lower())
+                lem_toks.append(t.lemma_.lower())
+        return raw_toks, lem_toks
+
+    def _build_ngrams_for_source(raw_toks, lem_toks, src_label, src_idx):
+        """Buduje n-gramy używając LEMATÓW jako klucza, surface form do wyświetlania."""
+        for n in range(2, 5):
+            for i in range(len(lem_toks) - n + 1):
+                lemma_key = " ".join(lem_toks[i:i + n])
+                surface_form = " ".join(raw_toks[i:i + n])
+                ngram_freqs[lemma_key] += 1
+                ngram_presence[lemma_key].add(src_label)
+                ngram_per_source[lemma_key][src_idx] += 1
+                lemma_surface_freq[lemma_key][surface_form] += 1
+
+    # ── Główne źródła: scraped pages ──────────────────────────────────────────
+    for src_idx, src in enumerate(sources):
         content = (src.get("content", "") or "").lower()
         if not content.strip():
             continue
-
         all_text_content.append(src.get("content", ""))
-
-        # ⭐ Zbierz struktury H2 z konkurencji
         src_h2 = src.get("h2_structure", [])
         if src_h2:
             h2_patterns.extend(src_h2)
+        raw_toks, lem_toks = _lemmatize_tokens(content)
+        _build_ngrams_for_source(raw_toks, lem_toks, src.get("url", f"src_{src_idx}"), src_idx)
 
-        # ⭐ v22.3: Limit content for NLP processing
-        doc = nlp(content[:50000])  # Reduced from 100000
-        tokens = [t.text.lower() for t in doc if t.is_alpha]
+    # ── v52.0: High-signal sources: PAA + related searches + SERP snippets ────
+    # Google sam selekcjonuje te frazy - zawierają ważne słowa kluczowe których
+    # brak w krótkich stronach SERP (np. "warunkowe umorzenie", "dożywotni zakaz").
+    HIGH_SIGNAL_SRC_IDX = len(sources)
+    HIGH_SIGNAL_LABEL = "__google_signals__"
+    high_signal_texts = []
 
-        for n in range(2, 5):
-            for i in range(len(tokens) - n + 1):
-                ngram = " ".join(tokens[i:i + n])
-                ngram_freqs[ngram] += 1
-                ngram_presence[ngram].add(src.get("url", "unknown"))
+    for paa_item in paa_questions:
+        q = paa_item.get("question", "") if isinstance(paa_item, dict) else str(paa_item)
+        if q:
+            high_signal_texts.append(q)
+    for rs in related_searches:
+        q = rs if isinstance(rs, str) else (rs.get("query", "") or rs.get("text", ""))
+        if q:
+            high_signal_texts.append(q)
+    for title in serp_titles:
+        if title:
+            high_signal_texts.append(title)
+    for snippet in serp_snippets:
+        if snippet:
+            high_signal_texts.append(snippet)
+
+    if high_signal_texts:
+        combined_signal = " . ".join(high_signal_texts)
+        raw_hs, lem_hs = _lemmatize_tokens(combined_signal, limit=20000)
+        _build_ngrams_for_source(raw_hs, lem_hs, HIGH_SIGNAL_LABEL, HIGH_SIGNAL_SRC_IDX)
+        print(f"[S1] 🎯 High-signal: {len(high_signal_texts)} tekstów (PAA+related+snippets) → dodane do n-gramów")
+
+    # ── Resolve best surface form per lemma-key ────────────────────────────────
+    lemma_to_surface = {}
+    for lemma_key, surface_counts in lemma_surface_freq.items():
+        lemma_to_surface[lemma_key] = surface_counts.most_common(1)[0][0]
 
     max_freq = max(ngram_freqs.values()) if ngram_freqs else 1
+    num_sources = len(sources)
     results = []
 
     for ngram, freq in ngram_freqs.items():
-        if freq < 2:
+        # v52.0: Oddzielny próg dla high-signal vs stron
+        page_presence = {s for s in ngram_presence[ngram] if s != HIGH_SIGNAL_LABEL}
+        page_freq = sum(
+            cnt for idx, cnt in ngram_per_source[ngram].items()
+            if idx != HIGH_SIGNAL_SRC_IDX
+        )
+        is_high_signal_only = (HIGH_SIGNAL_LABEL in ngram_presence[ngram]
+                               and not page_presence)
+        # Stary filtr: min 2x w stronach; nowy: high-signal przechodzi przy freq>=1
+        if page_freq < 2 and not is_high_signal_only:
             continue
-        freq_norm = freq / max_freq
-        site_score = len(ngram_presence[ngram]) / len(sources) if sources else 0
+        # v52.0: Wyświetlamy najczęstszą formę powierzchniową, nie lemat
+        display_ngram = lemma_to_surface.get(ngram, ngram)
+
+        page_presence_set = {s for s in ngram_presence[ngram] if s != HIGH_SIGNAL_LABEL}
+        freq_norm = page_freq / max_freq if max_freq else 0
+        site_score = len(page_presence_set) / num_sources if num_sources else 0
         weight = round(freq_norm * 0.5 + site_score * 0.5, 4)
-        if main_keyword and main_keyword.lower() in ngram:
+
+        # Boost: fraza zawiera główne słowo kluczowe
+        if main_keyword and main_keyword.lower() in display_ngram:
             weight += 0.1
+        # Boost: fraza pochodzi z high-signal source (PAA/related/snippet)
+        if HIGH_SIGNAL_LABEL in ngram_presence[ngram]:
+            weight += 0.08
+
+        # v51/v52: Per-source frequency stats (Surfer-style ranges) — tylko prawdziwe strony
+        per_src = ngram_per_source.get(ngram, {})
+        all_counts = [per_src.get(i, 0) for i in range(num_sources)]
+        non_zero = sorted([c for c in all_counts if c > 0])
+
+        if non_zero:
+            freq_min = non_zero[0]
+            freq_max = non_zero[-1]
+            mid = len(non_zero) // 2
+            freq_median = non_zero[mid] if len(non_zero) % 2 == 1 else (non_zero[mid-1] + non_zero[mid]) // 2
+        else:
+            freq_min = freq_median = freq_max = 0
+
         results.append({
-            "ngram": ngram,
-            "freq": freq,
+            "ngram": display_ngram,          # najczęstsza forma powierzchniowa
+            "ngram_lemma": ngram,            # lemat (do dedup w keyword_counter)
+            "freq": page_freq,               # tylko z prawdziwych stron
+            "freq_total": freq,              # łącznie z high-signal
+            "is_high_signal": is_high_signal_only,
             "weight": min(1.0, weight),
-            "site_distribution": f"{len(ngram_presence[ngram])}/{len(sources)}"
+            "site_distribution": f"{len(page_presence_set)}/{num_sources}",
+            "freq_per_source": all_counts,
+            "freq_min": freq_min,
+            "freq_median": freq_median,
+            "freq_max": freq_max
         })
 
     results = sorted(results, key=lambda x: x["weight"], reverse=True)[:top_n]
@@ -426,14 +783,79 @@ def perform_ngram_analysis():
     serp_analysis_data = {
         "paa_questions": paa_questions,
         "featured_snippet": featured_snippet,
+        "ai_overview": ai_overview,  # v27.0: Google SGE
         "related_searches": related_searches,
         "competitor_titles": serp_titles[:10],
         "competitor_snippets": serp_snippets[:10],
         "competitor_h2_patterns": unique_h2_patterns,
+        # v27.0: Dodaj competitors z word_count dla recommended_length
+        "competitors": [
+            {
+                "url": src.get("url", ""),
+                "title": src.get("title", ""),
+                "word_count": src.get("word_count", 0),
+                "h2_count": len(src.get("h2_structure", []))
+            }
+            for src in sources
+        ]
     }
 
-    # 3️⃣ Content Hints - subtelne wskazówki dla GPT
-    content_hints = generate_content_hints(serp_analysis_data, main_keyword)
+    # 3️⃣ Content Hints - WYŁĄCZONE v28.0 (duplikuje dane z serp_analysis)
+    # content_hints = generate_content_hints(serp_analysis_data, main_keyword)
+
+    # 4️⃣ 🆕 Entity SEO Analysis (v28.0)
+    entity_seo_data = None
+    if ENTITY_SEO_ENABLED and sources:
+        try:
+            print(f"[S1] 🧠 Running Entity SEO analysis...")
+            entity_seo_data = perform_entity_seo_analysis(
+                nlp=nlp,
+                sources=sources,
+                main_keyword=main_keyword,
+                h2_patterns=unique_h2_patterns
+            )
+            print(f"[S1] ✅ Entity SEO: {entity_seo_data.get('entity_seo_summary', {}).get('total_entities', 0)} entities found")
+        except Exception as e:
+            print(f"[S1] ⚠️ Entity SEO error (non-critical): {e}")
+            entity_seo_data = {"error": str(e), "status": "FAILED"}
+
+    # 5️⃣ 🆕 Causal Triplet Extraction (v45.0)
+    causal_data = None
+    if CAUSAL_EXTRACTOR_ENABLED and sources:
+        try:
+            print(f"[S1] 🔗 Running Causal Triplet Extraction...")
+            causal_triplets = extract_causal_triplets(
+                texts=[s.get("content", "") for s in sources],
+                main_keyword=main_keyword
+            )
+            causal_data = {
+                "count": len(causal_triplets),
+                "chains": [t.to_dict() for t in causal_triplets if t.is_chain],
+                "singles": [t.to_dict() for t in causal_triplets if not t.is_chain],
+                "agent_instruction": format_causal_for_agent(causal_triplets, main_keyword)
+            }
+            print(f"[S1] ✅ Causal Triplets: {len(causal_triplets)} found "
+                  f"({sum(1 for t in causal_triplets if t.is_chain)} chains)")
+        except Exception as e:
+            print(f"[S1] ⚠️ Causal extraction error (non-critical): {e}")
+            causal_data = {"error": str(e), "status": "FAILED"}
+
+    # 6️⃣ 🆕 Content Gap Analysis (v45.0)
+    content_gaps_data = None
+    if GAP_ANALYZER_ENABLED and sources:
+        try:
+            print(f"[S1] 📊 Running Gap Analysis...")
+            content_gaps_data = analyze_content_gaps(
+                competitor_texts=[s.get("content", "") for s in sources],
+                competitor_h2s=unique_h2_patterns,
+                paa_questions=paa_questions,
+                related_searches=related_searches,
+                main_keyword=main_keyword
+            )
+            print(f"[S1] ✅ Content Gaps: {content_gaps_data.get('total_gaps', 0)} gaps found")
+        except Exception as e:
+            print(f"[S1] ⚠️ Gap Analysis error (non-critical): {e}")
+            content_gaps_data = {"error": str(e), "status": "FAILED"}
 
     # ⭐ PEŁNA ODPOWIEDŹ z wszystkimi danymi SERP
     response_payload = {
@@ -450,18 +872,31 @@ def perform_ngram_analysis():
         # ⭐ Pełna analiza SERP (surowe dane)
         "serp_analysis": serp_analysis_data,
 
-        # ⭐ Content Hints - inspiracje dla GPT
-        "content_hints": content_hints,
+        # ⭐ Content Hints - WYŁĄCZONE v28.0 (BRAJEN używa serp_analysis bezpośrednio)
+        # "content_hints": content_hints,
+
+        # 🆕 Entity SEO (v28.0)
+        "entity_seo": entity_seo_data,
+
+        # 🆕 Causal Triplets (v45.0)
+        "causal_triplets": causal_data,
+
+        # 🆕 Content Gaps (v45.0)
+        "content_gaps": content_gaps_data,
 
         "summary": {
             "total_sources": len(sources),
             "sources_auto_fetched": not bool(data.get("sources", [])),
             "paa_count": len(paa_questions),
             "has_featured_snippet": featured_snippet is not None,
+            "has_ai_overview": ai_overview is not None,
             "related_searches_count": len(related_searches),
             "h2_patterns_found": len(unique_h2_patterns),
-            "content_hints_generated": bool(content_hints),
-            "engine": "v22.3-oom-fix",  # ⭐ v22.3
+            "entity_seo_enabled": ENTITY_SEO_ENABLED,
+            "entities_found": entity_seo_data.get("entity_seo_summary", {}).get("total_entities", 0) if entity_seo_data else 0,
+            "causal_triplets_found": causal_data.get("count", 0) if causal_data else 0,
+            "content_gaps_found": content_gaps_data.get("total_gaps", 0) if content_gaps_data else 0,
+            "engine": "v28.0",
             "lsi_candidates": len(semantic_keyphrases),
         }
     }
@@ -516,7 +951,7 @@ def perform_generate_compliance_report():
 def health():
     return jsonify({
         "status": "ok",
-        "engine": "v22.3-oom-fix",  # ⭐ v22.3
+        "engine": "v28.0",
         "limits": {
             "max_content_per_page": MAX_CONTENT_SIZE,
             "max_total_content": MAX_TOTAL_CONTENT,
@@ -528,11 +963,23 @@ def health():
             "serpapi_enabled": bool(SERPAPI_KEY),
             "paa_extraction": True,
             "featured_snippet_extraction": True,
+            "ai_overview_extraction": True,
             "related_searches_extraction": True,
             "competitor_h2_analysis": True,
+            "competitor_word_count": True,
             "full_content_scraping": True,
-            "content_hints_generation": True,
-            "oom_protection": True  # ⭐ v22.3
+            "oom_protection": True,
+            "keyword_alias_support": True,
+            # v28.0: Entity SEO
+            "entity_seo_enabled": ENTITY_SEO_ENABLED,
+            "entity_extraction": ENTITY_SEO_ENABLED,
+            "topical_coverage": ENTITY_SEO_ENABLED,
+            "entity_relationships": ENTITY_SEO_ENABLED,
+            # v28.0: content_hints WYŁĄCZONE (BRAJEN używa serp_analysis)
+            "content_hints_generation": False,
+            # v45.0: Causal Triplets + Gap Analysis
+            "causal_triplets_enabled": CAUSAL_EXTRACTOR_ENABLED,
+            "gap_analysis_enabled": GAP_ANALYZER_ENABLED,
         }
     })
 
