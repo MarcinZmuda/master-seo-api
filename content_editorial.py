@@ -54,20 +54,36 @@ YMYL_EXPERT_ROLES = {
         "domain": "prawo",
         "critical_checks": [
             "Czy artykuł zawiera placeholder 'odpowiednich przepisów prawa' lub podobny? → BŁĄD KRYTYCZNY",
-            "Czy używa błędnej terminologii: 'aresztowanie' zamiast 'pozbawienie wolności', 'uwięzienie', 'alkohol w naturze', 'promile z natury/urodzenia'? → BŁĄD KRYTYCZNY",
+            "Czy używa błędnej terminologii: 'aresztowanie' zamiast 'pozbawienie wolności', 'uwięzienie', 'alkohol w/z natury', 'alkohol z urodzenia', 'promile z natury/urodzenia', 'opilstwo' zamiast 'stan nietrzeźwości', 'obsługiwał pojazd' zamiast 'prowadził pojazd'? → BŁĄD KRYTYCZNY — KAŻDE WYSTĄPIENIE POPRAW",
             "Czy podane wymiary kar są aktualne? (art. 178a § 1 KK: do 3 lat od 1.10.2023, recydywa: do 5 lat) → BŁĄD KRYTYCZNY jeśli nieaktualne",
             "Czy brakuje kluczowych instytucji prawnych istotnych dla tematu? (np. konfiskata pojazdu art. 44b KK dla jazdy po alkoholu) → BŁĄD POWAŻNY",
             "Czy artykuł zawiera wymyślone sygnatury orzeczeń, daty rozporządzeń, numery ustaw? → HALUCYNACJA KRYTYCZNA",
         ],
         "forbidden_terms": [
+            # --- błędna terminologia karna ---
             ("aresztowanie", "pozbawienie wolności"),
             ("bezwzględne aresztowanie", "bezwzględne pozbawienie wolności"),
             ("uwięzienie", "pozbawienie wolności"),
+            # --- halucynacje alkohol ---
             ("alkohol w naturze", "stężenie alkoholu we krwi"),
-            ("promile z natury", "zawartość alkoholu"),
-            ("promile z urodzenia", "zawartość alkoholu"),
+            ("alkohol z natury", "stężenie alkoholu we krwi"),
+            ("alkohol z urodzenia", "stężenie alkoholu we krwi"),
+            ("promile z natury", "zawartość alkoholu we krwi"),
+            ("promile z urodzenia", "zawartość alkoholu we krwi"),
+            ("promile alkoholu z", "stężenie alkoholu"),
+            ("stężenie alkoholu z natury", "stężenie alkoholu we krwi"),
+            ("stężenie alkoholu z urodzenia", "stężenie alkoholu we krwi"),
+            # --- archaizmy i błędna terminologia ---
+            ("opilstwo", "stan nietrzeźwości"),
+            ("pijaństwo", "stan nietrzeźwości"),  # w kontekście prawnym
+            ("obsługiwał pojazd", "prowadził pojazd"),
+            ("obsługi pojazdu", "prowadzenia pojazdu"),
+            ("zakaz obsługi pojazdu", "zakaz prowadzenia pojazdu"),
+            ("zakaz obsługi pojazdów", "zakaz prowadzenia pojazdów"),
+            # --- phantom przepisy ---
             ("odpowiednich przepisów prawa", "[konkretny artykuł ustawy]"),
             ("właściwych regulacji prawnych", "[konkretny artykuł ustawy]"),
+            ("stosownych przepisów", "[konkretny artykuł ustawy]"),
         ],
     },
     "medycyna": {
