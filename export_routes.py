@@ -93,6 +93,75 @@ else:
     print("[EXPORT] ⚠️ ANTHROPIC_API_KEY not set")
 
 
+def _robust_json_parse(text: str) -> dict | None:
+    """
+    Robust JSON parser for LLM responses.
+    Handles: markdown fences, truncated corrected_text, raw newlines in strings.
+    """
+    import json, re
+
+    # 1. Strip markdown fences
+    clean = text.strip()
+    clean = re.sub(r'^```json\s*', '', clean)
+    clean = re.sub(r'^```\s*', '', clean)
+    clean = re.sub(r'```\s*$', '', clean).strip()
+
+    # 2. Find outer braces
+    first = clean.find('{')
+    last = clean.rfind('}')
+    if first == -1 or last <= first:
+        return None
+    candidate = clean[first:last + 1]
+
+    # 3. Try direct parse
+    try:
+        return json.loads(candidate)
+    except Exception:
+        pass
+
+    # 4. Try with strict=False (allows control chars)
+    try:
+        return json.loads(candidate, strict=False)
+    except Exception:
+        pass
+
+    # 5. Strip corrected_text field (often causes parse errors due to newlines)
+    try:
+        stripped = re.sub(
+            r'"corrected_text"\s*:\s*"[\s\S]*?"(?=\s*[,}])',
+            '"corrected_text": ""',
+            candidate
+        )
+        result = json.loads(stripped, strict=False)
+        result["corrected_text"] = ""  # mark as stripped
+        return result
+    except Exception:
+        pass
+
+    # 6. Extract just the safe fields
+    try:
+        score_m = re.search(r'"overall_score"\s*:\s*(\d+)', candidate)
+        summary_m = re.search(r'"summary"\s*:\s*"([^"]{0,300})', candidate)
+        errors_m = re.search(r'"errors_to_fix"\s*:\s*(\[[\s\S]*?\])', candidate)
+
+        partial = {"overall_score": 5, "summary": "Analiza czesciowo sparsowana", "errors_to_fix": []}
+        if score_m:
+            partial["overall_score"] = int(score_m.group(1))
+        if summary_m:
+            partial["summary"] = summary_m.group(1)
+        if errors_m:
+            try:
+                partial["errors_to_fix"] = json.loads(errors_m.group(1), strict=False)
+            except Exception:
+                pass
+        return partial
+    except Exception:
+        pass
+
+    return None
+
+
+
 def _claude_call(prompt: str, max_tokens: int = 6000, label: str = "CALL") -> tuple:
     """Call Claude with model fallback. Returns (response_text, model_used)."""
     models_to_try = [EDITORIAL_MODEL, EDITORIAL_MODEL_FALLBACK]
@@ -883,22 +952,12 @@ Każda Twoja sugestia powinna prowadzić do PUNKTOWEJ POPRAWY, nie do przepisani
             analysis_text, ai_model = _claude_call(analysis_prompt, max_tokens=6000, label="CALL 1")
             
             # Parsuj JSON analizy
-            try:
-                clean = analysis_text
-                if "```json" in clean:
-                    clean = re.sub(r'```json\s*', '', clean)
-                    clean = re.sub(r'```\s*$', '', clean)
-                elif "```" in clean:
-                    clean = re.sub(r'```\s*', '', clean)
-                
-                first_brace = clean.find('{')
-                last_brace = clean.rfind('}')
-                if first_brace != -1 and last_brace > first_brace:
-                    analysis = json.loads(clean[first_brace:last_brace + 1])
-                    print(f"[EDITORIAL_REVIEW] ✅ Analysis parsed: score={analysis.get('overall_score')}")
-            except Exception as e:
-                print(f"[EDITORIAL_REVIEW] ⚠️ Analysis parse error: {e}")
-                analysis = {"overall_score": 5, "summary": "Analiza nie sparsowana", "raw": analysis_text[:500]}
+            analysis = _robust_json_parse(analysis_text)
+            if analysis and analysis.get("overall_score") is not None:
+                print(f"[EDITORIAL_REVIEW] ✅ Analysis parsed: score={analysis.get('overall_score')}, errors={len(analysis.get('errors_to_fix',[]))}")
+            else:
+                print(f"[EDITORIAL_REVIEW] ⚠️ Analysis parse failed — raw: {analysis_text[:200]}")
+                analysis = {"overall_score": 5, "summary": "Analiza nie sparsowana", "errors_to_fix": [], "raw": analysis_text[:500]}
             
             # ============================================================
             # WYWOŁANIE 2: DIFF-BASED CORRECTION (v29.0)
@@ -1003,10 +1062,9 @@ Artykuł ({word_count} słów):
                 if "```json" in clean:
                     clean = re.sub(r'```json\s*', '', clean)
                     clean = re.sub(r'```\s*$', '', clean)
-                first_brace = clean.find('{')
-                last_brace = clean.rfind('}')
-                if first_brace != -1 and last_brace > first_brace:
-                    data = json.loads(clean[first_brace:last_brace + 1])
+                data = _robust_json_parse(clean)
+                if not data:
+                    data = {}
                     analysis = data.get("analysis", {})
                     corrected_article = data.get("corrected_article", "")
             except:
