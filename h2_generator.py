@@ -366,41 +366,60 @@ def analyze_competitor_h2(competitor_h2: List[str], main_keyword: str) -> Dict:
     topics = []
     question_count = 0
     
-    for h2 in competitor_h2:
+    for h2_item in competitor_h2:
+        # Handle both string and dict format (with count/sources from new ngram API)
+        if isinstance(h2_item, dict):
+            h2 = h2_item.get("text", h2_item.get("pattern", h2_item.get("h2", "")))
+            weight = h2_item.get("count", h2_item.get("sources", 1))
+        else:
+            h2 = str(h2_item)
+            weight = 1
+        
+        if not h2:
+            continue
         h2_lower = h2.lower().strip()
         
         # Wykryj typ H2
         h2_type = detect_h2_type_from_text(h2_lower)
-        type_counts[h2_type] = type_counts.get(h2_type, 0) + 1
+        # Weight by how many competitors use this H2
+        type_counts[h2_type] = type_counts.get(h2_type, 0) + weight
         
         # Czy to pytanie?
         if "?" in h2 or h2_lower.startswith(("jak ", "co ", "czy ", "ile ", "kiedy ", "gdzie ", "dlaczego ")):
-            question_count += 1
+            question_count += weight
         
-        # Zapisz temat
+        # Zapisz temat z wagą
         topics.append({
             "original": h2,
             "type": h2_type,
-            "is_question": "?" in h2
+            "is_question": "?" in h2,
+            "weight": weight
         })
     
     # Sortuj typy po częstości
     sorted_types = sorted(type_counts.items(), key=lambda x: x[1], reverse=True)
     common_types = [t[0] for t in sorted_types[:5]]
     
-    # Deduplikuj tematy po typie
+    # Sort topics by weight (most popular across competitors first)
+    topics_sorted = sorted(topics, key=lambda x: x.get("weight", 1), reverse=True)
+    
+    # Deduplikuj tematy po typie (zachowaj najczęstszy)
     seen_types = set()
     unique_topics = []
-    for topic in topics:
+    for topic in topics_sorted:
         if topic["type"] not in seen_types:
             unique_topics.append(topic)
             seen_types.add(topic["type"])
     
+    total_weight = sum(t.get("weight", 1) for t in topics)
     return {
         "common_types": common_types,
         "common_topics": unique_topics[:6],  # Max 6 tematów
-        "avg_h2_count": len(competitor_h2) // max(1, len(set(h2.split()[0] for h2 in competitor_h2 if h2))),
-        "question_ratio": round(question_count / len(competitor_h2) * 100, 1) if competitor_h2 else 0,
+        "avg_h2_count": len(competitor_h2) // max(1, len(set(
+            (h.get("text", h) if isinstance(h, dict) else h).split()[0]
+            for h in competitor_h2 if (h.get("text", h) if isinstance(h, dict) else h)
+        ))),
+        "question_ratio": round(question_count / max(total_weight, 1) * 100, 1),
         "type_distribution": type_counts
     }
 
