@@ -11,12 +11,8 @@ RUN apt-get update && apt-get install -y \
     default-jre-headless \
     && rm -rf /var/lib/apt/lists/*
 
-# 🆕 Fix #26B v4.2: sentence-transformers jako osobna warstwa (cachowana)
-# ~800MB — instalowane PRZED requirements.txt zeby Docker cachowal te warstwe
-RUN pip install --no-cache-dir sentence-transformers>=2.7.0
-
-# Pre-download modelu embeddings (zeby nie sciagal at runtime)
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+# sentence-transformers USUNIETY — powodowal OOM (>2GB RAM) na Render
+# Modul perplexity_ai_detector zostaje w kodzie, feature_flags go pominie
 
 # Kopiuj requirements i instaluj zależności
 COPY requirements.txt .
