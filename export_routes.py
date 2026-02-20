@@ -84,21 +84,21 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 # v50.5: Configurable editorial model via env var
 # v51: Changed default to alias (no snapshot) + added fallback chain
 # Fix #29: Walidacja modelu — claude-sonnet-4-6-20250514 nie istnieje
-_raw_model = os.getenv("EDITORIAL_MODEL", "claude-sonnet-4-5-20241022")
+_raw_model = os.getenv("EDITORIAL_MODEL", "claude-sonnet-4-5-20250929")
 # Walidacja: jesli model zawiera snapshot date, sprawdz czy to znany model
 _KNOWN_MODELS = {
-    "claude-sonnet-4-5-20241022", "claude-haiku-4-5-20251001",
+    "claude-sonnet-4-5-20250929", "claude-haiku-4-5-20251001",
     "claude-opus-4-5-20250101",
     # aliasy bez daty tez OK
     "claude-sonnet-4-5", "claude-haiku-4-5", "claude-opus-4-5",
 }
 # Fix #29 v2: Wzmocniona walidacja — wylapuje literowki (np. "laude-" zamiast "claude-")
 if not _raw_model.startswith("claude-"):
-    print(f"[EXPORT] ⚠️ EDITORIAL_MODEL '{_raw_model}' nie zaczyna sie od 'claude-' (literowka?), falling back to claude-sonnet-4-5-20241022")
-    _raw_model = "claude-sonnet-4-5-20241022"
+    print(f"[EXPORT] ⚠️ EDITORIAL_MODEL '{_raw_model}' nie zaczyna sie od 'claude-' (literowka?), falling back to claude-sonnet-4-5-20250929")
+    _raw_model = "claude-sonnet-4-5-20250929"
 elif _raw_model not in _KNOWN_MODELS and "-2025" in _raw_model:
-    print(f"[EXPORT] ⚠️ EDITORIAL_MODEL '{_raw_model}' may not exist, falling back to claude-sonnet-4-5-20241022")
-    _raw_model = "claude-sonnet-4-5-20241022"
+    print(f"[EXPORT] ⚠️ EDITORIAL_MODEL '{_raw_model}' may not exist, falling back to claude-sonnet-4-5-20250929")
+    _raw_model = "claude-sonnet-4-5-20250929"
 EDITORIAL_MODEL = _raw_model
 EDITORIAL_MODEL_FALLBACK = os.getenv("EDITORIAL_MODEL_FALLBACK", "claude-haiku-4-5-20251001")
 claude_client = None
