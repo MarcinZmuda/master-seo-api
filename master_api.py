@@ -2753,6 +2753,48 @@ def get_synonym_simple(word: str):
 
 
 # ================================================================
+# FIX #61: Coherence / Topic drift detection
+# ================================================================
+@app.route("/api/coherence", methods=["POST"])
+def coherence_check():
+    """
+    Fix #61: Analiza spójności między sekcjami H2.
+    Cosine similarity między kolejnymi sekcjami, alert gdy <0.6.
+
+    Request body:
+      { "text": "<article HTML with H2 headers>" }
+
+    Optional params:
+      drift_threshold: float (default 0.6) — below = drift alert
+      global_threshold: float (default 0.5)
+
+    Response:
+      {
+        "coherence_enabled": true,
+        "section_count": 5,
+        "avg_coherence": 0.71,
+        "min_coherence": 0.55,
+        "drift_alerts": [...],
+        "score": 75
+      }
+    """
+    try:
+        data = request.get_json(force=True) or {}
+        text = data.get("text", "")
+        if not text or len(text) < 100:
+            return jsonify({"error": "Brak tekstu lub za krótki", "coherence_enabled": False}), 400
+
+        drift_threshold = float(data.get("drift_threshold", 0.6))
+        global_threshold = float(data.get("global_threshold", 0.5))
+
+        from semantic_analyzer import analyze_section_coherence
+        result = analyze_section_coherence(text, drift_threshold=drift_threshold, global_threshold=global_threshold)
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"error": str(e), "coherence_enabled": False}), 500
+
+
+# ================================================================
 # FIX #28: Health Endpoint
 # ================================================================
 @app.route("/api/health", methods=["GET"])

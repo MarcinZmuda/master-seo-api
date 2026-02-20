@@ -184,6 +184,128 @@ def count_semantic_occurrences(text: str, keyword: str, threshold: float = 0.60)
         return 0
 
 
+def analyze_section_coherence(
+    text: str,
+    drift_threshold: float = 0.6,
+    global_threshold: float = 0.5
+) -> Dict:
+    """
+    Fix #61: Coherence / Topic drift detection.
+    Splits text by H2 headers, computes cosine similarity between consecutive
+    sections, flags drops below drift_threshold as topic drift.
+
+    Returns:
+        {
+            "coherence_enabled": True,
+            "section_count": N,
+            "pairwise_scores": [{"from": "H2a", "to": "H2b", "similarity": 0.72}, ...],
+            "avg_coherence": 0.71,
+            "min_coherence": 0.55,
+            "drift_alerts": [{"from": "H2a", "to": "H2b", "similarity": 0.42}],
+            "global_coherence": 0.68,
+            "score": 75  # 0-100
+        }
+    """
+    if not _load_semantic_model():
+        return {"coherence_enabled": False, "error": "Model not available"}
+
+    # Split by H2 headers (HTML or markdown)
+    # Matches <h2>...</h2> or ## ...
+    h2_pattern = re.compile(r'<h2[^>]*>(.*?)</h2>|^##\s+(.+)', re.IGNORECASE | re.MULTILINE)
+
+    sections = []
+    matches = list(h2_pattern.finditer(text))
+
+    if len(matches) < 2:
+        return {
+            "coherence_enabled": True,
+            "section_count": len(matches),
+            "pairwise_scores": [],
+            "avg_coherence": 1.0,
+            "min_coherence": 1.0,
+            "drift_alerts": [],
+            "global_coherence": 1.0,
+            "score": 100,
+            "note": "Za mało sekcji H2 do analizy coherence"
+        }
+
+    for i, match in enumerate(matches):
+        title = (match.group(1) or match.group(2) or "").strip()
+        # Clean HTML tags from title
+        title = re.sub(r'<[^>]+>', '', title).strip()
+        start = match.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        section_text = text[start:end].strip()
+        # Clean HTML for embedding
+        clean_text = re.sub(r'<[^>]+>', ' ', section_text)
+        clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+        if len(clean_text.split()) >= 10:  # min 10 words
+            sections.append({"title": title, "text": clean_text})
+
+    if len(sections) < 2:
+        return {
+            "coherence_enabled": True,
+            "section_count": len(sections),
+            "pairwise_scores": [],
+            "avg_coherence": 1.0,
+            "min_coherence": 1.0,
+            "drift_alerts": [],
+            "global_coherence": 1.0,
+            "score": 100,
+            "note": "Za mało sekcji z treścią do analizy"
+        }
+
+    try:
+        # Encode all sections
+        embeddings = _semantic_model.encode([s["text"] for s in sections])
+
+        # Pairwise consecutive similarity
+        pairwise = []
+        for i in range(len(sections) - 1):
+            sim = float(_cosine_similarity([embeddings[i]], [embeddings[i + 1]])[0][0])
+            pairwise.append({
+                "from": sections[i]["title"],
+                "to": sections[i + 1]["title"],
+                "similarity": round(sim, 3)
+            })
+
+        # Drift alerts (below threshold)
+        drift_alerts = [p for p in pairwise if p["similarity"] < drift_threshold]
+
+        scores = [p["similarity"] for p in pairwise]
+        avg_coherence = sum(scores) / len(scores) if scores else 1.0
+        min_coherence = min(scores) if scores else 1.0
+
+        # Global coherence: avg similarity of all pairs (not just consecutive)
+        all_pairs = []
+        for i in range(len(embeddings)):
+            for j in range(i + 1, len(embeddings)):
+                sim = float(_cosine_similarity([embeddings[i]], [embeddings[j]])[0][0])
+                all_pairs.append(sim)
+        global_coherence = sum(all_pairs) / len(all_pairs) if all_pairs else 1.0
+
+        # Score 0-100
+        # avg_coherence 0.8+ = 100, 0.6 = 70, 0.4 = 40, 0.2 = 10
+        score = max(0, min(100, int(avg_coherence * 125 - 25)))
+        # Penalty for drift alerts
+        score = max(0, score - len(drift_alerts) * 8)
+
+        return {
+            "coherence_enabled": True,
+            "section_count": len(sections),
+            "pairwise_scores": pairwise,
+            "avg_coherence": round(avg_coherence, 3),
+            "min_coherence": round(min_coherence, 3),
+            "drift_alerts": drift_alerts,
+            "drift_count": len(drift_alerts),
+            "global_coherence": round(global_coherence, 3),
+            "score": score,
+            "sections": [s["title"] for s in sections],
+        }
+    except Exception as e:
+        return {"coherence_enabled": False, "error": str(e)}
+
+
 def semantic_validation(text: str, keywords_state: Dict, min_coverage: float = 0.4) -> Dict:
     keywords = [
         meta.get("keyword", "") 
