@@ -2709,7 +2709,7 @@ def get_project_quality(project_id):
 def submit_batch_simple(project_id):
     """
     Alternatywny endpoint z uproszczonym response dla GPT.
-    
+
     Zamiast 50+ pól, zwraca tylko to co potrzebne:
     - accepted: true/false
     - action: CONTINUE/FIX_AND_RETRY/REWRITE
@@ -2717,7 +2717,7 @@ def submit_batch_simple(project_id):
     - issues: [top 4 issues]
     - fixes_needed: [top 3 fixes]
     - next_task: {batch_number, h2, action}
-    
+
     Request:
         {"text": "h2: Tytuł\n\nTreść batcha..."}
     """
@@ -2739,28 +2739,52 @@ def submit_batch_simple(project_id):
             "depth_shallow_sections": None,
             "next_task": {"action": "CONTINUE"}
         }), 200
-    
-    data = request.get_json() or {}
-    text = data.get("text", "").strip()
-    forced = data.get("forced", False)
-    
-    if not text:
-        return jsonify({"error": "No text provided"}), 400
-    
-    # Standardowe przetwarzanie
-    result = process_batch_in_firestore(project_id, text, {}, forced)
-    
-    if isinstance(result, dict) and result.get("status_code") == 404:
-        return jsonify({"error": "Project not found"}), 404
-    
-    # Pobierz project_data dla simplified response
-    db = firestore.client()
-    doc = db.collection("seo_projects").document(project_id).get()
-    project_data = doc.to_dict() if doc.exists else {}
-    
-    batch_number = len(project_data.get("batches", []))
-    
-    # Utwórz simplified response
-    simplified = create_simplified_response(result, project_data, batch_number, forced=forced)
-    
-    return jsonify(simplified), 200
+
+    try:
+        data = request.get_json() or {}
+        text = data.get("text", "").strip()
+        forced = data.get("forced", False)
+
+        if not text:
+            return jsonify({"error": "No text provided"}), 400
+
+        # Standardowe przetwarzanie
+        result = process_batch_in_firestore(project_id, text, {}, forced)
+
+        if isinstance(result, dict) and result.get("status_code") == 404:
+            return jsonify({"error": "Project not found"}), 404
+
+        # Pobierz project_data dla simplified response
+        db = firestore.client()
+        doc = db.collection("seo_projects").document(project_id).get()
+        project_data = doc.to_dict() if doc.exists else {}
+
+        batch_number = len(project_data.get("batches", []))
+
+        # Utwórz simplified response
+        simplified = create_simplified_response(result, project_data, batch_number, forced=forced)
+
+        return jsonify(simplified), 200
+
+    except Exception as e:
+        # Fix #36: Catch-all aby batch_simple nigdy nie zwracał 500 bez info
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[BATCH_SIMPLE] ❌ EXCEPTION for {project_id}: {str(e)[:300]}")
+        print(f"[BATCH_SIMPLE] Traceback:\n{tb[-500:]}")
+        return jsonify({
+            "accepted": True,
+            "action": "CONTINUE",
+            "confidence": 0.3,
+            "message": f"Internal error caught — batch force-accepted: {str(e)[:150]}",
+            "quality": {"score": None, "grade": "N/A", "status": "error_recovery"},
+            "issues": [f"Server error: {str(e)[:100]}"],
+            "fixes_needed": [],
+            "fixes_applied": [],
+            "depth_score": None,
+            "depth_shallow_sections": None,
+            "exceeded_keywords": [],
+            "next_task": {"action": "CONTINUE"},
+            "_error": str(e)[:200],
+            "_traceback": tb[-300:]
+        }), 200

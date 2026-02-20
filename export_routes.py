@@ -92,7 +92,11 @@ _KNOWN_MODELS = {
     # aliasy bez daty tez OK
     "claude-sonnet-4-5", "claude-haiku-4-5", "claude-opus-4-5",
 }
-if _raw_model not in _KNOWN_MODELS and "-2025" in _raw_model:
+# Fix #29 v2: Wzmocniona walidacja — wylapuje literowki (np. "laude-" zamiast "claude-")
+if not _raw_model.startswith("claude-"):
+    print(f"[EXPORT] ⚠️ EDITORIAL_MODEL '{_raw_model}' nie zaczyna sie od 'claude-' (literowka?), falling back to claude-sonnet-4-5-20241022")
+    _raw_model = "claude-sonnet-4-5-20241022"
+elif _raw_model not in _KNOWN_MODELS and "-2025" in _raw_model:
     print(f"[EXPORT] ⚠️ EDITORIAL_MODEL '{_raw_model}' may not exist, falling back to claude-sonnet-4-5-20241022")
     _raw_model = "claude-sonnet-4-5-20241022"
 EDITORIAL_MODEL = _raw_model
