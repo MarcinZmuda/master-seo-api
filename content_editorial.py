@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 # KONFIGURACJA
 # ================================================================
 
-ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5-20241022")
 
 # Kategorie YMYL i ich "rola eksperta"
 YMYL_EXPERT_ROLES = {

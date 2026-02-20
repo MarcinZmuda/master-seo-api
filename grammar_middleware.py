@@ -153,14 +153,33 @@ def validate_batch_grammar(text: str, max_errors: int = 3) -> GrammarValidation:
     # Sprawdź gramatykę
     if tool and _BACKEND == "local":
         raw_matches = tool.check(text)
+        # Fix #31: kompatybilnosc z roznymi wersjami language_tool_python
+        # Starsze: m.ruleId, m.category  |  Nowsze: m.ruleId usuniety
+        def _get_rule_id(m):
+            """Bezpieczne pobieranie rule ID z Match."""
+            if hasattr(m, 'ruleId'):
+                return m.ruleId
+            if hasattr(m, 'rule') and hasattr(m.rule, 'id'):
+                return m.rule.id
+            return getattr(m, 'rule_id', 'UNKNOWN')
+
+        def _get_category(m):
+            """Bezpieczne pobieranie category z Match."""
+            if hasattr(m, 'category'):
+                return m.category
+            if hasattr(m, 'rule') and hasattr(m.rule, 'category'):
+                cat = m.rule.category
+                return cat.id if hasattr(cat, 'id') else str(cat)
+            return 'UNKNOWN'
+
         matches = [{
-            "ruleId": m.ruleId,
+            "ruleId": _get_rule_id(m),
             "message": m.message,
-            "context": m.context,
+            "context": getattr(m, 'context', ''),
             "offset": m.offset,
-            "length": m.errorLength,
-            "replacements": m.replacements[:3],
-            "rule": {"id": m.ruleId, "category": {"id": m.category}}
+            "length": getattr(m, 'errorLength', getattr(m, 'error_length', 0)),
+            "replacements": (m.replacements or [])[:3],
+            "rule": {"id": _get_rule_id(m), "category": {"id": _get_category(m)}}
         } for m in raw_matches]
     else:
         matches = check_grammar_api(text)

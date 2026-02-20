@@ -693,7 +693,7 @@ def review_with_claude(text: str, ctx: Dict) -> ReviewResult:
 
         def _llm_call_658():
             return client.messages.create(
-            model=os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
+            model=os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5-20241022"),
             max_tokens=4000,
             messages=[{"role": "user", "content": _review_prompt}]
             )

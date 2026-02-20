@@ -681,8 +681,9 @@ def get_legal_context_for_article(
             
             for sq in all_saos_queries:
                 print(f"[LEGAL_MODULE] 📡 SAOS query: '{sq}'")
+                # Fix #30: parametr to 'topic', nie 'query'
                 saos_result = saos_search(
-                    query=sq,
+                    topic=sq,
                     max_results=max_results * 2
                 )
                 

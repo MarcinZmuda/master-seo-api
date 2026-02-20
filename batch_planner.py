@@ -11,17 +11,25 @@ Fix #1 v4.2: Zastepuje stary batch_planner.py ktory zawieral tresc Dockerfile.
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
 
-# Import logiki planowania (Fix #4 = dynamic_batch_planner.py)
-from dynamic_batch_planner import (
-    DynamicBatchPlanner, create_dynamic_batch_plan
-)
+# Fix #32: resilient import — nie lamie feature_flags jesli dynamic_batch_planner ma blad
+PLANNER_AVAILABLE = False
+try:
+    from dynamic_batch_planner import (
+        DynamicBatchPlanner, create_dynamic_batch_plan
+    )
+    PLANNER_AVAILABLE = True
+except ImportError as e:
+    print(f"[BATCH_PLANNER] ⚠️ dynamic_batch_planner not available: {e}")
+    DynamicBatchPlanner = None
+    create_dynamic_batch_plan = None
 
 # Import scoringu
+COMPLEXITY_AVAILABLE = False
 try:
     from batch_complexity import calculate_batch_complexity
     COMPLEXITY_AVAILABLE = True
 except ImportError:
-    COMPLEXITY_AVAILABLE = False
+    pass
 
 
 @dataclass
@@ -62,6 +70,13 @@ def create_article_plan(
         s1_data['entities'] = entities
     if paa_questions:
         s1_data['paa'] = paa_questions
+
+    # Fix #32: graceful fallback jesli planner niedostepny
+    if not PLANNER_AVAILABLE or create_dynamic_batch_plan is None:
+        # Minimalny plan: 1 batch per H2
+        batches = [{"batch_idx": i+1, "sections": [{"h2": h, "target_words": target_length // len(h2_list)}]} for i, h in enumerate(h2_list)]
+        plan_dict = {"total_batches": len(batches), "batches": batches}
+        return ArticlePlan(total_batches=len(batches), total_target_words=target_length, plan_dict=plan_dict)
 
     # Deleguj do DynamicBatchPlanner (token budgeting)
     plan_dict = create_dynamic_batch_plan(

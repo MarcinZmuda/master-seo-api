@@ -39,7 +39,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 # Model config
-TERMINOLOGY_MODEL = os.getenv("TERMINOLOGY_MODEL", "claude-sonnet-4-6")
+TERMINOLOGY_MODEL = os.getenv("TERMINOLOGY_MODEL", "claude-sonnet-4-5-20241022")
 TERMINOLOGY_MAX_TOKENS = 2000
 
 
