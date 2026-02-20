@@ -109,7 +109,7 @@ FORMAT: Zwróć TYLKO listę {target_count} H2, każdy w nowej linii, bez numera
             
             print(f"[H2_SUGGESTIONS] Trying Claude for: {topic}")
             response = client.messages.create(
-                model=os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
+                model=os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5-20241022"),
                 max_tokens=1000,
                 messages=[{"role": "user", "content": prompt}]
             )
@@ -122,7 +122,7 @@ FORMAT: Zwróć TYLKO listę {target_count} H2, każdy w nowej linii, bez numera
                 if h2.strip() and len(h2.strip()) > 5
             ][:target_count]
             
-            model_used = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+            model_used = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-5-20241022")
             print(f"[H2_SUGGESTIONS] ✅ Claude generated {len(suggestions)} H2")
             
         except Exception as e:
