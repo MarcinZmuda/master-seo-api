@@ -1004,14 +1004,16 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
     status = "APPROVED"
     if warnings or not valid_struct:
         status = "WARN"
-    if forced:
-        status = "FORCED"
-    
+
     # v24.0: Jeśli tylko per_batch warnings (nie EXCEEDED TOTAL) - status APPROVED
     has_critical = any("EXCEEDED TOTAL" in w for w in warnings)
     has_density_issue = any("density" in w.lower() and density > DENSITY_MAX for w in warnings)
     if not has_critical and not has_density_issue and not exceeded_keywords:
         status = "APPROVED"
+
+    # 🆕 v45.4: FORCED status MUST be the last override - prevents being overwritten by APPROVED
+    if forced:
+        status = "FORCED"
 
     # ================================================================
     # 🆕 v37.0: BLOKADA przy exceeded_critical (50%+) - NIE zapisuj batcha!
@@ -1202,6 +1204,116 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
                 
         except Exception as e:
             print(f"[TRACKER] ⚠️ Legal Validation error: {e}")
+
+    # ================================================================
+    # 🆕 v45.4: METRICS RECOMPUTE AFTER SURGERY
+    # Jeśli tekst został zmodyfikowany (surgery lub legal removals)
+    # - Oblicz nowe metryki (burstiness, transition, density)
+    # - Przebuduj warnings bez starych metryk
+    # - Re-evaluate exceeded keywords z nowym tekstem
+    # - Określ status SURGERY_WARN jeśli były zmian
+    # ================================================================
+    text_was_modified = (moe_validation_result and moe_validation_result.surgery_applied) or (len(legal_removals) > 0)
+
+    if text_was_modified:
+        # Snapshot original exceeded state
+        original_exceeded = exceeded_keywords.copy() if exceeded_keywords else []
+
+        # Recompute metrics with potentially modified text
+        burstiness = calculate_burstiness(batch_text)
+        transition_data = calculate_transition_score(batch_text)
+        precheck = unified_prevalidation(batch_text, keywords_state)
+        density = precheck.get("density", 0.0)
+
+        # Rebuild warnings - remove old metric-based warnings, keep structure/validity
+        old_warnings = warnings.copy()
+        warnings = [w for w in old_warnings if not any(
+            pattern in w.lower() for pattern in
+            ["burstiness", "transition", "density", "exceeded:"]
+        )]
+
+        # Revalidate metrics
+        metrics_warnings = validate_metrics(burstiness, transition_data, density)
+        warnings.extend(metrics_warnings)
+
+        # Re-evaluate exceeded keywords with modified text
+        exceeded_warning_new = []
+        exceeded_critical_new = []
+
+        for rid, meta in keywords_state.items():
+            if meta.get("type", "BASIC").upper() not in ["BASIC", "MAIN", "ENTITY"]:
+                continue
+
+            keyword = meta.get("keyword", "")
+            if not keyword:
+                continue
+
+            # Count uses in modified text
+            batch_count_new = count_keyword_occurrences(batch_text, keyword)
+            current = meta.get("actual_uses", 0)
+            target_max = meta.get("target_max", 999)
+            new_total = current + batch_count_new
+
+            if new_total > target_max:
+                exceeded_by = new_total - target_max
+                exceed_percent = (exceeded_by / target_max * 100) if target_max > 0 else 100
+
+                synonyms = get_synonyms(keyword) if SYNONYMS_ENABLED else []
+
+                exceeded_info = {
+                    "keyword": keyword,
+                    "current": current,
+                    "batch_uses": batch_count_new,
+                    "would_be": new_total,
+                    "target_max": target_max,
+                    "exceeded_by": exceeded_by,
+                    "exceed_percent": round(exceed_percent),
+                    "synonyms": synonyms[:3]
+                }
+
+                if is_structural_keyword(keyword):
+                    exceeded_info["is_structural"] = True
+                    continue
+
+                if exceed_percent >= 50:
+                    exceeded_critical_new.append(exceeded_info)
+                else:
+                    exceeded_warning_new.append(exceeded_info)
+
+        # Update exceeded lists
+        exceeded_warning = exceeded_warning_new
+        exceeded_critical = exceeded_critical_new
+        exceeded_keywords = exceeded_warning + exceeded_critical
+
+        # Add warnings for re-evaluated exceeded keywords
+        for ew in exceeded_warning:
+            syn_hint = f" → rozważ synonimy: {', '.join(ew['synonyms'][:2])}" if ew.get('synonyms') else ""
+            warnings.append(
+                f"⚠️ EXCEEDED: '{ew['keyword']}' = {ew['would_be']}/{ew['target_max']} "
+                f"(+{ew['exceed_percent']}%){syn_hint}"
+            )
+
+        # 🆕 Fix #5 v4.2: SURGERY_WARN — detect regressions introduced by surgery
+        pre_surgery_exceeded = set(e['keyword'] for e in original_exceeded) if original_exceeded else set()
+        post_surgery_exceeded = set(e['keyword'] for e in exceeded_keywords) if exceeded_keywords else set()
+        new_exceeded = post_surgery_exceeded - pre_surgery_exceeded
+
+        # Re-evaluate status after surgery
+        status = 'APPROVED'
+        if warnings or not valid_struct:
+            status = 'WARN'
+        if new_exceeded:
+            status = 'SURGERY_WARN'
+            warnings.append(f'SURGERY_WARN: nowe exceeded po surgery: {new_exceeded}')
+        has_critical = any('EXCEEDED TOTAL' in w for w in warnings)
+        has_density_issue = any('density' in w.lower() and density > DENSITY_MAX for w in warnings)
+        if not has_critical and not has_density_issue and not exceeded_keywords:
+            status = 'APPROVED'
+        if forced:
+            status = 'FORCED'
+
+        print(f"[TRACKER] 🔬 Surgery metrics recomputed: burstiness={burstiness:.2f}, "
+              f"transition={transition_data.get('ratio', 0):.1%}, density={density:.1%}, status={status}")
 
     # Save batch
     # 🆕 v41.3: Bezpieczne wywołanie to_dict() - chroni przed błędami

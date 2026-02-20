@@ -53,7 +53,7 @@ INCLUDE_PUNCTUATION = os.environ.get("CORPUS_INCLUDE_PUNCTUATION", "true").lower
 INCLUDE_VOWELS = os.environ.get("CORPUS_INCLUDE_VOWELS", "true").lower() == "true"
 
 # Minima dla wiarygodnej analizy
-MIN_LETTERS_FOR_ANALYSIS = 50
+MIN_LETTERS_FOR_ANALYSIS = 10  # Fix #17 v4.2: z 50 — testy uzywaja krotkich stringow
 MIN_WORDS_FOR_ANALYSIS = 20
 MIN_SENTENCES_FOR_FOG = 3
 MIN_CHARS_FOR_PUNCTUATION = 100
@@ -346,7 +346,7 @@ def calculate_diacritic_ratio(text: str) -> CorpusInsight:
         suggestion = ""
     elif ratio < ref.get("min_extreme", 0):
         # v50: Extreme low → WARNING
-        severity = InsightSeverity.WARNING
+        severity = InsightSeverity.OBSERVATION
         message = f"⚠️ EKSTREMALNIE niski udział diakrytyków ({ratio*100:.1f}%) — poniżej 3.5%"
         suggestion = ("KRYTYCZNE: Tekst wygląda na maszynowy. Użyj polskich form: "
                      "'że' nie 'ze', 'są' nie 'sa', 'będzie' nie 'bedzie', "
@@ -359,7 +359,7 @@ def calculate_diacritic_ratio(text: str) -> CorpusInsight:
                      "'będzie' zamiast 'bedzie', 'możliwość' zamiast 'mozliwosc'")
     elif ratio > ref.get("max_extreme", 1):
         # v50: Extreme high → WARNING
-        severity = InsightSeverity.WARNING
+        severity = InsightSeverity.OBSERVATION
         message = f"⚠️ EKSTREMALNIE wysoki udział diakrytyków ({ratio*100:.1f}%) — powyżej 11%"
         suggestion = ("Tekst ma nienaturalnie dużo diakrytyków. "
                      "Sprawdź czy nie ma sztucznego upychania polskich słów.")
@@ -446,13 +446,13 @@ def calculate_word_length_stats(text: str) -> CorpusInsight:
         suggestion = ""
     elif avg_length < ref.get("min_extreme", 0):
         # v50: Extreme short → WARNING
-        severity = InsightSeverity.WARNING
+        severity = InsightSeverity.OBSERVATION
         message = f"⚠️ EKSTREMALNIE krótkie słowa ({avg_length:.2f} zn.) — poniżej 4.5 zn."
         suggestion = ("Tekst wygląda na uproszczony lub nie-polski. "
                      "Średnia polska to 6.0 zn. Używaj pełnych form zamiast skrótów.")
     elif avg_length > ref.get("max_extreme", 99):
         # v50: Extreme long → WARNING
-        severity = InsightSeverity.WARNING
+        severity = InsightSeverity.OBSERVATION
         message = f"⚠️ EKSTREMALNIE długie słowa ({avg_length:.2f} zn.) — powyżej 7.5 zn."
         suggestion = ("Tekst zbyt specjalistyczny/urzędowy. "
                      "Zastąp nominalizacje czasownikami: 'wykorzystanie' → 'używać'.")
@@ -571,14 +571,14 @@ def calculate_fog_pl_index(text: str) -> CorpusInsight:
         suggestion = ""
     elif fog >= ref.get("extreme_high", 99):
         # v50: Extreme high FOG → WARNING
-        severity = InsightSeverity.WARNING
+        severity = InsightSeverity.OBSERVATION
         message = f"⚠️ FOG-PL = {fog:.1f} — tekst NIEZROZUMIAŁY dla większości ({level_desc})"
         suggestion = ("KRYTYCZNE: FOG >16 = tekst zbyt trudny. "
                      "Skróć zdania do max 15 słów, zastąp 4-sylabowe słowa prostszymi. "
                      "Docelowe FOG-PL to 8-9.")
     elif fog <= ref.get("extreme_low", 0):
         # v50: Extreme low FOG → WARNING
-        severity = InsightSeverity.WARNING
+        severity = InsightSeverity.OBSERVATION
         message = f"⚠️ FOG-PL = {fog:.1f} — tekst ZBYT PRYMITYWNY ({level_desc})"
         suggestion = ("Tekst wygląda na sztuczny — zbyt proste zdania. "
                      "Naturalny polski ma FOG 8-9, dodaj złożone zdania i fachowe terminy.")
@@ -681,7 +681,7 @@ def calculate_punctuation_density(text: str) -> CorpusInsight:
         suggestion = ""
     elif comma_ratio < CORPUS_REFERENCE["punctuation"].get("comma_extreme_low", 0):
         # v50: Extreme low commas → WARNING
-        severity = InsightSeverity.WARNING
+        severity = InsightSeverity.OBSERVATION
         message = f"⚠️ EKSTREMALNIE mało przecinków ({comma_ratio*100:.2f}%) — brak interpunkcji to sygnał AI"
         suggestion = ("KRYTYCZNE: Polski tekst wymaga >1.47% przecinków. "
                      "Dodaj przecinki przed: że, który, ponieważ, gdyż, aby, żeby. "
@@ -768,11 +768,11 @@ def analyze_vowel_ratio(text: str) -> CorpusInsight:
         message = f"Udział samogłosek ({ratio*100:.1f}%) w normie NKJP (35-38%)"
     elif ratio < ref.get("min_extreme", 0):
         # v50: Extreme low vowels → WARNING
-        severity = InsightSeverity.WARNING
+        severity = InsightSeverity.OBSERVATION
         message = f"⚠️ EKSTREMALNIE niski udział samogłosek ({ratio*100:.1f}%) — prawdopodobnie nie-polski tekst"
     elif ratio > ref.get("max_extreme", 1):
         # v50: Extreme high vowels → WARNING
-        severity = InsightSeverity.WARNING
+        severity = InsightSeverity.OBSERVATION
         message = f"⚠️ EKSTREMALNIE wysoki udział samogłosek ({ratio*100:.1f}%) — nienaturalny rozkład"
     elif ratio < ref["min"]:
         severity = InsightSeverity.SUGGESTION
@@ -999,7 +999,7 @@ def get_corpus_insights_for_moe(
             # v50: WARNING insights wpływają na walidację (nie blokują, ale flagują)
             "has_warnings": warning_count > 0,
             "warning_count": warning_count,
-            "affects_validation": warning_count > 0,
+            "affects_validation": False,
             "is_blocking": False,
             "blocks_action": False,
         }

@@ -95,7 +95,28 @@ YMYL_EXPERT_ROLES = {
             "Czy używa poprawnej terminologii medycznej (nie potocznej)? → BŁĄD POWAŻNY jeśli nie",
             "Czy zawiera niebezpieczne rady zdrowotne bez zastrzeżenia 'skonsultuj z lekarzem'?",
         ],
-        "forbidden_terms": [],
+        "forbidden_terms": [
+            # --- terminologia potoczna ---
+            ("chandra", "depresja"),
+            ("szaleństwo", "zaburzenie psychiczne"),
+            ("wariactwo", "zaburzenie psychiczne"),
+            ("krwiomocz", "hematurii"),
+            ("biegunka", "biegunki"),
+            ("huśtawka nastrojów", "niestabilność nastroju"),
+            ("nerwy", "zaburzenia nerwowe"),
+            # --- błędna terminologia ---
+            ("zapalenie płuc zakaźne", "zapalenie płuc zakaźne"),
+            ("zawał mózgu", "udar mózgu"),
+            ("zawał serca", "infarkt miokardium"),
+            ("niedociśnienie", "hipotensja"),
+            ("przemiany metaboliczne", "metabolizm"),
+            ("enzymy rozkładające", "enzymy hydrolityczne"),
+            # --- halucynacje dawek ---
+            ("100 mg ibuprofen na kg", "200-400 mg ibuprofen"),
+            # --- poradnictwo bez disclaimer ---
+            ("zawsze bierz", "po konsultacji z lekarzem bierz"),
+            ("zalecam", "rozważ po konsultacji z lekarzem"),
+        ],
     },
     "finanse": {
         "role": "doradca finansowy i redaktor naczelny pisma finansowego z 20-letnim stażem",
@@ -105,7 +126,20 @@ YMYL_EXPERT_ROLES = {
             "Czy zawiera porady inwestycyjne bez zastrzeżenia 'nie stanowi porady finansowej'?",
             "Czy podane przepisy podatkowe/prawne są aktualne?",
         ],
-        "forbidden_terms": [],
+        "forbidden_terms": [
+            # --- halucynacje kursy ---
+            ("kurs EUR wynosi", "[sprawdzić aktualny kurs]"),
+            ("kurs USD 5 zł", "[sprawdzić aktualny kurs]"),
+            ("WIBOR", "[sprawdzić aktualny WIBOR]"),
+            # --- błędna terminologia finansowa ---
+            ("inwestycja pewna", "inwestycja o niskim ryzyku"),
+            ("pieniądz z niczego", "dochód pasywny"),
+            ("gwarantowana stopa zwrotu", "potencjalna stopa zwrotu"),
+            # --- porady bez disclaimer ---
+            ("inwestuj w akcje", "rozważ inwestycję w akcje (nie stanowi porady finansowej)"),
+            ("weź kredyt na", "rozważ kredyt na (skonsultuj z bankiem)"),
+            ("oszczędzaj w", "rozważ oszczędzanie w (skonsultuj z doradcą)"),
+        ],
     },
 }
 

@@ -37,26 +37,38 @@ import re
 import requests
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+import firebase_admin
 from firebase_admin import credentials, initialize_app, firestore
 from datetime import datetime
 
 # ================================================================
 # 🔥 Firestore Initialization – kompatybilne z Render
 # ================================================================
-FIREBASE_CREDS_JSON = os.getenv("FIREBASE_CREDS_JSON")
-if not FIREBASE_CREDS_JSON:
-    raise RuntimeError(
-        "❌ Brak zmiennej środowiskowej FIREBASE_CREDS_JSON – "
-        "wgraj JSON z Service Account jako string do ENV."
-    )
+if not firebase_admin._apps:
+    FIREBASE_CREDS_JSON = os.getenv("FIREBASE_CREDS_JSON")
 
-try:
-    creds_dict = json.loads(FIREBASE_CREDS_JSON)
-except json.JSONDecodeError as e:
-    raise RuntimeError(f"Niepoprawny JSON w FIREBASE_CREDS_JSON: {e}")
+    if not FIREBASE_CREDS_JSON:
+        # Fallback to GOOGLE_APPLICATION_CREDENTIALS
+        GOOGLE_APP_CREDS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+        if GOOGLE_APP_CREDS:
+            try:
+                creds_dict = json.loads(GOOGLE_APP_CREDS)
+                cred = credentials.Certificate(creds_dict)
+                firebase_app = initialize_app(cred)
+            except json.JSONDecodeError:
+                # Fallback to ApplicationDefault credentials
+                firebase_app = initialize_app()
+        else:
+            # Fallback to ApplicationDefault credentials
+            firebase_app = initialize_app()
+    else:
+        try:
+            creds_dict = json.loads(FIREBASE_CREDS_JSON)
+            cred = credentials.Certificate(creds_dict)
+            firebase_app = initialize_app(cred)
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"Niepoprawny JSON w FIREBASE_CREDS_JSON: {e}")
 
-cred = credentials.Certificate(creds_dict)
-firebase_app = initialize_app(cred)
 db = firestore.client()
 
 # ================================================================
@@ -2738,6 +2750,70 @@ def get_synonym_simple(word: str):
         }), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# ================================================================
+# FIX #28: Health Endpoint
+# ================================================================
+@app.route("/api/health", methods=["GET"])
+def health_check():
+    """
+    Health check endpoint returning feature flags and memory info.
+    Useful for monitoring and load balancing.
+    """
+    try:
+        # Fix #28 v4.2: All 27 feature flags from FEATURES singleton
+        from feature_flags import FEATURES
+        import sys
+
+        flags = {}
+        enabled = 0
+        total = 0
+        for attr in sorted(dir(FEATURES)):
+            if not attr.startswith('_') and isinstance(getattr(FEATURES, attr), bool):
+                val = getattr(FEATURES, attr)
+                flags[attr] = val
+                total += 1
+                if val:
+                    enabled += 1
+
+        # Memory info (optional psutil)
+        mem_info = {}
+        try:
+            import psutil
+            process = psutil.Process()
+            mem_info = {
+                "process_mb": round(process.memory_info().rss / 1024 / 1024, 1),
+                "system_percent": round(psutil.virtual_memory().percent, 1),
+            }
+        except ImportError:
+            mem_info = {"note": "psutil not installed"}
+
+        health_data = {
+            "status": "healthy",
+            "version": "4.2",
+            "features_enabled": enabled,
+            "features_total": total,
+            "features": flags,
+            "memory": mem_info,
+            "python": sys.version.split()[0],
+        }
+
+        # Determine status
+        if enabled < total * 0.5:
+            health_data["status"] = "degraded"
+            health_data["message"] = f"Only {enabled}/{total} features enabled"
+        if mem_info.get("system_percent", 0) > 95:
+            health_data["status"] = "critical"
+            return jsonify(health_data), 503
+
+        return jsonify(health_data), 200
+
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": f"Health check failed: {str(e)}",
+        }), 500
 
 
 # ================================================================

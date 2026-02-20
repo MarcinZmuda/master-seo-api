@@ -339,7 +339,7 @@ def validate_h2_plan_endpoint(project_id):
         
         if is_valid:
             db = firestore.client()
-            project_ref = db.collection("projects").document(project_id)
+            project_ref = db.collection("seo_projects").document(project_id)
             if project_ref.get().exists:
                 normalized_plan = []
                 for i, h2 in enumerate(h2_plan, 1):
@@ -390,7 +390,7 @@ def save_h2_plan_endpoint(project_id):
     
     try:
         db = firestore.client()
-        project_ref = db.collection("projects").document(project_id)
+        project_ref = db.collection("seo_projects").document(project_id)
         
         if not project_ref.get().exists:
             return jsonify({"error": f"Project {project_id} not found"}), 404
@@ -430,7 +430,7 @@ def get_h2_plan(project_id):
     """Pobiera zapisany plan H2 dla projektu."""
     try:
         db = firestore.client()
-        project_ref = db.collection("projects").document(project_id)
+        project_ref = db.collection("seo_projects").document(project_id)
         project_doc = project_ref.get()
         
         if not project_doc.exists:
@@ -472,7 +472,7 @@ def update_h2_plan(project_id):
     
     try:
         db = firestore.client()
-        project_ref = db.collection("projects").document(project_id)
+        project_ref = db.collection("seo_projects").document(project_id)
         project_doc = project_ref.get()
         
         if not project_doc.exists:

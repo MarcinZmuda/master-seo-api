@@ -1065,8 +1065,10 @@ Artykuł ({word_count} słów):
                 data = _robust_json_parse(clean)
                 if not data:
                     data = {}
-                    analysis = data.get("analysis", {})
-                    corrected_article = data.get("corrected_article", "")
+                analysis = data.get("analysis", {'overall_score': 5, 'summary': 'parse incomplete'})
+                corrected_article = data.get("corrected_article", "") or ""
+                if not corrected_article:
+                    corrected_article = full_text
             except:
                 analysis = {"overall_score": 5, "summary": "Gemini parse error"}
                 corrected_article = full_text
@@ -1091,12 +1093,21 @@ Artykuł ({word_count} słów):
         if corrected_wc < word_count and corrected_article != full_text:
             shrinkage_pct = round((1 - corrected_wc / word_count) * 100, 1)
             print(f"[EDITORIAL_REVIEW] ⚠️ WORD COUNT SHRINKAGE: {word_count} → {corrected_wc} (-{shrinkage_pct}%)")
-            
+
             if shrinkage_pct > 5:
-                # Skrócenie o >5% = rollback do oryginału
-                word_count_shrinkage = True
-                print(f"[EDITORIAL_REVIEW] 🔴 AUTO-ROLLBACK: artykuł skrócił się o {shrinkage_pct}% — przywracam oryginał")
-                corrected_article = full_text
+                # Check surgery_applied from project_data Firestore
+                batches = project_data.get('batches', []) or []
+                surgery_applied = False
+                if batches:
+                    last_moe = (batches[-1].get('moe_validation') or {})
+                    surgery_applied = last_moe.get('surgery_applied', False)
+
+                if surgery_applied and shrinkage_pct <= 15:
+                    print(f"[EDITORIAL] Surgery shrinkage {shrinkage_pct}% accepted")
+                else:
+                    word_count_shrinkage = True
+                    print(f"[EDITORIAL] ROLLBACK: {shrinkage_pct}%")
+                    corrected_article = full_text
         
         # ================================================================
         # v29.0: BURSTINESS CHECK - PO + AUTO-ROLLBACK

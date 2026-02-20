@@ -21,7 +21,23 @@ from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass, asdict, field
 from collections import Counter
 import math
-from llm_retry import llm_call_with_retry
+
+# FIX #24: Safe import with fallback
+try:
+    from llm_retry import llm_call_with_retry
+except ImportError:
+    # Fallback: simple retry logic
+    def llm_call_with_retry(call_fn, max_retries=3, initial_backoff=1.0):
+        """Fallback retry logic if llm_retry module not available."""
+        import time
+        for attempt in range(max_retries + 1):
+            try:
+                return call_fn()
+            except Exception as e:
+                if attempt >= max_retries:
+                    raise
+                wait_time = initial_backoff * (2 ** attempt)
+                time.sleep(wait_time)
 try:
     from prompt_logger import log_prompt as _log_prompt
 except ImportError:

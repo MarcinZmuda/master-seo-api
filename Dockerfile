@@ -11,6 +11,13 @@ RUN apt-get update && apt-get install -y \
     default-jre-headless \
     && rm -rf /var/lib/apt/lists/*
 
+# 🆕 Fix #26B v4.2: sentence-transformers jako osobna warstwa (cachowana)
+# ~800MB — instalowane PRZED requirements.txt zeby Docker cachowal te warstwe
+RUN pip install --no-cache-dir sentence-transformers>=2.7.0
+
+# Pre-download modelu embeddings (zeby nie sciagal at runtime)
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+
 # Kopiuj requirements i instaluj zależności
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -27,6 +34,9 @@ COPY project_helpers/ ./project_helpers/
 
 # 🆕 v37.0: Kopiuj folder medical_module/
 COPY medical_module/ ./medical_module/
+
+# 🆕 v45.0: Kopiuj folder ymyl/
+COPY ymyl/ ./ymyl/
 
 # 🆕 v44.2: Kopiuj folder tests/ (opcjonalne - dla CI/CD)
 # COPY tests/ ./tests/

@@ -585,6 +585,24 @@ def create_project():
                 print(f"[PROJECT] ⚠️ NESTED: '{meta.get('keyword')}' max {original_max}→{adjusted_max} "
                       f"(zawarta w: {[kw['keyword'] for kw in containing_keywords]})")
 
+    # 🆕 v45.4: Helper function to resolve category from YMYL flags
+    def _resolve_category(data_dict):
+        """
+        Maps YMYL flags to category names.
+        is_legal -> 'prawo'
+        is_medical -> 'medycyna'
+        is_finance -> 'finanse'
+        else -> detected_category or 'inne'
+        """
+        if data_dict.get("is_legal"):
+            return "prawo"
+        elif data_dict.get("is_medical"):
+            return "medycyna"
+        elif data_dict.get("is_finance"):
+            return "finanse"
+        else:
+            return data_dict.get("detected_category", "inne")
+
     db = firestore.client()
     doc_ref = db.collection("seo_projects").document()
     
@@ -613,7 +631,9 @@ def create_project():
         "is_legal": data.get("is_legal", False),
         "is_medical": data.get("is_medical", False),
         "legal_context": data.get("legal_context") or {},
-        "medical_context": data.get("medical_context") or {}
+        "medical_context": data.get("medical_context") or {},
+        # 🆕 v45.4: Resolved category from YMYL flags
+        "detected_category": _resolve_category(data)
     }
     
     # ================================================================

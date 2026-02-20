@@ -56,18 +56,22 @@ def sanitize_for_firestore(data: Any, depth: int = 0, max_depth: int = 50) -> An
             
             # Replace problematic characters for Firestore
             safe_key = (str_key
-                .replace('.', '_')
-                .replace('/', '_')
+                .replace('.', '__dot__')
+                .replace('/', '__slash__')
                 .replace('[', '(')
                 .replace(']', ')')
                 .replace('\\', '_')
                 .replace('"', '')
                 .replace("'", '')
             )
-            
+
             # Ensure key is not empty after sanitization
             if not safe_key:
                 safe_key = f"_sanitized_key_{depth}"
+
+            # Handle duplicate keys from collisions
+            if safe_key in sanitized:
+                safe_key = f'{safe_key}__dup_{depth}'
             
             # Recursively sanitize value
             sanitized[safe_key] = sanitize_for_firestore(value, depth + 1, max_depth)
