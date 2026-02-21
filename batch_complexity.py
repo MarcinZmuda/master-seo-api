@@ -430,7 +430,10 @@ def calculate_batch_complexity(
     # 4. KEYWORDS - minimum dla density (0-15 pkt)
     # ========================================
     keywords_count = len(keywords_for_batch)
-    total_keyword_uses = sum(k.get("uses_this_batch", 1) for k in keywords_for_batch)
+    total_keyword_uses = sum(
+        k.get("uses_this_batch", 1) if isinstance(k, dict) else 1
+        for k in keywords_for_batch
+    )
     
     # Więcej keywords = potrzeba więcej miejsca
     keyword_score = min(15, total_keyword_uses * 2)
