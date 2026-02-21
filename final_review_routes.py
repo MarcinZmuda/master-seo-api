@@ -546,33 +546,124 @@ def get_keywords_validation_summary(missing_kw):
 # ================================================================
 @final_review_routes.get("/api/project/<project_id>/final_review")
 def get_final_review(project_id):
-    """v27.1: GET endpoint - zwraca istniejący final_review lub wykonuje nowy."""
+    """
+    GET endpoint - zwraca istniejący final_review lub wykonuje nowy.
+
+    ZAWSZE bezpośredni format (bez wrappera {"status": "EXISTS", "final_review": {...}}).
+    Standaryzacja:
+      quality_score (nie score), humanness_score (nie ai_score),
+      density (nie keyword_density), word_count (nie total_words)
+    Nowe: quality_breakdown z 7 polami do radar chart.
+    """
     print(f"[FINAL_REVIEW] 🔍 GET request for project: {project_id}")
-    
+
     try:
         db = firestore.client()
         doc = db.collection("seo_projects").document(project_id).get()
-        
+
         if not doc.exists:
             return jsonify({"error": "Project not found", "project_id": project_id}), 404
-        
+
         data = doc.to_dict()
-        
+
         existing_review = data.get("final_review")
         if existing_review:
-            print(f"[FINAL_REVIEW] ✅ Returning existing review")
-            return jsonify({
-                "status": "EXISTS",
-                "final_review": existing_review,
-                "hint": "Use POST to run new review"
-            }), 200
-        
+            print(f"[FINAL_REVIEW] ✅ Returning existing review (direct format)")
+            # Direct format - return the review itself, not wrapped
+            standardized = _standardize_final_review(existing_review)
+            return jsonify(standardized), 200
+
         print(f"[FINAL_REVIEW] ℹ️ No existing review, running new one...")
         return perform_final_review(project_id)
-        
+
     except Exception as e:
         print(f"[FINAL_REVIEW] ❌ Error: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+def _standardize_final_review(review: dict) -> dict:
+    """
+    Standardize final review field names and add quality_breakdown.
+
+    Renames: score -> quality_score, ai_score -> humanness_score,
+             keyword_density -> density, total_words -> word_count
+    Adds: quality_breakdown (7 fields for radar chart)
+    """
+    result = dict(review)
+
+    # Standardize field names
+    if "score" in result and "quality_score" not in result:
+        result["quality_score"] = result["score"]
+    if "ai_score" in result and "humanness_score" not in result:
+        result["humanness_score"] = result.pop("ai_score")
+    if "keyword_density" in result and "density" not in result:
+        result["density"] = result.pop("keyword_density")
+    if "total_words" in result and "word_count" not in result:
+        result["word_count"] = result.pop("total_words")
+
+    # Ensure quality_score is always present
+    if "quality_score" not in result:
+        result["quality_score"] = result.get("score", 0)
+
+    # Build quality_breakdown for radar chart (7 fields)
+    if "quality_breakdown" not in result:
+        validations = result.get("validations", {})
+        advanced = result.get("advanced_semantic", {}) or {}
+        entity = result.get("entity_scoring", {}) or {}
+        kw_val = result.get("keywords_validation", {}) or {}
+        issues_summary = result.get("issues_summary", {}) or {}
+
+        # Keywords score: based on stuffing/missing issues
+        stuffing_count = issues_summary.get("stuffing_critical", 0) + issues_summary.get("stuffing_warning", 0)
+        missing_count = len(kw_val.get("missing_basic", kw_val.get("missing", {}).get("basic", [])) if isinstance(kw_val.get("missing_basic", kw_val.get("missing")), (list, dict)) else [])
+        keywords_score = max(0, 100 - stuffing_count * 20 - missing_count * 5)
+
+        # Humanness score
+        humanness_score = result.get("humanness_score", 75)
+        if isinstance(humanness_score, (int, float)):
+            humanness_val = min(100, max(0, humanness_score))
+        else:
+            humanness_val = 75
+
+        # Grammar: based on h3 validation issues
+        h3_issues = len(validations.get("h3_length", {}).get("issues", []))
+        grammar_score = max(0, 100 - h3_issues * 10)
+
+        # Structure: based on H2 and list validation
+        h2_valid = validations.get("h2_keywords", {}).get("valid", True)
+        list_valid = validations.get("list_count", {}).get("valid", True)
+        structure_score = 100
+        if not h2_valid:
+            structure_score -= 20
+        if not list_valid:
+            structure_score -= 15
+        structure_score = max(0, structure_score)
+
+        # Semantic: from advanced_semantic analysis
+        topic_comp = advanced.get("topic_completeness", {}).get("score", 70) if advanced else 70
+        semantic_score = min(100, max(0, topic_comp))
+
+        # Depth: from source effort + entity scoring
+        source_effort = advanced.get("source_effort", {}).get("score", 50) if advanced else 50
+        entity_score_val = entity.get("score", 50) if entity else 50
+        depth_score = min(100, max(0, int((source_effort + entity_score_val) / 2)))
+
+        # Coherence: from ngram coverage + main/synonym ratio
+        ngram_cov = validations.get("ngram_coverage", {}).get("coverage", 1.0)
+        main_ratio = validations.get("main_vs_synonyms", {}).get("main_ratio", 0.5)
+        coherence_score = min(100, max(0, int(ngram_cov * 50 + main_ratio * 50)))
+
+        result["quality_breakdown"] = {
+            "keywords": keywords_score,
+            "humanness": humanness_val,
+            "grammar": grammar_score,
+            "structure": structure_score,
+            "semantic": semantic_score,
+            "depth": depth_score,
+            "coherence": coherence_score
+        }
+
+    return result
 
 
 @final_review_routes.post("/api/project/<project_id>/final_review")
@@ -894,17 +985,18 @@ def perform_final_review(project_id):
             "project_id": project_id,
             "word_count": word_count,
             "score": score,
+            "quality_score": score,  # standardized alias
             "version": "v40.2",
-            
+
             # 🆕 v40.1: Keywords validation z tolerancją
             "keywords_validation": keywords_validation,
-            
+
             # 🆕 v40.1: Advanced semantic analysis
             "advanced_semantic": advanced_semantic,
-            
+
             # 🆕 v40.2: Entity scoring (Semantic SEO)
             "entity_scoring": entity_scoring_result,
-            
+
             "validations": {
                 "missing_keywords": missing_kw,
                 "main_vs_synonyms": main_syn,
@@ -926,7 +1018,12 @@ def perform_final_review(project_id):
                 "explanation": f"Przekroczenie target_max o max {TOLERANCE_PERCENT}% = WARNING, powyżej = ERROR"
             }
         }
-        
+
+        # ================================================================
+        # Standardize + quality_breakdown (via shared helper)
+        # ================================================================
+        result = _standardize_final_review(result)
+
         # ================================================================
         # Save to Firestore
         # ================================================================
@@ -940,7 +1037,7 @@ def perform_final_review(project_id):
         except Exception as save_error:
             print(f"[FINAL_REVIEW] ⚠️ Could not save to Firestore: {save_error}")
             result["firestore_save_error"] = str(save_error)
-        
+
         print(f"[FINAL_REVIEW] ✅ Review complete. Status: {status}, Score: {score}")
         return jsonify(result), 200
         

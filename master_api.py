@@ -1078,8 +1078,20 @@ def master_debug(project_id):
 
 
 # ================================================================
-# 🚨 ERROR HANDLERS (Globalne)
+# 🚨 ERROR HANDLERS (Globalne) — ZAWSZE JSON, nigdy HTML
 # ================================================================
+@app.errorhandler(400)
+def bad_request(error):
+    return jsonify({"error": "Bad Request", "message": str(error)}), 400
+
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({"error": "Not Found", "message": str(error)}), 404
+
+@app.errorhandler(405)
+def method_not_allowed(error):
+    return jsonify({"error": "Method Not Allowed", "message": str(error)}), 405
+
 @app.errorhandler(413)
 def request_entity_too_large(error):
     return jsonify({"error": "Request Entity Too Large", "message": "Payload przekracza 32MB"}), 413
@@ -1087,6 +1099,17 @@ def request_entity_too_large(error):
 @app.errorhandler(500)
 def internal_server_error(error):
     return jsonify({"error": "Internal Server Error", "message": str(error)}), 500
+
+@app.errorhandler(Exception)
+def handle_unexpected_exception(error):
+    import traceback
+    print(f"[MASTER_API] Unhandled exception: {error}")
+    traceback.print_exc()
+    return jsonify({
+        "error": "Internal Server Error",
+        "message": str(error),
+        "type": type(error).__name__
+    }), 500
 
 
 # ================================================================

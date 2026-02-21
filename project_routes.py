@@ -1339,6 +1339,57 @@ def get_project_status(project_id):
 
 
 # ================================================================
+#  PRE-BATCH INFO HELPERS
+# ================================================================
+
+def _enrich_enhanced_info(enhanced_info, s1_data, paa_for_batch):
+    """
+    Enrich enhanced pre-batch info with causal_context, information_gain,
+    and paa_from_serp[] from Firestore s1_data (saved by ngram-api).
+    """
+    if enhanced_info is None:
+        enhanced_info = {}
+    else:
+        enhanced_info = dict(enhanced_info)  # don't mutate original
+
+    # causal_context: from s1_data (saved by ngram-api)
+    if "causal_context" not in enhanced_info:
+        causal = s1_data.get("causal_context", {})
+        if not causal:
+            # Fallback: extract from serp_analysis or entity_seo
+            serp = s1_data.get("serp_analysis", {})
+            causal = serp.get("causal_context", {})
+        enhanced_info["causal_context"] = causal if causal else {}
+
+    # information_gain: from s1_data
+    if "information_gain" not in enhanced_info:
+        ig = s1_data.get("information_gain", {})
+        if not ig:
+            serp = s1_data.get("serp_analysis", {})
+            ig = serp.get("information_gain", {})
+        enhanced_info["information_gain"] = ig if ig else {}
+
+    # paa_from_serp: PAA questions from SERP enrichment
+    if "paa_from_serp" not in enhanced_info:
+        paa_list = []
+        if paa_for_batch:
+            for paa in paa_for_batch:
+                q = paa.get("question", "") if isinstance(paa, dict) else str(paa)
+                if q:
+                    paa_list.append(q)
+        # Also add from s1_data if more available
+        serp = s1_data.get("serp_analysis", {})
+        all_paa = serp.get("paa_questions", [])
+        for paa in all_paa:
+            q = paa.get("question", "") if isinstance(paa, dict) else str(paa)
+            if q and q not in paa_list:
+                paa_list.append(q)
+        enhanced_info["paa_from_serp"] = paa_list
+
+    return enhanced_info
+
+
+# ================================================================
 #  PRE-BATCH INFO - v25.0
 # ================================================================
 @project_routes.get("/api/project/<project_id>/pre_batch_info")
@@ -2778,10 +2829,11 @@ def get_pre_batch_info(project_id):
         } if data.get("is_medical", False) and data.get("detected_category") == "medycyna" else None,
         
         "gpt_prompt": gpt_prompt,
-        
+
         # 🆕 v39.0: Enhanced Pre-Batch Instructions
-        "enhanced": enhanced_info,
-        
+        # + causal_context, information_gain, paa_from_serp from s1_data
+        "enhanced": _enrich_enhanced_info(enhanced_info, s1_data, paa_for_batch),
+
         # 🆕 v39.0: Konkretne instrukcje (wyodrębnione dla łatwości użycia)
         "entities_to_define": enhanced_info.get("entities_to_define", []) if enhanced_info else [],
         "relations_to_establish": enhanced_info.get("relations_to_establish", []) if enhanced_info else [],
@@ -2790,7 +2842,7 @@ def get_pre_batch_info(project_id):
         "continuation_v39": enhanced_info.get("continuation", {}) if enhanced_info else {},
         "keyword_tracking": enhanced_info.get("keyword_tracking", {}) if enhanced_info else {},
         "gpt_instructions_v39": enhanced_info.get("gpt_instructions", "") if enhanced_info else "",
-        
+
         "version": "v39.0"
     }), 200
 
