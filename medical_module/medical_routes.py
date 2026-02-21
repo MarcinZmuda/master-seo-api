@@ -168,60 +168,127 @@ def detect_medical_category():
 def get_medical_context():
     """
     Główny endpoint - pobiera kontekst medyczny dla artykułu.
-    
-    Request:
-    {
-        "main_keyword": "leczenie cukrzycy typu 2",
-        "additional_keywords": [],
-        "max_results": 3,
-        "include_clinical_trials": true,
-        "include_polish_sources": true,
-        "force_enable": false,
-        "compact": true  // ← NOWE: dla GPT Actions (mniejsza odpowiedź)
-    }
-    
-    Response (compact=true):
-    {
-        "status": "OK",
-        "is_medical": true,
-        "sources": [
-            {"type": "pubmed", "title": "...", "url": "...", "cite_as": "..."},
-            ...
-        ],
-        "instruction_short": "...",
-        "disclaimer": "..."
-    }
+    Integracja z PubMed E-utilities (esearch + esummary).
+
+    Standaryzacja pól w top_publications[]:
+    ZAWSZE: evidence_level (nie level), study_type (nie type)
+    Heurystyka study_type z tytułu:
+      meta-analysis -> I, systematic review -> I, RCT -> II, cohort -> III
+
+    Timeout: 15s
+    Przy braku danych: {"top_publications": [], "medical_instruction": "", "guidelines": []}
     """
     if not MEDICAL_MODULE_ENABLED:
-        return jsonify({"error": "Medical module not available"}), 503
-    
+        return jsonify({
+            "top_publications": [],
+            "medical_instruction": "",
+            "guidelines": [],
+            "error": "Medical module not available"
+        }), 503
+
     data = request.get_json() or {}
     main_keyword = data.get("main_keyword", "")
-    compact = data.get("compact", True)  # Domyślnie compact dla GPT
-    
+    compact = data.get("compact", True)
+
     if not main_keyword:
         return jsonify({"error": "main_keyword is required"}), 400
-    
-    result = get_medical_context_for_article(
-        main_keyword=main_keyword,
-        additional_keywords=data.get("additional_keywords", []),
-        max_results=data.get("max_results", 3),  # Domyślnie 3
-        include_clinical_trials=data.get("include_clinical_trials", True),
-        include_polish_sources=data.get("include_polish_sources", True),
-        force_enable=data.get("force_enable", False),
-        # v47.2: Claude unified classifier hints
-        mesh_hints=data.get("mesh_hints", []),
-        condition_en=data.get("condition_en", ""),
-        specialization=data.get("specialization", ""),
-        key_drugs=data.get("key_drugs", []),
-        evidence_note=data.get("evidence_note", ""),
-    )
-    
-    # COMPACT MODE dla GPT Actions (mniejsza odpowiedź)
+
+    try:
+        result = get_medical_context_for_article(
+            main_keyword=main_keyword,
+            additional_keywords=data.get("additional_keywords", []),
+            max_results=data.get("max_results", 3),
+            include_clinical_trials=data.get("include_clinical_trials", True),
+            include_polish_sources=data.get("include_polish_sources", True),
+            force_enable=data.get("force_enable", False),
+            mesh_hints=data.get("mesh_hints", []),
+            condition_en=data.get("condition_en", ""),
+            specialization=data.get("specialization", ""),
+            key_drugs=data.get("key_drugs", []),
+            evidence_note=data.get("evidence_note", ""),
+        )
+    except Exception as e:
+        print(f"[MEDICAL_ROUTES] Error fetching context: {e}")
+        return jsonify({
+            "top_publications": [],
+            "medical_instruction": "",
+            "guidelines": [],
+            "error": str(e)
+        })
+
+    # Standardize top_publications[] fields
+    standardized_pubs = _standardize_publications(result.get("publications", []))
+
+    result["top_publications"] = standardized_pubs
+    result["medical_instruction"] = result.get("instruction", "")
+    result["guidelines"] = result.get("guidelines", [])
+
     if compact:
-        return jsonify(_make_compact_response(result, main_keyword))
-    
+        compact_resp = _make_compact_response(result, main_keyword)
+        compact_resp["top_publications"] = standardized_pubs
+        compact_resp["medical_instruction"] = result.get("instruction", "")
+        compact_resp["guidelines"] = result.get("guidelines", [])
+        return jsonify(compact_resp)
+
     return jsonify(result)
+
+
+# ============================================================================
+# STUDY TYPE / EVIDENCE LEVEL HEURISTICS
+# ============================================================================
+
+import re as _re
+
+_STUDY_TYPE_PATTERNS = [
+    (_re.compile(r'meta[- ]?analy', _re.IGNORECASE), "Meta-Analysis", "I"),
+    (_re.compile(r'systematic\s+review', _re.IGNORECASE), "Systematic Review", "I"),
+    (_re.compile(r'(?:randomized|randomised)\s+controlled\s+trial|(?:^|\W)RCT(?:\W|$)', _re.IGNORECASE), "RCT", "II"),
+    (_re.compile(r'cohort\s+stud', _re.IGNORECASE), "Cohort Study", "III"),
+    (_re.compile(r'case[- ]?control', _re.IGNORECASE), "Case-Control Study", "IV"),
+    (_re.compile(r'cross[- ]?sectional', _re.IGNORECASE), "Cross-Sectional Study", "IV"),
+    (_re.compile(r'case\s+(?:report|series)', _re.IGNORECASE), "Case Report", "V"),
+    (_re.compile(r'guideline|practice\s+guideline|consensus', _re.IGNORECASE), "Guideline", "I"),
+    (_re.compile(r'review(?!\s+of)', _re.IGNORECASE), "Review", "V"),
+]
+
+
+def _infer_study_type(title: str) -> str:
+    """Heuristic: infer study type from publication title."""
+    for pattern, study_type, _ in _STUDY_TYPE_PATTERNS:
+        if pattern.search(title):
+            return study_type
+    return "Unknown"
+
+
+def _infer_evidence_level(title: str) -> str:
+    """Heuristic: infer evidence level from publication title."""
+    for pattern, _, level in _STUDY_TYPE_PATTERNS:
+        if pattern.search(title):
+            return level
+    return "V"
+
+
+def _standardize_publications(publications: list) -> list:
+    """Standardize publication fields: evidence_level (not level), study_type (not type)."""
+    standardized = []
+    for pub in publications:
+        title = pub.get("title", "")
+        std_pub = dict(pub)
+
+        # Standardize evidence_level (not "level")
+        if "level" in std_pub and "evidence_level" not in std_pub:
+            std_pub["evidence_level"] = std_pub.pop("level")
+        if "evidence_level" not in std_pub:
+            std_pub["evidence_level"] = _infer_evidence_level(title)
+
+        # Standardize study_type (not "type")
+        if "type" in std_pub and "study_type" not in std_pub:
+            std_pub["study_type"] = std_pub.pop("type")
+        if "study_type" not in std_pub:
+            std_pub["study_type"] = _infer_study_type(title)
+
+        standardized.append(std_pub)
+    return standardized
 
 
 def _make_compact_response(result: Dict[str, Any], main_keyword: str) -> Dict[str, Any]:

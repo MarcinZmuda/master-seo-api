@@ -208,26 +208,31 @@ def get_judgments_endpoint():
 @legal_routes.route("/api/legal/get_context", methods=["POST"])
 def get_context_endpoint():
     """
-    Pobiera kontekst prawny - 2 najlepsze orzeczenia po scoringu.
-    
-    ⚠️ Legacy endpoint - preferuj /api/legal/get_judgments (v3.5)
-    
+    Pobiera kontekst prawny - integracja z SAOS API (saos.org.pl/api/search/judgments).
+
+    Standaryzacja pól w top_judgments[]:
+    ZAWSZE: signature, court, date, summary, type
+    + aliasy: caseNumber, courtName, judgmentDate, excerpt, judgmentType
+    ZAWSZE: legal_acts (nie acts)
+
     Request:
     {
         "main_keyword": "alimenty na dziecko",
         "additional_keywords": [],
-        "force_enable": false
+        "force_enable": false,
+        "article_hints": [],
+        "search_queries": []
     }
     """
     if not LEGAL_MODULE_ENABLED:
         return jsonify({"error": "Legal module not available"}), 503
-    
+
     data = request.get_json() or {}
     main_keyword = data.get("main_keyword", "")
-    
+
     if not main_keyword:
         return jsonify({"error": "main_keyword is required"}), 400
-    
+
     result = get_legal_context_for_article(
         main_keyword=main_keyword,
         additional_keywords=data.get("additional_keywords", []),
@@ -235,7 +240,39 @@ def get_context_endpoint():
         article_hints=data.get("article_hints", []),
         search_queries=data.get("search_queries", []),
     )
-    
+
+    # Standardize top_judgments[] fields
+    standardized_judgments = []
+    for j in result.get("judgments", []):
+        std_j = {
+            # Primary standardized field names
+            "signature": j.get("signature", j.get("caseNumber", "")),
+            "court": j.get("court", j.get("courtName", "")),
+            "date": j.get("date", j.get("judgmentDate", "")),
+            "summary": j.get("summary", j.get("excerpt", j.get("text", ""))),
+            "type": j.get("type", j.get("judgmentType", "")),
+            # Aliases for backwards compatibility
+            "caseNumber": j.get("signature", j.get("caseNumber", "")),
+            "courtName": j.get("court", j.get("courtName", "")),
+            "judgmentDate": j.get("date", j.get("judgmentDate", "")),
+            "excerpt": j.get("summary", j.get("excerpt", j.get("text", ""))),
+            "judgmentType": j.get("type", j.get("judgmentType", "")),
+        }
+        # Preserve extra fields
+        for key in ("relevance_score", "source", "matched_article", "url",
+                     "official_portal", "portal_url", "citation", "full_citation"):
+            if key in j:
+                std_j[key] = j[key]
+        standardized_judgments.append(std_j)
+
+    result["top_judgments"] = standardized_judgments
+    # Keep "judgments" for backwards compatibility
+    result["judgments"] = standardized_judgments
+
+    # Standardize legal_acts (not acts)
+    if "acts" in result and "legal_acts" not in result:
+        result["legal_acts"] = result.pop("acts")
+
     return jsonify(result)
 
 

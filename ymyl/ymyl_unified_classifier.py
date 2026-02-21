@@ -369,30 +369,198 @@ def _keyword_fallback(main_keyword: str, additional_keywords: List[str] = None) 
 
 
 # ════════════════════════════════════════════════════════════════════
+# REGEX HEURISTIC DETECTION — fast, no API call
+# ════════════════════════════════════════════════════════════════════
+
+# Legal regex patterns
+_LEGAL_REGEX = re.compile(
+    r'(?:kodeks|ustawa|sąd|wyrok|kara|grzywna|mandat|przestępstwo|wykroczenie|'
+    r'prawo\s+(?:karne|cywilne|pracy|budowlane|rodzinne)|'
+    r'art\.\s*\d+|§\s*\d+|k\.c\.|k\.k\.|k\.p\.|k\.w\.|k\.r\.o\.|k\.p\.c\.|'
+    r'pozew|apelacja|alimenty|rozwód|spadek|testament|odszkodowanie|'
+    r'pozbawienie\s+wolności|zakaz\s+prowadzenia|promil|'
+    r'adwokat|komornik|notariusz|prokuratura|recydywa|eksmisja)',
+    re.IGNORECASE
+)
+
+# Medical regex patterns
+_MEDICAL_REGEX = re.compile(
+    r'(?:leczeni[ea]|terapi[aą]|diagnoz[aą]|objaw[yó]|dawkowani[ea]|'
+    r'operacj[aą]|rehabilitacj[aą]|szczepion[ka]|antybiotyk|insulin[aą]|'
+    r'cukrzyc[aą]|nadciśnieni[ea]|nowotwór|depresj[aą]|astm[aą]|'
+    r'zawał|migren[aą]|alergi[aą]|zapaleni[ea]|infekcj[aą]|'
+    r'chorob[aą]|szpital|lekarz|farmako|ICD-?\d+|'
+    r'meta-?analy[sz]|randomiz|RCT|kohorto|placebo|'
+    r'wytyczne\s+(?:PTD|ADA|ESC|WHO))',
+    re.IGNORECASE
+)
+
+# Finance regex patterns
+_FINANCE_REGEX = re.compile(
+    r'(?:podatek|PIT|VAT|CIT|kredyt|pożyczk[aą]|hipote[kc]|'
+    r'inwesty[co]|akcj[aei]|obligacj[aei]|giełd[aą]|emerytur[aą]|'
+    r'ZUS|ubezpiecz|polis[aą]|oszczędnoś[ćc]|lokata|krypto|'
+    r'KNF|NBP|PPK|OFE|bitcoin|'
+    r'oprocentowani[ea]|stopa\s+procentowa|inflacj[aą])',
+    re.IGNORECASE
+)
+
+
+def _regex_heuristic_detect(main_keyword: str, additional_keywords: List[str] = None) -> Dict[str, Any]:
+    """
+    Heuristic YMYL detection using regex patterns.
+    Fast, deterministic, no API calls needed.
+    """
+    all_text = main_keyword
+    if additional_keywords:
+        all_text += " " + " ".join(additional_keywords)
+
+    legal_hits = len(_LEGAL_REGEX.findall(all_text))
+    medical_hits = len(_MEDICAL_REGEX.findall(all_text))
+    finance_hits = len(_FINANCE_REGEX.findall(all_text))
+
+    scores = {"prawo": legal_hits, "zdrowie": medical_hits, "finanse": finance_hits}
+    best = max(scores, key=scores.get)
+    best_score = scores[best]
+
+    if best_score == 0:
+        return {
+            "detected_category": "general",
+            "is_ymyl": False,
+            "ymyl_intensity": "none",
+            "enrichment_method": "regex_heuristic",
+            "confidence": 0.0,
+            "reasoning": "Brak sygnałów YMYL (regex heuristic)",
+        }
+
+    confidence = min(1.0, best_score / 4)
+    is_ymyl = confidence >= 0.25
+
+    # Determine intensity
+    if best_score >= 3:
+        ymyl_intensity = "full"
+    elif best_score >= 1:
+        ymyl_intensity = "light"
+    else:
+        ymyl_intensity = "none"
+
+    result = {
+        "detected_category": best,
+        "is_ymyl": is_ymyl and ymyl_intensity == "full",
+        "ymyl_intensity": ymyl_intensity,
+        "enrichment_method": "regex_heuristic",
+        "confidence": round(confidence, 2),
+        "reasoning": f"Regex heuristic: {best_score} trafień dla kategorii '{best}'",
+    }
+
+    # Attach empty enrichment sections
+    if best == "prawo":
+        result["legal"] = {
+            "articles": [],
+            "legal_acts": [],
+            "search_queries": [],
+            "key_concepts": []
+        }
+    elif best == "zdrowie":
+        result["medical"] = {
+            "condition": "",
+            "condition_latin": "",
+            "icd10": "",
+            "specialization": "",
+            "mesh_terms": [],
+            "key_drugs": [],
+            "search_queries": [],
+            "evidence_note": ""
+        }
+    elif best == "finanse":
+        result["finance"] = {
+            "regulations": [],
+            "institutions": [],
+            "forms": [],
+            "search_queries": []
+        }
+
+    return result
+
+
+# ════════════════════════════════════════════════════════════════════
 # FLASK ROUTE (register in master_api.py)
 # ════════════════════════════════════════════════════════════════════
 
 def register_routes(app):
     """Register /api/ymyl/detect_and_enrich endpoint."""
     from flask import request, jsonify
-    
+
     @app.route("/api/ymyl/detect_and_enrich", methods=["POST"])
     def ymyl_detect_and_enrich():
         """
         Unified YMYL detection + enrichment.
-        
+
+        Tries Claude classifier first, falls back to regex heuristic on error.
+        ALWAYS returns JSON, never HTML.
+
         Request: {"main_keyword": "jazda po alkoholu", "additional_keywords": []}
-        Response: {category, is_ymyl, is_legal, is_medical, confidence, legal/medical/finance enrichment}
+        Response: {detected_category, is_ymyl, ymyl_intensity, enrichment_method, + legal{}/medical{}/finance{}}
         """
-        data = request.get_json() or {}
-        main_keyword = data.get("main_keyword", "")
-        
-        if not main_keyword:
-            return jsonify({"error": "main_keyword is required"}), 400
-        
-        result = detect_and_enrich(
-            main_keyword=main_keyword,
-            additional_keywords=data.get("additional_keywords", [])
-        )
-        
-        return jsonify(result)
+        try:
+            data = request.get_json(silent=True)
+            if not data:
+                return jsonify({"error": "Invalid or missing JSON body", "fallback": True}), 400
+
+            main_keyword = data.get("main_keyword", "")
+            if not main_keyword:
+                return jsonify({"error": "main_keyword is required", "fallback": True}), 400
+
+            additional_keywords = data.get("additional_keywords", [])
+
+            # Try Claude-based detection first
+            raw_result = detect_and_enrich(
+                main_keyword=main_keyword,
+                additional_keywords=additional_keywords
+            )
+
+            # Standardize output fields
+            enrichment_method = raw_result.get("detection_method", "unknown")
+            detected_category = raw_result.get("category", "general")
+
+            # Normalize legal.acts → legal.legal_acts
+            if "legal" in raw_result:
+                legal = raw_result["legal"]
+                if "acts" in legal and "legal_acts" not in legal:
+                    legal["legal_acts"] = legal.pop("acts")
+
+            result = {
+                "detected_category": detected_category,
+                "is_ymyl": raw_result.get("is_ymyl", False),
+                "ymyl_intensity": raw_result.get("ymyl_intensity", "none"),
+                "enrichment_method": enrichment_method,
+                "confidence": raw_result.get("confidence", 0.0),
+                "reasoning": raw_result.get("reasoning", ""),
+                "is_legal": raw_result.get("is_legal", False),
+                "is_medical": raw_result.get("is_medical", False),
+                "is_finance": raw_result.get("is_finance", False),
+            }
+
+            # Attach enrichment sections
+            for key in ("legal", "medical", "finance"):
+                if key in raw_result:
+                    result[key] = raw_result[key]
+
+            return jsonify(result)
+
+        except Exception as e:
+            # Fallback to regex heuristic on ANY error
+            print(f"[YMYL] Error in detect_and_enrich, falling back to regex: {e}")
+            try:
+                fallback_result = _regex_heuristic_detect(
+                    main_keyword=data.get("main_keyword", "") if data else "",
+                    additional_keywords=data.get("additional_keywords", []) if data else []
+                )
+                fallback_result["fallback"] = True
+                fallback_result["fallback_reason"] = str(e)
+                return jsonify(fallback_result)
+            except Exception as fallback_err:
+                return jsonify({
+                    "error": f"Both classifier and fallback failed: {fallback_err}",
+                    "fallback": True
+                }), 500
