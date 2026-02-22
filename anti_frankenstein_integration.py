@@ -141,14 +141,7 @@ def enhance_project_with_anti_frankenstein(
     # ================================================================
     if get_flexible_limits:
         try:
-            total_batches = project_data.get("total_planned_batches", 7)
-            soft_caps = {}
-            
-            for rid, meta in keywords_state.items():
-                keyword = meta.get("keyword", "")
-                if keyword:
-                    soft_caps[keyword] = get_flexible_limits(meta, total_batches)
-            
+            soft_caps = get_flexible_limits(keywords_state)
             project_data["soft_cap_limits"] = soft_caps
             print(f"[ANTI-FRANKENSTEIN] ✅ Soft cap limits for {len(soft_caps)} keywords")
         except Exception as e:
@@ -238,9 +231,35 @@ def get_anti_frankenstein_context(
             batches_done = len(project_data.get("batches", []))
             remaining_batches = max(1, total_batches - batches_done)
             
-            validator = create_soft_cap_validator(keywords_state, total_batches)
-            recommendations = validator.get_batch_recommendations(remaining_batches)
-            
+            # Build base_limits: {keyword_id: max_count} from keywords_state
+            base_limits = {}
+            for rid, meta in keywords_state.items():
+                if isinstance(meta, dict):
+                    target = meta.get("target_max", 5)
+                    if isinstance(target, dict):
+                        target = target.get("max", target.get("target_max", 5))
+                    base_limits[rid] = int(target)
+                else:
+                    base_limits[rid] = 5
+
+            validator = create_soft_cap_validator(base_limits)
+            soft_limits = validator.get('limits', {})
+
+            # Generate per-batch recommendations from validator limits
+            recommendations = {}
+            for kw_id, soft_limit in soft_limits.items():
+                keyword_meta = keywords_state.get(kw_id, {})
+                keyword_name = keyword_meta.get("keyword", kw_id) if isinstance(keyword_meta, dict) else kw_id
+                base_limit = validator.get('base_limits', {}).get(kw_id, soft_limit)
+                per_batch = max(1, soft_limit // remaining_batches)
+                recommendations[keyword_name] = {
+                    "soft_max_total": soft_limit,
+                    "base_max": base_limit,
+                    "recommended_this_batch": per_batch,
+                    "remaining_batches": remaining_batches,
+                    "action": "OK" if per_batch > 0 else "STOP"
+                }
+
             if recommendations:
                 context["soft_cap_keywords"] = recommendations
                 context["has_anti_frankenstein"] = True
@@ -407,24 +426,52 @@ def validate_batch_with_soft_caps(
 ) -> dict:
     """
     Waliduj batch z miękkimi limitami.
-    
+
     Używane w process_batch_in_firestore jako uzupełnienie standardowej walidacji.
-    
+
     Returns:
         Dict z wynikami walidacji soft cap
     """
-    if not validate_with_soft_caps:
+    if not create_soft_cap_validator:
         return {"available": False}
-    
+
     try:
-        result = validate_with_soft_caps(
-            batch_counts=batch_counts,
-            keywords_state=keywords_state,
-            humanness_score=humanness_score,
-            total_batches=total_batches
-        )
-        result["available"] = True
-        return result
+        # Build base_limits: {keyword: max_count} from keywords_state
+        base_limits = {}
+        for rid, meta in keywords_state.items():
+            if isinstance(meta, dict):
+                keyword = meta.get("keyword", rid)
+                target = meta.get("target_max", 5)
+                if isinstance(target, dict):
+                    target = target.get("max", target.get("target_max", 5))
+                base_limits[keyword] = int(target)
+            else:
+                base_limits[rid] = 5
+
+        validator = create_soft_cap_validator(base_limits)
+        soft_limits = validator.get('limits', {})
+
+        soft_exceeded = []
+        for kw, count in batch_counts.items():
+            soft_max = soft_limits.get(kw, 999)
+            base_max = validator.get('base_limits', {}).get(kw, soft_max)
+            if count > base_max:
+                soft_exceeded.append({
+                    "keyword": kw,
+                    "count": count,
+                    "base_max": base_max,
+                    "soft_max": soft_max,
+                    "exceeded_by": count - base_max,
+                    # Accept if within soft cap and humanness is decent
+                    "accepted": count <= soft_max and humanness_score >= 70.0
+                })
+
+        return {
+            "available": True,
+            "passed": len(soft_exceeded) == 0,
+            "soft_exceeded": soft_exceeded,
+            "soft_limits": soft_limits
+        }
     except Exception as e:
         print(f"[ANTI-FRANKENSTEIN] ⚠️ Soft cap validation error: {e}")
         return {"available": False, "error": str(e)}
