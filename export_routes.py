@@ -1191,6 +1191,24 @@ Artykuł ({word_count} słów):
                     corrected_article = full_text
         
         # ================================================================
+        # v55.1: SENTENCE LENGTH GUARD — editorial nie powinien robić zdań >20 słów
+        # ================================================================
+        if corrected_article != full_text:
+            import re as _re
+            _sentences = [s.strip() for s in _re.split(r'[.!?]+', corrected_article) if len(s.strip().split()) >= 3]
+            if _sentences:
+                avg_sent_len = sum(len(s.split()) for s in _sentences) / len(_sentences)
+                if avg_sent_len > 22:
+                    # Check if original was also long — only rollback if editorial made it worse
+                    _orig_sentences = [s.strip() for s in _re.split(r'[.!?]+', full_text) if len(s.strip().split()) >= 3]
+                    orig_avg = sum(len(s.split()) for s in _orig_sentences) / len(_orig_sentences) if _orig_sentences else 15
+                    if avg_sent_len > orig_avg + 3:
+                        print(f"[EDITORIAL_REVIEW] ⚠️ SENTENCE LENGTH ROLLBACK: avg {avg_sent_len:.1f} > orig {orig_avg:.1f}+3 — reverting")
+                        corrected_article = full_text
+                        rollback_reason = f"Sentence length degradation: {avg_sent_len:.1f} > {orig_avg:.1f}+3"
+                        rollback_triggered = True
+
+        # ================================================================
         # v53: GRAMMAR CORRECTION — BEFORE burstiness check
         # Moved here so grammar fixes are not lost to rollback.
         # ================================================================
