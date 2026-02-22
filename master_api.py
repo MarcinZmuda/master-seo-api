@@ -2701,7 +2701,7 @@ def content_editorial_endpoint(project_id):
         for field_name in ["full_article", "merged_article", "article"]:
             val = project_data.get(field_name, "")
             if isinstance(val, dict):
-                val = val.get("text", "")
+                val = val.get("content", val.get("text", ""))
             if val and len(val) > 100:
                 article_text = val
                 break
@@ -2743,15 +2743,32 @@ def content_editorial_endpoint(project_id):
     result_dict = _editorial_to_dict(result)
 
     # Jeśli był corrected_text — zapisz do projektu
+    # v55.1: Word count guard — nie zapisuj jeśli corrected jest znacząco krótszy niż oryginał
     if result.corrected_text:
-        try:
-            db.collection("seo_projects").document(project_id).update({
-                "full_article": result.corrected_text,
-                "content_editorial_applied": True,
-            })
-            print(f"[CONTENT_EDITORIAL] ✅ Zapisano poprawiony artykuł do Firestore")
-        except Exception as e:
-            print(f"[CONTENT_EDITORIAL] ⚠️ Błąd zapisu: {e}")
+        original_wc = len(article_text.split())
+        corrected_wc = len(result.corrected_text.split())
+        if corrected_wc < original_wc * 0.6:
+            print(f"[CONTENT_EDITORIAL] ⚠️ SKIP SAVE: corrected={corrected_wc} < 60% original={original_wc} — nie nadpisuję full_article")
+        else:
+            try:
+                # v55.1: Preserve dict format (auto_merge stores as {content: ..., word_count: ...})
+                fa = project_data.get("full_article")
+                if isinstance(fa, dict):
+                    fa["content"] = result.corrected_text
+                    fa["word_count"] = corrected_wc
+                    fa["content_editorial_applied"] = True
+                    db.collection("seo_projects").document(project_id).update({
+                        "full_article": fa,
+                        "content_editorial_applied": True,
+                    })
+                else:
+                    db.collection("seo_projects").document(project_id).update({
+                        "full_article": result.corrected_text,
+                        "content_editorial_applied": True,
+                    })
+                print(f"[CONTENT_EDITORIAL] ✅ Zapisano poprawiony artykuł ({corrected_wc} słów)")
+            except Exception as e:
+                print(f"[CONTENT_EDITORIAL] ⚠️ Błąd zapisu: {e}")
 
     # Zapisz wynik editorialu do projektu
     try:
