@@ -497,52 +497,101 @@ def parse_diff_response(response_text: str) -> list:
     return changes
 
 
+def _normalize_quotes(text: str) -> str:
+    """
+    v53: Normalizuje cudzysłowy do postaci ASCII dla porównań.
+    Claude często zwraca „polskie" cudzysłowy, a tekst ma ASCII lub odwrotnie.
+    """
+    return (text
+            .replace('\u201e', '"')   # „ → "
+            .replace('\u201d', '"')   # " → "
+            .replace('\u201c', '"')   # " → "
+            .replace('\u00ab', '"')   # « → "
+            .replace('\u00bb', '"')   # » → "
+            .replace('\u2018', "'")   # ' → '
+            .replace('\u2019', "'")   # ' → '
+            .replace('\u2013', '-')   # – → -
+            .replace('\u2014', '-')   # — → -
+            )
+
+
 def apply_diffs(original_text: str, changes: list) -> tuple:
     """
     Aplikuje zmiany diff do tekstu.
-    
+    v53: Dodano normalizację cudzysłowów (Fix 2).
+
     Zwraca: (modified_text, applied_changes, failed_changes)
     """
     modified = original_text
     applied = []
     failed = []
-    
+
     for change in changes:
         find_text = change["find"]
         replace_text = change["replace"]
-        
+
         # Próba 1: Dokładne dopasowanie
         if find_text in modified:
             modified = modified.replace(find_text, replace_text, 1)
             change["applied"] = True
             applied.append(change)
             continue
-        
-        # Próba 2: Dopasowanie ignorujące whitespace
-        find_normalized = ' '.join(find_text.split())
+
+        # Próba 2: Dopasowanie z normalizacją cudzysłowów
+        find_norm_quotes = _normalize_quotes(find_text)
+        modified_norm_quotes = _normalize_quotes(modified)
+        if find_norm_quotes in modified_norm_quotes:
+            # Znajdź pozycję w znormalizowanym tekście i zamień w oryginale
+            idx = modified_norm_quotes.index(find_norm_quotes)
+            # Oblicz oryginalny fragment (ta sama pozycja, ta sama długość)
+            original_fragment = modified[idx:idx + len(find_text)]
+            # Sprawdź czy po normalizacji pasuje (zabezpieczenie)
+            if _normalize_quotes(original_fragment) == find_norm_quotes:
+                modified = modified[:idx] + replace_text + modified[idx + len(original_fragment):]
+            else:
+                # Fallback: szukaj po znormalizowanym i zamień
+                modified = modified[:idx] + replace_text + modified[idx + len(find_norm_quotes):]
+            change["applied"] = True
+            change["match_type"] = "quote_normalized"
+            applied.append(change)
+            continue
+
+        # Próba 3: Dopasowanie ignorujące whitespace + cudzysłowy
+        find_normalized = _normalize_quotes(' '.join(find_text.split()))
         text_lines = modified.split('\n')
         found = False
-        
+
         for i, line in enumerate(text_lines):
-            line_normalized = ' '.join(line.split())
+            line_normalized = _normalize_quotes(' '.join(line.split()))
             if find_normalized in line_normalized:
-                # Zamień w tej linii
-                text_lines[i] = line.replace(find_text.strip(), replace_text.strip())
+                # Zamień w tej linii (użyj oryginalnego find_text.strip())
+                # Ale też spróbuj z quote-normalized
+                if find_text.strip() in line:
+                    text_lines[i] = line.replace(find_text.strip(), replace_text.strip(), 1)
+                else:
+                    # Zamień przez normalizację
+                    line_norm = _normalize_quotes(line)
+                    find_stripped_norm = _normalize_quotes(find_text.strip())
+                    if find_stripped_norm in line_norm:
+                        idx = line_norm.index(find_stripped_norm)
+                        text_lines[i] = line[:idx] + replace_text.strip() + line[idx + len(find_stripped_norm):]
+                    else:
+                        text_lines[i] = line.replace(find_text.strip(), replace_text.strip(), 1)
                 modified = '\n'.join(text_lines)
                 change["applied"] = True
-                change["match_type"] = "normalized"
+                change["match_type"] = "whitespace_quote_normalized"
                 applied.append(change)
                 found = True
                 break
-        
+
         if found:
             continue
-        
+
         # Nie udało się
         change["applied"] = False
         change["error"] = "Fragment nie znaleziony w tekście"
         failed.append(change)
-    
+
     return modified, applied, failed
 
 
@@ -1126,49 +1175,11 @@ Artykuł ({word_count} słów):
                     corrected_article = full_text
         
         # ================================================================
-        # v29.0: BURSTINESS CHECK - PO + AUTO-ROLLBACK
+        # v53: GRAMMAR CORRECTION — BEFORE burstiness check
+        # Moved here so grammar fixes are not lost to rollback.
         # ================================================================
-        burstiness_after = None
-        rollback_triggered = False
-        rollback_reason = None
-        
-        if BURSTINESS_CHECK_OK and burstiness_before and corrected_article != full_text:
-            try:
-                burstiness_after = calculate_burstiness(corrected_article)
-                cv_before = burstiness_before.get("cv", 0)
-                cv_after = burstiness_after.get("cv", 0)
-                
-                print(f"[EDITORIAL_REVIEW] 📊 Burstiness PO: CV={cv_after}")
-                
-                # ROLLBACK jeśli CV spadło o więcej niż 0.1 LUB spadło poniżej 0.3
-                cv_drop = cv_before - cv_after
-                
-                if cv_drop > 0.1:
-                    rollback_triggered = True
-                    rollback_reason = f"CV spadło o {cv_drop:.2f} (z {cv_before:.2f} do {cv_after:.2f}) — tekst stał się zbyt monotonny"
-                    print(f"[EDITORIAL_REVIEW] ⚠️ AUTO-ROLLBACK: {rollback_reason}")
-                    corrected_article = full_text
-                    
-                elif cv_after < 0.3 and cv_before >= 0.3:
-                    rollback_triggered = True
-                    rollback_reason = f"CV spadło poniżej progu AI ({cv_after:.2f} < 0.3) — tekst wygląda na wygenerowany przez AI"
-                    print(f"[EDITORIAL_REVIEW] ⚠️ AUTO-ROLLBACK: {rollback_reason}")
-                    corrected_article = full_text
-                    
-            except Exception as e:
-                print(f"[EDITORIAL_REVIEW] ⚠️ Burstiness after check failed: {e}")
-        
-        # v41.0: Rollback z powodu skrócenia artykułu
-        if word_count_shrinkage and not rollback_triggered:
-            rollback_triggered = True
-            rollback_reason = f"Artykuł skrócił się o {shrinkage_pct}% ({word_count} → {corrected_wc} słów) — editorial review powinien ROZBUDOWYWAĆ, nie skracać"
-        
-        # Statystyki diff
-        diff_stats = calculate_diff_stats(full_text, corrected_article)
-        
-        # v28.1: GRAMMAR CORRECTION (jeśli nie było rollbacku)
         grammar_stats = {"fixes": 0, "removed": []}
-        if not rollback_triggered:
+        if corrected_article != full_text:
             try:
                 from grammar_checker import full_correction
                 grammar_result = full_correction(corrected_article)
@@ -1179,12 +1190,127 @@ Artykuł ({word_count} słów):
                     "backend": grammar_result.get("backend", "unknown")
                 }
                 if grammar_stats["fixes"] > 0 or grammar_stats["removed"]:
-                    print(f"[EDITORIAL_REVIEW] ✅ Grammar: {grammar_stats['fixes']} fixes, {len(grammar_stats['removed'])} phrases removed")
+                    print(f"[EDITORIAL_REVIEW] ✅ Grammar (pre-rollback): {grammar_stats['fixes']} fixes, {len(grammar_stats['removed'])} phrases removed")
             except ImportError:
                 print(f"[EDITORIAL_REVIEW] ⚠️ grammar_checker not available, skipping grammar correction")
             except Exception as e:
                 print(f"[EDITORIAL_REVIEW] ⚠️ Grammar correction error: {e}")
+
+        # ================================================================
+        # v53: BURSTINESS CHECK + GRANULAR ROLLBACK
+        # Instead of rolling back ALL changes, test each individually
+        # and keep those that don't harm burstiness.
+        # ================================================================
+        burstiness_after = None
+        rollback_triggered = False
+        rollback_reason = None
+        granular_kept = 0
+        granular_reverted = 0
+
+        if BURSTINESS_CHECK_OK and burstiness_before and corrected_article != full_text:
+            try:
+                burstiness_after = calculate_burstiness(corrected_article)
+                cv_before = burstiness_before.get("cv", 0)
+                cv_after = burstiness_after.get("cv", 0)
+
+                print(f"[EDITORIAL_REVIEW] 📊 Burstiness PO: CV={cv_after}")
+
+                cv_drop = cv_before - cv_after
+                needs_granular = False
+
+                if cv_drop > 0.2 and cv_after < 0.35:
+                    needs_granular = True
+                    rollback_reason = f"CV spadło o {cv_drop:.2f} (z {cv_before:.2f} do {cv_after:.2f}) — uruchamiam granularny rollback"
+                    print(f"[EDITORIAL_REVIEW] ⚠️ {rollback_reason}")
+
+                elif cv_after < 0.25 and cv_before >= 0.3:
+                    needs_granular = True
+                    rollback_reason = f"CV spadło poniżej progu AI ({cv_after:.2f} < 0.25) — uruchamiam granularny rollback"
+                    print(f"[EDITORIAL_REVIEW] ⚠️ {rollback_reason}")
+
+                elif cv_drop > 0.1:
+                    print(f"[EDITORIAL_REVIEW] ⚠️ CV drop {cv_drop:.2f} (z {cv_before:.2f} do {cv_after:.2f}) — akceptowalne (cv_after={cv_after:.2f} >= 0.35)")
+
+                # ── GRANULAR ROLLBACK ──
+                # Apply changes one by one, keep those that don't break CV
+                if needs_granular and applied_changes:
+                    print(f"[EDITORIAL_REVIEW] 🔬 Granular rollback: testing {len(applied_changes)} changes individually...")
+
+                    # Start from original text
+                    granular_text = full_text
+                    kept_changes = []
+                    cv_min_threshold = 0.30  # absolute minimum CV we accept
+
+                    for i, change in enumerate(applied_changes):
+                        # Try applying this single change
+                        test_text = granular_text
+                        find_text = change.get("find", "")
+                        replace_text = change.get("replace", "")
+
+                        if not find_text or not replace_text:
+                            continue
+
+                        # Try exact match first, then quote-normalized
+                        if find_text in test_text:
+                            test_text = test_text.replace(find_text, replace_text, 1)
+                        elif _normalize_quotes(find_text) in _normalize_quotes(test_text):
+                            fn = _normalize_quotes(find_text)
+                            tn = _normalize_quotes(test_text)
+                            idx = tn.index(fn)
+                            test_text = test_text[:idx] + replace_text + test_text[idx + len(fn):]
+                        else:
+                            # Can't apply this change to original — skip
+                            granular_reverted += 1
+                            continue
+
+                        # Check CV after this change
+                        test_burst = calculate_burstiness(test_text)
+                        test_cv = test_burst.get("cv", 0)
+
+                        if test_cv >= cv_min_threshold:
+                            # Safe — keep this change
+                            granular_text = test_text
+                            kept_changes.append(change)
+                            granular_kept += 1
+                        else:
+                            # This change breaks CV — revert it
+                            granular_reverted += 1
+                            print(f"[EDITORIAL_REVIEW] 🔬 Change {i+1} reverted (CV would drop to {test_cv:.2f}): {find_text[:50]}...")
+
+                    corrected_article = granular_text
+
+                    # Recalculate final burstiness
+                    burstiness_after = calculate_burstiness(corrected_article)
+                    final_cv = burstiness_after.get("cv", 0)
+
+                    if granular_kept > 0:
+                        rollback_triggered = False  # Partial success — not a full rollback
+                        rollback_reason = f"Granular: zachowano {granular_kept}/{granular_kept + granular_reverted} zmian (CV: {cv_before:.2f} → {final_cv:.2f})"
+                        print(f"[EDITORIAL_REVIEW] ✅ {rollback_reason}")
+                    else:
+                        rollback_triggered = True
+                        rollback_reason = f"Granular rollback: żadna zmiana nie przeszła progu CV (CV: {cv_before:.2f} → {cv_after:.2f})"
+                        corrected_article = full_text
+                        print(f"[EDITORIAL_REVIEW] ⚠️ {rollback_reason}")
+
+                elif needs_granular and not applied_changes:
+                    # No individual changes to test — full rollback
+                    rollback_triggered = True
+                    corrected_article = full_text
+                    print(f"[EDITORIAL_REVIEW] ⚠️ Full rollback (no individual changes to test)")
+
+            except Exception as e:
+                print(f"[EDITORIAL_REVIEW] ⚠️ Burstiness after check failed: {e}")
         
+        # v41.0: Rollback z powodu skrócenia artykułu
+        if word_count_shrinkage and not rollback_triggered:
+            rollback_triggered = True
+            rollback_reason = f"Artykuł skrócił się o {shrinkage_pct}% ({word_count} → {corrected_wc} słów) — editorial review powinien ROZBUDOWYWAĆ, nie skracać"
+        
+        # Statystyki diff
+        diff_stats = calculate_diff_stats(full_text, corrected_article)
+
+        # v53: grammar_stats already computed above (before burstiness check)
         corrected_word_count = len(corrected_article.split())
         
         # Zapisz w Firestore
@@ -1270,7 +1396,9 @@ Artykuł ({word_count} słów):
             "rollback": {
                 "triggered": rollback_triggered,
                 "reason": rollback_reason,
-                "original_preserved": True
+                "original_preserved": True,
+                "granular_kept": granular_kept,
+                "granular_reverted": granular_reverted,
             },
             
             "corrected_article": corrected_article,
