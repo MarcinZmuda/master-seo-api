@@ -514,10 +514,19 @@ def auto_merge_full_article(project_id: str, project_data: dict) -> dict:
         for batch in batches:
             text = batch.get("text", "")
             if text:
-                full_content_parts.append(text.strip())
-                total_words += len(text.split())
-                h2_count += len(re.findall(r'(?:^h2:|<h2)', text, re.MULTILINE | re.IGNORECASE))
-        
+                # v55.1: Strip markdown code fences (GPT-4.1 wraps HTML in ```html...```)
+                _bt = text.strip()
+                if _bt.startswith("```html"):
+                    _bt = _bt[7:]
+                elif _bt.startswith("```"):
+                    _bt = _bt[3:]
+                if _bt.endswith("```"):
+                    _bt = _bt[:-3]
+                _bt = _bt.strip()
+                full_content_parts.append(_bt)
+                total_words += len(_bt.split())
+                h2_count += len(re.findall(r'(?:^h2:|<h2)', _bt, re.MULTILINE | re.IGNORECASE))
+
         full_content = "\n\n".join(full_content_parts)
         
         # Zapisz do projektu
