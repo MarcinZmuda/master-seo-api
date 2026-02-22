@@ -1744,6 +1744,15 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         else:
             print(f"[TRACKER] ⚠️ Final review has errors - skipping auto-merge")
 
+    # v56: Re-merge if previous auto_merge is stale (fewer batches than current)
+    # This handles FIX_AND_RETRY adding batches beyond the original plan.
+    existing_fa = project_data.get("full_article", {})
+    if isinstance(existing_fa, dict) and existing_fa.get("auto_merged"):
+        merged_batch_count = existing_fa.get("batch_count", 0)
+        if batches_done > merged_batch_count:
+            print(f"[TRACKER] 🔄 Re-merging: full_article has {merged_batch_count} batches but {batches_done} exist")
+            auto_merge_result = auto_merge_full_article(project_id, project_data)
+
     # ================================================================
     # 🆕 v37.4: GLOBAL QUALITY SCORE
     # ================================================================
