@@ -112,8 +112,8 @@ cat .env >> /path/to/brajen/.env
 
 ```env
 # NCBI PubMed
-NCBI_API_KEY=1562abd11c7620d42e377dbce3391edaf409
-NCBI_EMAIL=marcin.zmuda@embasy.pl
+NCBI_API_KEY=your_ncbi_api_key_here
+NCBI_EMAIL=your_email@example.com
 
 # Anthropic (użyj swojego klucza z BRAJEN)
 ANTHROPIC_API_KEY=sk-ant-api03-...
