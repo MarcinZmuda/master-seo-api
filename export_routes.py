@@ -448,6 +448,7 @@ def rescan_keywords_after_editorial(project_id: str, corrected_article: str) -> 
 def parse_diff_response(response_text: str) -> list:
     """
     Parsuje odpowiedź Claude w formacie DIFF.
+    v56: Block-based parser — obsługuje puste ZAMIEŃ, [USUŃ], sanityzacja instruction leak.
     
     Format wejściowy:
     [ZMIANA 1]
@@ -455,29 +456,87 @@ def parse_diff_response(response_text: str) -> list:
     ZAMIEŃ: "poprawiona wersja"
     POWÓD: wyjaśnienie
     
-    Zwraca: [{"find": "...", "replace": "...", "reason": "..."}]
+    Zwraca: [{"find": "...", "replace": "...", "reason": "...", "is_deletion": bool}]
     """
     changes = []
+    _INSTRUCTION_MARKERS = ['[ZMIANA', 'ZNAJDŹ:', 'ZAMIEŃ:', 'POWÓD:']
     
-    # Wzorzec dla pojedynczej zmiany
-    pattern = r'\[ZMIANA \d+\]\s*\n\s*ZNAJDŹ:\s*["\'](.+?)["\']\s*\n\s*ZAMIEŃ:\s*["\'](.+?)["\']\s*\n\s*POWÓD:\s*(.+?)(?=\n\s*\[ZMIANA|\Z)'
+    # Split on [ZMIANA N] markers — each block = one change
+    blocks = re.split(r'\[ZMIANA\s+\d+\]', response_text)
     
-    matches = re.findall(pattern, response_text, re.DOTALL | re.IGNORECASE)
-    
-    for match in matches:
-        find_text = match[0].strip()
-        replace_text = match[1].strip()
-        reason = match[2].strip()
+    for block in blocks[1:]:  # skip text before first [ZMIANA]
+        block = block.strip()
+        if not block:
+            continue
         
-        if find_text and len(find_text) > 5:
-            changes.append({
-                "find": find_text,
-                "replace": replace_text,
-                "reason": reason,
-                "applied": False
-            })
+        # ── Extract ZNAJDŹ ──
+        find_match = re.search(
+            r'ZNAJDŹ:\s*["\u201e\u201c\'"](.+?)["\u201d\u201f\'"]',
+            block, re.DOTALL
+        )
+        if not find_match:
+            # Fallback: unquoted ZNAJDŹ (to next line keyword)
+            find_match = re.search(
+                r'ZNAJDŹ:\s*(.+?)(?=\nZAMIEŃ:|\nPOWÓD:|\Z)',
+                block, re.DOTALL
+            )
+        if not find_match:
+            continue
+        find_text = find_match.group(1).strip().strip('"\'\u201e\u201d\u201c\u201f')
+        
+        if not find_text or len(find_text) <= 5:
+            continue
+        
+        # ── Extract ZAMIEŃ ──
+        # First try quoted format
+        replace_match = re.search(
+            r'ZAMIEŃ:\s*["\u201e\u201c\'"](.+?)["\u201d\u201f\'"](?=\s*\n|\s*$)',
+            block, re.DOTALL
+        )
+        
+        is_deletion = False
+        
+        if replace_match:
+            replace_text = replace_match.group(1).strip()
+        else:
+            # Try unquoted — capture until POWÓD: or end
+            replace_match2 = re.search(
+                r'ZAMIEŃ:\s*(.+?)(?=\nPOWÓD:|\Z)',
+                block, re.DOTALL
+            )
+            if replace_match2:
+                raw_replace = replace_match2.group(1).strip()
+                # Handle [USUŃ ...] → deletion
+                if re.match(r'^\[USUŃ[^\]]*\]$', raw_replace, re.IGNORECASE):
+                    replace_text = ""
+                    is_deletion = True
+                # Handle empty quotes: "", '', „"
+                elif raw_replace in ('""', "''", '\u201e\u201d', '\u201c\u201d', '""', "''"):
+                    replace_text = ""
+                    is_deletion = True
+                else:
+                    replace_text = raw_replace.strip('"\'\u201e\u201d\u201c\u201f')
+            else:
+                continue
+        
+        # ── SANITIZE: reject if replace_text contains editorial instructions ──
+        if any(marker in replace_text for marker in _INSTRUCTION_MARKERS):
+            print(f"[DIFF_PARSE] ⚠️ Instruction leak in ZAMIEŃ, skipping: {replace_text[:80]}")
+            continue
+        
+        # ── Extract POWÓD (optional) ──
+        reason_match = re.search(r'POWÓD:\s*(.+?)(?=\n|$)', block)
+        reason = reason_match.group(1).strip() if reason_match else "auto"
+        
+        changes.append({
+            "find": find_text,
+            "replace": replace_text,
+            "reason": reason,
+            "applied": False,
+            "is_deletion": is_deletion or (replace_text == "")
+        })
     
-    # Fallback: prostszy wzorzec
+    # Fallback: old simple pattern (only if block parser found nothing)
     if not changes:
         simple_pattern = r'ZNAJDŹ:\s*["\']?(.+?)["\']?\s*\n\s*ZAMIEŃ:\s*["\']?(.+?)["\']?\s*(?:\n|$)'
         simple_matches = re.findall(simple_pattern, response_text, re.DOTALL)
@@ -486,12 +545,17 @@ def parse_diff_response(response_text: str) -> list:
             find_text = match[0].strip().strip('"\'')
             replace_text = match[1].strip().strip('"\'')
             
+            # Sanitize fallback too
+            if any(marker in replace_text for marker in _INSTRUCTION_MARKERS):
+                continue
+            
             if find_text and len(find_text) > 5:
                 changes.append({
                     "find": find_text,
                     "replace": replace_text,
                     "reason": "auto-parsed",
-                    "applied": False
+                    "applied": False,
+                    "is_deletion": (replace_text == "")
                 })
     
     return changes
@@ -526,9 +590,40 @@ def apply_diffs(original_text: str, changes: list) -> tuple:
     applied = []
     failed = []
 
+    _INSTRUCTION_MARKERS = ['[ZMIANA', 'ZNAJDŹ:', 'ZAMIEŃ:', 'POWÓD:']
+    
     for change in changes:
         find_text = change["find"]
         replace_text = change["replace"]
+
+        # ═══ v56 FIX 3B: Final sanitization — reject instruction leaks ═══
+        if any(marker in replace_text for marker in _INSTRUCTION_MARKERS):
+            change["applied"] = False
+            change["error"] = "Instruction leak detected in replacement"
+            failed.append(change)
+            continue
+
+        # ═══ v56 FIX 3B: Handle deletions — remove text + cleanup whitespace ═══
+        if change.get("is_deletion") or replace_text == "":
+            if find_text in modified:
+                modified = modified.replace(find_text, "", 1)
+                modified = re.sub(r'\n{3,}', '\n\n', modified)
+                modified = re.sub(r'  +', ' ', modified)
+                change["applied"] = True
+                change["match_type"] = "deletion"
+                applied.append(change)
+                continue
+            # Try normalized quote matching for deletions too
+            find_norm = _normalize_quotes(find_text)
+            mod_norm = _normalize_quotes(modified)
+            if find_norm in mod_norm:
+                idx = mod_norm.index(find_norm)
+                modified = modified[:idx] + modified[idx + len(find_norm):]
+                modified = re.sub(r'\n{3,}', '\n\n', modified)
+                change["applied"] = True
+                change["match_type"] = "deletion_quote_normalized"
+                applied.append(change)
+                continue
 
         # Próba 1: Dokładne dopasowanie
         if find_text in modified:
@@ -1102,8 +1197,8 @@ POWÓD: dramatyzator → konkretna informacja prawna
 Przykład usunięcia błędnego wyroku:
 [ZMIANA 2]
 ZNAJDŹ: "Potwierdza to wyrok Sądu Okręgowego w Słupsku z dnia 15 marca 2021 r. (sygn. I C 245/21), który wskazał na konieczność"
-ZAMIEŃ: [USUŃ — wyrok cywilny (I C) w artykule karnym]
-POWÓD: błędny wyrok — cywilny w artykule karnym
+ZAMIEŃ: ""
+POWÓD: błędny wyrok — cywilny w artykule karnym → USUNIĘCIE
 
 (kontynuuj do max 15 zmian)"""
 
@@ -1739,7 +1834,8 @@ def export_html(project_id):
     processed = []
     for line in lines:
         line = line.strip()
-        if line and not line.startswith('<h'):
+        # v56 FIX 2B: case-insensitive check + detect already-tagged lines
+        if line and not re.match(r'^</?(?:h[1-6]|p|li|ul|ol|table|div|tr|td|th|blockquote|hr|br)', line, re.IGNORECASE):
             if line.startswith('- ') or line.startswith('• '):
                 processed.append(f'<li>{line[2:]}</li>')
             else:
