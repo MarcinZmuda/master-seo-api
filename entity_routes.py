@@ -335,7 +335,7 @@ def validate_entities(project_id):
             "suggestions": [...]
         }
     """
-    from db import get_project
+    from master_api import get_project
     
     try:
         project = get_project(project_id)

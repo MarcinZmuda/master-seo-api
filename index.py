@@ -389,7 +389,7 @@ def fetch_serp_sources(keyword, num_results=10):
             print(f"[S1] ✅ Found {len(paa_questions)} PAA questions")
         else:
             print(f"[S1] ⚠️ No PAA from SerpAPI — generating with Claude fallback...")
-            paa_questions = _generate_paa_claude_fallback(main_keyword, serp_data)
+            paa_questions = _generate_paa_claude_fallback(keyword, serp_data)
 
         # ⭐ 3. Wyciągnij Featured Snippet (Answer Box)
         featured_snippet = None

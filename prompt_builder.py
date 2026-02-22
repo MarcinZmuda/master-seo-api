@@ -819,7 +819,7 @@ def _fmt_keywords(pre_batch):
             
             # Build descriptive line
             parts_line = [f'"{name}"']
-            if remaining:
+            if remaining is not None and remaining != "":
                 parts_line.append(f"zostało {remaining}× ogółem")
             if hard_max:
                 parts_line.append(f"max {hard_max}× w tym batchu")
@@ -844,7 +844,7 @@ def _fmt_keywords(pre_batch):
                 remaining = max(0, target_max - int(actual))
             
             line = f'  • "{name}"'
-            if remaining:
+            if remaining is not None and remaining != "":
                 line += f" , zostało {remaining}×"
             ext_lines.append(line)
         else:
@@ -1772,7 +1772,14 @@ def build_faq_user_prompt(paa_data, pre_batch=None):
 Napisz sekcję FAQ. Zaczynaj DOKŁADNIE od:
 h2: Najczęściej zadawane pytania""")
 
-    all_paa = list(dict.fromkeys(paa_questions + enhanced_paa))
+    # Deduplicate PAA — items may be dicts (unhashable), so use seen-set on question text
+    _seen_paa = set()
+    all_paa = []
+    for _q in (paa_questions or []) + (enhanced_paa or []):
+        _key = _q.get("question", _q) if isinstance(_q, dict) else _q
+        if _key and _key not in _seen_paa:
+            _seen_paa.add(_key)
+            all_paa.append(_q)
     if all_paa:
         sections.append("Pytania z Google (People Also Ask), to NAPRAWDĘ pytają użytkownicy:")
         for i, q in enumerate(all_paa[:8], 1):

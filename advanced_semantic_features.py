@@ -321,7 +321,7 @@ def analyze_entity_density_advanced(
     current_density = (existing_entity_count / word_count) * 100 if word_count > 0 else 0
     
     # 4. Oblicz potencjalną gęstość po transformacjach
-    potential_density = ((existing_entity_count + total_entities_gainable) / word_count) * 100
+    potential_density = ((existing_entity_count + total_entities_gainable) / word_count) * 100 if word_count > 0 else 0
     
     # 5. Kategoryzuj encje po typach (jeśli dostępne)
     entity_type_distribution = defaultdict(int)

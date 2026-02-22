@@ -185,6 +185,14 @@ except ImportError as e:
     def get_synonyms(keyword, max_synonyms=4):
         return []
 
+# v24.2: Unified keyword counter — count_keyword_occurrences alias
+try:
+    from keyword_counter import count_single_keyword as count_keyword_occurrences
+except ImportError:
+    def count_keyword_occurrences(text, keyword):
+        """Fallback: simple case-insensitive count."""
+        return text.lower().count(keyword.lower()) if text and keyword else 0
+
 # 🆕 v37.1: Batch Review System z auto-poprawkami
 try:
     from batch_review_system import (
