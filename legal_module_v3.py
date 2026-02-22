@@ -797,7 +797,7 @@ def get_legal_context_for_article(
         print(f"[LEGAL_MODULE] ⚖️ Filtr typu '{required_type}': {before_type_filter} → {len(judgments)} wyroków")
 
     # 6c. v52.5: Weryfikacja AI przez Claude Haiku — wybiera najlepsze, odrzuca niepasujące
-    if judgments and CLAUDE_VERIFIER_AVAILABLE:
+    if judgments and SCORING_AVAILABLE:
         try:
             print(f"[LEGAL_MODULE] 🤖 Claude Haiku weryfikuje {len(judgments)} orzeczeń dla: '{main_keyword}'")
             verified = verify_judgments_with_claude(

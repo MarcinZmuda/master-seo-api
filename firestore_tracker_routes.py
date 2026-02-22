@@ -185,6 +185,14 @@ except ImportError as e:
     def get_synonyms(keyword, max_synonyms=4):
         return []
 
+# v24.2: Unified keyword counter — count_keyword_occurrences alias
+try:
+    from keyword_counter import count_single_keyword as count_keyword_occurrences
+except ImportError:
+    def count_keyword_occurrences(text, keyword):
+        """Fallback: simple case-insensitive count."""
+        return text.lower().count(keyword.lower()) if text and keyword else 0
+
 # 🆕 v37.1: Batch Review System z auto-poprawkami
 try:
     from batch_review_system import (
@@ -814,9 +822,9 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
     # Sprawdź czy batch używa fraz zarezerwowanych dla innych sekcji
     # ================================================================
     reserved_keyword_warnings = []
+    current_batch_num = batches_done + 1  # Bo to jest batch który właśnie dodajemy
     semantic_plan = project_data.get("semantic_keyword_plan", {})
     if semantic_plan:
-        current_batch_num = batches_done + 1  # Bo to jest batch który właśnie dodajemy
         batch_plans = semantic_plan.get("batch_plans", [])
         
         # Znajdź plan dla bieżącego batcha
@@ -1846,8 +1854,7 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
             print(f"[TRACKER] 🔴 v38.2 OVERRIDE: Relations MUST missing → action=FIX_AND_RETRY")
     
     # 5. 🆕 v38.2: PROXIMITY CLUSTERS - soft validation (tylko warning, nie blokuje)
-    proximity_score = result.get("semantic_proximity", {}).get("score", 100) if 'result' in dir() else 100
-    isolated_keywords = result.get("semantic_proximity", {}).get("isolated_keywords", []) if 'result' in dir() else []
+    # proximity_score and isolated_keywords are already computed above (lines ~919-973)
     
     if proximity_score < 60 and isolated_keywords:
         # Nie blokujemy, ale dodajemy do fixes_needed jako sugestię

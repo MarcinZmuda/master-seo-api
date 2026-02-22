@@ -318,7 +318,23 @@ def format_anti_frankenstein_prompt(context: dict) -> str:
     if context.get("style_instructions"):
         lines.append(context["style_instructions"])
         lines.append("")
-    
+
+    # Soft cap keywords — limits per keyword per batch
+    soft_caps = context.get("soft_cap_keywords")
+    if soft_caps:
+        lines.append("=" * 60)
+        lines.append("⚠️ SOFT CAP — LIMITY FRAZ W TYM BATCHU")
+        lines.append("=" * 60)
+        for sc in soft_caps:
+            kw = sc.get("keyword", "")
+            per_batch = sc.get("per_batch", "?")
+            action = sc.get("action", "")
+            if action == "STOP":
+                lines.append(f'  🛑 "{kw}" → NIE UŻYWAJ (limit wyczerpany)')
+            else:
+                lines.append(f'  • "{kw}" → max {per_batch}× w tym batchu')
+        lines.append("")
+
     return "\n".join(lines)
 
 

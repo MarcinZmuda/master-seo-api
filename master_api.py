@@ -1,5 +1,6 @@
 import os
 import json
+import hmac
 try:
     from prompt_logger import log_prompt as _log_prompt, get_log_html, clear_log
 except ImportError:
@@ -80,6 +81,52 @@ app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 32 * 1024 * 1024  # 32 MB
 
 CORS(app)
+
+# ================================================================
+# 🔒 API Key Authentication
+# ================================================================
+MASTER_SEO_API_KEY = os.getenv("MASTER_SEO_API_KEY", "")
+
+@app.before_request
+def _require_api_key():
+    """Enforce Bearer token auth on all /api/ endpoints (except health)."""
+    if not MASTER_SEO_API_KEY:
+        return  # No key configured — skip auth (dev mode)
+    if request.path in ("/api/health", "/health", "/"):
+        return
+    if not request.path.startswith("/api/"):
+        return
+    auth = request.headers.get("Authorization", "")
+    token = auth.removeprefix("Bearer ").strip() if auth.startswith("Bearer ") else ""
+    if not token or not hmac.compare_digest(token, MASTER_SEO_API_KEY):
+        return jsonify({"error": "Unauthorized", "hint": "Set Authorization: Bearer <MASTER_SEO_API_KEY>"}), 401
+
+# ================================================================
+# 🚦 Rate Limiting (in-memory, lightweight)
+# ================================================================
+import time as _time
+from collections import defaultdict as _defaultdict
+
+_rate_limit_store = _defaultdict(list)  # ip -> [timestamps]
+_RATE_LIMIT_WINDOW = 60  # seconds
+_RATE_LIMIT_MAX = int(os.getenv("RATE_LIMIT_MAX", "30"))  # requests per window
+
+@app.before_request
+def _rate_limit():
+    """Simple per-IP rate limiting for /api/ endpoints."""
+    if not request.path.startswith("/api/"):
+        return
+    if request.path in ("/api/health", "/health"):
+        return
+
+    ip = request.remote_addr or "unknown"
+    now = _time.time()
+    timestamps = _rate_limit_store[ip]
+    # Prune old entries
+    _rate_limit_store[ip] = [t for t in timestamps if now - t < _RATE_LIMIT_WINDOW]
+    if len(_rate_limit_store[ip]) >= _RATE_LIMIT_MAX:
+        return jsonify({"error": "Too many requests", "retry_after": _RATE_LIMIT_WINDOW}), 429
+    _rate_limit_store[ip].append(now)
 
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
 VERSION = "v45.3.1"  # 🆕 AI Middleware, forced mode fix, Anti-Frankenstein enabled

@@ -819,7 +819,7 @@ def _fmt_keywords(pre_batch):
             
             # Build descriptive line
             parts_line = [f'"{name}"']
-            if remaining:
+            if remaining is not None and remaining != "":
                 parts_line.append(f"zostało {remaining}× ogółem")
             if hard_max:
                 parts_line.append(f"max {hard_max}× w tym batchu")
@@ -844,7 +844,7 @@ def _fmt_keywords(pre_batch):
                 remaining = max(0, target_max - int(actual))
             
             line = f'  • "{name}"'
-            if remaining:
+            if remaining is not None and remaining != "":
                 line += f" , zostało {remaining}×"
             ext_lines.append(line)
         else:
@@ -1061,9 +1061,9 @@ def _fmt_entity_salience(pre_batch):
         secondary_eav = [e for e in eav_triples if not e.get("is_primary")]
         if primary_eav:
             e = primary_eav[0]
-            eav_lines.append(f'🎯 GŁÓWNA: "{e["entity"]}" → {e["attribute"]} → {e["value"]}')
+            eav_lines.append(f'🎯 GŁÓWNA: "{e.get("entity","")}" → {e.get("attribute","")} → {e.get("value","")}')
         for e in secondary_eav[:10]:
-            eav_lines.append(f'   • "{e["entity"]}" ({e.get("type","")}) → {e["attribute"]} → {e["value"]}')
+            eav_lines.append(f'   • "{e.get("entity","")}" ({e.get("type","")}) → {e.get("attribute","")} → {e.get("value","")}')
         eav_lines.append("")
         eav_lines.append("✅ Przykład zamiany EAV na zdanie:")
         eav_lines.append('   EAV: "kodeks karny → penalizuje → jazdę po alkoholu art. 178a"')
@@ -1080,8 +1080,8 @@ def _fmt_entity_salience(pre_batch):
                      "Możesz rozłożyć je na różne sekcje — ważne żeby były obecne.",
                      ""]
         for i, t in enumerate(svo_triples[:12], 1):
-            ctx = f' [{t["context"]}]' if t.get("context") else ""
-            svo_lines.append(f'  {i}. {t["subject"]} → {t["verb"]} → {t["object"]}{ctx}')
+            ctx = f' [{t.get("context","")}]' if t.get("context") else ""
+            svo_lines.append(f'  {i}. {t.get("subject","")} → {t.get("verb","")} → {t.get("object","")}{ctx}')
         svo_lines.append("")
         svo_lines.append("Google Knowledge Graph indeksuje te relacje. Im więcej z nich pojawi")
         svo_lines.append("się jako wyraźne zdania (nie wtrącenia), tym wyższy topic authority.")
@@ -1772,7 +1772,14 @@ def build_faq_user_prompt(paa_data, pre_batch=None):
 Napisz sekcję FAQ. Zaczynaj DOKŁADNIE od:
 h2: Najczęściej zadawane pytania""")
 
-    all_paa = list(dict.fromkeys(paa_questions + enhanced_paa))
+    # Deduplicate PAA — items may be dicts (unhashable), so use seen-set on question text
+    _seen_paa = set()
+    all_paa = []
+    for _q in (paa_questions or []) + (enhanced_paa or []):
+        _key = _q.get("question", _q) if isinstance(_q, dict) else _q
+        if _key and _key not in _seen_paa:
+            _seen_paa.add(_key)
+            all_paa.append(_q)
     if all_paa:
         sections.append("Pytania z Google (People Also Ask), to NAPRAWDĘ pytają użytkownicy:")
         for i, q in enumerate(all_paa[:8], 1):

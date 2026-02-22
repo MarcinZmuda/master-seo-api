@@ -29,6 +29,13 @@ except ImportError:
     UNIFIED_COUNTER = False
     print("[FINAL_REVIEW] ⚠️ keyword_counter not available, using legacy regex")
 
+# Prompt logging
+try:
+    from prompt_logger import log_prompt as _log_prompt
+except ImportError:
+    def _log_prompt(*args, **kwargs):
+        pass
+
 # 🆕 v40.1: Advanced Semantic Features (source effort, topic completeness)
 try:
     from advanced_semantic_features import (
