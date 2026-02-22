@@ -794,6 +794,7 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
             
             exceeded_info = {
                 "keyword": keyword,
+                "type": meta.get("type", "BASIC").upper(),
                 "current": current,
                 "batch_uses": batch_count,
                 "would_be": new_total,
