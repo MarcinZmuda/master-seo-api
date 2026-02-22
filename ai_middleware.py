@@ -645,7 +645,13 @@ def smart_retry_batch(original_text, exceeded_keywords, pre_batch, h2, batch_typ
         kw = exc.get("keyword", "")
         synonyms = exc.get("use_instead") or exc.get("synonyms") or []
         severity = exc.get("severity", "WARNING")
+        kw_type = exc.get("type", "BASIC").upper()
         if not kw:
+            continue
+        # v56: Skip ENTITY type keywords — these are required topical/named entities
+        # Smart Retry was removing legally required phrases like "pozbawienie wolności"
+        if kw_type == "ENTITY":
+            logger.info(f"[AI_MW] Smart retry: SKIP entity '{kw}' (type=ENTITY, required)")
             continue
         syn_list = [s if isinstance(s, str) else str(s) for s in synonyms[:3]] if synonyms else []
         replacements.append({"keyword": kw, "synonyms": syn_list, "severity": severity})
@@ -797,7 +803,11 @@ def should_use_smart_retry(result: dict, attempt: int) -> bool:
     exceeded = result.get("exceeded_keywords", [])
     if not exceeded:
         return False
-    critical = sum(1 for e in exceeded if e.get("severity") == "CRITICAL")
+    # v56: Skip if ALL exceeded keywords are ENTITY type (required entities, not retryable)
+    non_entity_exceeded = [e for e in exceeded if e.get("type", "BASIC").upper() != "ENTITY"]
+    if not non_entity_exceeded:
+        return False
+    critical = sum(1 for e in non_entity_exceeded if e.get("severity") == "CRITICAL")
     if critical > 5:
         return False
     return True
