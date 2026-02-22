@@ -661,7 +661,23 @@ def editorial_review(project_id):
         if batches:
             full_text, debug_info = extract_text_from_batches(batches)
             debug_info["source"] = "batches"
-    
+
+    # v55.1: Word count guard — if full_article is truncated vs batches, use batches
+    batches = project_data.get("batches", [])
+    if full_text and batches:
+        batches_text_parts = []
+        for b in batches:
+            if isinstance(b, dict):
+                batches_text_parts.append(b.get("text", b.get("content", "")))
+            elif isinstance(b, str):
+                batches_text_parts.append(b)
+        batches_wc = sum(len(p.split()) for p in batches_text_parts if p)
+        full_text_wc = len(full_text.split())
+        if batches_wc > 0 and full_text_wc < batches_wc * 0.7:
+            print(f"[EDITORIAL_REVIEW] ⚠️ full_article truncated ({full_text_wc} vs {batches_wc} from batches) — using batches")
+            full_text = "\n\n".join(p for p in batches_text_parts if p)
+            debug_info = {"source": "batches_fallback", "reason": f"full_article truncated ({full_text_wc}<{batches_wc})"}
+
     if not full_text:
         return jsonify({
             "error": "No content found",
