@@ -354,6 +354,14 @@ try:
 except ImportError as e:
     print(f"[MASTER_API] ⚠️ Unified YMYL classifier not available: {e}")
 
+# 🆕 v47.3: spaCy Salience endpoint (NER + entity prominence)
+try:
+    from spacy_salience import register_routes as register_spacy_salience_routes
+    register_spacy_salience_routes(app)
+    print("[MASTER_API] ✅ spaCy Salience registered (/api/spacy/salience, /api/spacy/status)")
+except ImportError as e:
+    print(f"[MASTER_API] ⚠️ spaCy Salience not available: {e}")
+
 # ================================================================
 # 🔗 S1 PROXY ENDPOINTS (przekierowanie do N-gram API)
 # ================================================================
