@@ -1380,6 +1380,9 @@ def _enrich_enhanced_info(enhanced_info, s1_data, paa_for_batch):
         # Also add from s1_data if more available
         serp = s1_data.get("serp_analysis", {})
         all_paa = serp.get("paa_questions", [])
+        # v55.1: Fallback — PAA at s1_data.paa directly
+        if not all_paa:
+            all_paa = s1_data.get("paa", [])
         for paa in all_paa:
             q = paa.get("question", "") if isinstance(paa, dict) else str(paa)
             if q and q not in paa_list:
@@ -1581,6 +1584,9 @@ def get_pre_batch_info(project_id):
     
     # PAA - pytania użytkowników
     paa_questions = serp_analysis.get("paa_questions", [])
+    # v55.1: Fallback — PAA saved at s1_data.paa by Brajn2026 (serp_analysis not in s1_data)
+    if not paa_questions:
+        paa_questions = s1_data.get("paa", [])
     paa_for_batch = []
     if paa_questions and current_batch_num <= 3:  # PAA tylko w pierwszych 3 batchach
         paa_per_batch = max(1, len(paa_questions) // 3)

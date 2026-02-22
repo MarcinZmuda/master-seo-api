@@ -40,10 +40,18 @@ def analyze_for_paa(project_id):
     batches = data.get("batches", [])
     original_h2_list = data.get("h2_list", [])
     
-    # PAA z SERP
+    # PAA z SERP — check multiple storage paths
     serp_paa = data.get("serp_data", {}).get("paa_questions", [])
     if not serp_paa:
         serp_paa = data.get("paa_questions", [])
+    if not serp_paa:
+        # v55.1: PAA saved by Brajn2026 in s1_data.paa (list of dicts with "question" key)
+        s1_paa_raw = data.get("s1_data", {}).get("paa", [])
+        serp_paa = [
+            p.get("question", "") if isinstance(p, dict) else str(p)
+            for p in s1_paa_raw if p
+        ]
+        serp_paa = [q for q in serp_paa if q]  # remove empty strings
     
     # --------------------------------------------
     # v23.8: SEMANTIC GAPS ANALYSIS
