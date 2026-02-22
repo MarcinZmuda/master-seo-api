@@ -423,6 +423,9 @@ def get_semantic_context(
     
     serp = s1_data.get("serp_analysis", {})
     related = serp.get("related_searches", [])[:5]
+    # v55.1: Fallback — related_searches at top level of s1_data
+    if not related:
+        related = s1_data.get("related_searches", [])[:5]
     
     all_terms = top_ngrams + lsi_keywords
     terms_per_batch = max(CONFIG.MIN_CONTEXT_TERMS, len(all_terms) // 8)
@@ -813,6 +816,9 @@ def generate_enhanced_pre_batch_info(
     if batch_type == "FAQ" and current_batch_num >= total_batches:
         serp_data = s1_data.get("serp_data", {}) or s1_data.get("serp_analysis", {}) or {}
         paa_raw = serp_data.get("paa_questions", []) or serp_data.get("paa", [])
+        # v55.1: Fallback — PAA at s1_data.paa directly (serp_data/serp_analysis not in s1_data)
+        if not paa_raw:
+            paa_raw = s1_data.get("paa", [])
         for paa_item in paa_raw:
             if isinstance(paa_item, dict):
                 paa_from_serp.append(paa_item.get("question", ""))
