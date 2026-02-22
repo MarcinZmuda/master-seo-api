@@ -2742,33 +2742,10 @@ def content_editorial_endpoint(project_id):
 
     result_dict = _editorial_to_dict(result)
 
-    # Jeśli był corrected_text — zapisz do projektu
-    # v55.1: Word count guard — nie zapisuj jeśli corrected jest znacząco krótszy niż oryginał
+    # v55.2: content_editorial should NOT generate corrected_text (prompt updated).
+    # Guard: if Claude still returns it, never overwrite full_article (prevents duplication).
     if result.corrected_text:
-        original_wc = len(article_text.split())
-        corrected_wc = len(result.corrected_text.split())
-        if corrected_wc < original_wc * 0.6:
-            print(f"[CONTENT_EDITORIAL] ⚠️ SKIP SAVE: corrected={corrected_wc} < 60% original={original_wc} — nie nadpisuję full_article")
-        else:
-            try:
-                # v55.1: Preserve dict format (auto_merge stores as {content: ..., word_count: ...})
-                fa = project_data.get("full_article")
-                if isinstance(fa, dict):
-                    fa["content"] = result.corrected_text
-                    fa["word_count"] = corrected_wc
-                    fa["content_editorial_applied"] = True
-                    db.collection("seo_projects").document(project_id).update({
-                        "full_article": fa,
-                        "content_editorial_applied": True,
-                    })
-                else:
-                    db.collection("seo_projects").document(project_id).update({
-                        "full_article": result.corrected_text,
-                        "content_editorial_applied": True,
-                    })
-                print(f"[CONTENT_EDITORIAL] ✅ Zapisano poprawiony artykuł ({corrected_wc} słów)")
-            except Exception as e:
-                print(f"[CONTENT_EDITORIAL] ⚠️ Błąd zapisu: {e}")
+        print(f"[CONTENT_EDITORIAL] ⚠️ Claude returned corrected_text despite prompt — IGNORING (anti-duplication guard)")
 
     # Zapisz wynik editorialu do projektu
     try:

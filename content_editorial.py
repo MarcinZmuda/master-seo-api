@@ -239,9 +239,10 @@ Wykonaj merytoryczny przegląd. Odpowiedz TYLKO w formacie JSON:
       "suggestion": "<jak poprawić>"
     }}
   ],
-  "corrected_text": "<PEŁNY poprawiony artykuł — TYLKO jeśli były błędy CRITICAL lub TERMINOLOGY>",
   "summary": "<2 zdania: co znalazłeś>"
 }}
+
+⛔ NIE generuj pola "corrected_text". NIE przepisuj artykułu. Raportuj tylko issues.
 
 ARTYKUŁ:
 {article_text}"""
