@@ -1061,9 +1061,9 @@ def _fmt_entity_salience(pre_batch):
         secondary_eav = [e for e in eav_triples if not e.get("is_primary")]
         if primary_eav:
             e = primary_eav[0]
-            eav_lines.append(f'🎯 GŁÓWNA: "{e["entity"]}" → {e["attribute"]} → {e["value"]}')
+            eav_lines.append(f'🎯 GŁÓWNA: "{e.get("entity","")}" → {e.get("attribute","")} → {e.get("value","")}')
         for e in secondary_eav[:10]:
-            eav_lines.append(f'   • "{e["entity"]}" ({e.get("type","")}) → {e["attribute"]} → {e["value"]}')
+            eav_lines.append(f'   • "{e.get("entity","")}" ({e.get("type","")}) → {e.get("attribute","")} → {e.get("value","")}')
         eav_lines.append("")
         eav_lines.append("✅ Przykład zamiany EAV na zdanie:")
         eav_lines.append('   EAV: "kodeks karny → penalizuje → jazdę po alkoholu art. 178a"')
@@ -1080,8 +1080,8 @@ def _fmt_entity_salience(pre_batch):
                      "Możesz rozłożyć je na różne sekcje — ważne żeby były obecne.",
                      ""]
         for i, t in enumerate(svo_triples[:12], 1):
-            ctx = f' [{t["context"]}]' if t.get("context") else ""
-            svo_lines.append(f'  {i}. {t["subject"]} → {t["verb"]} → {t["object"]}{ctx}')
+            ctx = f' [{t.get("context","")}]' if t.get("context") else ""
+            svo_lines.append(f'  {i}. {t.get("subject","")} → {t.get("verb","")} → {t.get("object","")}{ctx}')
         svo_lines.append("")
         svo_lines.append("Google Knowledge Graph indeksuje te relacje. Im więcej z nich pojawi")
         svo_lines.append("się jako wyraźne zdania (nie wtrącenia), tym wyższy topic authority.")

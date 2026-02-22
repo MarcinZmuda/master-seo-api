@@ -1636,10 +1636,10 @@ def get_pre_batch_info(project_id):
         kw_lower = kw.lower()
         if kw_lower not in keyword_meta_map:
             continue
-        
-        data = keyword_meta_map[kw_lower]
-        meta = data["meta"]
-        keyword = data["keyword"]
+
+        kw_data = keyword_meta_map[kw_lower]
+        meta = kw_data["meta"]
+        keyword = kw_data["keyword"]
         
         kw_type = meta.get("type", "BASIC").upper()
         actual = meta.get("actual_uses", 0)
@@ -1697,10 +1697,10 @@ def get_pre_batch_info(project_id):
         kw_lower = kw.lower()
         if kw_lower not in keyword_meta_map:
             continue
-        
-        data = keyword_meta_map[kw_lower]
-        meta = data["meta"]
-        keyword = data["keyword"]
+
+        kw_data = keyword_meta_map[kw_lower]
+        meta = kw_data["meta"]
+        keyword = kw_data["keyword"]
         
         kw_type = meta.get("type", "BASIC").upper()
         actual = meta.get("actual_uses", 0)
@@ -3173,8 +3173,6 @@ def approve_batch_with_review(project_id):
         # APPROVED lub force_save - zapisz
         print(f"[APPROVE_BATCH] ✅ Review passed: {result.status}, saving batch")
         
-    except ImportError:
-        print(f"[APPROVE_BATCH] ⚠️ claude_reviewer not available, saving without review")
     except ImportError:
         print(f"[APPROVE_BATCH] ⚠️ claude_reviewer not available, saving without review")
     except Exception as e:
