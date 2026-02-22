@@ -1,97 +1,3 @@
-"""
-SEO Content Tracker Routes - v42.2 BRAJEN SEO Engine
-
-🆕 ZMIANY v42.2:
-- Integracja z keyword_limiter_integration.py
-- Dynamiczne limity stuffingu (zależne od długości tekstu)
-- Bonus dla fraz wielowyrazowych (+20/40/60%)
-- Header variation check (max 3× main keyword w nagłówkach)
-- Structural density check (max 6× w H1/H2)
-- Graceful fallback gdy keyword_limiter niedostępny
-
-ZMIANY v38.4:
-- 🆕 STRUCTURAL KEYWORDS: frazy w MAIN/H2 NIE blokują batcha
-- 🆕 structural_exceeded w response (global check only)
-- 🆕 FINAL REVIEW: weryfikacja globalna z tolerancją 30%
-- 🆕 final_review w response (status, warnings, exceeded)
-- 🔧 is_structural_keyword() helper function
-- ✅ Koniec nieskończonych pętli REWRITE dla fraz w H2!
-
-ZMIANY v38.3:
-- 🔧 DRIFT: procedural ↔ institutional dozwolone (nie blokuje)
-- 🔧 SEMANTIC FALLBACK: entity validator próbuje keyword proximity po regexach
-- ✅ Proximity clusters: zostawione jako soft warning (nie ruszać!)
-
-ZMIANY v38.2:
-- 🔴 RELATION COMPLETION: brakujące relacje MUST → FIX_AND_RETRY
-- 🔴 ENTITY DRIFT DETECTION: wykrywa zmiany definicji encji
-- 🔴 PROXIMITY CLUSTERS: aktywowane jako soft validator
-- ✅ Kompletna egzekucja entity/relation/drift
-
-ZMIANY v38.1:
-- 🔴 DECISION ENGINE: entity/legal/helpful → WPŁYWAJĄ NA ACTION!
-- 🔴 Entity MUST missing → action = REWRITE
-- 🔴 Legal CRITICAL violations → action = FIX_AND_RETRY  
-- 🔴 YMYL soft_advice → action = FIX_AND_RETRY
-- 🔴 v38_overrides w response i decision_trace
-- ✅ Fixes_needed z konkretnym co naprawić
-
-ZMIANY v38.0:
-- 🆕 ENTITY_STATE: tracking encji z S1 (introduced/defined/explained)
-- 🆕 ENTITY_REQUIREMENTS: wymagania encji w pre_batch_info
-- 🆕 ENTITY_COVERAGE_EXPERT: walidacja pokrycia encji
-- 🆕 LEGAL_HARD_LOCK: whitelist przepisów dla YMYL
-- 🆕 HELPFUL_REFLEX_DETECTOR: wykrywanie "dopowiadania" GPT
-- 🔧 Rozszerzona inicjalizacja projektu
-
-ZMIANY v37.5:
-- 🔄 CRITICAL FIX: Recount keywords after auto-fix
-- ✅ keywords_state saved to Firestore after auto-fix
-- 📊 Accurate keyword tracking for subsequent batches
-- 🔧 Fixed: keywords were counted BEFORE auto-fix, not AFTER
-
-ZMIANY v37.4:
-- 🆕 GLOBAL QUALITY SCORE: jeden score 0-100 z grade A-F
-- 🆕 DECISION TRACE: audit trail dla każdej decyzji
-- 🆕 CONFIDENCE: HIGH/MEDIUM/LOW dla GPT
-- 🆕 CONFIG-DRIVEN: konfigurowalne progi (QualityConfig)
-- 🆕 SIMPLIFIED RESPONSE: mniej pól, jasna akcja
-- 🆕 FAST MODE: szybka walidacja ~100ms (validate_fast_mode)
-- 🔧 Grammar YMYL: ≥2 błędy → CRITICAL + cap grade C
-- 🔧 Semantic: wielopoziomowe capy (0.25→B, 0.35→B+)
-
-ZMIANY v37.2:
-- 🆕 CLAUDE SMART-FIX: inteligentne poprawki z pre_batch_info
-- 🆕 POST /claude_smart_fix - Claude poprawia batch z kontekstem
-- 🆕 POST /review_and_fix - auto-fix + opcjonalnie Claude
-
-ZMIANY v37.1:
-- 🆕 MOE BATCH VALIDATOR: 4 ekspertów walidujących każdy batch
-  - STRUCTURE: różna liczba akapitów, anty-monotonność
-  - SEO: BASIC/EXTENDED keywords, encje, n-gramy
-  - LANGUAGE: gramatyka polska (LanguageTool)
-  - AI DETECTION: burstiness, TTR, rozkład zdań
-- 🆕 moe_validation w response i batch_entry
-- 🆕 moe_fix_instructions z konkretnymi poprawkami
-
-ZMIANY v37.0:
-- 🆕 EXCEEDED KEYWORDS: podział na WARNING (1-49%) i CRITICAL (50%+)
-- 🆕 BLOKADA BATCHA przy exceeded 50%+ (chyba że forced=True)
-- 🆕 SYNONIMY: automatyczne pobieranie synonimów dla exceeded keywords
-- 🆕 FIX INSTRUCTIONS: konkretne synonimy do przepisania batcha
-- 🆕 Tylko BASIC/MAIN są pilnowane - EXTENDED mogą być przekroczone
-
-ZMIANY v36.3:
-- 🆕 FIRESTORE FIX: sanitize_for_firestore() dla kluczy ze znakami . / [ ]
-
-v27.0 Original:
-+ Morfeusz2 lemmatization (with spaCy fallback)
-+ Burstiness validation (3.2-3.8)
-+ Transition words validation (25-50%)
-+ v24.0: Per-batch keyword validation
-+ v24.0: Fixed density limit (3.0% from seo_rules.json)
-"""
-
 from flask import Blueprint, request, jsonify
 from firebase_admin import firestore
 import re
@@ -523,6 +429,14 @@ def auto_merge_full_article(project_id: str, project_data: dict) -> dict:
                 if _bt.endswith("```"):
                     _bt = _bt[:-3]
                 _bt = _bt.strip()
+                # v56 FIX 2C: Normalize malformed HTML tags (same as _clean_batch_text)
+                _bt = re.sub(r'<p[.,;:]+>', '<p>', _bt, flags=re.IGNORECASE)
+                _bt = re.sub(r'</p[.,;:]+>', '</p>', _bt, flags=re.IGNORECASE)
+                _bt = re.sub(r'<(h[2-6])[.,;:]+>', r'<\1>', _bt, flags=re.IGNORECASE)
+                _bt = re.sub(r'</(h[2-6])[.,;:]+>', r'</\1>', _bt, flags=re.IGNORECASE)
+                def _lower_tag(m):
+                    return m.group(0).lower()
+                _bt = re.sub(r'</?[A-Z][A-Z0-9]*(?:\s[^>]*)?\s*/?>', _lower_tag, _bt)
                 full_content_parts.append(_bt)
                 total_words += len(_bt.split())
                 h2_count += len(re.findall(r'(?:^h2:|<h2)', _bt, re.MULTILINE | re.IGNORECASE))
