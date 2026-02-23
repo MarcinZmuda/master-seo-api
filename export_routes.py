@@ -468,14 +468,33 @@ def parse_diff_response(response_text: str) -> list:
         find_text = match[0].strip()
         replace_text = match[1].strip()
         reason = match[2].strip()
-        
-        if find_text and len(find_text) > 5:
+
+        # v58: Hallucination guards
+        find_word_count = len(find_text.split())
+        if find_text and find_word_count >= 3 and len(find_text) > 10:
+            # Reject if REPLACE is drastically different length (>3x or <0.2x)
+            if replace_text:
+                len_ratio = len(replace_text) / max(len(find_text), 1)
+                if len_ratio > 3.0 or len_ratio < 0.15:
+                    print(f"[EDITORIAL] ⚠️ Skipped diff: length ratio {len_ratio:.2f} (find={len(find_text)}, replace={len(replace_text)})")
+                    continue
+            # Reject if REPLACE looks like truncated garbage (ends mid-word without punctuation)
+            if replace_text and len(replace_text) > 20:
+                last_char = replace_text.rstrip()[-1] if replace_text.rstrip() else ''
+                if last_char.isalpha() and not replace_text.rstrip().endswith(('...', 'etc')):
+                    # Check if it looks like a cut-off sentence (no sentence-ending punctuation)
+                    last_10 = replace_text[-10:]
+                    if not any(c in last_10 for c in '.!?:;",)'):
+                        print(f"[EDITORIAL] ⚠️ Skipped diff: REPLACE looks truncated: ...{replace_text[-40:]}")
+                        continue
             changes.append({
                 "find": find_text,
                 "replace": replace_text,
                 "reason": reason,
                 "applied": False
             })
+        elif find_text:
+            print(f"[EDITORIAL] ⚠️ Skipped diff: FIND too short ({find_word_count} words, {len(find_text)} chars): {find_text[:60]}")
     
     # Fallback: prostszy wzorzec
     if not changes:
@@ -485,14 +504,22 @@ def parse_diff_response(response_text: str) -> list:
         for match in simple_matches:
             find_text = match[0].strip().strip('"\'')
             replace_text = match[1].strip().strip('"\'')
-            
-            if find_text and len(find_text) > 5:
+
+            find_word_count = len(find_text.split())
+            if find_text and find_word_count >= 3 and len(find_text) > 10:
+                if replace_text:
+                    len_ratio = len(replace_text) / max(len(find_text), 1)
+                    if len_ratio > 3.0 or len_ratio < 0.15:
+                        print(f"[EDITORIAL] ⚠️ Skipped fallback diff: length ratio {len_ratio:.2f}")
+                        continue
                 changes.append({
                     "find": find_text,
                     "replace": replace_text,
                     "reason": "auto-parsed",
                     "applied": False
                 })
+            elif find_text:
+                print(f"[EDITORIAL] ⚠️ Skipped fallback diff: FIND too short ({find_word_count} words): {find_text[:60]}")
     
     return changes
 
@@ -529,6 +556,16 @@ def apply_diffs(original_text: str, changes: list) -> tuple:
     for change in changes:
         find_text = change["find"]
         replace_text = change["replace"]
+
+        # v58: Safety — reject diff that removes H2/H3 tags or injects broken HTML
+        _find_h_tags = len(re.findall(r'<h[23][^>]*>', find_text, re.IGNORECASE))
+        _repl_h_tags = len(re.findall(r'<h[23][^>]*>', replace_text, re.IGNORECASE))
+        if _find_h_tags > 0 and _repl_h_tags == 0:
+            print(f"[EDITORIAL] ⚠️ Skipped diff: would remove {_find_h_tags} heading tag(s)")
+            change["applied"] = False
+            change["error"] = "Would remove heading tags"
+            failed.append(change)
+            continue
 
         # Próba 1: Dokładne dopasowanie
         if find_text in modified:
@@ -591,6 +628,21 @@ def apply_diffs(original_text: str, changes: list) -> tuple:
         change["applied"] = False
         change["error"] = "Fragment nie znaleziony w tekście"
         failed.append(change)
+
+    # v58: Post-application integrity check
+    orig_h2_count = len(re.findall(r'<h2[^>]*>', original_text, re.IGNORECASE))
+    mod_h2_count = len(re.findall(r'<h2[^>]*>', modified, re.IGNORECASE))
+    if mod_h2_count < orig_h2_count:
+        print(f"[EDITORIAL] 🚨 H2 tags lost after diffs ({orig_h2_count} → {mod_h2_count}), reverting ALL changes")
+        return original_text, [], changes
+
+    orig_words = len(original_text.split())
+    mod_words = len(modified.split())
+    if orig_words > 0:
+        change_ratio = abs(mod_words - orig_words) / orig_words
+        if change_ratio > 0.30:
+            print(f"[EDITORIAL] 🚨 Word count changed >30% ({orig_words} → {mod_words}), reverting ALL changes")
+            return original_text, [], changes
 
     return modified, applied, failed
 

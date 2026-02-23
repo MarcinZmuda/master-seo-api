@@ -449,8 +449,8 @@ def count_lists(text):
         
         return {
             "count": list_blocks,
-            "valid": list_blocks <= 1,
-            "action": f"Zamień {list_blocks - 1} list na tekst" if list_blocks > 1 else None
+            "valid": list_blocks <= 2,
+            "action": f"Zamień {list_blocks - 2} list na tekst" if list_blocks > 2 else None
         }
     except Exception as e:
         print(f"[FINAL_REVIEW] ❌ count_lists error: {e}")
@@ -892,8 +892,8 @@ def perform_final_review(project_id):
         if h2_val.get("overoptimized"):
             score -= 5
         score -= len(h3_val.get("issues", [])) * 3
-        if list_val.get("count", 0) > 1:
-            score -= (list_val["count"] - 1) * 5
+        if list_val.get("count", 0) > 2:
+            score -= (list_val["count"] - 2) * 5
         if ngram_val.get("coverage", 1.0) < 0.6:
             score -= 10
         score = max(0, min(100, score))
