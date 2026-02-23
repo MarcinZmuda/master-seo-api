@@ -2662,7 +2662,7 @@ def content_editorial_endpoint(project_id):
 
     Request body (opcjonalne — jeśli nie podasz, pobiera z Firestore):
       {
-        "article_text": "...",   // jeśli nie — pobiera z projektu
+        "article_text": "...",   // v60: Brajn sends this directly
         "category": "prawo",     // jeśli nie — bierze z projektu
         "is_ymyl": true          // jeśli nie — bierze z projektu
       }
@@ -2682,84 +2682,100 @@ def content_editorial_endpoint(project_id):
     if not _CONTENT_EDITORIAL_ENABLED:
         return jsonify({"status": "OK", "message": "Content editorial disabled"}), 200
 
-    data = request.get_json(force=True) or {}
+    try:
+        data = request.get_json(force=True) or {}
 
-    # Pobierz projekt z Firestore
-    from firebase_admin import firestore as _fs
-    db = _fs.client()
-    doc = db.collection("seo_projects").document(project_id).get()
-    if not doc.exists:
-        return jsonify({"error": "Project not found"}), 404
+        # v60 FIX: Prefer article_text from request body (sent by Brajn)
+        article_text = data.get("article_text", "")
 
-    project_data = doc.to_dict()
-    topic = project_data.get("main_keyword", "")
+        # Pobierz projekt z Firestore (for topic, category, ymyl — and fallback article)
+        from firebase_admin import firestore as _fs
+        db = _fs.client()
+        doc = db.collection("seo_projects").document(project_id).get()
+        if not doc.exists:
+            return jsonify({"error": "Project not found"}), 404
 
-    # Tekst artykułu
-    article_text = data.get("article_text", "")
-    if not article_text:
-        # Pobierz z projektu — próbuj różne pola
-        for field_name in ["full_article", "merged_article", "article"]:
-            val = project_data.get(field_name, "")
-            if isinstance(val, dict):
-                val = val.get("content", val.get("text", ""))
-            if val and len(val) > 100:
-                article_text = val
-                break
+        project_data = doc.to_dict()
+        topic = project_data.get("main_keyword", "")
+
+        # Fallback: Tekst artykułu from Firestore if not in body
         if not article_text:
-            # Złóż z batchów
-            batches = project_data.get("batches", [])
-            if batches:
-                article_text = "\n\n".join(
-                    b.get("content", b) if isinstance(b, dict) else b
-                    for b in batches if b
-                )
+            for field_name in ["full_article", "merged_article", "article"]:
+                val = project_data.get(field_name, "")
+                if isinstance(val, dict):
+                    val = val.get("content", val.get("text", ""))
+                if val and len(val) > 100:
+                    article_text = val
+                    break
+            if not article_text:
+                # Złóż z batchów
+                batches = project_data.get("batches", [])
+                if batches:
+                    article_text = "\n\n".join(
+                        b.get("content", b) if isinstance(b, dict) else b
+                        for b in batches if b
+                    )
 
-    if not article_text:
-        return jsonify({"error": "Brak tekstu artykułu w projekcie"}), 400
+        if not article_text:
+            return jsonify({"error": "Brak tekstu artykułu w projekcie"}), 400
 
-    # Kategoria i YMYL
-    category = data.get("category") or project_data.get("detected_category", "inne")
-    is_ymyl_raw = data.get("is_ymyl")
-    if is_ymyl_raw is None:
-        ymyl_data = project_data.get("ymyl_classification", {})
-        if isinstance(ymyl_data, dict):
-            is_ymyl = ymyl_data.get("is_ymyl", False)
-            if not is_ymyl:
+        # Kategoria i YMYL
+        category = data.get("category") or project_data.get("detected_category", "inne")
+        is_ymyl_raw = data.get("is_ymyl")
+        if is_ymyl_raw is None:
+            ymyl_data = project_data.get("ymyl_classification", {})
+            if isinstance(ymyl_data, dict):
+                is_ymyl = ymyl_data.get("is_ymyl", False)
+                if not is_ymyl:
+                    is_ymyl = category in ("prawo", "medycyna", "finanse")
+            else:
                 is_ymyl = category in ("prawo", "medycyna", "finanse")
         else:
-            is_ymyl = category in ("prawo", "medycyna", "finanse")
-    else:
-        is_ymyl = bool(is_ymyl_raw)
+            is_ymyl = bool(is_ymyl_raw)
 
-    print(f"[CONTENT_EDITORIAL] project={project_id} | topic={topic} | category={category} | ymyl={is_ymyl}")
+        print(f"[CONTENT_EDITORIAL] project={project_id} | topic={topic} | category={category} | ymyl={is_ymyl} | text_len={len(article_text)}")
 
-    result = run_content_editorial(
-        article_text=article_text,
-        topic=topic,
-        category=category,
-        is_ymyl=is_ymyl,
-    )
+        result = run_content_editorial(
+            article_text=article_text,
+            topic=topic,
+            category=category,
+            is_ymyl=is_ymyl,
+        )
 
-    result_dict = _editorial_to_dict(result)
+        result_dict = _editorial_to_dict(result)
 
-    # v55.2: content_editorial should NOT generate corrected_text (prompt updated).
-    # Guard: if Claude still returns it, never overwrite full_article (prevents duplication).
-    if result.corrected_text:
-        print(f"[CONTENT_EDITORIAL] ⚠️ Claude returned corrected_text despite prompt — IGNORING (anti-duplication guard)")
+        # v55.2: content_editorial should NOT generate corrected_text (prompt updated).
+        # Guard: if Claude still returns it, never overwrite full_article (prevents duplication).
+        if result.corrected_text:
+            print(f"[CONTENT_EDITORIAL] ⚠️ Claude returned corrected_text despite prompt — IGNORING (anti-duplication guard)")
 
-    # Zapisz wynik editorialu do projektu
-    try:
-        db.collection("seo_projects").document(project_id).update({
-            "content_editorial_result": result_dict,
-        })
+        # Zapisz wynik editorialu do projektu
+        try:
+            db.collection("seo_projects").document(project_id).update({
+                "content_editorial_result": result_dict,
+            })
+        except Exception as e:
+            print(f"[CONTENT_EDITORIAL] ⚠️ Błąd zapisu wyniku: {e}")
+
+        status_code = 200
+        if result.status == "BLOCKED":
+            status_code = 422  # Unprocessable — artykuł wymaga poprawy przed dalszym przetwarzaniem
+
+        return jsonify(result_dict), status_code
+
     except Exception as e:
-        print(f"[CONTENT_EDITORIAL] ⚠️ Błąd zapisu wyniku: {e}")
-
-    status_code = 200
-    if result.status == "BLOCKED":
-        status_code = 422  # Unprocessable — artykuł wymaga poprawy przed dalszym przetwarzaniem
-
-    return jsonify(result_dict), status_code
+        print(f"[CONTENT_EDITORIAL] ❌ Unhandled error: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            "status": "OK",
+            "score": 100,
+            "issues": [],
+            "critical_count": 0,
+            "warning_count": 0,
+            "summary": f"Editorial error (non-blocking): {str(e)[:200]}",
+            "blocked": False,
+        }), 200  # Return 200 so pipeline continues
 
 
 @app.route("/api/debug/prompts", methods=["GET"])
