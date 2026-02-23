@@ -84,20 +84,24 @@ TOLERANCE_PERCENT = BASIC_TOLERANCE_PERCENT
 # ================================================================
 # 1. MISSING KEYWORDS DETECTOR - v40.1 (ORIGINAL_MAX FIX)
 # ================================================================
-def detect_missing_keywords(text, keywords_state):
+def detect_missing_keywords(text, keywords_state, target_length=None, actual_word_count=None):
     """
-    v40.1: Wykrywa brakujące frazy - używa ORIGINAL_MAX dla zredukowanych fraz!
-    
+    v40.1 + v57.1: Wykrywa brakujące frazy - używa ORIGINAL_MAX dla zredukowanych fraz!
+
     WAŻNE:
     - Frazy mogą mieć zredukowany target_max (np. 24→2) przez AUTO-REDUKCJA
     - original_max zawiera ORYGINALNY limit podany przez użytkownika
     - Final review MUSI używać original_max, nie zredukowanego target_max
-    
+
+    v57.1: Jeśli artykuł jest dłuższy niż target_length, skaluj target_max
+    proporcjonalnie. Artykuł 5000 słów z targetem 1700 → target_max * (5000/1700).
+    Zapobiega fałszywemu stuffing dla dłuższych artykułów.
+
     Logika:
     - missing (0×) → WARNING (Claude uzupełni)
     - underused (< target) → OK
     - stuffing (> original_max) → CRITICAL (JEDYNY BLOKER!)
-    
+
     needs_correction = True TYLKO gdy stuffing > 0
     """
     try:
@@ -133,7 +137,16 @@ def detect_missing_keywords(text, keywords_state):
             # Jeśli jest original_max → użyj go (fraza była zredukowana)
             # Jeśli nie ma → użyj target_max (fraza nie była zredukowana)
             target_max = original_max if original_max else target_max_current
-            
+
+            # 🆕 v57.1: Skaluj target_max proporcjonalnie do długości artykułu
+            # Jeśli artykuł jest dłuższy niż target_length, frazy naturalnie
+            # występują częściej. Bez skalowania → fałszywy stuffing.
+            if target_length and actual_word_count and target_length > 0:
+                length_ratio = actual_word_count / target_length
+                if length_ratio > 1.2:  # Tylko gdy artykuł >20% dłuższy
+                    target_max = int(target_max * length_ratio)
+                    target_min = max(target_min, int(target_min * min(length_ratio, 2.0)))
+
             # Oblicz tolerancję (30% dla BASIC/MAIN, 50% dla EXTENDED)
             # 🆕 v42.1: Różne tolerancje!
             tolerance_percent = EXTENDED_TOLERANCE_PERCENT if kw_type == "EXTENDED" else BASIC_TOLERANCE_PERCENT
@@ -720,8 +733,16 @@ def perform_final_review(project_id):
         # ================================================================
         print("[FINAL_REVIEW] 🔍 Running validations...")
         
-        missing_kw = detect_missing_keywords(full_text, keywords_state)
-        print(f"[FINAL_REVIEW] ✅ Missing keywords check done (v40.1 with original_max)")
+        # v57.1: Get target_length for proportional scaling
+        _target_length = data.get("target_length", 0)
+        missing_kw = detect_missing_keywords(
+            full_text, keywords_state,
+            target_length=_target_length,
+            actual_word_count=word_count,
+        )
+        if _target_length and word_count > _target_length * 1.2:
+            print(f"[FINAL_REVIEW] 📏 Length scaling active: {word_count}/{_target_length} words (ratio {word_count/_target_length:.1f}x)")
+        print(f"[FINAL_REVIEW] ✅ Missing keywords check done (v40.1+v57.1 with length scaling)")
         
         main_syn = check_main_vs_synonyms(full_text, main_keyword, keywords_state)
         print(f"[FINAL_REVIEW] ✅ Main vs synonyms check done")
