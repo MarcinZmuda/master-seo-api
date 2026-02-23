@@ -255,8 +255,9 @@ def calculate_global_quality_score(
     # 3. GRAMMAR (15%)
     # v37.4: YMYL ≥2 błędy → CRITICAL + cap C
     # ================================================================
-    grammar_expert = moe.get("experts_summary", {}).get("grammar", {}) if isinstance(moe, dict) else {}
-    grammar_errors = grammar_expert.get("error_count", 0)
+    # v37.5 FIX: LanguageExpert saves as "language" not "grammar", and uses "grammar_errors" not "error_count"
+    grammar_expert = moe.get("experts_summary", {}).get("language", {}) if isinstance(moe, dict) else {}
+    grammar_errors = grammar_expert.get("grammar_errors", 0) or grammar_expert.get("critical_errors", 0)
     
     if is_ymyl:
         if grammar_errors >= config.grammar_errors_critical_ymyl:

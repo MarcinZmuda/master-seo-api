@@ -94,6 +94,9 @@ YMYL_EXPERT_ROLES = {
             "Czy podane informacje o leczeniu/dawkach są bezpieczne i zgodne z aktualną wiedzą medyczną?",
             "Czy używa poprawnej terminologii medycznej (nie potocznej)? → BŁĄD POWAŻNY jeśli nie",
             "Czy zawiera niebezpieczne rady zdrowotne bez zastrzeżenia 'skonsultuj z lekarzem'?",
+            # v45.3: Brand name check
+            "Czy artykuł wymienia nazwy handlowe leków/maści/suplementów bez uzasadnienia naukowego? → BŁĄD POWAŻNY jeśli to nie jest niezbędne",
+            "Czy brand-name product pojawia się w must_mention z competitor SERP? → Jeśli TAK, zmień na generic name",
         ],
         "forbidden_terms": [
             # --- terminologia potoczna ---
@@ -116,6 +119,22 @@ YMYL_EXPERT_ROLES = {
             # --- poradnictwo bez disclaimer ---
             ("zawsze bierz", "po konsultacji z lekarzem bierz"),
             ("zalecam", "rozważ po konsultacji z lekarzem"),
+            # --- v45.3: Nazwy handlowe leków/produktów (brand → generic) ---
+            ("SunewMed+", "[usunąć — nazwa marki, podaj aktywny składnik]"),
+            ("SunewMed", "[usunąć — nazwa marki, podaj aktywny składnik]"),
+            ("Nurofen", "ibuprofen"),
+            ("Ibuprom", "ibuprofen"),
+            ("Apap", "paracetamol"),
+            ("No-Spa", "drotaweryna"),
+            ("Strepsils", "pastylki antyseptyczne"),
+            ("Gripex", "preparat złożony na objawy przeziębienia"),
+            ("Theraflu", "preparat złożony na objawy grypy"),
+            ("Coldrex", "preparat złożony na objawy przeziębienia"),
+            ("Fervex", "preparat złożony na objawy przeziębienia"),
+            ("Rutinoscorbin", "witamina C z rutyną"),
+            ("Voltaren", "diklofenak"),
+            ("Ketonal", "ketoprofen"),
+            ("Fastum", "ketoprofen (żel)"),
         ],
     },
     "finanse": {

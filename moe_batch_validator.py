@@ -264,9 +264,20 @@ try:
     from gap_analyzer import analyze_batch_depth, get_depth_hints
     DEPTH_SCORER_AVAILABLE = True
     print("[MOE_VALIDATOR] ✅ Depth Scorer v1.0 enabled")
-except ImportError:
+except ImportError as e:
     DEPTH_SCORER_AVAILABLE = False
-    print("[MOE_VALIDATOR] ℹ️ Depth Scorer not available (optional)")
+    print(f"[MOE_VALIDATOR] ℹ️ Depth Scorer not available: {e}")
+    # v45.1 FIX: Try importing from same directory with explicit path
+    import sys, os
+    _this_dir = os.path.dirname(os.path.abspath(__file__))
+    if _this_dir not in sys.path:
+        sys.path.insert(0, _this_dir)
+    try:
+        from gap_analyzer import analyze_batch_depth, get_depth_hints
+        DEPTH_SCORER_AVAILABLE = True
+        print("[MOE_VALIDATOR] ✅ Depth Scorer v1.0 enabled (via sys.path fix)")
+    except ImportError:
+        pass
 
 
 # ================================================================
