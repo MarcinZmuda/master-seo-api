@@ -310,8 +310,40 @@ except ImportError:
 print(f"[PROJECT_ROUTES] ✅ Blueprint defined, nlp loaded, Gemini={'OK' if GEMINI_API_KEY else 'DISABLED'}")
 
 
-# ================================================================
-# 🆕 v44.2: H2 ROUTES MOVED TO project_helpers/h2_routes.py
+# ═══ v56: Fuzzy H2 matching — GPT often changes dashes, adds words ═══
+def _normalize_h2(text):
+    """Normalize H2 text for comparison: lowercase, strip dashes/punctuation variants."""
+    t = text.strip().lower()
+    # Normalize all dash variants to simple hyphen
+    t = t.replace('—', '-').replace('–', '-').replace('−', '-')
+    # Remove extra whitespace
+    t = re.sub(r'\s+', ' ', t)
+    return t
+
+def _h2_is_used(plan_h2, used_h2_list):
+    """Check if plan_h2 has been used, with fuzzy matching.
+    Returns True if plan_h2 matches any entry in used_h2_list."""
+    norm_plan = _normalize_h2(plan_h2)
+    for used in used_h2_list:
+        norm_used = _normalize_h2(used)
+        # Exact match after normalization
+        if norm_plan == norm_used:
+            return True
+        # One contains the other (GPT added/removed words)
+        if norm_plan in norm_used or norm_used in norm_plan:
+            return True
+        # First 30 chars match (common prefix = same H2)
+        if len(norm_plan) > 15 and len(norm_used) > 15 and norm_plan[:30] == norm_used[:30]:
+            return True
+        # Word overlap > 70%
+        plan_words = set(norm_plan.split())
+        used_words = set(norm_used.split())
+        if plan_words and used_words:
+            overlap = len(plan_words & used_words)
+            min_len = min(len(plan_words), len(used_words))
+            if min_len > 2 and overlap / min_len > 0.7:
+                return True
+    return False
 # Endpointy H2 są teraz w osobnym Blueprint (h2_routes)
 # Rejestracja w master_api.py:
 #   from project_helpers import h2_routes
@@ -399,7 +431,7 @@ def create_project():
             h2_structure = [f"Czym jest {h2_terms[0]}?" if i == 0 else term for i, term in enumerate(h2_terms)]
             h2_generation_info = {"source": "fallback_no_module"}
     
-    total_planned_batches = data.get("total_planned_batches")
+    total_planned_batches = data.get("total_planned_batches") or data.get("total_batches")
     if not total_planned_batches:
         total_planned_batches = max(2, min(6, math.ceil(len(h2_structure) / 2))) if h2_structure else 4
 
@@ -1537,7 +1569,7 @@ def get_pre_batch_info(project_id):
         batch_text = batch.get("text", "")
         h2_in_batch = re.findall(r'(?:^h2:\s*(.+)$|<h2[^>]*>([^<]+)</h2>)', batch_text, re.MULTILINE | re.IGNORECASE)
         used_h2_early.extend([(m[0] or m[1]).strip() for m in h2_in_batch if m[0] or m[1]])
-    remaining_h2_early = [h2 for h2 in h2_structure if h2 not in used_h2_early]
+    remaining_h2_early = [h2 for h2 in h2_structure if not _h2_is_used(h2, used_h2_early)]
     
     # v33.3: N-gramy dopasowane do H2 (zamiast sekwencyjnych)
     ngrams = s1_data.get("ngrams", [])
@@ -1610,8 +1642,7 @@ def get_pre_batch_info(project_id):
     semantic_reserved = []      # Frazy ZAREZERWOWANE na inne batche
     
     if semantic_plan and "batch_plans" in semantic_plan:
-        batch_plans = semantic_plan.get("batch_plans", [])
-        for bp in batch_plans:
+        for bp in semantic_plan.get("batch_plans", []):
             if bp.get("batch_number") == current_batch_num:
                 semantic_batch_plan_early = bp
                 semantic_assigned = bp.get("assigned_keywords", [])
@@ -1619,17 +1650,6 @@ def get_pre_batch_info(project_id):
                 semantic_reserved = bp.get("reserved_keywords", [])
                 print(f"[PRE_BATCH] 🎯 Semantic plan: {len(semantic_assigned)} assigned + {len(semantic_universal)} universal")
                 break
-
-        # v56: Fallback for retry batches beyond original plan
-        # FIX_AND_RETRY creates batches beyond total_planned_batches.
-        # Use the last batch_plan's universal keywords as fallback.
-        if not semantic_batch_plan_early and batch_plans:
-            last_bp = batch_plans[-1]
-            semantic_batch_plan_early = last_bp
-            semantic_assigned = []  # No specific assignment for retry batches
-            semantic_universal = last_bp.get("universal_keywords", [])
-            semantic_reserved = []
-            print(f"[PRE_BATCH] 🔄 Semantic plan fallback (batch {current_batch_num} > planned): 0 assigned + {len(semantic_universal)} universal")
     
     # Zbuduj słownik keyword → meta dla szybkiego lookup
     keyword_meta_map = {}
@@ -1877,7 +1897,7 @@ def get_pre_batch_info(project_id):
         h2_in_batch = re.findall(r'(?:^h2:\s*(.+)$|<h2[^>]*>([^<]+)</h2>)', batch_text, re.MULTILINE | re.IGNORECASE)
         used_h2.extend([(m[0] or m[1]).strip() for m in h2_in_batch if m[0] or m[1]])
     
-    remaining_h2 = [h2 for h2 in h2_structure if h2 not in used_h2]
+    remaining_h2 = [h2 for h2 in h2_structure if not _h2_is_used(h2, used_h2)]
     
     # Last sentences
     last_sentences = ""
