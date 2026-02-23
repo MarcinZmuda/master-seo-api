@@ -2948,10 +2948,14 @@ def approve_batch_with_review(project_id):
     skip_review = data.get("skip_review", False)
     force_save = data.get("force_save", False)
     attempt = data.get("attempt", 1)  # v28.3: numer próby
-    
-    # v30.1 OPTIMIZED: AUTO-APPROVE po 2 próbach (było 3)
-    if attempt >= 2 and not force_save:
-        print(f"[APPROVE_BATCH] ⚡ Auto-approve: attempt={attempt} >= 3, force_save=True")
+
+    # v45.3 FIX: Progressive relaxation — auto-approve po 4 próbach (było 2 — zbyt agresywne!)
+    # attempt 1: normal validation
+    # attempt 2: normal validation (was force_save before — caused quality drop)
+    # attempt 3: normal validation
+    # attempt 4: force_save — last resort
+    if attempt >= 4 and not force_save:
+        print(f"[APPROVE_BATCH] ⚡ Auto-approve: attempt={attempt} >= 4, force_save=True")
         force_save = True
     
     db = firestore.client()
