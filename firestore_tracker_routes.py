@@ -558,18 +558,6 @@ def auto_merge_full_article(project_id: str, project_data: dict) -> dict:
         return {"merged": False, "error": str(e)}
 
 
-# v57.1: Helper to detect if batch text has a specific H2
-def _batch_matches_h2(text: str, target_h2_lower: str) -> bool:
-    """Check if batch text starts with the same H2 header."""
-    if not text:
-        return False
-    m = re.match(r'(?:h2:\s*(.+)|<h2[^>]*>([^<]+)</h2>)', text.strip(), re.IGNORECASE)
-    if m:
-        h2 = (m.group(1) or m.group(2)).strip().lower()
-        return h2 == target_h2_lower
-    return False
-
-
 # ============================================================================
 # 3. FIRESTORE PROCESSOR
 # ============================================================================
@@ -1391,26 +1379,7 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
         "legal_removals": legal_removals
     }
 
-    # v57.1: Replace previous batch with same H2 instead of appending.
-    # When batch is retried (5 attempts), each call appended a new entry,
-    # resulting in 5x duplicated H2 sections in the final article.
-    # Fix: detect H2 in batch text and replace existing batch with same H2.
-    _batch_h2_match = re.match(r'(?:h2:\s*(.+)|<h2[^>]*>([^<]+)</h2>)', batch_text.strip(), re.IGNORECASE)
-    _batch_h2 = (_batch_h2_match.group(1) or _batch_h2_match.group(2)).strip().lower() if _batch_h2_match else None
-
-    existing_batches = project_data.setdefault("batches", [])
-    if _batch_h2:
-        # Remove previous batch(es) with same H2 header
-        _before_count = len(existing_batches)
-        existing_batches[:] = [
-            b for b in existing_batches
-            if not _batch_matches_h2(b.get("text", ""), _batch_h2)
-        ]
-        _removed = _before_count - len(existing_batches)
-        if _removed:
-            print(f"[TRACKER] 🔄 Replaced {_removed} previous batch(es) for H2: {_batch_h2[:60]}")
-
-    existing_batches.append(batch_entry)
+    project_data.setdefault("batches", []).append(batch_entry)
     project_data["keywords_state"] = keywords_state
     
     # ================================================================
