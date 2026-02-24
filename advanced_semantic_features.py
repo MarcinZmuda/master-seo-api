@@ -457,6 +457,21 @@ def analyze_topic_completeness(
     content_lower = content.lower()
     config = AdvancedSemanticConfig()
     
+    # v59.1 FIX: Normalize competitor_topics — final_review passes plain strings
+    # from entity_seo.entities, not dicts with "priority"/"subtopic"
+    normalized_topics = []
+    for t in competitor_topics:
+        if isinstance(t, dict):
+            normalized_topics.append(t)
+        elif isinstance(t, str) and t.strip():
+            normalized_topics.append({
+                "subtopic": t.strip(),
+                "priority": "HIGH",
+                "sample_h2": "",
+                "coverage_percent": 0,
+            })
+    competitor_topics = normalized_topics
+    
     # 1. Analizuj pokrycie tematów MUST i HIGH
     must_topics = [t for t in competitor_topics if t.get("priority") in ["MUST", "HIGH"]]
     
