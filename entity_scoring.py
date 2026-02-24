@@ -269,6 +269,83 @@ def _polish_entity_match(entity_name: str, text: str) -> bool:
     return False
 
 
+def _polish_entity_find_all(entity_name: str, text: str) -> list:
+    """Find ALL occurrences of a Polish entity in text, accounting for inflection.
+    
+    Returns list of match positions (start index in text).
+    Handles Polish morphology: "jazda po alkoholu" matches
+    "jazdę po alkoholu", "jazdy po alkoholu", "jazdą po alkoholu" etc.
+    
+    Args:
+        entity_name: Entity name in lowercase
+        text: Full text in lowercase
+        
+    Returns:
+        List of start positions where entity was found
+    """
+    positions = []
+    
+    # 1. Exact matches first
+    start = 0
+    while True:
+        pos = text.find(entity_name, start)
+        if pos == -1:
+            break
+        positions.append(pos)
+        start = pos + 1
+    
+    # 2. Normalized (ó→o) matches
+    norm_entity = _polish_normalize(entity_name)
+    norm_text = _polish_normalize(text)
+    if norm_entity != entity_name:
+        start = 0
+        while True:
+            pos = norm_text.find(norm_entity, start)
+            if pos == -1:
+                break
+            if pos not in positions:
+                positions.append(pos)
+            start = pos + 1
+    
+    # 3. Stem-based matching for inflected forms
+    words = entity_name.split()
+    stems = []
+    for w in words:
+        if len(w) <= 2:
+            continue  # Skip prepositions
+        stem = _polish_normalize(_polish_stem(w).lower())
+        if len(stem) >= 3:
+            stems.append(stem)
+    
+    if stems:
+        # Find all positions of the first stem
+        first_stem = stems[0]
+        start = 0
+        while True:
+            pos = norm_text.find(first_stem, start)
+            if pos == -1:
+                break
+            
+            # Check if all other stems are within 80 chars
+            if len(stems) == 1:
+                # Single-stem entity
+                if pos not in positions:
+                    positions.append(pos)
+            else:
+                window_start = max(0, pos - 10)
+                window_end = min(len(norm_text), pos + 80)
+                window = norm_text[window_start:window_end]
+                
+                if all(s in window for s in stems):
+                    if pos not in positions:
+                        positions.append(pos)
+            
+            start = pos + 1
+    
+    positions.sort()
+    return positions
+
+
 # ============================================================
 # COVERAGE CALCULATION
 # ============================================================
@@ -438,20 +515,20 @@ def calculate_entity_density(
     entities_found = []
     
     if s1_entities:
-        # Szukaj znanych encji
+        # Szukaj znanych encji — v59.1: use Polish inflection-aware matching
         text_lower = text.lower()
         for entity in s1_entities:
             name = entity.get("name", entity) if isinstance(entity, dict) else str(entity)
             name_lower = name.lower()
             
-            pattern = rf'\b{re.escape(name_lower)}\b'
-            matches = re.findall(pattern, text_lower)
+            # v59.1 FIX: Use inflection-aware matching instead of exact regex
+            match_positions = _polish_entity_find_all(name_lower, text_lower)
             
-            if matches:
-                entity_mentions += len(matches)
+            if match_positions:
+                entity_mentions += len(match_positions)
                 entities_found.append({
                     "name": name,
-                    "count": len(matches)
+                    "count": len(match_positions)
                 })
     else:
         # Fallback: szukaj kapitalizowanych fraz
@@ -591,11 +668,12 @@ def calculate_entity_salience(
     text_lower = text.lower()
     main_lower = main_entity.lower()
     
-    # Znajdź wszystkie wystąpienia
-    pattern = rf'\b{re.escape(main_lower)}\b'
-    matches = list(re.finditer(pattern, text_lower))
+    # v59.1 FIX: Use Polish inflection-aware matching instead of exact regex
+    # Old: pattern = rf'\b{re.escape(main_lower)}\b' → misses ALL inflected forms
+    # "jazda po alkoholu" never matched "jazdę po alkoholu", "jazdy po alkoholu"
+    match_positions = _polish_entity_find_all(main_lower, text_lower)
     
-    if not matches:
+    if not match_positions:
         return {
             "score": 0,
             "frequency": 0,
@@ -605,12 +683,12 @@ def calculate_entity_salience(
         }
     
     # Pozycja pierwszego wystąpienia (jako % tekstu)
-    first_pos = matches[0].start()
+    first_pos = match_positions[0]
     text_len = len(text_lower)
     first_pos_pct = (first_pos / text_len) * 100 if text_len > 0 else 100
     
     # Częstotliwość
-    frequency = len(matches)
+    frequency = len(match_positions)
     words = text_lower.split()
     frequency_per_100 = (frequency / len(words)) * 100 if words else 0
     
@@ -643,8 +721,8 @@ def calculate_entity_salience(
     # +30 za ogólną prominencję (częste wystąpienia rozproszone)
     if frequency >= 5:
         # Sprawdź rozproszenie
-        positions = [m.start() / text_len for m in matches]
-        spread = max(positions) - min(positions) if len(positions) > 1 else 0
+        positions_pct = [p / text_len for p in match_positions] if text_len > 0 else []
+        spread = max(positions_pct) - min(positions_pct) if len(positions_pct) > 1 else 0
         
         if spread > 0.7:  # Encja przez cały tekst
             score += 30
