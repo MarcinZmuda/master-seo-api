@@ -22,6 +22,9 @@ from dataclasses import dataclass, asdict, field
 from collections import Counter
 import math
 
+# v2.1: Simplified review prompt
+from claude_reviewer_v2 import build_review_prompt_v2
+
 # FIX #24: Safe import with fallback
 try:
     from llm_retry import llm_call_with_retry
@@ -739,128 +742,8 @@ def review_with_claude(text: str, ctx: Dict) -> ReviewResult:
 
 
 def build_review_prompt(text: str, ctx: Dict) -> str:
-    """
-    🆕 v42.1: Zoptymalizowany prompt dla Claude review.
-    Zawiera instrukcje humanizacji, forbidden phrases, YMYL/legal.
-    """
-    # Wyciągnij dane z kontekstu
-    topic = ctx.get('topic', '')
-    keywords_required = ctx.get('keywords_required', [])
-    missing_basic = ctx.get('missing_basic', [])
-    missing_extended = ctx.get('missing_extended', [])
-    is_ymyl = ctx.get('is_ymyl', False)
-    batch_number = ctx.get('batch_number', 1)
-    total_batches = ctx.get('total_batches', 8)
-    
-    # Entities i triplets (jeśli dostępne)
-    entities_must = ctx.get('entities_must', [])
-    triplets = ctx.get('triplets', [])
-    
-    # Forbidden phrases
-    forbidden_phrases = [
-        "warto podkreślić", "warto zauważyć", "warto wspomnieć",
-        "należy pamiętać", "istotne jest", "kluczowe jest",
-        "w kontekście", "ogólnie rzecz biorąc", "podsumowując",
-        "bez wątpienia", "nie ulega wątpliwości"
-    ]
-    
-    # Sekcja YMYL/Legal (warunkowa)
-    ymyl_section = ""
-    if is_ymyl:
-        ymyl_section = """
-⚖️ WYMOGI YMYL/LEGAL:
-• Cytaty przepisów: "art. 13 § 1 k.c." (NIE: "artykuł 13")
-• kurator ≠ opiekun (różne instytucje!)
-• orzeczenie ≠ wyrok
-• Unikaj kategorycznych stwierdzeń bez podstawy prawnej
-"""
-
-    # Sekcja entities (warunkowa)
-    entities_section = ""
-    if entities_must:
-        entities_list = ", ".join([e.get('entity', e) if isinstance(e, dict) else str(e) for e in entities_must[:5]])
-        entities_section = f"\nENCJE MUST: {entities_list}"
-
-    # Sekcja triplets (warunkowa)
-    triplets_section = ""
-    if triplets:
-        triplet_examples = []
-        for t in triplets[:3]:
-            if isinstance(t, dict):
-                subj = t.get('subject', '')
-                verb = t.get('verb', '')
-                obj = t.get('object', '')
-                if subj and verb and obj:
-                    triplet_examples.append(f"{subj} → {verb} → {obj}")
-        if triplet_examples:
-            triplets_section = f"\nRELACJE: {'; '.join(triplet_examples)}"
-
-    # Sekcja keywords
-    keywords_section = ""
-    if keywords_required:
-        kw_list = []
-        for kw in keywords_required[:8]:
-            if isinstance(kw, dict):
-                kw_list.append(f"\"{kw.get('keyword', '')}\" (×{kw.get('count', 1)})")
-            else:
-                kw_list.append(f"\"{kw}\"")
-        keywords_section = f"\nFRAZY WYMAGANE: {', '.join(kw_list)}"
-
-    # Sekcja missing
-    missing_section = ""
-    if missing_basic:
-        missing_section = f"\n🔴 BRAKUJĄCE BASIC (wpleć!): {', '.join(missing_basic[:3])}"
-    if missing_extended:
-        missing_section += f"\n🟡 BRAKUJĄCE EXTENDED (bonus): {', '.join(missing_extended[:2])}"
-
-    return f"""Przejrzyj batch artykułu SEO i zwróć JSON.
-
-KONTEKST:
-Temat: {topic}
-Batch: {batch_number}/{total_batches}
-Typ: {"YMYL/Legal" if is_ymyl else "Standard"}{keywords_section}{missing_section}{entities_section}{triplets_section}
-
-TEKST:
-{text}
-
-KRYTERIA OCENY:
-
-1️⃣ HUMANIZACJA (KRYTYCZNE!)
-• Zdania: urozmaicona długość — krótkie dla faktów, dłuższe dla wyjaśnień; unikaj monotonii
-• Akapity: różna liczba zdań — nie pisz wszystkich akapitów identycznej długości
-• Zdania z kilkoma zagnieżdżonymi klauzulami względnymi — rozbij na prostsze
-• Dramatyzatory jako samodzielne "myśli" ("Granice są sztywne.", "I protokół.") — USUŃ
-• FORBIDDEN PHRASES (USUŃ!): {', '.join(f'"{p}"' for p in forbidden_phrases[:6])}
-• Zamień: "należy pamiętać" → "Pamiętaj:", "istotne jest" → "Ważne:"
-
-2️⃣ POPRAWNOŚĆ JĘZYKOWA
-• Odmiana przypadków, zgodność liczby/rodzaju
-• Powtórzenia w sąsiednich zdaniach
-• Tautologie ("ubezwłasnowolniony całkowicie w pełni")
-{ymyl_section}
-3️⃣ SEO
-• Frazy wplataj NATURALNIE
-• H2/H3 powinny zawierać frazę lub synonim
-• Max density 2-3%
-
-ODPOWIEDŹ (TYLKO JSON!):
-{{
-  "status": "APPROVED|CORRECTED|REJECTED",
-  "issues": [
-    {{"type": "FORBIDDEN_PHRASE|GRAMMAR|REPETITION|HUMANIZATION|KEYWORD|YMYL", "severity": "critical|warning|suggestion", "description": "...", "fix_applied": true|false}}
-  ],
-  "humanization_score": {{"sentence_variety": 0-100, "paragraph_variety": 0-100, "forbidden_phrases_found": [], "ai_patterns_detected": false}},
-  "corrected_text": "PEŁNY poprawiony tekst (jeśli CORRECTED)",
-  "summary": "1-2 zdania"
-}}
-
-ZASADY:
-• APPROVED = tekst OK, max 2 drobne sugestie
-• CORRECTED = naprawiłeś problemy, zwróć corrected_text
-• REJECTED = >3 critical LUB brak frazy BASIC (UNIKAJ - lepiej napraw!)
-• Jeśli brakuje fraz - DODAJ je naturalnie w corrected_text
-
-Odpowiedz TYLKO JSON (bez markdown, bez ```)."""
+    """v2.1: Delegated to claude_reviewer_v2 — 4 checks instead of 15."""
+    return build_review_prompt_v2(text, ctx)
 
 
 def build_context_from_pre_batch(pre_batch: Dict, project: Dict = None) -> Dict:
