@@ -210,7 +210,8 @@ def detect_fake_humanization(text: str) -> Dict[str, Any]:
             "severity": "OK",
             "score": 100,
             "issues": [],
-            "recommendations": []
+            "recommendations": [],
+            "metrics": {}
         }
     
     paragraphs = split_into_paragraphs(text)
@@ -222,7 +223,8 @@ def detect_fake_humanization(text: str) -> Dict[str, Any]:
             "severity": "OK", 
             "score": 100,
             "issues": ["Za mało tekstu do analizy"],
-            "recommendations": []
+            "recommendations": [],
+            "metrics": {}
         }
     
     # Analizuj każdy akapit
