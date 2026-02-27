@@ -135,7 +135,10 @@ def create_semantic_keyword_plan(
     # KROK 2: Przypisz frazy do H2
     # ================================================================
     keyword_assignments = {}
-    batch_keywords = {i: [] for i in range(len(h2_structure) + 1)}
+    # v67 FIX: Use max(total_batches, h2_count) for dict keys
+    # h2_structure can differ from total_batches after dynamic scaling
+    _max_batch = max(total_batches, len(h2_structure) + 1)
+    batch_keywords = {i: [] for i in range(_max_batch + 1)}
     universal_keywords = []
     
     for kw_lower, kw_data in all_keywords.items():
@@ -210,6 +213,8 @@ def create_semantic_keyword_plan(
             if batch_num > total_batches:
                 batch_num = total_batches
             
+            if batch_num not in batch_keywords:
+                batch_keywords[batch_num] = []
             batch_keywords[batch_num].append(keyword)
             keyword_assignments[keyword] = {
                 "batch": batch_num,
@@ -222,6 +227,8 @@ def create_semantic_keyword_plan(
             keyword_hash = hash(keyword) % total_batches
             batch_num = keyword_hash + 1
             
+            if batch_num not in batch_keywords:
+                batch_keywords[batch_num] = []
             batch_keywords[batch_num].append(keyword)
             keyword_assignments[keyword] = {
                 "batch": batch_num,
