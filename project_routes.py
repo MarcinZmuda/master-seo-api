@@ -1875,6 +1875,27 @@ def get_pre_batch_info(project_id):
                     basic_done.append(kw_info)
     
     # ================================================================
+    # v67 FIX: BUDGET OVERFLOW RECOVERY
+    # When Brajn demotes all BASIC→EXTENDED, promote important EXTENDED back
+    # So that pre_batch still has MUST-USE keywords for the model
+    # ================================================================
+    if not basic_must_use and extended_this_batch:
+        # Sort EXTENDED by priority: actual==0 first, then by suggested count
+        high_priority_extended = [
+            kw for kw in extended_this_batch 
+            if kw.get("actual", 0) == 0 and kw.get("suggested", 0) > 0
+        ]
+        if high_priority_extended:
+            # Promote top 3-5 EXTENDED to basic_must_use
+            promote_count = min(5, len(high_priority_extended))
+            promoted = high_priority_extended[:promote_count]
+            for kw in promoted:
+                kw["_promoted_from_extended"] = True
+                basic_must_use.append(kw)
+                extended_this_batch.remove(kw)
+            print(f"[PRE_BATCH] 🔄 Budget overflow recovery: promoted {promote_count} EXTENDED→MUST (0 BASIC detected)")
+    
+    # ================================================================
     # KROK 4: Zbierz info o RESERVED keywords (dla wyświetlenia w prompt)
     # ================================================================
     reserved_for_display = []
