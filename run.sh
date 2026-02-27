@@ -48,10 +48,13 @@ case $MODE in
         echo ""
         gunicorn \
             --bind 0.0.0.0:$PORT \
-            --workers 4 \
+            --workers 2 \
             --threads 2 \
-            --timeout 120 \
+            --timeout 180 \
             --keep-alive 5 \
+            --worker-tmp-dir /dev/shm \
+            --max-requests 200 \
+            --max-requests-jitter 30 \
             --access-logfile - \
             --error-logfile - \
             master_api:app
