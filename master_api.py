@@ -111,6 +111,8 @@ _rate_limit_store = _defaultdict(list)  # ip -> [timestamps]
 _RATE_LIMIT_WINDOW = 60  # seconds
 _RATE_LIMIT_MAX = int(os.getenv("RATE_LIMIT_MAX", "30"))  # requests per window
 _rate_limit_last_cleanup = 0  # v68 H3: track last full cleanup
+import threading as _rl_threading
+_rate_limit_lock = _rl_threading.Lock()  # v68 M9: thread safety
 
 @app.before_request
 def _rate_limit():
@@ -122,12 +124,12 @@ def _rate_limit():
 
     ip = request.remote_addr or "unknown"
     now = _time.time()
-    timestamps = _rate_limit_store[ip]
-    # Prune old entries for this IP
-    _rate_limit_store[ip] = [t for t in timestamps if now - t < _RATE_LIMIT_WINDOW]
-    if len(_rate_limit_store[ip]) >= _RATE_LIMIT_MAX:
-        return jsonify({"error": "Too many requests", "retry_after": _RATE_LIMIT_WINDOW}), 429
-    _rate_limit_store[ip].append(now)
+    with _rate_limit_lock:
+        timestamps = _rate_limit_store[ip]
+        _rate_limit_store[ip] = [t for t in timestamps if now - t < _RATE_LIMIT_WINDOW]
+        if len(_rate_limit_store[ip]) >= _RATE_LIMIT_MAX:
+            return jsonify({"error": "Too many requests", "retry_after": _RATE_LIMIT_WINDOW}), 429
+        _rate_limit_store[ip].append(now)
 
     # v68 H3: Periodically clean up stale IPs (every 5 min)
     global _rate_limit_last_cleanup
@@ -203,13 +205,20 @@ def get_project(project_id: str) -> dict:
 
 
 def update_project(project_id: str, data: dict):
-    """Aktualizuje projekt w cache i Firestore."""
+    """Aktualizuje projekt w cache i Firestore. v68 M7: targeted update."""
     if project_id not in PROJECTS:
         PROJECTS[project_id] = {}
     PROJECTS[project_id].update(data)
     _PROJECTS_ACCESS[project_id] = _proj_time.time()
     _evict_projects_cache()
-    save_project_to_firestore(project_id, PROJECTS[project_id])
+    # v68 M7: Write only changed fields to Firestore (not full cached dict)
+    try:
+        doc_ref = db.collection(PROJECTS_COLLECTION).document(project_id)
+        doc_ref.update(data)
+    except Exception as e:
+        # Fallback to full set on error (e.g., doc doesn't exist yet)
+        print(f"[FIRESTORE] ⚠️ update failed ({e}), falling back to set(merge=True)")
+        save_project_to_firestore(project_id, PROJECTS[project_id])
 
 # ================================================================
 # 🧠 Check if semantic analysis is available
