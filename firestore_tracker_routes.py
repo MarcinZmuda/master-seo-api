@@ -1382,17 +1382,41 @@ def process_batch_in_firestore(project_id, batch_text, meta_trace=None, forced=F
     except Exception as e:
         print(f"[TRACKER] ⚠️ Sanitization warning: {e}")
     
+    # v68: Use targeted update instead of full doc_ref.set() to reduce write size
+    # Full set() writes 50-200KB per batch. Update() writes only changed fields (~10-30KB).
     try:
-        doc_ref.set(project_data)
-        print(f"[FIRESTORE] ✅ Batch saved successfully, total batches: {len(project_data.get('batches', []))}")
-    except Exception as e:
-        print(f"[FIRESTORE] ❌ CRITICAL: Błąd zapisu: {e}")
-        # 🆕 v36.3: Return error instead of silently continuing!
-        return {
-            "status": "ERROR",
-            "error": f"Firestore save failed: {str(e)}",
-            "message": "Batch was NOT saved. Please retry."
+        _update_fields = {
+            "batches": project_data.get("batches", []),
+            "keywords_state": project_data.get("keywords_state", {}),
         }
+        # Only include fields that were actually modified
+        if "article_memory" in project_data:
+            _update_fields["article_memory"] = project_data["article_memory"]
+        if "entity_state" in project_data:
+            _update_fields["entity_state"] = project_data["entity_state"]
+        if "legal_whitelist" in project_data:
+            _update_fields["legal_whitelist"] = project_data["legal_whitelist"]
+        if "legal_hardlock_enabled" in project_data:
+            _update_fields["legal_hardlock_enabled"] = project_data["legal_hardlock_enabled"]
+        if "style_consistency" in project_data:
+            _update_fields["style_consistency"] = project_data["style_consistency"]
+        
+        _update_fields = sanitize_for_firestore(_update_fields)
+        doc_ref.update(_update_fields)
+        print(f"[FIRESTORE] ✅ Batch saved (update, {len(_update_fields)} fields, ~{len(str(_update_fields))//1024}KB), total batches: {len(project_data.get('batches', []))}")
+    except Exception as e:
+        # Fallback to full set on update failure (e.g., document doesn't exist yet)
+        print(f"[FIRESTORE] ⚠️ Update failed ({e}), falling back to full set")
+        try:
+            doc_ref.set(project_data)
+            print(f"[FIRESTORE] ✅ Batch saved (fallback set), total batches: {len(project_data.get('batches', []))}")
+        except Exception as e2:
+            print(f"[FIRESTORE] ❌ CRITICAL: Błąd zapisu: {e2}")
+            return {
+                "status": "ERROR",
+                "error": f"Firestore save failed: {str(e2)}",
+                "message": "Batch was NOT saved. Please retry."
+            }
 
     # =========================================================================
     # v33.3: Przygotuj keywords_state_after do response
