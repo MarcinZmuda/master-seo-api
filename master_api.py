@@ -961,7 +961,7 @@ def quick_semantic_check():
         }), 200
         
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+        print(f"[ERROR] {e}"); return jsonify({"status": "error", "message": "Internal server error"}), 500
 
 
 @app.post("/api/synthesize_topics")
@@ -983,7 +983,7 @@ def synthesize_topics_proxy():
         )
         return jsonify(response.json()), response.status_code
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        print(f"[ERROR] {e}"); return jsonify({"error": "Internal server error"}), 500
 
 
 # ============================================================================
@@ -1089,7 +1089,7 @@ def compliance_report_proxy():
         )
         return jsonify(response.json()), response.status_code
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        print(f"[ERROR] {e}"); return jsonify({"error": "Internal server error"}), 500
 
 
 @app.get("/api/s1_health")
@@ -1531,7 +1531,7 @@ def auto_final_review(project_id):
         response = perform_final_review(project_id)
         return response
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        print(f"[ERROR] {e}"); return jsonify({"error": "Internal server error"}), 500
 
 
 # ================================================================
@@ -2688,7 +2688,7 @@ def get_synonyms_endpoint():
             "results": {word: {"word": word.lower(), "synonyms": synonyms, "source": "static", "count": len(synonyms)}}
         }), 200
     except Exception as e:
-        return jsonify({"status": "ERROR", "message": str(e)}), 500
+        print(f"[ERROR] {e}"); return jsonify({"status": "ERROR", "message": "Internal server error"}), 500
 
 
 
@@ -2873,7 +2873,7 @@ def get_synonym_simple(word: str):
             "count": len(synonyms)
         }), 200
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        print(f"[ERROR] {e}"); return jsonify({"error": "Internal server error"}), 500
 
 
 # ================================================================
@@ -2915,7 +2915,7 @@ def coherence_check():
         result = analyze_section_coherence(text, drift_threshold=drift_threshold, global_threshold=global_threshold)
         return jsonify(result), 200
     except Exception as e:
-        return jsonify({"error": str(e), "coherence_enabled": False}), 500
+        print(f"[ERROR] {e}"); return jsonify({"error": "Internal server error", "coherence_enabled": False}), 500
 
 
 # ================================================================
@@ -3037,4 +3037,4 @@ if __name__ == "__main__":
     print(f"   /api/ai_detection")
     print(f"   /api/legal/status")
     print(f"   /api/medical/status (🆕)\n")
-    app.run(host="0.0.0.0", port=port, debug=DEBUG_MODE)
+    app.run(host="0.0.0.0", port=port, debug=False)  # v68 M31: NEVER debug=True in prod
