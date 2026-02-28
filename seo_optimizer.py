@@ -42,16 +42,27 @@ else:
 # ================================================================
 # 🧠 SEMANTIC EMBEDDINGS - Dodatkowa analiza
 # ================================================================
-try:
-    from sentence_transformers import SentenceTransformer
-    from sklearn.metrics.pairwise import cosine_similarity
-    
-    semantic_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
-    print("[SEO_OPT] ✅ Sentence Transformers loaded (Semantic Analysis)")
-    SEMANTIC_ENABLED = True
-except ImportError:
-    print("[SEO_OPT] ⚠️ Sentence Transformers not installed - semantic analysis disabled")
-    SEMANTIC_ENABLED = False
+# v68 M28: Lazy-load semantic model (was loading 100MB at import time)
+semantic_model = None
+SEMANTIC_ENABLED = False
+_cosine_similarity = None
+
+def _load_seo_semantic():
+    global semantic_model, SEMANTIC_ENABLED, _cosine_similarity
+    if semantic_model is not None:
+        return SEMANTIC_ENABLED
+    try:
+        from sentence_transformers import SentenceTransformer
+        from sklearn.metrics.pairwise import cosine_similarity
+        semantic_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
+        _cosine_similarity = cosine_similarity
+        SEMANTIC_ENABLED = True
+        print("[SEO_OPT] ✅ Sentence Transformers loaded (Semantic Analysis)")
+        return True
+    except ImportError:
+        SEMANTIC_ENABLED = False
+        print("[SEO_OPT] ⚠️ Sentence Transformers not installed - semantic analysis disabled")
+        return False
 
 # ================================================================
 # 🧠 Ładowanie modelu spaCy (Polish) - SHARED (oszczędność RAM)
@@ -409,6 +420,7 @@ def calculate_keyword_density_detailed(text: str, keywords_state: dict) -> dict:
 # ================================================================
 def semantic_keyword_coverage(text: str, keywords_state: dict) -> dict:
     """Analizuje pokrycie słów kluczowych semantycznie."""
+    _load_seo_semantic()  # v68 M28: lazy init
     if not SEMANTIC_ENABLED or not keywords_state:
         return {"semantic_enabled": False, "coverage": {}}
     
