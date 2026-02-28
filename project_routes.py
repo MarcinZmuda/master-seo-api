@@ -2179,15 +2179,67 @@ def get_pre_batch_info(project_id):
     if basic_for_this_batch:
         prompt_sections.append(f"📋 BASIC - MUSISZ UŻYĆ WSZYSTKIE ({len(basic_for_this_batch)} fraz):")
         for i, kw in enumerate(basic_for_this_batch, 1):
-            prompt_sections.append(f"   {i}. \"{kw['keyword']}\" ← OBOWIĄZKOWO 1x")
+            # v68: Cascade deduction awareness — check if this keyword is covered by longer phrases
+            kw_lower = kw['keyword'].lower()
+            kw_meta_lookup = keyword_meta_map.get(kw_lower, {}).get("meta", {})
+            is_cascade = kw_meta_lookup.get("_cascade_deducted", False)
+            cascade_min = kw_meta_lookup.get("target_min", 1)
+            if is_cascade and cascade_min == 0:
+                prompt_sections.append(f"   {i}. \"{kw['keyword']}\" ← pokryte przez dłuższą frazę, NIE dodawaj osobno")
+            else:
+                prompt_sections.append(f"   {i}. \"{kw['keyword']}\" ← OBOWIĄZKOWO 1x")
         prompt_sections.append("")
     
     if extended_for_this_batch:
         prompt_sections.append(f"📋 EXTENDED - MUSISZ UŻYĆ WSZYSTKIE ({len(extended_for_this_batch)} fraz):")
         for i, kw in enumerate(extended_for_this_batch, 1):
-            prompt_sections.append(f"   {i}. \"{kw['keyword']}\" ← OBOWIĄZKOWO 1x")
+            # v68: Cascade deduction awareness
+            kw_lower = kw['keyword'].lower()
+            kw_meta_lookup = keyword_meta_map.get(kw_lower, {}).get("meta", {})
+            is_cascade = kw_meta_lookup.get("_cascade_deducted", False)
+            cascade_min = kw_meta_lookup.get("target_min", 1)
+            if is_cascade and cascade_min == 0:
+                prompt_sections.append(f"   {i}. \"{kw['keyword']}\" ← pokryte przez dłuższą frazę, NIE dodawaj osobno")
+            else:
+                prompt_sections.append(f"   {i}. \"{kw['keyword']}\" ← OBOWIĄZKOWO 1x")
         prompt_sections.append("")
     
+    # ================================================================
+    # 🆕 v68: CASCADE DEDUCTION HINT
+    # When a short phrase is contained in a longer phrase,
+    # using the longer phrase automatically covers the short one.
+    # ================================================================
+    cascade_hints = []
+    for rid, meta in keywords_state.items():
+        if meta.get("_cascade_deducted"):
+            children = meta.get("_cascade_children", [])
+            raw_max = meta.get("raw_target_max", meta.get("target_max", 5))
+            adj_max = meta.get("target_max", 5)
+            if children and adj_max < raw_max:
+                cascade_hints.append({
+                    "keyword": meta.get("keyword", ""),
+                    "covered_by": children[:2],
+                    "adj_max": adj_max,
+                    "raw_max": raw_max
+                })
+    
+    if cascade_hints:
+        prompt_sections.append("")
+        prompt_sections.append("=" * 60)
+        prompt_sections.append("🔗 FRAZY POKRYTE PRZEZ DŁUŻSZE (nie powtarzaj osobno!)")
+        prompt_sections.append("=" * 60)
+        prompt_sections.append("")
+        prompt_sections.append("Dłuższe frazy AUTOMATYCZNIE pokrywają krótsze.")
+        prompt_sections.append("NIE dodawaj krótszych form osobno — to prowadzi do przeoptymalizowania!")
+        prompt_sections.append("")
+        for ch in cascade_hints[:10]:
+            covered_str = " + ".join(f'"{c}"' for c in ch["covered_by"])
+            if ch["adj_max"] == 0:
+                prompt_sections.append(f"   🔗 \"{ch['keyword']}\" → W PEŁNI pokryte przez {covered_str} (0× osobno)")
+            else:
+                prompt_sections.append(f"   🔗 \"{ch['keyword']}\" → częściowo pokryte przez {covered_str} (max {ch['adj_max']}× osobno)")
+        prompt_sections.append("")
+
     # ================================================================
     # 🆕 v35.9: WYRAŹNE LIMITY NA BATCH
     # ================================================================
