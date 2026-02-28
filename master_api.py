@@ -85,12 +85,12 @@ CORS(app)
 # ================================================================
 # 🔒 API Key Authentication
 # ================================================================
-MASTER_SEO_API_KEY = os.getenv("MASTER_SEO_API_KEY", "")
+MASTER_SEO_API_KEY = os.getenv("MASTER_SEO_API_KEY") or None  # v68 C4: empty string → None (no bypass)
 
 @app.before_request
 def _require_api_key():
     """Enforce Bearer token auth on all /api/ endpoints (except health)."""
-    if not MASTER_SEO_API_KEY:
+    if MASTER_SEO_API_KEY is None:
         return  # No key configured — skip auth (dev mode)
     if request.path in ("/api/health", "/health", "/"):
         return
@@ -322,6 +322,15 @@ except Exception as e:
 # 🔗 N-gram API Configuration (for S1 proxy)
 # ================================================================
 NGRAM_API_URL = os.getenv("NGRAM_API_URL", "https://gpt-ngram-api.onrender.com")
+# v68 C6: Auth key for gpt-ngram-api
+NGRAM_API_KEY = os.getenv("NGRAM_API_KEY") or None
+
+def _ngram_headers():
+    """Return headers for gpt-ngram-api calls, including auth if configured."""
+    h = {'Content-Type': 'application/json; charset=utf-8', 'Accept': 'application/json'}
+    if NGRAM_API_KEY:
+        h['Authorization'] = f'Bearer {NGRAM_API_KEY}'
+    return h
 
 # Sprawdź czy URL już zawiera endpoint
 if "/api/ngram_entity_analysis" in NGRAM_API_URL:
@@ -442,10 +451,7 @@ def s1_analysis_proxy():
             NGRAM_ANALYSIS_ENDPOINT,
             json=data,
             timeout=90,
-            headers={
-                'Content-Type': 'application/json; charset=utf-8',
-                'Accept': 'application/json'
-            }
+            headers=_ngram_headers()
         )
         
         print(f"[S1_PROXY] 📬 Response status: {response.status_code}")
@@ -933,7 +939,8 @@ def synthesize_topics_proxy():
         response = requests.post(
             f"{NGRAM_BASE_URL}/api/synthesize_topics",
             json=data,
-            timeout=30
+            timeout=30,
+            headers=_ngram_headers()
         )
         return jsonify(response.json()), response.status_code
     except Exception as e:
@@ -959,7 +966,7 @@ def analyze_serp_length():
             NGRAM_ANALYSIS_ENDPOINT,
             json={"keyword": keyword, "max_urls": 6, "top_results": 6},
             timeout=60,
-            headers={'Content-Type': 'application/json'}
+            headers=_ngram_headers()
         )
         
         if response.status_code != 200:
@@ -1038,7 +1045,8 @@ def compliance_report_proxy():
         response = requests.post(
             f"{NGRAM_BASE_URL}/api/generate_compliance_report",
             json=data,
-            timeout=30
+            timeout=30,
+            headers=_ngram_headers()
         )
         return jsonify(response.json()), response.status_code
     except Exception as e:
