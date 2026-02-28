@@ -687,6 +687,117 @@ def _standardize_final_review(review: dict) -> dict:
 
 
 @final_review_routes.post("/api/project/<project_id>/final_review")
+def _build_keyword_budget_summary(text, keywords_state, word_count, main_keyword=""):
+    """
+    v68: Build detailed keyword budget summary for frontend panel.
+    
+    Returns per-keyword data with:
+    - overlapping count (how Google sees it)
+    - exclusive count (standalone, without parent phrases)
+    - inherited count (from longer phrases)
+    - target_min/max (adjusted after cascade deduction)
+    - raw_target_min/max (original before cascade)
+    - density percentage
+    - status (ok/over/under/covered)
+    """
+    try:
+        items = []
+        total_mentions = 0
+        
+        # Use unified counter if available
+        if UNIFIED_COUNTER:
+            kw_list = [meta.get("keyword", "") for rid, meta in keywords_state.items() if meta.get("keyword")]
+            unified = count_keywords(text, kw_list, return_per_segment=False, return_paragraph_stuffing=False)
+            overlapping_counts = unified.get("overlapping", {})
+            exclusive_counts = unified.get("exclusive", {})
+            inherited_counts = unified.get("inherited", {})
+        else:
+            overlapping_counts = {}
+            exclusive_counts = {}
+            inherited_counts = {}
+        
+        for rid, meta in keywords_state.items():
+            keyword = meta.get("keyword", "")
+            if not keyword:
+                continue
+            
+            kw_type = meta.get("type", "BASIC").upper()
+            target_min = meta.get("target_min", 1)
+            target_max = meta.get("target_max", 5)
+            raw_min = meta.get("raw_target_min", target_min)
+            raw_max = meta.get("raw_target_max", target_max)
+            is_cascade = meta.get("_cascade_deducted", False)
+            cascade_children = meta.get("_cascade_children", [])
+            
+            # Counts
+            if UNIFIED_COUNTER:
+                overlap = overlapping_counts.get(keyword, 0)
+                exclusive = exclusive_counts.get(keyword, 0)
+                inherited = inherited_counts.get(keyword, 0)
+            else:
+                try:
+                    overlap = len(re.findall(rf"\b{re.escape(keyword.lower())}\b", text.lower()))
+                except Exception:
+                    overlap = text.lower().count(keyword.lower())
+                exclusive = overlap  # fallback: no exclusive counting
+                inherited = 0
+            
+            density = (overlap / word_count * 100) if word_count > 0 else 0
+            total_mentions += exclusive
+            
+            # Status
+            if is_cascade and target_max == 0:
+                status = "covered"  # fully covered by longer phrases
+            elif overlap > raw_max * 1.3:
+                status = "over"  # over-optimized
+            elif overlap >= target_min:
+                status = "ok"
+            elif overlap == 0:
+                status = "missing"
+            else:
+                status = "under"
+            
+            items.append({
+                "keyword": keyword,
+                "type": kw_type,
+                "overlap": overlap,
+                "exclusive": exclusive,
+                "inherited": inherited,
+                "target_min": target_min,
+                "target_max": target_max,
+                "raw_target_min": raw_min,
+                "raw_target_max": raw_max,
+                "density": round(density, 2),
+                "status": status,
+                "is_cascade": is_cascade,
+                "cascade_children": cascade_children[:3],
+                "is_main": meta.get("is_main_keyword", False)
+            })
+        
+        # Sort: MAIN first, then by overlap desc
+        items.sort(key=lambda x: (0 if x["is_main"] else 1, -x["overlap"]))
+        
+        total_density = (total_mentions / word_count * 100) if word_count > 0 else 0
+        budget_ceiling = int(word_count * 0.025)
+        
+        return {
+            "items": items,
+            "total_mentions_exclusive": total_mentions,
+            "total_density_pct": round(total_density, 2),
+            "budget_ceiling": budget_ceiling,
+            "word_count": word_count,
+            "budget_status": "over" if total_mentions > budget_ceiling else "ok",
+            "cascade_count": sum(1 for i in items if i["is_cascade"]),
+            "over_count": sum(1 for i in items if i["status"] == "over"),
+            "missing_count": sum(1 for i in items if i["status"] == "missing"),
+            "version": "v68"
+        }
+    except Exception as e:
+        print(f"[FINAL_REVIEW] ⚠️ _build_keyword_budget_summary error: {e}")
+        traceback.print_exc()
+        return {"items": [], "error": str(e), "version": "v68"}
+
+
 def perform_final_review(project_id):
     """
     v40.1: Kompleksowy audyt końcowy artykułu.
@@ -1019,11 +1130,14 @@ def perform_final_review(project_id):
             # 🆕 v40.1: Keywords validation z tolerancją
             "keywords_validation": keywords_validation,
 
-            # 🆕 v40.1: Advanced semantic analysis
+            # 🆕 v40.2: Advanced semantic analysis
             "advanced_semantic": advanced_semantic,
 
             # 🆕 v40.2: Entity scoring (Semantic SEO)
             "entity_scoring": entity_scoring_result,
+
+            # 🆕 v68: Keyword Budget Summary (for frontend panel)
+            "keyword_budget_summary": _build_keyword_budget_summary(full_text, keywords_state, word_count, main_keyword),
 
             "validations": {
                 "missing_keywords": missing_kw,
