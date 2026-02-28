@@ -110,6 +110,7 @@ from collections import defaultdict as _defaultdict
 _rate_limit_store = _defaultdict(list)  # ip -> [timestamps]
 _RATE_LIMIT_WINDOW = 60  # seconds
 _RATE_LIMIT_MAX = int(os.getenv("RATE_LIMIT_MAX", "30"))  # requests per window
+_rate_limit_last_cleanup = 0  # v68 H3: track last full cleanup
 
 @app.before_request
 def _rate_limit():
@@ -122,11 +123,19 @@ def _rate_limit():
     ip = request.remote_addr or "unknown"
     now = _time.time()
     timestamps = _rate_limit_store[ip]
-    # Prune old entries
+    # Prune old entries for this IP
     _rate_limit_store[ip] = [t for t in timestamps if now - t < _RATE_LIMIT_WINDOW]
     if len(_rate_limit_store[ip]) >= _RATE_LIMIT_MAX:
         return jsonify({"error": "Too many requests", "retry_after": _RATE_LIMIT_WINDOW}), 429
     _rate_limit_store[ip].append(now)
+
+    # v68 H3: Periodically clean up stale IPs (every 5 min)
+    global _rate_limit_last_cleanup
+    if now - _rate_limit_last_cleanup > 300:
+        _rate_limit_last_cleanup = now
+        stale = [k for k, v in _rate_limit_store.items() if not v or now - max(v) > _RATE_LIMIT_WINDOW]
+        for k in stale:
+            del _rate_limit_store[k]
 
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() == "true"
 VERSION = "v45.3.1"  # 🆕 AI Middleware, forced mode fix, Anti-Frankenstein enabled
@@ -135,7 +144,23 @@ VERSION = "v45.3.1"  # 🆕 AI Middleware, forced mode fix, Anti-Frankenstein en
 # 🆕 v32.4: Firestore persistence for projects
 # ================================================================
 PROJECTS = {}  # Cache w pamięci
+_PROJECTS_ACCESS = {}  # v68 H2: track last access time for LRU eviction
+_PROJECTS_MAX = 50  # max cached projects
 PROJECTS_COLLECTION = "seo_projects"  # Ta sama kolekcja co export_routes!
+
+import time as _proj_time
+
+def _evict_projects_cache():
+    """v68 H2: Evict oldest projects when cache exceeds max size."""
+    if len(PROJECTS) <= _PROJECTS_MAX:
+        return
+    # Sort by last access, remove oldest
+    sorted_ids = sorted(_PROJECTS_ACCESS, key=_PROJECTS_ACCESS.get)
+    to_remove = sorted_ids[:len(PROJECTS) - _PROJECTS_MAX + 10]  # remove 10 extra for headroom
+    for pid in to_remove:
+        PROJECTS.pop(pid, None)
+        _PROJECTS_ACCESS.pop(pid, None)
+    print(f"[CACHE] 🗑️ Evicted {len(to_remove)} projects, cache size: {len(PROJECTS)}")
 
 
 def save_project_to_firestore(project_id: str, data: dict):
@@ -165,11 +190,14 @@ def load_project_from_firestore(project_id: str) -> dict:
 def get_project(project_id: str) -> dict:
     """Pobiera projekt z cache lub Firestore."""
     if project_id in PROJECTS:
+        _PROJECTS_ACCESS[project_id] = _proj_time.time()
         return PROJECTS[project_id]
     
     data = load_project_from_firestore(project_id)
     if data:
         PROJECTS[project_id] = data
+        _PROJECTS_ACCESS[project_id] = _proj_time.time()
+        _evict_projects_cache()
         return data
     return None
 
@@ -179,6 +207,8 @@ def update_project(project_id: str, data: dict):
     if project_id not in PROJECTS:
         PROJECTS[project_id] = {}
     PROJECTS[project_id].update(data)
+    _PROJECTS_ACCESS[project_id] = _proj_time.time()
+    _evict_projects_cache()
     save_project_to_firestore(project_id, PROJECTS[project_id])
 
 # ================================================================
@@ -1274,10 +1304,9 @@ def verify_keywords():
 # ================================================================
 @app.get("/api/debug/medical")
 def debug_medical_module():
-    """
-    Endpoint diagnostyczny dla modułu medycznego.
-    Sprawdza szczegóły dlaczego moduł może nie działać.
-    """
+    """Endpoint diagnostyczny dla modułu medycznego. Requires DEBUG_MODE=true."""
+    if not DEBUG_MODE:
+        return jsonify({"error": "Debug endpoints disabled in production"}), 403
     import os
     import sys
     
@@ -2776,31 +2805,21 @@ def content_editorial_endpoint(project_id):
         import traceback
         traceback.print_exc()
         return jsonify({
-            "status": "OK",
-            "score": 100,
-            "issues": [],
-            "critical_count": 0,
+            "status": "ERROR",
+            "score": 0,
+            "issues": [{"severity": "critical", "message": f"Editorial error: {str(e)[:200]}"}],
+            "critical_count": 1,
             "warning_count": 0,
-            "summary": f"Editorial error (non-blocking): {str(e)[:200]}",
+            "summary": f"Editorial error: {str(e)[:200]}",
             "blocked": False,
         }), 200  # Return 200 so pipeline continues
 
 
 @app.route("/api/debug/prompts", methods=["GET"])
 def debug_prompts():
-    """
-    Podgląd wszystkich promptów wysłanych do LLM w trakcie workflow.
-
-    Etapy logowane:
-      batch_review        — Claude review każdego batcha (claude_reviewer.py)
-      final_review_correction — korekta Gemini po final review
-      editorial           — prompt editorial review (claude_reviewer / editorial_prompt.json)
-
-    Parametry:
-      ?tail=N   — ostatnie N znaków (domyślnie 30000)
-      ?clear=1  — czyści plik logu
-      ?json=1   — odpowiedź JSON zamiast HTML
-    """
+    """Podgląd promptów LLM. Requires DEBUG_MODE=true."""
+    if not DEBUG_MODE:
+        return jsonify({"error": "Debug endpoints disabled in production"}), 403
     from flask import request as _req
     if _req.args.get("clear") == "1":
         cleared = clear_log()
