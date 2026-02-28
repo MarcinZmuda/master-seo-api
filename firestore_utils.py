@@ -120,30 +120,29 @@ def batch_update(project_id: str, updates: Dict[str, Any], collection: str = "se
 def batch_multi_update(operations: List[Dict[str, Any]], collection: str = "seo_projects") -> bool:
     """
     Wykonuje batch update na WIELU dokumentach naraz.
-    
-    Args:
-        operations: Lista dict z {"project_id": ..., "updates": {...}}
-        collection: Nazwa kolekcji
-        
-    Returns:
-        True jeśli sukces
+    v68 M8: Chunks operations into batches of 490 (Firestore limit = 500).
     """
     try:
         db = firestore.client()
-        batch = db.batch()
-        
-        for op in operations:
-            project_id = op.get("project_id")
-            updates = op.get("updates", {})
-            
-            if not project_id or not updates:
-                continue
-            
-            doc_ref = db.collection(collection).document(project_id)
-            sanitized = sanitize_for_firestore(updates)
-            batch.update(doc_ref, sanitized)
-        
-        batch.commit()
+        _CHUNK_SIZE = 490  # Firestore batch limit is 500
+
+        for i in range(0, len(operations), _CHUNK_SIZE):
+            chunk = operations[i:i + _CHUNK_SIZE]
+            batch = db.batch()
+
+            for op in chunk:
+                project_id = op.get("project_id")
+                updates = op.get("updates", {})
+
+                if not project_id or not updates:
+                    continue
+
+                doc_ref = db.collection(collection).document(project_id)
+                sanitized = sanitize_for_firestore(updates)
+                batch.update(doc_ref, sanitized)
+
+            batch.commit()
+
         return True
     except Exception as e:
         print(f"[FIRESTORE_UTILS] ❌ batch_multi_update error: {e}")
